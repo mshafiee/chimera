@@ -2,20 +2,19 @@
 """
 Verdict Evaluator for 21-Day Forward Test
 
-Evaluates experiment data and emits GO/KILL decision using BCa bootstrap confidence intervals.
+Evaluates experiment data and emits GO/KILL decision using percentile bootstrap confidence intervals.
 
 Pre-committed Decision Rules:
-- GO: expectancy > 0 AND lower CI > 0 (or PF > 1.2 on >=50 trades) AND beats both controls AND drawdown within breakers AND toxic-flag rate <= 30%
-- KILL: expectancy CI includes 0, any breaker trips, or toxic threshold exceeded
-- INCONCLUSIVE: window elapsed but <50 trades — extend, do not decide
+- GO: expectancy > 0 AND lower CI > 0 (or PF > 1.2 on >= min_trades trades) AND beats both controls AND drawdown within breakers AND toxic-flag rate <= 30%
+- KILL: expectancy CI includes 0 (unless the PF rescue applies), any breaker trips, or toxic threshold exceeded
+- INCONCLUSIVE: window elapsed but < min_trades trades — extend, do not decide
 """
 
 import argparse
 import sqlite3
 import json
 import logging
-from datetime import datetime, timedelta
-from decimal import Decimal
+from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple, Optional
 import numpy as np
@@ -46,6 +45,8 @@ class VerdictEvaluator:
         self.max_drawdown_pct = max_drawdown_pct
         self.toxic_threshold_pct = toxic_threshold_pct
         self.bootstrap_resamples = bootstrap_resamples
+        # Fixed RNG seed so verdicts are reproducible across runs
+        self._rng = np.random.default_rng(42)
     
     def evaluate(self) -> dict:
         """Main evaluation method."""
@@ -64,33 +65,34 @@ class VerdictEvaluator:
         control_random_pnl = experiment_data['control_random_pnl']
         control_sol_pnl = experiment_data['control_sol_pnl']
         
-        # Calculate expectancy with BCa bootstrap CI
+        # Calculate expectancy with bootstrap CI
         expectancy_mean, ci_lower, ci_upper = self._calculate_bootstrap_ci(pnl_values)
-        
+
         # Calculate profit factor
         profit_factor, profit_factor_lb = self._calculate_profit_factor(pnl_values)
-        
+
         # Calculate max drawdown
         max_drawdown_pct = self._calculate_max_drawdown(pnl_values)
-        
+
         # Calculate win rate
         win_rate = self._calculate_win_rate(pnl_values)
-        
+
         # Calculate execution gap statistics
         avg_gap, gap_p95 = self._calculate_execution_gap_stats(execution_gaps)
-        
+
         # Compare with controls
         vs_random = self._compare_with_control(pnl_values, control_random_pnl)
         vs_sol = self._compare_with_control(pnl_values, control_sol_pnl)
-        
+
         # Apply decision rules
         verdict, reasons = self._apply_decision_rules(
             expectancy_mean, ci_lower, ci_upper,
             profit_factor, profit_factor_lb,
-            max_drawdown_pct, avg_gap,
+            max_drawdown_pct,
             vs_random, vs_sol,
             experiment_data['toxic_wallet_count'],
-            experiment_data['total_wallets']
+            experiment_data['total_wallets'],
+            len(pnl_values)
         )
         
         # Build result
@@ -199,13 +201,21 @@ class VerdictEvaluator:
                 exit_times.append(datetime.fromisoformat(exit_time_str))
         
         # Calculate experiment duration
-        experiment_start = entry_times[0] if entry_times else datetime.now()
-        experiment_end = exit_times[-1] if exit_times else datetime.now()
+        # Prefer the scheduled experiment window from the manifest (anti-look-ahead);
+        # fall back to trade timestamps only if no manifest row is available.
+        scheduled_start = self._load_scheduled_start()
+        if scheduled_start is not None:
+            experiment_start = scheduled_start
+            experiment_end = datetime.now()
+        else:
+            experiment_start = entry_times[0] if entry_times else datetime.now()
+            experiment_end = max(exit_times) if exit_times else experiment_start
         experiment_days = (experiment_end - experiment_start).days
-        
+
         return {
             'experiment_days': experiment_days,
             'total_trades': len(trades),
+            'real_pnl_trades': len(pnl_values),
             'tracer_trades': sum(1 for t in trades if t[14]),  # is_tracer
             'real_pnl_values': pnl_values,
             'execution_gaps': execution_gaps,
@@ -217,6 +227,31 @@ class VerdictEvaluator:
             'experiment_start': experiment_start.isoformat(),
             'experiment_end': experiment_end.isoformat(),
         }
+
+    def _load_scheduled_start(self) -> Optional[datetime]:
+        """Load the scheduled experiment start time from the manifest."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name='experiment_manifest'
+            """)
+            if cursor.fetchone() is None:
+                conn.close()
+                return None
+            cursor.execute("""
+                SELECT start_time FROM experiment_manifest
+                WHERE status IN ('running', 'completed')
+                ORDER BY rowid DESC LIMIT 1
+            """)
+            row = cursor.fetchone()
+            conn.close()
+            if row and row[0]:
+                return datetime.fromisoformat(row[0])
+            return None
+        except (sqlite3.Error, ValueError):
+            return None
     
     def _create_mock_data(self) -> dict:
         """Create mock experiment data for testing."""
@@ -224,6 +259,7 @@ class VerdictEvaluator:
         return {
             'experiment_days': 0,
             'total_trades': 0,
+            'real_pnl_trades': 0,
             'tracer_trades': 0,
             'real_pnl_values': [],
             'execution_gaps': [],
@@ -235,12 +271,12 @@ class VerdictEvaluator:
             'experiment_start': datetime.now().isoformat(),
             'experiment_end': datetime.now().isoformat(),
         }
-    
+
     def _meets_minimum_requirements(self, data: dict) -> bool:
         """Check if experiment meets minimum requirements for verdict."""
-        trades = data['total_trades']
+        trades = data.get('real_pnl_trades', data['total_trades'])
         days = data['experiment_days']
-        
+
         meets = trades >= self.min_trades and days >= self.min_days
         logger.info(f"Minimum requirements: trades={trades}/{self.min_trades}, days={days}/{self.min_days}, meets={meets}")
         return meets
@@ -282,55 +318,52 @@ class VerdictEvaluator:
         }
     
     def _calculate_bootstrap_ci(self, values: List[float]) -> Tuple[float, float, float]:
-        """Calculate BCa bootstrap confidence interval for mean."""
+        """Calculate percentile bootstrap confidence interval for the mean."""
         if not values:
             return 0.0, 0.0, 0.0
-        
+
         n = len(values)
         bootstrap_means = []
-        
+
         for _ in range(self.bootstrap_resamples):
-            sample = np.random.choice(values, size=n, replace=True)
+            sample = self._rng.choice(values, size=n, replace=True)
             bootstrap_means.append(np.mean(sample))
-        
+
         bootstrap_means.sort()
-        
+
         # Calculate 95% CI (2.5th and 97.5th percentiles)
         lower_idx = int(self.bootstrap_resamples * 0.025)
         upper_idx = int(self.bootstrap_resamples * 0.975)
-        
+
         mean = np.mean(values)
         ci_lower = bootstrap_means[lower_idx]
         ci_upper = bootstrap_means[upper_idx]
-        
+
         return mean, ci_lower, ci_upper
-    
+
     def _calculate_profit_factor(self, values: List[float]) -> Tuple[float, float]:
-        """Calculate profit factor and Wilson lower bound."""
+        """Calculate profit factor and a bootstrap lower bound for it."""
         if not values:
             return 0.0, 0.0
-        
-        gross_profit = sum(v for v in values if v > 0)
-        gross_loss = sum(abs(v) for v in values if v < 0)
-        
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else gross_profit
-        
-        # Wilson score interval for proportion
-        wins = sum(1 for v in values if v > 0)
+
+        def pf_of(sample: List[float]) -> float:
+            gross_profit = sum(v for v in sample if v > 0)
+            gross_loss = sum(abs(v) for v in sample if v < 0)
+            return gross_profit / gross_loss if gross_loss > 0 else gross_profit
+
+        profit_factor = pf_of(values)
+
+        # Bootstrap the profit factor and take the 2.5th percentile as the lower bound
         n = len(values)
-        z = 1.96  # 95% confidence
-        
-        if n == 0:
-            return 0.0, 0.0
-        
-        p_hat = wins / n
-        denominator = 1 + z**2 / n
-        center = (p_hat + z**2 / (2 * n)) / denominator
-        margin = z * np.sqrt((p_hat * (1 - p_hat) / n) + (z**2 / (4 * n**2))) / denominator
-        
-        lower_bound = max(0.0, center - margin)
-        profit_factor_lb = profit_factor * lower_bound
-        
+        bootstrapped = []
+        for _ in range(self.bootstrap_resamples):
+            sample = self._rng.choice(values, size=n, replace=True)
+            bootstrapped.append(pf_of(sample))
+
+        bootstrapped.sort()
+        lower_idx = int(self.bootstrap_resamples * 0.025)
+        profit_factor_lb = bootstrapped[lower_idx]
+
         return profit_factor, profit_factor_lb
     
     def _calculate_max_drawdown(self, values: List[float]) -> float:
@@ -380,8 +413,8 @@ class VerdictEvaluator:
         bootstrap_diffs = []
         
         for _ in range(self.bootstrap_resamples):
-            strategy_sample = np.random.choice(strategy, size=len(strategy), replace=True)
-            control_sample = np.random.choice(control, size=len(control), replace=True)
+            strategy_sample = self._rng.choice(strategy, size=len(strategy), replace=True)
+            control_sample = self._rng.choice(control, size=len(control), replace=True)
             
             strategy_mean = np.mean(strategy_sample)
             control_mean = np.mean(control_sample)
@@ -415,27 +448,37 @@ class VerdictEvaluator:
         self,
         expectancy_mean: float, ci_lower: float, ci_upper: float,
         profit_factor: float, profit_factor_lb: float,
-        max_drawdown_pct: float, avg_gap: float,
+        max_drawdown_pct: float,
         vs_random: dict, vs_sol: dict,
-        toxic_wallet_count: int, total_wallets: int
+        toxic_wallet_count: int, total_wallets: int,
+        n_pnl_trades: int
     ) -> Tuple[str, List[str]]:
         """Apply pre-committed decision rules."""
         reasons = []
         verdict = "GO"
-        
-        # Rule 1: Expectancy must be positive with CI above 0
-        if expectancy_mean <= 0 or ci_lower <= 0:
+
+        # The documented rescue: GO may still be reached when PF > 1.2 on >= min_trades
+        # trades even if the expectancy CI includes zero.
+        pf_rescue = profit_factor > 1.2 and n_pnl_trades >= self.min_trades
+
+        # Rule 1: Expectancy must be positive with CI above 0 (unless PF rescue applies)
+        if ci_lower <= 0 and not pf_rescue:
             verdict = "KILL"
             reasons.append(f"Expectancy CI includes zero: [{ci_lower:.2f}, {ci_upper:.2f}]")
+        elif ci_lower <= 0:
+            reasons.append(
+                f"Expectancy CI includes zero but PF rescue applies: "
+                f"PF {profit_factor:.2f} > 1.2 on {n_pnl_trades} trades"
+            )
         else:
             reasons.append(f"Positive expectancy: {expectancy_mean:.2f}% ± [{ci_lower:.2f}% to {ci_upper:.2f}%]")
-        
-        # Rule 2: Profit factor must be > 1.2 or expectancy CI clearly positive
-        if profit_factor_lb < 1.2 and ci_lower < 5.0:
-            verdict = "KILL"
-            reasons.append(f"Profit factor too low: {profit_factor:.2f} (LB: {profit_factor_lb:.2f})")
+
+        # Rule 2: Profit factor point estimate must be > 1.2 (informational, not a hard kill
+        # on its own: a weakly positive CI should not be overridden by the PF lower bound)
+        if profit_factor < 1.2:
+            reasons.append(f"Profit factor below 1.2: {profit_factor:.2f} (bootstrap LB: {profit_factor_lb:.2f})")
         else:
-            reasons.append(f"Profit factor acceptable: {profit_factor:.2f} (LB: {profit_factor_lb:.2f})")
+            reasons.append(f"Profit factor acceptable: {profit_factor:.2f} (bootstrap LB: {profit_factor_lb:.2f})")
         
         # Rule 3: Must beat both controls
         if not vs_random['beats_control']:

@@ -134,7 +134,6 @@ class WebSocketConfig:
 
     # Queue settings
     MESSAGE_QUEUE_SIZE: int = 10000  # Maximum queued messages
-    BACKPRESSURE_THRESHOLD: int = 8000  # Start dropping at this queue size
 
     # Subscription settings
     MAX_SUBSCRIPTIONS: int = 100  # Maximum active subscriptions
@@ -173,10 +172,15 @@ class HeliusWebSocketClient:
         self._should_reconnect = True
         self._reconnect_attempts = 0
 
-        # Subscriptions
+        # Subscriptions: local id -> Subscription. Server-issued subscription
+        # ids are mapped via _server_to_local so notifications resolve to the
+        # right local entry (Solana does NOT echo the client's request id in
+        # notifications — it sends its own subscription id).
         self._subscriptions: Dict[int, Subscription] = {}
         self._subscription_counter = 0
-        self._pending_subscriptions: deque = deque()
+        self._pending_subs: Dict[int, int] = {}  # request id -> local sub id
+        self._server_to_local: Dict[int, int] = {}  # server sub id -> local id
+        self._state_lock = threading.Lock()
 
         # Message queue
         self._message_queue: deque[WebSocketMessage] = deque(maxlen=self._config.MESSAGE_QUEUE_SIZE)
@@ -185,9 +189,8 @@ class HeliusWebSocketClient:
         # Statistics
         self._stats = ConnectionStats(connected_at=time.time())
 
-        # Event loop for async operations
-        self._event_loop: Optional[asyncio.AbstractEventLoop] = None
-        self._loop_thread: Optional[threading.Thread] = None
+        # Message listener task (retained so disconnect() can cancel it)
+        self._listener_task: Optional[asyncio.Task] = None
 
         logger.info("Helius WebSocket Client initialized")
 
@@ -201,11 +204,20 @@ class HeliusWebSocketClient:
         endpoint = self._config.WS_ENDPOINT
 
         try:
-            logger.info(f"Connecting to WebSocket: {endpoint}")
+            # Log only the redacted endpoint — the api-key query parameter
+            # must never appear in logs (error messages from websockets.connect
+            # include the full URI)
+            log_endpoint = endpoint
+            if self._api_key:
+                log_endpoint = f"{endpoint}?api-key=REDACTED"
+            logger.info(f"Connecting to WebSocket: {log_endpoint}")
 
             # Add API key to endpoint if provided
             if self._api_key:
                 endpoint = f"{endpoint}?api-key={self._api_key}"
+
+            # Preserve accumulated stats across reconnects
+            existing_stats = self._stats
 
             self._websocket = await websockets.connect(
                 endpoint,
@@ -216,12 +228,15 @@ class HeliusWebSocketClient:
 
             self._connected = True
             self._reconnect_attempts = 0
-            self._stats = ConnectionStats(connected_at=time.time())
+            # Keep counters (reconnection_count, message totals); refresh the
+            # uptime anchor only
+            existing_stats.connected_at = time.time()
+            self._stats = existing_stats
 
             logger.info("WebSocket connected successfully")
 
-            # Start message listener
-            asyncio.create_task(self._message_listener())
+            # Start message listener (single retained task)
+            self._listener_task = asyncio.create_task(self._message_listener())
 
             # Resubscribe to previous subscriptions
             await self._resubscribe_all()
@@ -229,7 +244,7 @@ class HeliusWebSocketClient:
             return True
 
         except Exception as e:
-            logger.error(f"WebSocket connection failed: {e}")
+            logger.error("WebSocket connection failed: %s", e)
             return False
 
     async def disconnect(self):
@@ -243,6 +258,16 @@ class HeliusWebSocketClient:
                 logger.info("WebSocket disconnected")
             except Exception as e:
                 logger.warning(f"Error closing WebSocket: {e}")
+            self._websocket = None
+
+        # Cancel the retained listener task
+        if self._listener_task and not self._listener_task.done():
+            self._listener_task.cancel()
+            try:
+                await self._listener_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._listener_task = None
 
     async def _message_listener(self):
         """Listen for incoming WebSocket messages."""
@@ -257,6 +282,9 @@ class HeliusWebSocketClient:
             logger.warning("WebSocket connection closed")
             if self._should_reconnect:
                 await self._reconnect()
+
+        except asyncio.CancelledError:
+            pass
 
         except Exception as e:
             logger.error(f"WebSocket message listener error: {e}")
@@ -273,54 +301,95 @@ class HeliusWebSocketClient:
             # Parse message
             data = json.loads(raw_message)
 
-            # Determine message type
-            if "result" in data and "subscription" in data:
-                # Subscription confirmation
-                subscription_id = data["subscription"]
-                logger.debug(f"Subscription confirmed: {subscription_id}")
+            message_type = MessageType.TRANSACTION
+            subscription_id = 0
+            message_data: Dict[str, Any] = data
 
+            # Subscription confirmation: {"result": <server_sub_id>, "id": <request_id>}
+            if "id" in data and "result" in data and "method" not in data:
+                request_id = data.get("id")
+                server_id = data.get("result")
+                local_id = self._pending_subs.pop(request_id, None)
+                if local_id is not None and isinstance(server_id, int):
+                    with self._state_lock:
+                        self._server_to_local[server_id] = local_id
+                    logger.debug(
+                        "Subscription confirmed: local=%s server=%s",
+                        local_id, server_id,
+                    )
+                # Confirmation messages are not data — skip queueing
+                return
+
+            # Method notifications (must be checked BEFORE the generic
+            # params.result branch, which also matches them)
+            method = data.get("method")
+            if method:
+                if method == "slotNotification":
+                    message_type = MessageType.SLOT
+                    params = data.get("params", {})
+                    message_data = params.get("result", params)
+                elif method == "accountNotification":
+                    message_type = MessageType.ACCOUNT
+                    params = data.get("params", {})
+                    subscription_id = params.get("subscription", 0)
+                    message_data = params.get("result", params)
+                elif method == "logsNotification":
+                    message_type = MessageType.LOG
+                    params = data.get("params", {})
+                    subscription_id = params.get("subscription", 0)
+                    message_data = params.get("result", params)
+                elif method == "programNotification":
+                    message_type = MessageType.PROGRAM
+                    params = data.get("params", {})
+                    subscription_id = params.get("subscription", 0)
+                    message_data = params.get("result", params)
+                elif method == "transactionNotification":
+                    message_type = MessageType.TRANSACTION
+                    params = data.get("params", {})
+                    subscription_id = params.get("subscription", 0)
+                    message_data = params.get("result", params)
+                elif method == "rootNotification":
+                    message_type = MessageType.ROOT
+                    params = data.get("params", {})
+                    message_data = params.get("result", params)
             elif "params" in data and "result" in data["params"]:
                 # Regular data message
                 subscription_id = data["params"].get("subscription", 0)
                 result = data["params"]["result"]
+                message_data = result
 
-                # Update subscription stats
-                if subscription_id in self._subscriptions:
-                    sub = self._subscriptions[subscription_id]
-                    sub.message_count += 1
-                    sub.last_message_at = time.time()
+            # Resolve the LOCAL subscription for callbacks/stats
+            local_id = None
+            with self._state_lock:
+                local_id = self._server_to_local.get(subscription_id, subscription_id)
+            if local_id in self._subscriptions:
+                sub = self._subscriptions[local_id]
+                sub.message_count += 1
+                sub.last_message_at = time.time()
 
-                    # Call callback if provided
-                    if sub.callback:
-                        try:
-                            message = WebSocketMessage(
-                                message_type=MessageType.TRANSACTION,  # Default
-                                subscription_id=subscription_id,
-                                data=result,
-                                raw_message=raw_message
-                            )
-                            sub.callback(message)
-                        except Exception as e:
-                            logger.error(f"Callback error: {e}")
+                # Invoke callback without blocking the listener (offloaded)
+                if sub.callback:
+                    try:
+                        message = WebSocketMessage(
+                            message_type=message_type,
+                            subscription_id=local_id,
+                            data=message_data,
+                            raw_message=raw_message
+                        )
+                        asyncio.create_task(asyncio.to_thread(sub.callback, message))
+                    except Exception as e:
+                        logger.error(f"Callback error: {e}")
 
-            elif "method" in data:
-                # RPC method call
-                method = data["method"]
-                if method == "slotNotification":
-                    pass  # Handle slot updates
-                elif method == "accountNotification":
-                    pass  # Handle account updates
-
-            # Add to queue
+            # Add to queue with the correct type and subscription id
             with self._queue_lock:
                 if len(self._message_queue) >= self._message_queue.maxlen:
                     # Drop oldest message if queue is full (backpressure)
                     self._message_queue.popleft()
 
                 self._message_queue.append(WebSocketMessage(
-                    message_type=MessageType.TRANSACTION,
-                    subscription_id=0,
-                    data=data,
+                    message_type=message_type,
+                    subscription_id=local_id if local_id is not None else 0,
+                    data=message_data,
                     raw_message=raw_message
                 ))
 
@@ -342,34 +411,40 @@ class HeliusWebSocketClient:
             callback: Optional callback for incoming messages
 
         Returns:
-            Subscription ID or None if failed
+            Local subscription ID or None if failed
         """
         if not self._connected or not self._websocket:
             logger.warning("Cannot subscribe - not connected")
             return None
 
         # Check subscription limit
-        if len(self._subscriptions) >= self._config.MAX_SUBSCRIPTIONS:
-            logger.warning(f"Maximum subscriptions reached ({self._config.MAX_SUBSCRIPTIONS})")
-            return None
+        with self._state_lock:
+            if len(self._subscriptions) >= self._config.MAX_SUBSCRIPTIONS:
+                logger.warning(f"Maximum subscriptions reached ({self._config.MAX_SUBSCRIPTIONS})")
+                return None
 
-        # Create subscription
-        self._subscription_counter += 1
-        subscription_id = self._subscription_counter
+            # Create subscription
+            self._subscription_counter += 1
+            subscription_id = self._subscription_counter
 
-        subscription = Subscription(
-            subscription_type=subscription_type,
-            filters=filters,
-            callback=callback,
-            subscribed_at=time.time()
-        )
+            subscription = Subscription(
+                subscription_type=subscription_type,
+                filters=filters,
+                callback=callback,
+                subscribed_at=time.time()
+            )
 
-        self._subscriptions[subscription_id] = subscription
+            self._subscriptions[subscription_id] = subscription
 
         # Send subscription request
         try:
             request = self._build_subscription_request(subscription_type, subscription_id, filters)
             await self._websocket.send(json.dumps(request))
+
+            # Track the pending request id -> local id so the server's
+            # subscription confirmation can be mapped back
+            with self._state_lock:
+                self._pending_subs[subscription_id] = subscription_id
 
             self._stats.messages_sent += 1
             self._stats.bytes_sent += len(json.dumps(request))
@@ -379,17 +454,35 @@ class HeliusWebSocketClient:
 
         except Exception as e:
             logger.error(f"Subscription failed: {e}")
-            del self._subscriptions[subscription_id]
+            with self._state_lock:
+                self._subscriptions.pop(subscription_id, None)
             return None
 
     def _build_subscription_request(self, subscription_type: SubscriptionType,
                                     subscription_id: int, filters: Dict[str, Any]) -> Dict[str, Any]:
-        """Build subscription request JSON."""
+        """Build subscription request JSON.
+
+        Solana/Helius RPC subscription methods take POSITIONAL params, not an
+        object — e.g. accountSubscribe -> params: ["<account>", {"encoding": ...}].
+        """
+        method = subscription_type.value
+
+        if subscription_type == SubscriptionType.ACCOUNT_SUBSCRIBE:
+            params = [filters.get("account"), {"encoding": filters.get("encoding", "jsonParsed"), "commitment": filters.get("commitment", "confirmed")}]
+        elif subscription_type == SubscriptionType.LOGS_SUBSCRIBE:
+            params = [filters.get("mentions", []), {"commitment": filters.get("commitment", "confirmed")}]
+        elif subscription_type == SubscriptionType.PROGRAM_SUBSCRIBE:
+            params = [filters.get("program"), {"encoding": filters.get("encoding", "base64"), "commitment": filters.get("commitment", "confirmed")}]
+        elif subscription_type in (SubscriptionType.SLOT_SUBSCRIBE, SubscriptionType.ROOT_SUBSCRIBE):
+            params = []
+        else:
+            params = [filters]
+
         return {
             "jsonrpc": "2.0",
             "id": subscription_id,
-            "method": subscription_type.value,
-            "params": filters
+            "method": method,
+            "params": params
         }
 
     async def unsubscribe(self, subscription_id: int) -> bool:
@@ -397,33 +490,46 @@ class HeliusWebSocketClient:
         Unsubscribe from data feed.
 
         Args:
-            subscription_id: Subscription ID to unsubscribe
+            subscription_id: Local subscription ID to unsubscribe
 
         Returns:
             True if successful
         """
-        if subscription_id not in self._subscriptions:
+        with self._state_lock:
+            subscription = self._subscriptions.get(subscription_id)
+        if subscription is None:
             logger.warning(f"Subscription {subscription_id} not found")
             return False
 
-        subscription = self._subscriptions[subscription_id]
-
         try:
-            # Build unsubscribe request
+            # Build unsubscribe request. The *Unsubscribe methods expect the
+            # SERVER subscription id as a positional list param.
             unsubscribe_method = subscription.subscription_type.value.replace("Subscribe", "Unsubscribe")
+            server_id = None
+            with self._state_lock:
+                for sid, local in self._server_to_local.items():
+                    if local == subscription_id:
+                        server_id = sid
+                        break
+            params = [server_id] if server_id is not None else []
 
             request = {
                 "jsonrpc": "2.0",
                 "id": subscription_id,
                 "method": unsubscribe_method,
-                "params": subscription.filters
+                "params": params
             }
 
             await self._websocket.send(json.dumps(request))
             self._stats.messages_sent += 1
 
             # Remove subscription
-            del self._subscriptions[subscription_id]
+            with self._state_lock:
+                self._subscriptions.pop(subscription_id, None)
+                self._server_to_local = {
+                    sid: local for sid, local in self._server_to_local.items()
+                    if local != subscription_id
+                }
 
             logger.info(f"Unsubscribed from {subscription.subscription_type.value} (ID: {subscription_id})")
             return True
@@ -433,10 +539,24 @@ class HeliusWebSocketClient:
             return False
 
     async def _resubscribe_all(self):
-        """Resubscribe to all previous subscriptions after reconnection."""
-        for subscription_id, subscription in list(self._subscriptions.items()):
+        """Resubscribe to all previous subscriptions after reconnection.
+
+        Reuses the existing LOCAL ids (re-sending the request) so the registry
+        does not duplicate entries on every reconnect; the server issues a new
+        server id, which the confirmation handler maps to the same local id.
+        """
+        with self._state_lock:
+            subscriptions = list(self._subscriptions.items())
+        for subscription_id, subscription in subscriptions:
             try:
-                await self.subscribe(subscription.subscription_type, subscription.filters, subscription.callback)
+                request = self._build_subscription_request(
+                    subscription.subscription_type, subscription_id, subscription.filters
+                )
+                await self._websocket.send(json.dumps(request))
+                with self._state_lock:
+                    self._pending_subs[subscription_id] = subscription_id
+                self._stats.messages_sent += 1
+                logger.debug(f"Resubscribed to {subscription.subscription_type.value} (ID: {subscription_id})")
             except Exception as e:
                 logger.error(f"Failed to resubscribe: {e}")
 
@@ -459,6 +579,11 @@ class HeliusWebSocketClient:
             )
 
         await asyncio.sleep(delay)
+
+        # A disconnect()/shutdown() during the backoff must abort the
+        # reconnection instead of resurrecting a closed connection
+        if not self._should_reconnect:
+            return
 
         # Try to reconnect
         if await self.connect():
@@ -498,8 +623,9 @@ class HeliusWebSocketClient:
         return self._stats
 
     def get_active_subscriptions(self) -> Dict[int, Subscription]:
-        """Get all active subscriptions."""
-        return self._subscriptions.copy()
+        """Get all active subscriptions (thread-safe snapshot)."""
+        with self._state_lock:
+            return dict(self._subscriptions)
 
     def print_status_report(self):
         """Print comprehensive status report."""
@@ -523,8 +649,10 @@ class HeliusWebSocketClient:
         print("\nLatency:")
         print(f"  Current: {stats.latency_ms:.1f} ms")
 
-        print(f"\nActive Subscriptions: {len(self._subscriptions)}")
-        for sub_id, sub in self._subscriptions.items():
+        with self._state_lock:
+            active_subs = list(self._subscriptions.items())
+        print(f"\nActive Subscriptions: {len(active_subs)}")
+        for sub_id, sub in active_subs:
             print(f"  [{sub_id}] {sub.subscription_type.value}: {sub.message_count} messages")
 
         print("="*70 + "\n")
@@ -614,13 +742,30 @@ def get_websocket_client(api_key: Optional[str] = None) -> HeliusWebSocketClient
 
 
 def reset_websocket_client():
-    """Reset the global WebSocket client (mainly for testing)."""
+    """Reset the global WebSocket client (mainly for testing).
+
+    NOTE: use ``await shutdown_websocket_client()`` for proper async cleanup;
+    this sync variant only drops the reference.
+    """
     global _client
 
     with _client_lock:
-        if _client:
-            # Note: This should be called from async context
-            _client = None
+        _client = None
+
+
+async def shutdown_websocket_client():
+    """Shut the global client down cleanly (closes socket, cancels tasks)."""
+    global _client
+
+    with _client_lock:
+        client = _client
+        _client = None
+
+    if client is not None:
+        try:
+            await client.shutdown()
+        except Exception as e:
+            logger.warning(f"WebSocket shutdown error: {e}")
 
 
 if __name__ == "__main__":

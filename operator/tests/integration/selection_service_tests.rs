@@ -1,10 +1,15 @@
 //! Selection Service Tests (B1)
 //!
 //! Validates the unified decision pipeline:
-//! - WQS boundaries (missing/69.99/70/79.99/80) produce correct strategy + gate
+//! - WQS boundary: below 70 rejected (WQS_TOO_LOW); exactly 70 passes the WQS gate
 //! - Both ingress paths (Webhook/Helius) produce identical decisions for the same inputs
-//! - BUY sizing comes from PositionSizer, not the copied wallet's amount (no clamp)
 //! - SELL with no active position is rejected
+//!
+//! NOTE: admitted-path behavior (70 ≤ WQS < 80 → SPEAR, WQS ≥ 80 → SHIELD, BUY
+//! sizing via PositionSizer) cannot run in the default suite: the token-safety
+//! and liquidity gates need live mainnet RPC data (and stablecoins are
+//! deliberately rejected as non-speculative, so no whitelisted token can reach
+//! the admitted path). Those flows are covered by the lib unit tests.
 
 use chimera_operator::config::PositionSizingConfig;
 use chimera_operator::db_abstraction::{create_database, Database, DatabaseConfig, DbPool};
@@ -18,6 +23,9 @@ use chimera_operator::monitoring::signal_aggregator::SignalAggregator;
 use chimera_operator::models::{Action, Strategy};
 use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
 use rust_decimal::Decimal;
+
+#[path = "../common/mod.rs"]
+mod common;
 use sqlx::Pool;
 use sqlx::Postgres;
 use std::str::FromStr;
@@ -26,20 +34,14 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
-    match db.pool() {
-        DbPool::PostgreSQL(pool) => pool,
-        _ => panic!("test requires PostgreSQL backend"),
-    }
+    // DbPool is PostgreSQL-only (single variant), so this is an irrefutable
+    // destructure — no fallback panic arm (which would be unreachable).
+    let DbPool::PostgreSQL(pool) = db.pool();
+    pool
 }
 
-async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
-    let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::postgres(
-        std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"),
-    );
-    let db = create_database(&config).await.unwrap();
-    db.run_migrations().await.unwrap();
-    (db, temp_dir)
+async fn create_test_db() -> (Arc<dyn Database>, common::TestDbGuard) {
+    common::create_test_db().await
 }
 
 fn dec(s: &str) -> Decimal {
@@ -68,10 +70,7 @@ fn build_selection_service(
     Arc<TokenParser>,
     Arc<PositionSizer>,
 ) {
-    let pool = match db.pool() {
-        DbPool::PostgreSQL(p) => p,
-        _ => panic!("requires PG"),
-    };
+    let DbPool::PostgreSQL(_pool) = db.pool();
     let token_parser = Arc::new({
         let config = TokenSafetyConfig::default();
         let cache = Arc::new(TokenCache::default_config());
@@ -143,6 +142,56 @@ async fn test_wqs_below_70_buy_rejected() {
     let decision = service.decide(&req).await;
     assert!(!decision.admitted, "WQS 65 must be rejected");
     assert_eq!(decision.rejection_code, Some("WQS_TOO_LOW"));
+}
+
+#[tokio::test]
+async fn test_wqs_boundary_just_below_70_rejected() {
+    // 69.99 is still below the 70.0 gate (no rounding can promote it).
+    let (db, _tmp) = create_test_db().await;
+    let wallet = format!("WQS7{}", &WALLET_PREFIX[..27]);
+    insert_wallet(&db, &wallet, Some(69.99)).await;
+    let (service, _, _) = build_selection_service(db);
+
+    let req = SelectionRequest {
+        wallet_address: wallet,
+        token_address: TOKEN.to_string(),
+        action: Action::Buy,
+        source_amount_sol: dec("1.0"),
+        ingress: Ingress::Webhook,
+        source_slot: None,
+        exit_fraction: None,
+    };
+    let decision = service.decide(&req).await;
+    assert!(!decision.admitted, "WQS 69.99 must be rejected");
+    assert_eq!(decision.rejection_code, Some("WQS_TOO_LOW"));
+}
+
+#[tokio::test]
+async fn test_wqs_exactly_70_passes_wqs_gate() {
+    // WQS 70.0 exactly must pass the WQS gate (>= comparison). USDC is then
+    // rejected as NON_SPECULATIVE_TOKEN — reaching that gate proves the WQS
+    // boundary is inclusive at exactly 70.
+    let (db, _tmp) = create_test_db().await;
+    let wallet = format!("WQS8{}", &WALLET_PREFIX[..27]);
+    insert_wallet(&db, &wallet, Some(70.0)).await;
+    let (service, _, _) = build_selection_service(db);
+
+    let req = SelectionRequest {
+        wallet_address: wallet,
+        token_address: TOKEN.to_string(),
+        action: Action::Buy,
+        source_amount_sol: dec("1.0"),
+        ingress: Ingress::Webhook,
+        source_slot: None,
+        exit_fraction: None,
+    };
+    let decision = service.decide(&req).await;
+    assert!(!decision.admitted);
+    assert_eq!(
+        decision.rejection_code,
+        Some("NON_SPECULATIVE_TOKEN"),
+        "WQS 70.0 must pass the WQS gate and only fail on the token check"
+    );
 }
 
 #[tokio::test]

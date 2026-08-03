@@ -116,13 +116,13 @@ class ScoutConfig:
     # ========================================================================
 
     @staticmethod
-    def get_min_wqs_whale() -> Optional[float]:
+    def get_min_wqs_whale() -> float:
         """Get minimum WQS score for WHALE archetype (lower threshold for high-conviction trades)."""
         val = os.getenv("SCOUT_MIN_WQS_WHALE")
         return float(val) if val else 70.0
 
     @staticmethod
-    def get_min_wqs_swing() -> Optional[float]:
+    def get_min_wqs_swing() -> float:
         """Get minimum WQS score for SWING archetype (lower threshold for swing traders)."""
         val = os.getenv("SCOUT_MIN_WQS_SWING")
         return float(val) if val else 72.0
@@ -447,11 +447,6 @@ class ScoutConfig:
     def get_production_monitoring_enabled() -> bool:
         """Get whether production monitoring is enabled."""
         return os.getenv("SCOUT_PRODUCTION_MONITORING_ENABLED", "true").lower() == "true"
-
-    @staticmethod
-    def get_growth_optimized() -> bool:
-        """Get whether growth optimization is enabled ($200 → $1000)."""
-        return os.getenv("SCOUT_GROWTH_OPTIMIZED", "true").lower() == "true"
 
     @staticmethod
     def get_current_capital() -> float:
@@ -954,52 +949,8 @@ class ScoutConfig:
         return os.getenv("SCOUT_USE_CPMM_SLIPPAGE", "true").lower() == "true"
 
     # ========================================================================
-    # Redis Configuration
-    # ========================================================================
-    
-    @staticmethod
-    def get_redis_enabled() -> bool:
-        """Get whether Redis caching is enabled."""
-        return os.getenv("REDIS_ENABLED", "true").lower() == "true"
-    
-    @staticmethod
-    def get_redis_url() -> str:
-        """Get Redis connection URL."""
-        return os.getenv("REDIS_URL", "redis://localhost:6379")
-
-    # ========================================================================
     # Validation Reporter Configuration
     # ========================================================================
-
-    @staticmethod
-    def get_validation_enabled() -> bool:
-        """Get whether ML validation reporting is enabled."""
-        return os.getenv("SCOUT_VALIDATION_ENABLED", "true").lower() == "true"
-
-    @staticmethod
-    def get_alert_webhook_url() -> str:
-        """Get webhook URL for validation alerts."""
-        return os.getenv("SCOUT_ALERT_WEBHOOK_URL", "")
-
-    @staticmethod
-    def get_alert_high_error_threshold() -> float:
-        """Get high error threshold for alerts (SOL)."""
-        return float(os.getenv("SCOUT_ALERT_HIGH_ERROR_THRESHOLD", "0.5"))
-
-    @staticmethod
-    def get_alert_drift_threshold() -> float:
-        """Get drift threshold for alerts (15% = 0.15)."""
-        return float(os.getenv("SCOUT_ALERT_DRIFT_THRESHOLD", "0.15"))
-
-    @staticmethod
-    def get_alert_low_accuracy_threshold() -> float:
-        """Get low accuracy threshold for alerts (50% = 0.5)."""
-        return float(os.getenv("SCOUT_ALERT_LOW_ACCURACY_THRESHOLD", "0.5"))
-
-    @staticmethod
-    def get_alert_dir() -> str:
-        """Get directory for storing alert logs."""
-        return os.getenv("SCOUT_ALERT_DIR", "data/alerts")
 
     @staticmethod
     def get_validation_report_schedule() -> str:
@@ -1406,22 +1357,26 @@ class ScoutConfig:
         # Check API keys
         if not os.getenv("HELIUS_API_KEY"):
             warnings.append("HELIUS_API_KEY is not set. Discovery will use sample data.")
+            is_valid = False
         
         if not os.getenv("BIRDEYE_API_KEY"):
             warnings.append("BIRDEYE_API_KEY is not set. Historical liquidity data will be limited.")
+            is_valid = False
 
         # Strict Liquidity Check (default to true for production safety)
         mode = ScoutConfig.get_liquidity_mode()
         if mode == "real":
             strict_mode = os.getenv("SCOUT_STRICT_HISTORICAL_LIQUIDITY", "true").lower() == "true"
-            allow_fallback = os.getenv("SCOUT_LIQUIDITY_ALLOW_FALLBACK", "false").lower() == "true"
+            allow_fallback = ScoutConfig.get_liquidity_allow_fallback()
 
             if not strict_mode and allow_fallback:
                 warnings.append("WARNING: Strict Historical Liquidity is OFF. Backtests may use current liquidity for old trades (Survivorship Bias).")
                 warnings.append("Recommended for Production: Keep SCOUT_STRICT_HISTORICAL_LIQUIDITY=true")
+                is_valid = False
         elif mode == "simulated":
             warnings.append("WARNING: Running in simulated liquidity mode - results are non-deterministic!")
             warnings.append("Set SCOUT_LIQUIDITY_MODE=real and provide BIRDEYE_API_KEY for production use")
+            is_valid = False
         
             
             if not ScoutConfig.get_helius_api_key():
@@ -1500,8 +1455,8 @@ class ScoutConfig:
             else:
                 warnings.append(msg)
 
-        # Database path validation
-        db_path = os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
+        # Database path validation (use the same path the app actually uses)
+        db_path = ScoutConfig.get_db_path()
         db_dir = Path(db_path).parent
         if not db_dir.exists() and strict:
             # Try to create it

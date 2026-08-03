@@ -50,7 +50,7 @@ class DEXProgram(Enum):
     """DEX programs to monitor via WebSocket."""
     JUPITER = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
     ORCA = "9WzaBBWQNqAghxSAfKUUx3ZkhBBFCkTUvJJJcjF2oG4"
-    RAYDIUM = "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So"
+    RAYDIUM = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
     WHIRLPOOL = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"
     STEPTHIRD = "7dHbWXmci3dTUpSFJC3s3nxMPrsrTn5fQjYPb26cscQ"
 
@@ -110,12 +110,16 @@ class WebSocketDiscoveryClient:
         self,
         rpc_ws_url: Optional[str] = None,
         top_wallets: int = 200,
-        max_reconnect_attempts: int = 10
+        max_reconnect_attempts: int = 10,
+        program: Optional[DEXProgram] = None,
     ):
         """Initialize the WebSocket discovery client."""
         self._rpc_ws_url = rpc_ws_url or self._get_default_ws_url()
         self._top_wallets = top_wallets
         self._max_reconnect_attempts = max_reconnect_attempts
+        # DEX program this client monitors (None = generic); used to attribute
+        # program notifications to the correct source DEX.
+        self._program = program
 
         # Connection state
         self._connection_state = WebSocketConnectionState.DISCONNECTED
@@ -135,7 +139,13 @@ class WebSocketDiscoveryClient:
 
         # Monitoring task
         self._monitor_task: Optional[asyncio.Task] = None
+        self._processing = False
         self._running = False
+
+        # accountSubscribe bookkeeping: server subscription id -> address
+        self._request_counter = 0
+        self._pending_account_subs: Dict[int, str] = {}  # request id -> address
+        self._account_subscriptions: Dict[int, str] = {}  # server sub id -> address
 
         logger.info(f"[WebSocketClient] Initialized with {top_wallets} top wallets target")
 
@@ -186,8 +196,11 @@ class WebSocketDiscoveryClient:
 
             logger.info(f"[WebSocketClient] Connected to {self._rpc_ws_url}")
 
-            # Start message processing
-            asyncio.create_task(self._process_messages())
+            # Start message processing (single monitor task, cancel any stale one
+            # so a reconnection never spawns a second concurrent message loop)
+            if self._monitor_task and not self._monitor_task.done():
+                self._monitor_task.cancel()
+            self._monitor_task = asyncio.create_task(self._process_messages())
 
             return True
 
@@ -206,9 +219,15 @@ class WebSocketDiscoveryClient:
                 logger.info("[WebSocketClient] Disconnected")
             except Exception as e:
                 logger.error(f"[WebSocketClient] Error during disconnect: {e}")
+            self._websocket = None
 
         if self._monitor_task:
             self._monitor_task.cancel()
+            try:
+                await self._monitor_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._monitor_task = None
 
         self._set_connection_state(WebSocketConnectionState.DISCONNECTED)
 
@@ -267,9 +286,11 @@ class WebSocketDiscoveryClient:
         """
         for address in account_addresses[:self._top_wallets]:
             try:
+                self._request_counter += 1
+                request_id = self._request_counter
                 subscription_message = {
                     "jsonrpc": "2.0",
-                    "id": hash(address) % 1000000,  # Unique ID
+                    "id": request_id,
                     "method": "accountSubscribe",
                     "params": [
                         address,
@@ -279,6 +300,10 @@ class WebSocketDiscoveryClient:
                         }
                     ]
                 }
+
+                # Track the pending request so the confirmation can be mapped
+                # to the server subscription id
+                self._pending_account_subs[request_id] = address
 
                 if self._websocket:
                     await self._websocket.send(json.dumps(subscription_message))
@@ -293,28 +318,40 @@ class WebSocketDiscoveryClient:
 
     async def _process_messages(self) -> None:
         """Process incoming WebSocket messages."""
+        # Only one message loop may run at a time (reconnection spawns new
+        # tasks; a stale loop must not keep reading from a shared socket)
+        if self._processing:
+            return
+        self._processing = True
         self._running = True
 
-        while self._running and self._websocket:
-            try:
-                message = await asyncio.wait_for(
-                    self._websocket.recv(),
-                    timeout=60.0  # 60 second timeout for health check
-                )
+        try:
+            while self._running and self._websocket:
+                try:
+                    message = await asyncio.wait_for(
+                        self._websocket.recv(),
+                        timeout=60.0  # 60 second timeout for health check
+                    )
 
-                self._stats.messages_received += 1
-                self._stats.last_message_time = time.time()
+                    self._stats.messages_received += 1
+                    self._stats.last_message_time = time.time()
 
-                # Parse and process message
-                await self._process_message(message)
+                    # Parse and process message
+                    await self._process_message(message)
 
-            except asyncio.TimeoutError:
-                logger.warning("[WebSocketClient] No messages received for 60 seconds")
-                await self._handle_connection_loss()
+                except asyncio.TimeoutError:
+                    logger.warning("[WebSocketClient] No messages received for 60 seconds")
+                    await self._handle_connection_loss()
+                    if self._connection_state == WebSocketConnectionState.FAILED:
+                        break
 
-            except Exception as e:
-                logger.error(f"[WebSocketClient] Error processing message: {e}")
-                await self._handle_connection_loss()
+                except Exception as e:
+                    logger.error(f"[WebSocketClient] Error processing message: {e}")
+                    await self._handle_connection_loss()
+                    if self._connection_state == WebSocketConnectionState.FAILED:
+                        break
+        finally:
+            self._processing = False
 
     async def _process_message(self, message: str) -> None:
         """Process a single WebSocket message."""
@@ -328,6 +365,12 @@ class WebSocketDiscoveryClient:
                 await self._handle_program_notification(data)
             elif method == "accountNotification":
                 await self._handle_account_notification(data)
+            elif not method and "id" in data and "result" in data:
+                # Subscription confirmation: result is the server subscription id
+                server_id = data.get("result")
+                address = self._pending_account_subs.pop(data.get("id"), None)
+                if address is not None and isinstance(server_id, int):
+                    self._account_subscriptions[server_id] = address
 
         except json.JSONDecodeError as e:
             logger.error(f"[WebSocketClient] Failed to parse message: {e}")
@@ -353,15 +396,20 @@ class WebSocketDiscoveryClient:
             if not account_keys:
                 return
 
-            # Extract fee payer (usually the initiating wallet)
-            fee_payer = account_keys[0] if account_keys else None
+            # Extract fee payer (usually the initiating wallet). With the
+            # jsonParsed encoding, accountKeys are objects like
+            # {"pubkey": ..., "signer": ...} rather than raw base58 strings.
+            first_key = account_keys[0]
+            fee_payer = first_key.get("pubkey") if isinstance(first_key, dict) else first_key
 
             if fee_payer and self._is_valid_wallet_address(fee_payer):
+                # Attribute the event to the program this client monitors
+                source_dex = self._program or DEXProgram.JUPITER
                 # Create wallet discovery event
                 event = DiscoveredWalletEvent(
                     address=fee_payer,
                     discovery_timestamp=time.time(),
-                    source_dex=DEXProgram.JUPITER,  # Would be determined from program ID
+                    source_dex=source_dex,
                     transaction_signature=signature,
                     transaction_type="SWAP",
                     quality_score=self._calculate_initial_quality_score(fee_payer),
@@ -380,11 +428,32 @@ class WebSocketDiscoveryClient:
         """Handle account notification (wallet activity)."""
         try:
             params = data.get("params", {})
-            params.get("result", {})
+            result = params.get("result", {})
 
-            # Extract account address
-            params.get("subscription", 0)
-            # Would need to maintain subscription->address mapping
+            # Map the server subscription id back to the subscribed address
+            subscription_id = params.get("subscription", 0)
+            address = self._account_subscriptions.get(subscription_id)
+            if not address:
+                return
+
+            transaction = result.get("transaction", {})
+            signature = (transaction or {}).get("signature") or result.get("signature", "")
+
+            # Account activity is a real-time signal: register as a wallet event
+            if self._is_valid_wallet_address(address):
+                event = DiscoveredWalletEvent(
+                    address=address,
+                    discovery_timestamp=time.time(),
+                    source_dex=self._program or DEXProgram.JUPITER,
+                    transaction_signature=signature,
+                    transaction_type="ACCOUNT_ACTIVITY",
+                    quality_score=self._calculate_initial_quality_score(address),
+                    metadata={
+                        "discovery_method": "websocket_account",
+                        "subscription_id": subscription_id,
+                    }
+                )
+                await self._register_discovered_wallet(event)
 
         except Exception as e:
             logger.error(f"[WebSocketClient] Error handling account notification: {e}")
@@ -456,6 +525,19 @@ class WebSocketDiscoveryClient:
 
             await asyncio.sleep(delay)
 
+            if not self._running:
+                # A disconnect()/shutdown happened during backoff
+                self._set_connection_state(WebSocketConnectionState.DISCONNECTED)
+                return
+
+            # Close the stale socket before reconnecting so it can't leak
+            if self._websocket:
+                try:
+                    await self._websocket.close()
+                except Exception:
+                    pass
+                self._websocket = None
+
             # Attempt reconnection
             success = await self.connect()
             if success:
@@ -465,6 +547,13 @@ class WebSocketDiscoveryClient:
         else:
             logger.error(f"[WebSocketClient] Max reconnection attempts ({self._max_reconnect_attempts}) reached")
             self._set_connection_state(WebSocketConnectionState.FAILED)
+            # Drop the stale socket so the message loop terminates
+            if self._websocket:
+                try:
+                    await self._websocket.close()
+                except Exception:
+                    pass
+                self._websocket = None
 
     def _set_connection_state(self, state: WebSocketConnectionState) -> None:
         """Set connection state and trigger callback."""
@@ -519,7 +608,7 @@ class DEXMonitor:
 
         # Create clients for each DEX program
         for dex in DEXProgram:
-            client = WebSocketDiscoveryClient(top_wallets=self._top_wallets)
+            client = WebSocketDiscoveryClient(top_wallets=self._top_wallets, program=dex)
             self._clients[dex] = client
 
             # Set up callbacks
@@ -529,10 +618,10 @@ class DEXMonitor:
         connection_tasks = []
         for dex, client in self._clients.items():
             task = asyncio.create_task(client.connect())
-            connection_tasks.append((dex, task))
+            connection_tasks.append((dex, client, task))
 
         # Wait for all connections
-        for dex, task in connection_tasks:
+        for dex, client, task in connection_tasks:
             try:
                 success = await task
                 if success:

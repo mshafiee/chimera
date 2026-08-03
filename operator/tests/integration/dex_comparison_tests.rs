@@ -9,7 +9,20 @@
 use chimera_operator::engine::slippage;
 use chimera_operator::Strategy;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
+
+// Mirrors of the engine's slippage constants (slippage.rs, private there) so
+// the expected values below stay derived from the same numbers the engine
+// uses — a legitimate formula change surfaces as a test failure here.
+const BUFFER_MULT: Decimal = dec!(2.0);
+const MIN_BUFFER: Decimal = dec!(0.003);
+const LIQ_IMPACT_FLOOR: Decimal = dec!(0.001); // 0.1%
+
+fn expect_tolerance(expected_fraction: Decimal) -> u16 {
+    let fraction = expected_fraction * BUFFER_MULT + MIN_BUFFER;
+    (fraction * dec!(10000)).round().to_u32().unwrap_or(0) as u16
+}
 
 /// A deep pool: a 1 SOL trade against $500k liquidity should produce a tight,
 /// sub-1% expected impact and a proportionally small (but buffered) tolerance.
@@ -30,9 +43,9 @@ fn test_slippage_model_deep_pool() {
         Some(dec!(100)),
         fb,
     );
-    assert_eq!(est.expected_fraction, dec!(0.001), "deep pool clamps to the impact floor");
-    // tolerance = (0.001×2 + 0.003) × 1e4 = 50 bps (within Spear [30,300]).
-    assert_eq!(est.tolerance_bps, 50);
+    assert_eq!(est.expected_fraction, LIQ_IMPACT_FLOOR, "deep pool clamps to the impact floor");
+    // tolerance = expected × BUFFER_MULT + MIN_BUFFER (0.001×2 + 0.003) × 1e4 = 50 bps
+    assert_eq!(est.tolerance_bps, expect_tolerance(LIQ_IMPACT_FLOOR));
 }
 
 /// A thin pool (memecoin-grade): a 0.5 SOL trade against $5k liquidity should
@@ -45,6 +58,7 @@ fn test_slippage_model_thin_pool() {
         threshold_sol: dec!(0.5),
     };
     // 0.5 SOL @ $100 = $50 vs $5k → 50/(2×5000) = 0.005 (0.5%)
+    let expected_fraction = dec!(0.005);
     let est = slippage::estimate(
         Strategy::Spear,
         None,
@@ -53,9 +67,9 @@ fn test_slippage_model_thin_pool() {
         Some(dec!(100)),
         fb,
     );
-    assert_eq!(est.expected_fraction, dec!(0.005));
-    // tolerance = 0.005×2 + 0.003 = 0.013 → 130 bps
-    assert_eq!(est.tolerance_bps, 130);
+    assert_eq!(est.expected_fraction, expected_fraction);
+    // tolerance = expected × BUFFER_MULT + MIN_BUFFER = 0.005×2 + 0.003 = 0.013 → 130 bps
+    assert_eq!(est.tolerance_bps, expect_tolerance(expected_fraction));
 }
 
 /// Jupiter's real impact always wins; Shield clamps to its tight ceiling.
@@ -79,8 +93,7 @@ async fn test_route_selection_real() {
     use chimera_operator::engine::dex_comparator::DexComparator;
 
     if chimera_operator::jupiter::api_key().is_none() {
-        eprintln!("Skipping: no Jupiter API key installed");
-        return;
+        panic!("CHIMERA_JUPITER__API_KEY is required to run this ignored network test");
     }
 
     let comparator = DexComparator::new().expect("Failed to create DexComparator");
@@ -113,8 +126,7 @@ async fn test_route_selection_caching() {
     use chimera_operator::engine::dex_comparator::DexComparator;
 
     if chimera_operator::jupiter::api_key().is_none() {
-        eprintln!("Skipping: no Jupiter API key installed");
-        return;
+        panic!("CHIMERA_JUPITER__API_KEY is required to run this ignored network test");
     }
 
     let comparator = DexComparator::new().expect("Failed to create DexComparator");
@@ -129,6 +141,8 @@ async fn test_route_selection_caching() {
         .select_route(sol_mint, usdc_mint, 1_000_000_000, 50)
         .await
         .expect("cached selection");
-    // Cached within TTL → identical selection.
+    // A cache hit must reproduce the FULL quote, not just the selected DEX —
+    // comparing only the DEX could pass with two independent live calls.
+    assert_eq!(r1.quote, r2.quote, "cached selection must reproduce the full quote");
     assert_eq!(r1.selected_dex, r2.selected_dex);
 }

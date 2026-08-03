@@ -13,14 +13,14 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, Any, List
-from datetime import datetime, timedelta
+from typing import Dict, Any
+from datetime import datetime
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.helius_client import HeliusClient
-from core.helius_credit_tracker import HeliusCreditTracker
+from core.helius_credit_tracker import get_credit_tracker
 
 FIXTURE_DIR = Path(__file__).parent.parent / "tests" / "fixtures" / "helius"
 FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
@@ -66,9 +66,9 @@ async def capture_wallet_transactions(
     """
     print(f"Capturing transactions for {fixture_name} ({wallet})...")
     
-    # Track credit consumption
-    credit_tracker = HeliusCreditTracker()
-    initial_credits = credit_tracker.get_remaining_credits()
+    # Track credit consumption via the shared tracker the client records against
+    credit_tracker = get_credit_tracker()
+    initial_credits = credit_tracker.get_snapshot().credits_remaining
     
     # Capture transactions with different parameters for cache key testing
     fixtures = {}
@@ -85,7 +85,7 @@ async def capture_wallet_transactions(
     }
     
     # Capture with analysis phase parameters (different days/limit for cache key testing)
-    print(f"  Capturing with days=7, limit=500...")
+    print("  Capturing with days=7, limit=500...")
     txs_analysis = await client.get_wallet_transactions(wallet, days=7, limit=500)
     fixtures["analysis"] = {
         "wallet": wallet,
@@ -96,7 +96,7 @@ async def capture_wallet_transactions(
     }
     
     # Capture with validation phase parameters
-    print(f"  Capturing with days=1, limit=100...")
+    print("  Capturing with days=1, limit=100...")
     txs_validation = await client.get_wallet_transactions(wallet, days=1, limit=100)
     fixtures["validation"] = {
         "wallet": wallet,
@@ -107,7 +107,7 @@ async def capture_wallet_transactions(
     }
     
     # Calculate credit consumption
-    final_credits = credit_tracker.get_remaining_credits()
+    final_credits = credit_tracker.get_snapshot().credits_remaining
     credits_consumed = initial_credits - final_credits
     
     fixture_metadata = {
@@ -146,7 +146,7 @@ async def main():
         print("Export it with: export HELIUS_API_KEY=your_key_here")
         sys.exit(1)
     
-    print(f"Using API key: {api_key[:10]}...")
+    print(f"Using API key ending in ...{api_key[-4:]}")
     print()
     
     # Create Helius client
@@ -170,6 +170,11 @@ async def main():
             print()
     
     # Save manifest
+    if not all_metadata:
+        print("ERROR: All wallet captures failed - not writing manifest")
+        print("A previous good manifest (if any) is preserved")
+        sys.exit(1)
+
     manifest = {
         "captured_at": datetime.utcnow().isoformat(),
         "total_fixtures": len(all_metadata),

@@ -6,7 +6,6 @@ use chimera_operator::engine::volume_cache::VolumeCache;
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use std::thread;
-use std::time::Duration;
 
 #[test]
 fn test_volume_cache_initialization() {
@@ -52,7 +51,6 @@ fn test_volume_drop_detection() {
     for i in 0..10 {
         let volume = dec!(1000.0) - dec!(50.0) * Decimal::from(i);
         cache.record_volume("declining_token", volume);
-        thread::sleep(Duration::from_millis(10)); // Small delay for timestamp variation
     }
 
     // Current volume should be significantly lower than average
@@ -62,13 +60,23 @@ fn test_volume_drop_detection() {
     assert!(current.is_some() && average.is_some());
     println!("✓ Current volume: {}, Average: {}", current.unwrap(), average.unwrap());
 
-    // Test volume drop detection with 50% threshold
+    // NOTE: drop detection is NOT asserted to fire here. `has_volume_drop`
+    // requires >= 30 minutes of recorded history (or 12+ baseline samples)
+    // before it reports a drop; record_volume stamps Utc::now() internally, so
+    // a sub-second test can never produce the windowed/stale-history state.
+    // The assertions below pin the documented guard: with insufficient
+    // history the cache must NOT report a drop.
     let has_dropped = cache.has_volume_drop("declining_token", dec!(50));
-    println!("✓ Volume drop detected (50% threshold): {}", has_dropped);
+    assert!(
+        !has_dropped,
+        "With < 30 minutes of history, has_volume_drop must not fire"
+    );
 
-    // Test with lower threshold (should be more sensitive)
     let has_dropped_lower = cache.has_volume_drop("declining_token", dec!(20));
-    println!("✓ Volume drop detected (20% threshold): {}", has_dropped_lower);
+    assert!(
+        !has_dropped_lower,
+        "With < 30 minutes of history, has_volume_drop must not fire (20% threshold)"
+    );
 }
 
 #[test]
@@ -133,16 +141,12 @@ fn test_volume_cache_precision() {
 
 #[test]
 fn test_volume_stale_data_handling() {
-    // Test that stale data (>10 minutes old) doesn't trigger false drops
+    // The most-recent entry is high volume, so no drop may be reported
+    // regardless of how old the earlier entry is.
     let cache = VolumeCache::new();
 
-    // Record some volume
+    // Record a lower volume first, then a very recent high volume entry
     cache.record_volume("stale_token", dec!(1000.0));
-
-    // Wait a moment to ensure timestamp is slightly older
-    thread::sleep(Duration::from_millis(100));
-
-    // Add a very recent high volume entry
     cache.record_volume("stale_token", dec!(5000.0));
 
     // Volume drop should not be detected (most recent is high)
@@ -166,7 +170,6 @@ fn test_volume_cache_concurrent_access() {
             for j in 0..10 {
                 let volume = dec!(100.0) * Decimal::from(j + 1);
                 cache_clone.record_volume(&token, volume);
-                thread::sleep(Duration::from_millis(1));
             }
         });
         handles.push(handle);
@@ -188,7 +191,40 @@ fn test_volume_cache_concurrent_access() {
     println!("✓ Concurrent access handled safely");
 }
 
-fn main() {
-    println!("Running Volume Cache tests...");
-    println!("Note: Use 'cargo test' instead of running this directly");
+#[test]
+fn test_volume_cache_concurrent_same_token() {
+    // Concurrent mutation of ONE token's history: every write must survive and
+    // the last write must win for get_current_volume.
+    let cache = std::sync::Arc::new(VolumeCache::new());
+    let mut handles = Vec::new();
+
+    for _ in 0..5 {
+        let cache_clone = cache.clone();
+        let handle = thread::spawn(move || {
+            for j in 0..10 {
+                let volume = dec!(100.0) * Decimal::from(j + 1);
+                cache_clone.record_volume("shared_token", volume);
+            }
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    // 5 threads × 10 writes: the final entry is the last write (1000.0), and
+    // the 24h average spans every written value 100..=1000 → 550.0. If any
+    // write was lost or duplicated by the lock, these invariants break.
+    let current = cache.get_current_volume("shared_token");
+    assert_eq!(current, Some(dec!(1000.0)), "Last write must win");
+
+    let avg = cache.get_24h_average_volume("shared_token");
+    assert_eq!(
+        avg,
+        Some(dec!(550.0)),
+        "Average must span all 50 writes (values 100..=1000)"
+    );
+
+    println!("✓ Concurrent same-token writes preserve all entries");
 }

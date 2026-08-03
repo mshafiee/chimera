@@ -18,8 +18,10 @@ static API_KEY: OnceLock<Option<String>> = OnceLock::new();
 ///
 /// Subsequent calls are ignored (the first value wins) to mirror how a
 /// deployment credential is bound before any worker touches the network.
-pub fn set_api_key(key: Option<String>) {
-    let _ = API_KEY.set(key);
+/// Returns `true` if this call installed the key, `false` if a key was already
+/// installed (a conflicting later call is rejected).
+pub fn set_api_key(key: Option<String>) -> bool {
+    API_KEY.set(key).is_ok()
 }
 
 /// Returns the installed Jupiter API key, if any.
@@ -45,12 +47,29 @@ pub fn with_api_key(rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
 mod tests {
     use super::*;
 
+    /// The process-global key is installed by [`set_api_key`] and can never be
+    /// reset (and tests run in parallel), so exactly ONE test may install the
+    /// key and no test may assert on the global state afterwards.
     #[test]
-    fn with_api_key_is_noop_without_key() {
-        // No key installed in this process — the helper must not panic and must
-        // return the builder unchanged (header attachment is best-effort).
+    fn with_api_key_attaches_configured_key() {
+        // This is the only test in the crate that installs a key, so the
+        // first-wins set must succeed deterministically.
+        assert!(
+            set_api_key(Some("test-jupiter-key".to_string())),
+            "set_api_key must install the key on the first call"
+        );
+        // A conflicting second installation is rejected (first-wins semantics).
+        assert!(
+            !set_api_key(Some("different-key".to_string())),
+            "a later conflicting set_api_key call must be rejected"
+        );
+
         let client = reqwest::Client::new();
-        let _rb = with_api_key(client.get("https://api.jup.ag/price/v3?ids=x"));
-        assert!(api_key().is_none());
+        let rb = with_api_key(client.get("https://api.jup.ag/price/v3?ids=x"));
+        let req = rb.build().expect("request must build");
+        assert_eq!(
+            req.headers().get("x-api-key").and_then(|v| v.to_str().ok()),
+            Some("test-jupiter-key")
+        );
     }
 }

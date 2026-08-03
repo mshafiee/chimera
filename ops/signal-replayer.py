@@ -107,12 +107,15 @@ class SignalReplayer:
 
                     try:
                         signal_data = json.loads(line)
+                        raw_timestamp = signal_data.get('timestamp', signal_data.get('time', '')) or ''
+                        if raw_timestamp.endswith('Z'):
+                            raw_timestamp = raw_timestamp[:-1] + '+00:00'
                         signal = HistoricalSignal(
-                            timestamp=signal_data.get('timestamp', signal_data.get('time', '')),
+                            timestamp=raw_timestamp,
                             wallet_address=signal_data.get('wallet_address', signal_data.get('wallet', '')),
                             token_address=signal_data.get('token_address', signal_data.get('token', '')),
                             action=signal_data.get('action', signal_data.get('type', 'buy')),
-                            amount_sol=float(signal_data.get('amount_sol', signal_data.get('amount', 0.1))),
+                            amount_sol=float(signal_data.get('amount_sol') or signal_data.get('amount') or 0.1),
                             strategy=signal_data.get('strategy', 'shield'),
                             metadata=signal_data.get('metadata', {})
                         )
@@ -122,8 +125,15 @@ class SignalReplayer:
                         print(f"Warning: Skipping invalid signal line: {e}")
                         continue
 
-            # Sort signals by timestamp
-            self.signals.sort(key=lambda s: s.timestamp)
+            # Sort signals by parsed timestamp (invalid entries sort first and
+            # are rejected by validate_signals)
+            def _sort_key(sig):
+                try:
+                    return datetime.fromisoformat(sig.timestamp)
+                except (ValueError, TypeError):
+                    return datetime.min
+
+            self.signals.sort(key=_sort_key)
 
             # Apply max_signals limit if specified
             if self.max_signals and len(self.signals) > self.max_signals:
@@ -223,13 +233,13 @@ class SignalReplayer:
             previous_time = datetime.fromisoformat(previous_signal.timestamp)
             original_delay = (current_time - previous_time).total_seconds()
 
-            # Apply replay speed
-            replay_delay = original_delay / self.replay_speed
+            # Apply replay speed (guarded against invalid/zero speed)
+            replay_delay = original_delay / self.replay_speed if self.replay_speed > 0 else 1.0
 
             # Ensure minimum delay (0.1 seconds) and maximum delay (60 seconds)
             return max(0.1, min(replay_delay, 60.0))
 
-        except (ValueError, IndexError) as e:
+        except (ValueError, TypeError, IndexError) as e:
             print(f"Warning: Error calculating delay for signal {signal_index}: {e}")
             return 1.0  # Default 1 second delay
 
@@ -347,6 +357,13 @@ class SignalReplayer:
 
         for i, signal in enumerate(self.signals):
             # Check required fields
+            if not signal.timestamp:
+                validation_errors.append(f"Signal {i}: Missing timestamp")
+            else:
+                try:
+                    datetime.fromisoformat(signal.timestamp)
+                except ValueError:
+                    validation_errors.append(f"Signal {i}: Invalid timestamp ({signal.timestamp})")
             if not signal.wallet_address:
                 validation_errors.append(f"Signal {i}: Missing wallet_address")
             if not signal.token_address:
@@ -416,6 +433,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.replay_speed <= 0:
+        parser.error(f"--replay-speed must be greater than 0 (got {args.replay_speed})")
 
     # Create replayer
     replayer = SignalReplayer(

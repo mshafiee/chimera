@@ -18,7 +18,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from scout.core import correlation_backfill as cb
+from core import correlation_backfill as cb
 
 
 class _FakeCursor:
@@ -91,14 +91,6 @@ class TestBackfillCorrelationPnl(unittest.TestCase):
 
     def test_backfill_computes_pnl_from_trades_not_wallets(self):
         """Backfill reads from trades, not wallets.realized_pnl_30d_sol."""
-        # First execute_query: the flagged-correlation SELECT returns one wallet.
-        # Second execute_query: the trades-aggregation SELECT returns its PnL.
-        self.conn.cursor._rows = [{"wallet_address": "wallet_abc"}]
-
-        # Make the SECOND fetchall return trades-based PnL by swapping rows
-        # after the first fetchall consumes them.
-        original_fetchall = self.conn.cursor.fetchall
-
         call_count = {"n": 0}
 
         def fetchall():
@@ -128,11 +120,14 @@ class TestBackfillCorrelationPnl(unittest.TestCase):
             any("FROM wallets" in q for q, _ in self.query_calls),
             "backfill must not read from the wallets table (circular PnL)",
         )
-        # The UPDATE must populate copy_trade_count_all.
+        # The UPDATE must populate copy_trade_count_all AND carry the computed
+        # PnL/count values from the trades aggregation.
         updates = [q for q, _ in self.query_calls if "UPDATE wqs_pnl_correlation" in q]
         self.assertTrue(updates)
         self.assertIn("copy_trade_count_all", updates[0])
-        original_fetchall  # silence unused
+        update_params = [p for q, p in self.query_calls if "UPDATE wqs_pnl_correlation" in q][-1]
+        self.assertIn(0.5, update_params)  # copy_pnl_30d from the trades aggregation
+        self.assertIn(5, update_params)    # count_30d from the trades aggregation
 
     def test_backfill_skips_wallets_with_no_closed_trades(self):
         """A flagged wallet with no closed copy-trades is skipped (kept NULL)."""
@@ -147,12 +142,17 @@ class TestBackfillCorrelationPnl(unittest.TestCase):
         self.conn.cursor.fetchall = fetchall
         updated = cb.backfill_correlation_pnl("../data/chimera.db")
         self.assertEqual(updated, 0)
+        # The skip path must not issue any write (UPDATE/INSERT)
+        write_queries = [q for q, _ in self.update_calls if q.strip().upper().startswith(("UPDATE", "INSERT"))]
+        self.assertEqual(write_queries, [], "skip path must not write")
 
     def test_backfill_no_flagged_records(self):
         """No correlation rows with NULL PnL → no work, returns 0."""
         self.conn.cursor.fetchall = lambda: []
         updated = cb.backfill_correlation_pnl("../data/chimera.db")
         self.assertEqual(updated, 0)
+        write_queries = [q for q, _ in self.update_calls if q.strip().upper().startswith(("UPDATE", "INSERT"))]
+        self.assertEqual(write_queries, [], "empty path must not write")
 
 
 class TestWriteCorrelationRecord(unittest.TestCase):

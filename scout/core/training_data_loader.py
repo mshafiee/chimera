@@ -17,7 +17,6 @@ Usage:
 """
 
 import logging
-import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -87,53 +86,56 @@ class TrainingDataLoader:
 
         try:
             conn = get_connection(self.db_path)
-            conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
+            try:
+                # Build query (PostgreSQL dialect)
+                query = """
+                    SELECT
+                        address,
+                        status,
+                        wqs_score,
+                        roi_7d,
+                        roi_30d,
+                        trade_count_30d,
+                        win_rate,
+                        max_drawdown_30d,
+                        avg_trade_size_sol,
+                        profit_factor,
+                        sortino_ratio,
+                        avg_entry_delay_seconds,
+                        archetype,
+                        realized_pnl_30d_sol,
+                        last_trade_at,
+                        created_at
+                    FROM wallets
+                    WHERE trade_count_30d >= %s
+                """
+                params: List[Any] = [min_trades]
 
-            # Build query
-            query = """
-                SELECT
-                    address,
-                    status,
-                    wqs_score,
-                    roi_7d,
-                    roi_30d,
-                    trade_count_30d,
-                    win_rate,
-                    max_drawdown_30d,
-                    avg_trade_size_sol,
-                    profit_factor,
-                    sortino_ratio,
-                    avg_entry_delay_seconds,
-                    archetype,
-                    realized_pnl_30d_sol,
-                    last_trade_at,
-                    created_at
-                FROM wallets
-                WHERE trade_count_30d >= ?
-            """
-            params = [min_trades]
+                if status:
+                    query += " AND status = %s"
+                    params.append(status)
 
-            if status:
-                query += " AND status = ?"
-                params.append(status)
+                # Honor the requested lookback window (created_at is a
+                # timestamp; NOW() - INTERVAL gives PG-compatible recency)
+                query += " AND created_at >= NOW() - INTERVAL '%s days'" % time_window_days
 
-            query += " ORDER BY created_at DESC"
+                query += " ORDER BY created_at DESC"
 
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
 
-            # Convert to list of dicts
-            wallets = []
-            for row in rows:
-                wallet = dict(row)
-                # Convert to float where needed
-                for key, value in wallet.items():
-                    if value is not None and isinstance(value, (int, float)):
-                        wallet[key] = float(value)
-                wallets.append(wallet)
-
-            conn.close()
+                # Convert to list of dicts
+                wallets = []
+                for row in rows:
+                    wallet = dict(row)
+                    # Convert to float where needed
+                    for key, value in wallet.items():
+                        if value is not None and isinstance(value, (int, float)):
+                            wallet[key] = float(value)
+                    wallets.append(wallet)
+            finally:
+                conn.close()
 
             logger.info(f"Loaded {len(wallets)} wallet features from database")
             return wallets
@@ -163,29 +165,30 @@ class TrainingDataLoader:
 
         try:
             conn = get_connection(self.db_path)
-            cursor = conn.cursor()
+            try:
+                cursor = conn.cursor()
 
-            # Calculate time threshold
-            threshold = datetime.utcnow() - timedelta(days=time_window_days)
+                # Calculate time threshold
+                threshold = datetime.utcnow() - timedelta(days=time_window_days)
 
-            # Query trades for each wallet
-            targets = {}
-            for address in wallet_addresses:
-                cursor.execute("""
-                    SELECT
-                        SUM(net_pnl_sol) as total_pnl,
-                        COUNT(*) as trade_count
-                    FROM trades
-                    WHERE wallet_address = %s
-                        AND created_at >= %s
-                        AND status IN ('CLOSED', 'EXITED')
-                """, (address, threshold.isoformat()))
+                # Query trades for each wallet
+                targets = {}
+                for address in wallet_addresses:
+                    cursor.execute("""
+                        SELECT
+                            SUM(net_pnl_sol) as total_pnl,
+                            COUNT(*) as trade_count
+                        FROM trades
+                        WHERE wallet_address = %s
+                            AND created_at >= %s
+                            AND status IN ('CLOSED', 'EXITED')
+                    """, (address, threshold.isoformat()))
 
-                row = cursor.fetchone()
-                if row and row["trade_count"] > 0:  # Has closed trades
-                    targets[address] = float(row["total_pnl"]) if row["total_pnl"] else 0.0
-
-            conn.close()
+                    row = cursor.fetchone()
+                    if row and row["trade_count"] > 0:  # Has closed trades
+                        targets[address] = float(row["total_pnl"]) if row["total_pnl"] else 0.0
+            finally:
+                conn.close()
 
             logger.info(f"Loaded PnL targets for {len(targets)} wallets")
             return targets
@@ -210,7 +213,7 @@ class TrainingDataLoader:
 
             df = pd.read_csv(self.feature_store_path)
             logger.info(f"Loaded {len(df)} feature vectors from feature store")
-            return df.to_dict('records')
+            return df.to_numpy()
 
         except ImportError:
             logger.warning("pandas not available for feature store loading")
@@ -261,6 +264,12 @@ class TrainingDataLoader:
         # Convert to numpy arrays
         X = np.array(X)
         y = np.array(y)
+
+        # load_wallet_features returns newest-first (ORDER BY created_at DESC);
+        # reverse so the split keeps the oldest data for training and the
+        # most recent 20% for validation.
+        X = X[::-1]
+        y = y[::-1]
 
         # Split into train and validation sets (time-based split)
         # Use last 20% for validation (more realistic for time-series)

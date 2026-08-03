@@ -14,7 +14,8 @@ Usage:
 import json
 import logging
 import os
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
@@ -104,13 +105,17 @@ class ValidationReporter:
             try:
                 from .db import get_connection
                 conn = get_connection(str(self.db_path))
-                cursor = conn.cursor()
-                cursor.execute("SELECT DISTINCT model_type FROM ml_predictions WHERE status = 'MATCHED'")
-                model_types = [row["model_type"] for row in cursor.fetchall()]
-                conn.close()
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT DISTINCT model_type FROM ml_predictions WHERE status = 'MATCHED'")
+                    model_types = [row["model_type"] for row in cursor.fetchall()]
+                finally:
+                    conn.close()
             except Exception as e:
+                # A DB outage must NOT be reported as a healthy zero-data
+                # report — surface the failure to the caller
                 logger.error(f"Failed to get model types: {e}")
-                model_types = []
+                raise
 
         # Calculate metrics for each model
         model_metrics = {}
@@ -253,6 +258,37 @@ class ValidationReporter:
                     'value': metrics.missing_actual_rate,
                 })
 
+            # Drift detection: compare the current window's RMSE against the
+            # previous window of equal length; flag when degradation exceeds
+            # the configured drift threshold.
+            try:
+                days = 7 if metrics.time_window == '7d' else 30 if metrics.time_window == '30d' else None
+                if days:
+                    now = datetime.utcnow()
+                    prev_metrics = self.metrics_calculator.calculate_metrics(
+                        model_type=model_type,
+                        time_window='all',
+                        min_predictions=1,
+                        start_date=(now - timedelta(days=2 * days)).isoformat(),
+                        end_date=(now - timedelta(days=days)).isoformat(),
+                    )
+                    if prev_metrics and prev_metrics.rmse is not None and metrics.rmse is not None:
+                        if prev_metrics.rmse > 0:
+                            degradation = (metrics.rmse - prev_metrics.rmse) / prev_metrics.rmse
+                        else:
+                            degradation = float('inf') if metrics.rmse > 0 else 0.0
+                        if degradation > self.alert_config.drift_threshold:
+                            issues.append({
+                                'severity': 'medium',
+                                'type': 'rmse_drift',
+                                'model': model_type,
+                                'message': f"RMSE degraded {degradation:.1%} vs previous window (threshold {self.alert_config.drift_threshold:.1%})",
+                                'value': degradation,
+                                'threshold': self.alert_config.drift_threshold,
+                            })
+            except Exception as e:
+                logger.debug(f"Drift detection failed for {model_type}: {e}")
+
         return issues
 
     def _get_recent_errors(
@@ -290,7 +326,14 @@ class ValidationReporter:
         recommendations = []
 
         summary = report.get('summary', {})
-        report.get('issues', [])
+        issues = report.get('issues', [])
+
+        # Surface detected issues as recommendations (microsecond-resolution
+        # filenames elsewhere keep alert history intact)
+        for issue in issues:
+            recommendations.append(
+                f"[{issue.get('severity', 'info').upper()}] {issue.get('message', '')}"
+            )
 
         # Analyze RMSE
         avg_rmse = summary.get('avg_rmse', 0)
@@ -376,7 +419,7 @@ class ValidationReporter:
             'details': details,
         }
 
-        alert_file = Path(self.alert_config.alert_dir) / f"alert_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{condition}.json"
+        alert_file = Path(self.alert_config.alert_dir) / f"alert_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}_{condition}.json"
         alert_file.parent.mkdir(parents=True, exist_ok=True)
 
         with open(alert_file, 'w') as f:
@@ -609,13 +652,17 @@ class ValidationReporter:
         return html
 
 
-# Global instance
-_global_reporter = None
+# Global instances (cached per resolved db_path)
+_global_reporters = {}
+_global_reporters_lock = threading.Lock()
 
 
 def get_validation_reporter(db_path: Optional[str] = None) -> ValidationReporter:
-    """Get or create global validation reporter instance."""
-    global _global_reporter
-    if _global_reporter is None:
-        _global_reporter = ValidationReporter(db_path)
-    return _global_reporter
+    """Get or create a validation reporter instance (cached per db_path)."""
+    if db_path is None:
+        db_path = "data/chimera.db"
+    resolved = str(Path(db_path).resolve())
+    with _global_reporters_lock:
+        if resolved not in _global_reporters:
+            _global_reporters[resolved] = ValidationReporter(db_path)
+        return _global_reporters[resolved]

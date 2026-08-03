@@ -204,11 +204,12 @@ class PositionSizer:
             position_size_usd = base_capital * adjusted_fraction
             position_size_pct = position_size_usd / capital if capital > 0 else 0
 
-            # Apply safety limits
-            position_size_pct = max(
-                self._config.MIN_POSITION_PCT,
-                min(position_size_pct, self._config.MAX_POSITION_PCT)
-            )
+            # Apply safety limits. The minimum floor only applies when there
+            # is an actual positive edge — a zero/negative Kelly edge must
+            # size to zero instead of forcing a losing bet.
+            position_size_pct = min(position_size_pct, self._config.MAX_POSITION_PCT)
+            if kelly_fraction > 0 and position_size_pct > 0:
+                position_size_pct = max(position_size_pct, self._config.MIN_POSITION_PCT)
             position_size_usd = capital * position_size_pct
 
             return PositionSize(
@@ -250,13 +251,26 @@ class PositionSizer:
             )
             sizes[wallet] = size
 
-        # Normalize to ensure we don't exceed total exposure
+        # Normalize to ensure we don't exceed total exposure. Rebuild new
+        # PositionSize instances instead of mutating the returned objects, and
+        # re-apply the per-position min/max clamps after scaling.
         total_exposure = sum(s.size_pct for s in sizes.values())
         if total_exposure > self._config.MAX_TOTAL_EXPOSURE:
             scale_factor = self._config.MAX_TOTAL_EXPOSURE / total_exposure
-            for wallet in sizes:
-                sizes[wallet].size_pct *= scale_factor
-                sizes[wallet].size_usd *= scale_factor
+            for wallet, size in list(sizes.items()):
+                scaled_pct = size.size_pct * scale_factor
+                if size.kelly_fraction > 0 and scaled_pct > 0:
+                    scaled_pct = max(scaled_pct, self._config.MIN_POSITION_PCT)
+                scaled_pct = min(scaled_pct, self._config.MAX_POSITION_PCT)
+                sizes[wallet] = PositionSize(
+                    size_usd=capital * scaled_pct,
+                    size_pct=scaled_pct,
+                    kelly_fraction=size.kelly_fraction,
+                    growth_multiplier=size.growth_multiplier,
+                    confidence=size.confidence,
+                    stage=size.stage,
+                    timestamp=size.timestamp,
+                )
 
         return sizes
 

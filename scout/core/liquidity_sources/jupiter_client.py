@@ -1,6 +1,7 @@
 """Jupiter API client for price and liquidity proxy data."""
 
 import asyncio
+import threading
 import time
 import os
 from datetime import datetime
@@ -23,6 +24,8 @@ class JupiterLiquidityClient:
         self.api_url = api_url
         self.rate_limit_delay = 0.3  # Seconds between requests
         self.last_request_time = 0.0
+        # threading.Lock so the delay is enforced across event loops/threads
+        self._rate_limit_lock = threading.Lock()
         self._session = session
         self._own_session = False
         # Get API key from environment for authenticated requests
@@ -44,11 +47,13 @@ class JupiterLiquidityClient:
 
     async def _rate_limit(self):
         """Ensure we don't exceed rate limits."""
-        current_time = time.time()
-        time_since_last = current_time - self.last_request_time
-        if time_since_last < self.rate_limit_delay:
-            await asyncio.sleep(self.rate_limit_delay - time_since_last)
-        self.last_request_time = time.time()
+        with self._rate_limit_lock:
+            current_time = time.time()
+            time_since_last = current_time - self.last_request_time
+            if time_since_last < self.rate_limit_delay:
+                await asyncio.sleep(self.rate_limit_delay - time_since_last)
+            # Stamp BEFORE the sleep so concurrent callers reserve distinct slots
+            self.last_request_time = time.time()
 
     async def get_current_liquidity(self, token_address: str) -> Optional[LiquidityData]:
         """
@@ -80,9 +85,9 @@ class JupiterLiquidityClient:
                 data = await response.json() or {}
 
                 # v3 response format: {"token_address": {"usdPrice": ..., ...}}
-                price_data = data.get(token_address, {})
+                price_data = data.get(token_address) or {}
 
-                price = price_data.get("usdPrice")
+                price = price_data.get("usdPrice") if isinstance(price_data, dict) else None
                 if price is None:
                     return None
 
@@ -101,7 +106,7 @@ class JupiterLiquidityClient:
                     source="jupiter_v3",
                 )
 
-        except aiohttp.ClientError as e:
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             import logging
             logger = logging.getLogger(__name__)
             logger.debug(f"Jupiter v3 API request failed: {e}")

@@ -275,9 +275,10 @@ class MultiTimeframeDiscovery:
         # Wait for all tasks to complete
         task_results = await asyncio.gather(*executed_tasks, return_exceptions=True)
 
-        # Process results
+        # Process results (CancelledError is a BaseException, not Exception —
+        # treat cancelled tasks like failures so no timeframe is silently lost)
         for (timeframe, _), result in zip(tasks, task_results):
-            if isinstance(result, Exception):
+            if isinstance(result, (Exception, asyncio.CancelledError)):
                 logger.error(f"[MultiTimeframeDiscovery] {timeframe.value} failed: {result}")
                 # Create empty result for failed timeframe
                 results[timeframe] = TimeframeResult(
@@ -315,22 +316,20 @@ class MultiTimeframeDiscovery:
                 continue
 
             # Allocate budget for this timeframe
-            if remaining_budget and remaining_budget > 0:
-                credits_per_timeframe = min(
-                    config.credits_per_operation if hasattr(config, 'credits_per_operation') else 50,
-                    remaining_budget
-                )
+            if remaining_budget is not None:
+                credits_per_timeframe = min(50, remaining_budget)
             else:
                 credits_per_timeframe = None
 
             result = await self._execute_single_timeframe(timeframe, config, credits_per_timeframe)
             results[timeframe] = result
 
-            # Update remaining budget
-            if remaining_budget:
+            # Update remaining budget (0 is a legitimate "exhausted" value —
+            # truthiness checks would treat it as no budget)
+            if remaining_budget is not None:
                 remaining_budget -= result.credits_consumed
 
-            if remaining_budget and remaining_budget <= 0:
+            if remaining_budget is not None and remaining_budget <= 0:
                 logger.warning("[MultiTimeframeDiscovery] Budget exhausted, stopping sequential execution")
                 break
 
@@ -371,7 +370,7 @@ class MultiTimeframeDiscovery:
                 timeframe=timeframe,
                 wallets_discovered=list(wallet_counts.keys()),
                 wallet_quality_scores=quality_scores,
-                credits_consumed=budget_credits or 50,  # Estimate
+                credits_consumed=budget_credits if budget_credits is not None else 50,  # Estimate
                 execution_time_seconds=execution_time,
                 metadata={
                     "hours_back": config.hours_back,
@@ -544,19 +543,22 @@ class AdaptiveTimeframeSelector:
         # Get preferred timeframes for goal
         preferred = goal_preferences.get(goal, goal_preferences["balanced"])
 
-        # Filter by budget if specified
-        if budget_credits:
+        # Filter by budget if specified. If no preferred timeframe fits the
+        # budget, return an empty list rather than silently violating the
+        # caller's credit constraint.
+        if budget_credits is not None:
             affordable = []
             for tf in preferred:
                 config = self._discovery.get_timeframe_config(tf)
                 if config and config.limit_per_token * 10 <= budget_credits:  # Rough estimate
                     affordable.append(tf)
-            selected = affordable if affordable else [preferred[0]]
+            selected = affordable
         else:
             selected = preferred
 
-        # Filter by time limit if specified
-        if time_limit_seconds:
+        # Filter by time limit if specified. If nothing fits, surface the
+        # infeasibility instead of falling back to a known-too-slow timeframe.
+        if time_limit_seconds is not None and selected:
             # Estimate execution time per timeframe (rough estimate)
             estimated_times = {
                 DiscoveryTimeframe.TRENDING: 10,   # 10 seconds
@@ -571,7 +573,7 @@ class AdaptiveTimeframeSelector:
                     fast_enough.append(tf)
                     total_time += estimated_times.get(tf, 30)
 
-            selected = fast_enough if fast_enough else [preferred[0]]
+            selected = fast_enough
 
         # Record selection for learning
         self._selection_history.append({

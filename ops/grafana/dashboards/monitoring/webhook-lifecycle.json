@@ -104,7 +104,7 @@
       "targets": [
         {
           "format": "table",
-          "rawSql": "SELECT w.address, w.status, wm.helius_webhook_id, wm.webhook_status, wm.webhook_health_status, wm.webhook_registered_at, wm.last_monitored_at FROM wallets w JOIN wallet_monitoring wm ON w.address = wm.wallet_address WHERE w.status = 'ACTIVE' ORDER BY wm.webhook_registered_at DESC",
+          "rawSql": "SELECT w.address, w.status, wm.helius_webhook_id, wm.webhook_status, wm.webhook_health_status, wm.webhook_registered_at, wm.last_monitored_at FROM wallets w JOIN wallet_monitoring wm ON w.address = wm.wallet_address WHERE w.status = 'ACTIVE' AND wm.helius_webhook_id IS NOT NULL ORDER BY wm.webhook_registered_at DESC",
           "refId": "A"
         }
       ],
@@ -139,7 +139,7 @@
       "targets": [
         {
           "format": "table",
-          "rawSql": "SELECT wallet_address, event_type, webhook_id, status, error_message, created_at FROM webhook_lifecycle_audit ORDER BY created_at DESC LIMIT 30",
+          "rawSql": "SELECT wallet_address, action, webhook_id, status, error_message, created_at FROM webhook_lifecycle_audit WHERE $__timeFilter(created_at) ORDER BY created_at DESC LIMIT 30",
           "refId": "A"
         }
       ],
@@ -151,7 +151,7 @@
             "indexByName": {},
             "renameByName": {
               "wallet_address": "Wallet",
-              "event_type": "Event Type",
+              "action": "Event Type",
               "webhook_id": "Webhook ID",
               "status": "Status",
               "error_message": "Error Message",

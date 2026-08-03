@@ -10,7 +10,7 @@
 
 use crate::config::CircuitBreakerConfig;
 use crate::db_abstraction::Database;
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
 use crate::notifications::{CompositeNotifier, NotificationEvent};
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::RwLock;
@@ -36,13 +36,51 @@ async fn persist_cb_state(
         .await
 }
 
-/// Load persisted circuit breaker state from the database
+/// Load persisted circuit breaker state from the database.
+/// A failed read is propagated (fail-closed at startup) rather than silently
+/// treated as "no persisted state".
 async fn load_cb_state(
     db: &dyn Database,
 ) -> AppResult<Option<(String, Option<String>, Option<String>)>> {
-    match db.get_circuit_breaker_state().await {
-        Ok(state) => Ok(Some((state.state, state.tripped_at, state.trip_reason))),
-        Err(_) => Ok(None),
+    let state = db.get_circuit_breaker_state().await?;
+    Ok(Some((state.state, state.tripped_at, state.trip_reason)))
+}
+
+/// RAII guard that clears the `evaluation_in_progress` flag on drop.
+///
+/// Without this, an early return (e.g. `?` on a DB error, or a Tripped→Cooldown
+/// transition) leaks the flag and every subsequent `evaluate()` call
+/// short-circuits at the "already in progress" guard — leaving the breaker in
+/// Cooldown forever with automatic recovery disabled.
+struct EvaluationGuard<'a> {
+    state: &'a Arc<RwLock<InternalState>>,
+    armed: bool,
+}
+
+impl<'a> EvaluationGuard<'a> {
+    /// Sets the flag unless an evaluation is already in progress.
+    fn new(state: &'a Arc<RwLock<InternalState>>) -> Self {
+        {
+            let mut s = state.write();
+            if s.evaluation_in_progress {
+                return Self { state, armed: false };
+            }
+            s.evaluation_in_progress = true;
+        }
+        Self { state, armed: true }
+    }
+
+    /// True if this guard set the flag (i.e. the caller may proceed).
+    fn armed(&self) -> bool {
+        self.armed
+    }
+}
+
+impl Drop for EvaluationGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.state.write().evaluation_in_progress = false;
+        }
     }
 }
 
@@ -92,6 +130,8 @@ pub enum TripReason {
     },
     /// Manual trip by admin
     Manual { reason: String },
+    /// State restored from a persisted DB record (not an admin action)
+    Restored { reason: String },
 }
 
 impl std::fmt::Display for TripReason {
@@ -146,6 +186,7 @@ impl std::fmt::Display for TripReason {
                 )
             }
             Self::Manual { reason } => write!(f, "Manual: {}", reason),
+            Self::Restored { reason } => write!(f, "Restored: {}", reason),
         }
     }
 }
@@ -255,17 +296,30 @@ impl CircuitBreaker {
     /// Restore persisted circuit breaker state from DB on startup.
     /// Call this after construction but before the server starts accepting connections.
     pub async fn restore_from_db(&self) -> AppResult<()> {
+        // A failed read propagates here (fail-closed): silently resuming trading
+        // when the persisted state said Tripped/Cooldown would be unsafe.
         match load_cb_state(self.db.as_ref()).await? {
             Some((state_str, tripped_at_str, trip_reason_str)) if state_str != "Active" => {
+                // A missing/unparseable persisted timestamp must not strand the
+                // breaker in Cooldown forever (the cooldown-expiry check returns
+                // false when tripped_at is None) — fall back to now so the
+                // cooldown clock can still expire.
                 let tripped_at = tripped_at_str
                     .as_deref()
                     .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                    .map(|dt| dt.with_timezone(&Utc));
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .or_else(|| {
+                        tracing::warn!(
+                            "Persisted circuit breaker tripped_at is missing/unparseable — \
+                             defaulting to now so the cooldown can expire"
+                        );
+                        Some(Utc::now())
+                    });
 
                 let reason = trip_reason_str
                     .clone()
-                    .map(|r| TripReason::Manual { reason: r })
-                    .unwrap_or(TripReason::Manual {
+                    .map(|r| TripReason::Restored { reason: r })
+                    .unwrap_or(TripReason::Restored {
                         reason: "Restored from persisted state".to_string(),
                     });
 
@@ -405,17 +459,18 @@ impl CircuitBreaker {
         let consecutive_breached = consecutive >= self.config.max_consecutive_losses;
 
         let total_capital = *self.total_capital_sol.read();
-        let drawdown = match self.db.get_max_drawdown_percent(total_capital).await {
-            Ok(dd) => dd,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "Circuit breaker: failed to fetch max drawdown — \
-                     skipping evaluation this tick"
-                );
-                return Err(e);
-            }
-        };
+        let (drawdown, historical_max_drawdown) =
+            match self.db.get_max_drawdown_percent(total_capital).await {
+                Ok(pair) => pair,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Circuit breaker: failed to fetch max drawdown — \
+                         skipping evaluation this tick"
+                    );
+                    return Err(e);
+                }
+            };
         let drawdown_breached = drawdown >= self.config.max_drawdown_percent;
 
         tracing::debug!(
@@ -434,6 +489,7 @@ impl CircuitBreaker {
             consecutive_losses_threshold = self.config.max_consecutive_losses,
             consecutive_losses_breached = consecutive_breached,
             max_drawdown_percent = %drawdown,
+            historical_max_drawdown_percent = %historical_max_drawdown,
             max_drawdown_threshold_percent = %self.config.max_drawdown_percent,
             max_drawdown_breached = drawdown_breached,
             sol_price_usd = ?sol_price_usd,
@@ -474,15 +530,13 @@ impl CircuitBreaker {
     /// Evaluate trip conditions and update state
     #[tracing::instrument(skip(self))]
     pub async fn evaluate(&self) -> AppResult<()> {
-        // Atomically check if evaluation is already in progress and skip if true
-        {
-            let mut state = self.state.write();
-            if state.evaluation_in_progress {
-                tracing::debug!("Circuit breaker evaluation already in progress, skipping");
-                return Ok(());
-            }
-            state.evaluation_in_progress = true;
-            // Lock released here
+        // Atomically check if evaluation is already in progress and skip if true.
+        // The guard clears the flag on EVERY exit path (including `?` on the
+        // DB errors in check_breach_conditions) — see EvaluationGuard.
+        let guard = EvaluationGuard::new(&self.state);
+        if !guard.armed() {
+            tracing::debug!("Circuit breaker evaluation already in progress, skipping");
+            return Ok(());
         }
 
         // FIX [R-M3]: Check interval under write lock but do NOT update last_check yet.
@@ -491,10 +545,7 @@ impl CircuitBreaker {
             let state = self.state.write();
             if let Some(last_check) = state.last_check {
                 if Utc::now().signed_duration_since(last_check) < self.check_interval {
-                    // Clear evaluation flag since we're skipping
-                    drop(state);
-                    let mut state = self.state.write();
-                    state.evaluation_in_progress = false;
+                    // Guard clears evaluation flag on drop.
                     return Ok(());
                 }
             }
@@ -519,11 +570,6 @@ impl CircuitBreaker {
 
         if should_exit_cooldown {
             self.exit_cooldown().await?;
-            // Clear evaluation flag before returning
-            {
-                let mut state = self.state.write();
-                state.evaluation_in_progress = false;
-            }
             return Ok(());
         }
 
@@ -533,38 +579,22 @@ impl CircuitBreaker {
         // Transition from Tripped → Cooldown after trip is recorded
         if current == CircuitBreakerState::Tripped {
             self.enter_cooldown().await?;
-            // Clear evaluation flag before returning
-            {
-                let mut state = self.state.write();
-                state.evaluation_in_progress = false;
-            }
             return Ok(());
         }
 
         // If still in cooldown or tripped, don't evaluate further
         if current != CircuitBreakerState::Active {
-            // Clear evaluation flag before returning
-            {
-                let mut state = self.state.write();
-                state.evaluation_in_progress = false;
-            }
             return Ok(());
         }
 
         if let Some(reason) = self.check_breach_conditions().await? {
             self.trip(reason).await?;
-            // Clear evaluation flag before returning
-            {
-                let mut state = self.state.write();
-                state.evaluation_in_progress = false;
-            }
             return Ok(());
         }
         // Update last_check
         {
             let mut state = self.state.write();
             state.last_check = Some(Utc::now());
-            state.evaluation_in_progress = false;
         }
 
         Ok(())
@@ -573,6 +603,22 @@ impl CircuitBreaker {
     /// Trip the circuit breaker
     #[tracing::instrument(skip(self))]
     async fn trip(&self, reason: TripReason) -> AppResult<()> {
+        // Guard against duplicate trips: concurrent Jupiter failures (or failures
+        // while already tripped) must not re-log, re-notify, re-increment
+        // `trips_total`, or reset the cooldown clock. A Tripped breaker stays
+        // Tripped until evaluate()/exit_cooldown() advances it. (A Cooldown→Tripped
+        // re-trip from exit_cooldown is still allowed — it is not yet Tripped.)
+        {
+            let state = self.state.read();
+            if state.state == CircuitBreakerState::Tripped {
+                tracing::debug!(
+                    reason = %reason,
+                    "Circuit breaker already TRIPPED — ignoring duplicate trip"
+                );
+                return Ok(());
+            }
+        }
+
         let reason_str = reason.to_string();
         let now = Utc::now();
 
@@ -793,6 +839,10 @@ impl CircuitBreaker {
             state.state = CircuitBreakerState::Active;
             state.tripped_at = None;
             state.trip_reason = None;
+            // Fresh start after cooldown: clear the Jupiter failure accumulation
+            // so the next outage gets a full threshold window.
+            state.jupiter_failure_count = 0;
+            state.last_jupiter_error = None;
         }
 
         // Update Prometheus gauge to Active (2)
@@ -835,6 +885,9 @@ impl CircuitBreaker {
             state.state = CircuitBreakerState::Active;
             state.tripped_at = None;
             state.trip_reason = None;
+            // Clear Jupiter failure accumulation on manual reset.
+            state.jupiter_failure_count = 0;
+            state.last_jupiter_error = None;
         }
 
         // Update Prometheus gauge to Active (2)
@@ -909,27 +962,36 @@ impl CircuitBreaker {
     ///
     /// This should be called when Jupiter API calls fail. If consecutive failures
     /// exceed the threshold, the circuit breaker will trip automatically.
+    ///
+    /// Async (not blocking): `trip()` awaits DB/notification work, so this must
+    /// never be called via `Handle::block_on` from inside an async context
+    /// (that panics on a tokio worker thread and blocks the runtime).
     #[tracing::instrument(skip(self))]
-    pub fn record_jupiter_failure(&self, error_type: String) -> AppResult<bool> {
-        let mut state = self.state.write();
+    pub async fn record_jupiter_failure(&self, error_type: String) -> AppResult<bool> {
+        // Scope the parking_lot write guard to a block: holding the (non-Send)
+        // guard across an await would make this future !Send.
+        let (current_failures, threshold) = {
+            let mut state = self.state.write();
 
-        // Increment failure counter
-        state.jupiter_failure_count += 1;
-        state.last_jupiter_error = Some(error_type.clone());
+            // Increment failure counter
+            state.jupiter_failure_count += 1;
+            state.last_jupiter_error = Some(error_type.clone());
 
-        let current_failures = state.jupiter_failure_count;
-        let threshold = self.config.max_jupiter_failures;
+            let current_failures = state.jupiter_failure_count;
+            let threshold = self.config.max_jupiter_failures;
 
-        tracing::warn!(
-            jupiter_failures = current_failures,
-            threshold = threshold,
-            error_type = %error_type,
-            "Jupiter API failure recorded"
-        );
+            tracing::warn!(
+                jupiter_failures = current_failures,
+                threshold = threshold,
+                error_type = %error_type,
+                "Jupiter API failure recorded"
+            );
+
+            (current_failures, threshold)
+        };
 
         // Check if threshold exceeded
         if current_failures >= threshold {
-            drop(state); // Release lock before calling trip
             let reason = TripReason::JupiterApiFailures {
                 consecutive_failures: current_failures,
                 threshold,
@@ -937,12 +999,7 @@ impl CircuitBreaker {
             };
 
             // Trip the circuit breaker (will re-acquire lock)
-            let rt = tokio::runtime::Handle::try_current()
-                .map_err(|e| AppError::Internal(format!("No tokio runtime: {}", e)))?;
-
-            rt.block_on(async {
-                self.trip(reason).await
-            })?;
+            self.trip(reason).await?;
 
             return Ok(true); // Circuit breaker was tripped
         }

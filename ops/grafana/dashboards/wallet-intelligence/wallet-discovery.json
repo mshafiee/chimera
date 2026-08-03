@@ -64,7 +64,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(scout_analysis_duration_seconds_bucket[5m]))",
+          "expr": "histogram_quantile(0.95, sum(rate(scout_analysis_duration_seconds_bucket[5m])) by (le))",
           "legendFormat": "p95 Duration",
           "refId": "A"
         }
@@ -121,7 +121,7 @@
       "targets": [
         {
           "format": "table",
-          "rawSql": "SELECT wallet_address, total_trades, winning_trades, win_rate, total_pnl_sol, profit_factor, max_drawdown_percent FROM wallet_performance_history ORDER BY timestamp DESC LIMIT 20",
+          "rawSql": "SELECT wallet_address, total_trades, winning_trades, win_rate, total_pnl_sol, profit_factor, max_drawdown_percent FROM wallet_performance_history WHERE $__timeFilter(timestamp) ORDER BY timestamp DESC LIMIT 20",
           "refId": "A"
         }
       ],
@@ -156,7 +156,7 @@
       "targets": [
         {
           "format": "table",
-          "rawSql": "SELECT wallet_address, wqs_score_at_promotion, actual_copy_pnl_30d_sol, correlation_bucket, measured_at FROM wqs_pnl_correlation ORDER BY measured_at DESC LIMIT 20",
+          "rawSql": "SELECT wallet_address, wqs_score_at_promotion, actual_copy_pnl_30d_sol, last_updated_at FROM wqs_pnl_correlation WHERE $__timeFilter(last_updated_at) ORDER BY last_updated_at DESC LIMIT 20",
           "refId": "A"
         }
       ],
@@ -170,8 +170,7 @@
               "wallet_address": "Wallet",
               "wqs_score_at_promotion": "WQS at Promotion",
               "actual_copy_pnl_30d_sol": "Actual PnL 30d (SOL)",
-              "correlation_bucket": "Correlation Bucket",
-              "measured_at": "Measured At"
+              "last_updated_at": "Measured At"
             }
           }
         }
@@ -189,7 +188,7 @@
       "targets": [
         {
           "format": "table",
-          "rawSql": "SELECT wallet_address, discovery_timeframe, wqs_score, sample_size, signal_count FROM multi_timeframe_discovery_stats ORDER BY discovered_at DESC LIMIT 20",
+          "rawSql": "SELECT wallet_address, discovery_timeframe, wqs_score, sample_size, signal_count FROM multi_timeframe_discovery_stats WHERE $__timeFilter(discovered_at) ORDER BY discovered_at DESC LIMIT 20",
           "refId": "A"
         }
       ],

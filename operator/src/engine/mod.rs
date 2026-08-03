@@ -70,15 +70,11 @@ use crate::state::{StateRegistry, AsyncWriteQueue};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Engine handle for external interaction
 #[derive(Clone)]
 pub struct EngineHandle {
-    /// Sender for queueing signals
-    #[allow(dead_code)] // Used for queueing signals
-    tx: mpsc::Sender<Signal>,
     /// Priority queue for monitoring
     queue: Arc<PriorityQueue>,
     /// Executor for RPC state access
@@ -189,9 +185,6 @@ pub struct Engine {
     queue: Arc<PriorityQueue>,
     /// Executor for trade submission (wrapped in RwLock for shared access)
     executor: Arc<tokio::sync::RwLock<Executor>>,
-    /// Channel receiver for signals
-    #[allow(dead_code)] // Used in run loop
-    rx: mpsc::Receiver<Signal>,
     /// Notification service
     #[allow(dead_code)] // Used via SignalProcessor
     notifier: Option<Arc<CompositeNotifier>>,
@@ -223,6 +216,7 @@ pub struct Engine {
     #[allow(dead_code)] // Used via SignalProcessor
     execution_lock: Option<Arc<ExecutionLock>>,
     /// Profitability verdict cache for live trading enforcement
+    #[allow(dead_code)] // Used via SignalProcessor
     verdict_cache: Option<Arc<tokio::sync::RwLock<Option<crate::handlers::CachedVerdict>>>>,
 }
 
@@ -378,8 +372,6 @@ impl Engine {
         verdict_cache: Option<Arc<tokio::sync::RwLock<Option<crate::handlers::CachedVerdict>>>>,
     ) -> (Self, EngineHandle) {
         let config = Arc::new(config);
-        let (tx, rx) = mpsc::channel(100); // Buffer for incoming signals
-
         let queue = Arc::new(PriorityQueue::new(
             config.queue.capacity,
             config.queue.load_shed_threshold_percent,
@@ -402,7 +394,6 @@ impl Engine {
         let executor_arc = Arc::new(tokio::sync::RwLock::new(executor));
         let shutdown_token = CancellationToken::new();
         let handle = EngineHandle {
-            tx,
             queue: queue.clone(),
             executor: Some(executor_arc.clone()),
             shutdown_token: shutdown_token.clone(),
@@ -411,8 +402,10 @@ impl Engine {
         // Create execution lock if enabled in configuration
         let execution_lock_config = config.execution_lock.clone();
         let execution_lock = if execution_lock_config.enabled {
-            let lock_metrics = metrics.as_ref().map(|_m| {
-                Arc::new(crate::metrics::ExecutionLockMetrics::new())
+            let lock_metrics = metrics.as_ref().map(|m| {
+                // Register the execution-lock collectors with the shared registry
+                // so they are actually scraped at /metrics.
+                Arc::new(crate::metrics::ExecutionLockMetrics::new(m.registry()))
             });
             Some(Arc::new(ExecutionLock::new(execution_lock_config, lock_metrics)))
         } else {
@@ -465,7 +458,6 @@ impl Engine {
             db,
             queue,
             executor: executor_arc,
-            rx,
             notifier,
             metrics,
             ws_state,
@@ -506,13 +498,18 @@ impl Engine {
         // Spawn metrics update task
         let metrics_clone = self.metrics.clone();
         let queue_clone = self.queue.clone();
+        let metrics_shutdown = self.shutdown_token.clone();
         if let Some(metrics) = metrics_clone {
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
                 loop {
-                    interval.tick().await;
-                    let depths = queue_clone.depths();
-                    metrics.queue_depth.set(depths.total as i64);
+                    tokio::select! {
+                        _ = metrics_shutdown.cancelled() => break,
+                        _ = interval.tick() => {
+                            let depths = queue_clone.depths();
+                            metrics.queue_depth.set(depths.total as i64);
+                        }
+                    }
                 }
             });
         }
@@ -596,48 +593,55 @@ impl Engine {
 
         tracing::info!("Worker pool running - engine now processes signals in parallel");
 
-        // Keep the engine task alive and log statistics periodically
+        // Keep the engine task alive and log statistics periodically.
+        // Cancellation is handled immediately via select! — waiting for the
+        // 60s stats tick would delay shutdown by up to a minute.
         let mut stats_interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
-            stats_interval.tick().await;
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    tracing::info!("Shutdown signal received, closing worker pool");
+                    worker_pool.shutdown().await;
+                    break;
+                }
+                _ = stats_interval.tick() => {
+                    let stats = worker_pool.stats();
+                    let depths = self.queue.depths();
 
-            let stats = worker_pool.stats();
-            let depths = self.queue.depths();
-
-            tracing::info!(
-                active_workers = stats.active_workers,
-                queue_depth = stats.queue_depth,
-                rpc_permits_available = stats.rpc_semaphore_available,
-                high_priority = depths.high,
-                medium_priority = depths.medium,
-                spear_high_wqs = depths.spear_high_wqs,
-                low_priority = depths.low,
-                "Worker pool statistics"
-            );
-
-            // Check for cancellation signal
-            if cancel_token.is_cancelled() {
-                tracing::info!("Shutdown signal received, closing worker pool");
-                worker_pool.shutdown().await;
-                break;
+                    tracing::info!(
+                        active_workers = stats.active_workers,
+                        queue_depth = stats.queue_depth,
+                        rpc_permits_available = stats.rpc_semaphore_available,
+                        high_priority = depths.high,
+                        medium_priority = depths.medium,
+                        spear_high_wqs = depths.spear_high_wqs,
+                        low_priority = depths.low,
+                        "Worker pool statistics"
+                    );
+                }
             }
         }
     }
 
     /// Run engine in sequential processing mode (legacy implementation)
-    async fn run_sequential(mut self) {
+    async fn run_sequential(self) {
         tracing::info!("Engine running in sequential mode");
 
         // Spawn metrics update task
         let metrics_clone = self.metrics.clone();
         let queue_clone = self.queue.clone();
+        let metrics_shutdown = self.shutdown_token.clone();
         if let Some(metrics) = metrics_clone {
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
                 loop {
-                    interval.tick().await;
-                    let depths = queue_clone.depths();
-                    metrics.queue_depth.set(depths.total as i64);
+                    tokio::select! {
+                        _ = metrics_shutdown.cancelled() => break,
+                        _ = interval.tick() => {
+                            let depths = queue_clone.depths();
+                            metrics.queue_depth.set(depths.total as i64);
+                        }
+                    }
                 }
             });
         }
@@ -668,39 +672,48 @@ impl Engine {
         }
 
         // [R-H2] Panic counter for circuit-breaker integration.
-        // If the loop body panics 5+ times within 60 seconds, trip the circuit breaker.
+        // If processing panics 5+ times within 60 seconds, trip the circuit breaker.
         let panic_count = Arc::new(AtomicU32::new(0));
         let panic_window_start = Arc::new(parking_lot::Mutex::new(Instant::now()));
 
         loop {
+            // Graceful shutdown: the sequential loop only pops from the queue,
+            // so observe the token explicitly — cancellation must be able to
+            // stop the engine even while the queue is idle.
+            if self.shutdown_token.is_cancelled() {
+                tracing::info!("Shutdown signal received, exiting sequential loop");
+                break;
+            }
+
             // Process signals from queue
             if let Some(signal) = self.queue.pop().await {
-                // Wrap the body in a panic guard so a single signal cannot kill the loop.
-                // AssertUnwindSafe is required because Future is not UnwindSafe by default.
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    // We cannot .await inside catch_unwind; process_signal is async.
-                    // We use a channel to hand the result back to the async context.
-                    // Instead, we execute synchronously-safe pre-checks here and let
-                    // the async portion run outside; real panics in tokio tasks are
-                    // caught by the runtime. For the sync portion (queue pop handling)
-                    // this guard is sufficient. Async panics are propagated as task
-                    // abort, which keeps the outer loop alive.
-                    Ok::<(), ()>(())
-                }));
+                // Real panic boundary: process_signal runs in a spawned task so
+                // a panic inside it is caught here via the JoinHandle instead of
+                // unwinding and killing the engine loop.
+                let processor = self.signal_processor.clone();
+                let handle = tokio::spawn(async move {
+                    let mut signal = signal;
+                    processor.process_signal(&mut signal).await;
+                });
 
+                let result = handle.await;
                 match result {
                     Ok(_) => {
-                        // Normal path: run the async handler
-                        self.process_signal(signal).await;
+                        // Normal path: processing completed
                     }
-                    Err(panic_payload) => {
-                        // Synchronous panic in setup code
-                        let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                            format!("Engine loop panic (str): {}", s)
-                        } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                            format!("Engine loop panic (String): {}", s)
+                    Err(join_err) => {
+                        // Panic (or cancellation) in the processing task
+                        let msg = if join_err.is_panic() {
+                            let payload = join_err.into_panic();
+                            if let Some(s) = payload.downcast_ref::<&str>() {
+                                format!("Engine task panic (str): {}", s)
+                            } else if let Some(s) = payload.downcast_ref::<String>() {
+                                format!("Engine task panic (String): {}", s)
+                            } else {
+                                "Engine task panic (unknown payload)".to_string()
+                            }
                         } else {
-                            "Engine loop panic (unknown payload)".to_string()
+                            "Engine task cancelled".to_string()
                         };
                         tracing::error!("{}", msg);
 
@@ -730,10 +743,9 @@ impl Engine {
                                 count,
                                 elapsed.as_secs()
                             );
-                            let executor = self.executor.read().await;
-                            // Attempt to trip circuit breaker via config audit log so
-                            // the operations team is alerted even if the CB reference
-                            // is not directly accessible from Engine.
+                            // Do not hold the executor read lock across the async
+                            // DB write below — the guard is unused (the circuit
+                            // breaker reference is not accessible from Engine).
                             let _ = self
                                 .db
                                 .log_config_change(
@@ -747,7 +759,6 @@ impl Engine {
                                 )),
                                 )
                                 .await;
-                            drop(executor);
                             panic_count.store(0, Ordering::SeqCst);
                         }
                         // Continue loop — do NOT break
@@ -758,9 +769,5 @@ impl Engine {
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             }
         }
-    }
-    /// Process a single signal (delegates to SignalProcessor)
-    async fn process_signal(&mut self, mut signal: Signal) {
-        self.signal_processor.process_signal(&mut signal).await;
     }
 }

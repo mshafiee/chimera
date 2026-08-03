@@ -4,8 +4,6 @@
 //! (Solana CLI JSON / base58 / hex), validates it, and stores it — along with
 //! the current `CHIMERA_SECURITY__WEBHOOK_SECRET` — into `config/secrets.enc`.
 
-#![allow(warnings)]
-
 //! # Why this exists
 //!
 //! The operator's normal container mount (`./config:/app/config:ro` in
@@ -132,8 +130,20 @@ fn main() -> Result<()> {
     // 6. Confirm the bytes are a real Ed25519 keypair (pubkey matches secret).
     let keypair = Keypair::try_from(keypair_bytes_64.as_slice())
         .map_err(|e| anyhow!("Decoded bytes are not a valid Ed25519 keypair: {:?}", e))?;
+    // Keypair::try_from only splits the 64 bytes; depending on the SDK version
+    // it may not re-derive the pubkey from the secret. Sign/verify a probe
+    // message to deterministically reject a keypair whose secret and public
+    // halves disagree.
+    let probe = b"import_keypair: secret/public consistency probe";
+    let sig = keypair.sign_message(probe);
+    if !sig.verify(keypair.pubkey().as_ref(), probe) {
+        bail!("Keypair secret and public halves are inconsistent — refusing to import");
+    }
     let derived_pubkey = keypair.pubkey();
     let derived_pubkey_b58 = bs58::encode(derived_pubkey.as_ref()).into_string();
+    // The Keypair is only needed for pubkey derivation; release it now so the
+    // raw secret does not stay resident for the remainder of the process.
+    drop(keypair);
 
     println!("Derived pubkey: {}", derived_pubkey_b58);
 
@@ -169,8 +179,20 @@ fn main() -> Result<()> {
     };
 
     // 8. Always (re)stamp the webhook secret in case it was rotated in .env
-    //    since the last import. Optionally stamp RPC keys if env provides them.
-    secrets.webhook_secret = webhook_secret;
+    //    since the last import. When the secret CHANGES, the old current
+    //    secret moves to webhook_secret_previous so webhooks still signed with
+    //    it verify during the grace period (HMAC checks both). A prior
+    //    CHIMERA_SECURITY__WEBHOOK_SECRET_PREVIOUS env var is honored too.
+    if secrets.webhook_secret != webhook_secret {
+        secrets.webhook_secret_previous = Some(secrets.webhook_secret.clone());
+        secrets.webhook_secret = webhook_secret;
+    }
+    if let Ok(prev) = std::env::var("CHIMERA_SECURITY__WEBHOOK_SECRET_PREVIOUS") {
+        let trimmed = prev.trim();
+        if !trimmed.is_empty() {
+            secrets.webhook_secret_previous = Some(trimmed.to_string());
+        }
+    }
     if let Ok(rpc_key) = std::env::var("HELIUS_API_KEY") {
         let trimmed = rpc_key.trim();
         if !trimmed.is_empty() {
@@ -240,7 +262,7 @@ fn main() -> Result<()> {
     //     file is somehow unreadable (filesystem fault, race). If it fails we
     //     restore the prior vault from backup rather than deleting — deleting
     //     would lose the old keypair that save_secrets already destroyed.
-    if let Err(e) = roundtrip_validate(&vault, &vault_path) {
+    if let Err(e) = roundtrip_validate(&vault, &vault_path, &derived_pubkey_b58) {
         let outcome = restore_backup(&backup_path, &vault_path, had_prior_vault);
         let recovery_msg = match outcome {
             RestoreOutcome::Restored => format!(
@@ -487,19 +509,29 @@ fn print_plan(
 }
 
 /// Re-open the vault and confirm the keypair loads end-to-end.
-fn roundtrip_validate(vault: &Vault, vault_path: &std::path::Path) -> Result<()> {
+///
+/// The loaded pubkey is compared against the pubkey captured BEFORE the write
+/// (`expected_pubkey_b58`) — re-deriving it from the reloaded vault would be
+/// tautological (the same pipeline produced both values) and could never catch
+/// a wrong-but-self-consistent write.
+fn roundtrip_validate(
+    vault: &Vault,
+    vault_path: &std::path::Path,
+    expected_pubkey_b58: &str,
+) -> Result<()> {
     let reloaded = vault
         .load_secrets(vault_path)
         .context("Re-open failed: vault could not be decrypted with current key")?;
     let kp =
         load_wallet_keypair(&reloaded).context("load_wallet_keypair failed on reloaded vault")?;
-    // Sanity: pubkey must match what we just wrote.
-    let expected = Keypair::try_from(
-        normalize_to_64_bytes(reloaded.wallet_private_key.as_deref().unwrap_or(""))?.as_slice(),
-    )
-    .map_err(|e| anyhow!("decoded-key mismatch: {:?}", e))?;
-    if kp.pubkey() != expected.pubkey() {
-        bail!("pubkey mismatch after round-trip");
+    // Sanity: pubkey must match what we derived before writing.
+    let reloaded_b58 = bs58::encode(kp.pubkey().as_ref()).into_string();
+    if reloaded_b58 != expected_pubkey_b58 {
+        bail!(
+            "pubkey mismatch after round-trip: expected {}, got {}",
+            expected_pubkey_b58,
+            reloaded_b58
+        );
     }
     Ok(())
 }

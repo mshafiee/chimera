@@ -465,15 +465,25 @@ fn test_status_equality() {
 
 #[test]
 fn test_status_clone() {
-    // Test that status can be cloned
+    // Call .clone() explicitly (TradeStatus is Copy, but the derive must keep
+    // working for non-Copy use sites).
     let status = TradeStatus::Active;
-    let cloned = status;
+    let cloned = status.clone();
     assert_eq!(status, cloned);
 }
 
 #[test]
+fn test_status_parsing_rejects_invalid() {
+    // The FromStr failure path must reject unknown/malformed/empty input.
+    assert!(TradeStatus::from_str("UNKNOWN").is_err());
+    assert!(TradeStatus::from_str("").is_err());
+    assert!(TradeStatus::from_str("PENDNG").is_err());
+    assert!(TradeStatus::from_str("ACTIVE ").is_err());
+}
+
+#[test]
 fn test_self_transitions() {
-    // Test that states cannot transition to themselves (except maybe in edge cases)
+    // All self-transitions are invalid per the current state-machine spec.
     let states = vec![
         TradeStatus::Pending,
         TradeStatus::Queued,
@@ -497,10 +507,9 @@ fn test_self_transitions() {
 
 #[test]
 fn test_multiple_paths_to_same_state() {
-    // Test that multiple states can transition to the same target
-    // EXECUTING and RETRY can both go to EXECUTING
+    // Multiple source states can reach EXECUTING (via RETRY), but never via a
+    // direct self-transition.
     assert!(TradeStatus::Retry.can_transition_to(TradeStatus::Executing));
-    // EXECUTING can go to itself via RETRY -> EXECUTING (but not directly)
     assert!(!TradeStatus::Executing.can_transition_to(TradeStatus::Executing));
 
     // Multiple states can go to DEAD_LETTER
@@ -508,6 +517,16 @@ fn test_multiple_paths_to_same_state() {
     assert!(TradeStatus::Queued.can_transition_to(TradeStatus::DeadLetter));
     assert!(TradeStatus::Executing.can_transition_to(TradeStatus::DeadLetter));
     assert!(TradeStatus::Retry.can_transition_to(TradeStatus::DeadLetter));
+}
+
+#[test]
+fn test_recovery_cycle_is_unbounded() {
+    // The state machine admits an unbounded ACTIVE <-> EXITING cycle: recovery
+    // (EXITING -> ACTIVE) and exit (ACTIVE -> EXITING) are both always valid.
+    // There is NO max-recovery-attempts guard in the state machine itself —
+    // bounded recovery must be enforced by the recovery engine's thresholds.
+    assert!(TradeStatus::Exiting.can_transition_to(TradeStatus::Active));
+    assert!(TradeStatus::Active.can_transition_to(TradeStatus::Exiting));
 }
 
 #[test]

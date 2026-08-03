@@ -109,7 +109,7 @@
       },
       "targets": [
         {
-          "expr": "scout_rugcheck_rejections_total",
+          "expr": "increase(scout_rugcheck_rejections_total[$__range])",
           "refId": "A"
         }
       ]
@@ -125,8 +125,9 @@
       },
       "targets": [
         {
-          "expr": "rate(scout_wqs_distribution_bucket[5m])",
+          "expr": "sum by (le) (rate(scout_wqs_distribution_bucket[5m]))",
           "legendFormat": "{{le}}",
+          "format": "heatmap",
           "refId": "A"
         }
       ]
@@ -160,7 +161,7 @@
       "targets": [
         {
           "format": "table",
-          "rawSql": "SELECT address, wqs_score, wqs_confidence, roi_30d, trade_count_30d, win_rate, archetype, status FROM wallets WHERE wqs_score IS NOT NULL ORDER BY wqs_score DESC LIMIT 25",
+          "rawSql": "SELECT address, wqs_score, wqs_confidence, roi_30d, trade_count_30d, win_rate, archetype, status FROM wallets WHERE $__timeFilter(updated_at) AND wqs_score IS NOT NULL ORDER BY wqs_score DESC LIMIT 25",
           "refId": "A"
         }
       ],
@@ -196,7 +197,7 @@
       "targets": [
         {
           "format": "table",
-          "rawSql": "SELECT status, count(*) FROM wallets GROUP BY status",
+          "rawSql": "SELECT status, count(*) FROM wallets WHERE $__timeFilter(updated_at) GROUP BY status",
           "refId": "A"
         }
       ],

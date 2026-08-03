@@ -23,7 +23,6 @@ from dataclasses import dataclass, asdict
 from collections import defaultdict
 import threading
 import queue
-import os
 
 
 @dataclass
@@ -99,6 +98,11 @@ class SignalCollector:
         self.is_recording = False
         self.stats['recording_end_time'] = datetime.now().isoformat()
 
+        # Drain queued signals in the writer before closing the file
+        while not self.signal_queue.empty():
+            self.process_signals()
+            time.sleep(0.1)
+
         # Close current file
         if self.current_file:
             self.current_file.close()
@@ -124,7 +128,7 @@ class SignalCollector:
             wallet_address=signal_data.get('wallet_address', ''),
             token_address=signal_data.get('token_address', ''),
             action=signal_data.get('action', 'buy'),
-            amount_sol=float(signal_data.get('amount_sol', 0.1)),
+            amount_sol=float(signal_data['amount_sol']) if signal_data.get('amount_sol') is not None else 0.1,
             strategy=signal_data.get('strategy', 'shield'),
             source=source,
             metadata=signal_data.get('metadata', {}),
@@ -135,14 +139,9 @@ class SignalCollector:
             }
         )
 
-        # Add to queue for async processing
+        # Enqueue only; durable counters are updated in process_signals()
+        # after a successful write so stats match persisted data.
         self.signal_queue.put(recorded_signal)
-
-        # Update statistics
-        self.stats['total_signals'] += 1
-        self.stats['signals_by_source'][source] += 1
-        self.stats['signals_by_strategy'][recorded_signal.strategy] += 1
-        self.stats['signals_by_action'][recorded_signal.action] += 1
 
     def process_signals(self):
         """Process signals from queue and write to file."""
@@ -160,6 +159,12 @@ class SignalCollector:
                     self.current_file.write(json.dumps(asdict(signal)) + '\n')
                     self.current_file.flush()
                     self.current_signal_count += 1
+
+                    # Count only durably written signals
+                    self.stats['total_signals'] += 1
+                    self.stats['signals_by_source'][signal.source] += 1
+                    self.stats['signals_by_strategy'][signal.strategy] += 1
+                    self.stats['signals_by_action'][signal.action] += 1
 
                 self.signal_queue.task_done()
 
@@ -260,9 +265,21 @@ class WebhookInterceptor:
                     self.collector = server.collector
                     super().__init__(request, client_address, server)
 
+                MAX_BODY_BYTES = 1024 * 1024  # cap request body size
+
                 def do_POST(self):
-                    # Get content length
-                    content_length = int(self.headers.get('Content-Length', 0))
+                    # Get content length (reject malformed headers with 400)
+                    try:
+                        content_length = int(self.headers.get('Content-Length', 0) or 0)
+                    except ValueError:
+                        self.send_response(400)
+                        self.end_headers()
+                        return
+
+                    if content_length > MAX_BODY_BYTES:
+                        self.send_response(413)
+                        self.end_headers()
+                        return
 
                     # Read request body
                     post_data = self.rfile.read(content_length)
@@ -368,6 +385,7 @@ def main():
             'strategy': 'shield',
             'timestamp': datetime.now().isoformat()
         }
+        collector.start_recording()
         collector.record_signal(test_signal, source='test')
         collector.process_signals()
         collector.stop_recording()
@@ -386,13 +404,22 @@ def main():
         print(f"Recording signals for {args.duration_days} days...")
         print("Press Ctrl+C to stop recording early")
 
-        # Keep main thread alive
+        # Keep main thread alive until the configured duration elapses
+        from datetime import timedelta
         while True:
             time.sleep(60)
 
             # Print periodic statistics
             stats = collector.get_statistics()
             print(f"Recording progress: {stats['total_signals']} signals recorded")
+
+            elapsed = datetime.now() - datetime.fromisoformat(collector.stats['recording_start_time'])
+            if elapsed >= timedelta(days=args.duration_days):
+                print(f"Recording duration reached ({args.duration_days} days)")
+                break
+
+        collector.stop_recording()
+        collector.save_summary()
 
     except KeyboardInterrupt:
         print("\nStopping signal recording...")

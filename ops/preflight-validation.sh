@@ -1,6 +1,9 @@
 #!/bin/bash
 # Comprehensive pre-flight validation for 10-day evaluation
 
+# Run from the repo root regardless of where the script is invoked from
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
+
 echo "🚀 Chimera 10-Day Evaluation - Pre-Flight Validation"
 echo "===================================================="
 echo ""
@@ -34,34 +37,37 @@ echo "📋 System Requirements"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # Check CPU cores (macOS/Linux compatible)
+CPU_CORES=""
+MEMORY_GB=""
+DISK_GB=""
 if [[ "$OSTYPE" == "darwin"* ]]; then
-    CPU_CORES=$(sysctl -n hw.ncpu)
-    MEMORY_GB=$(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 ))
-    DISK_GB=$(df -h . | awk 'NR==2 {print $4}' | tr -d 'GGMKi')
+    CPU_CORES=$(sysctl -n hw.ncpu 2>/dev/null || true)
+    MEMORY_GB=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 / 1024 / 1024 ))
+    DISK_GB=$(df -h . | awk 'NR==2 {print $4}' | sed 's/[A-Za-z]//g')
 else
-    CPU_CORES=$(nproc)
-    MEMORY_GB=$(free -g | awk '/^Mem:/{print $2}')
-    DISK_GB=$(df -BG . | awk 'NR==2 {print $4}' | tr -d 'G')
+    CPU_CORES=$(nproc 2>/dev/null || true)
+    MEMORY_GB=$(free -g | awk '/^Mem:/{print $2}' 2>/dev/null || true)
+    DISK_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/[A-Za-z]//g')
 fi
 
-if [ $CPU_CORES -ge 4 ]; then
+if [ -n "$CPU_CORES" ] && [ "$CPU_CORES" -ge 4 ]; then
     check_pass "CPU cores: $CPU_CORES (≥4 required)"
 else
-    check_fail "CPU cores: $CPU_CORES (<4 required)"
+    check_fail "CPU cores: ${CPU_CORES:-unknown} (<4 required or unmeasurable)"
 fi
 
 # Check Memory
-if [ $MEMORY_GB -ge 16 ]; then
+if [ -n "$MEMORY_GB" ] && [ "$MEMORY_GB" -ge 16 ]; then
     check_pass "Memory: ${MEMORY_GB}GB (≥16GB required)"
 else
-    check_fail "Memory: ${MEMORY_GB}GB (<16GB required)"
+    check_fail "Memory: ${MEMORY_GB:-unknown}GB (<16GB required or unmeasurable)"
 fi
 
 # Check disk space
-if [ $DISK_GB -ge 100 ]; then
+if [ -n "$DISK_GB" ] && [ "$DISK_GB" -ge 100 ]; then
     check_pass "Disk space: ${DISK_GB}GB free (≥100GB required)"
 else
-    check_fail "Disk space: ${DISK_GB}GB free (<100GB required)"
+    check_fail "Disk space: ${DISK_GB:-unknown}GB free (<100GB required or unmeasurable)"
 fi
 
 echo ""
@@ -76,10 +82,13 @@ else
     check_fail "Docker not installed"
 fi
 
-# Check Docker Compose
+# Check Docker Compose (standalone binary or the docker compose plugin)
 if command -v docker-compose &> /dev/null; then
     COMPOSE_VERSION=$(docker-compose --version | awk '{print $4}' | tr -d ',')
     check_pass "Docker Compose installed: $COMPOSE_VERSION"
+elif docker compose version &> /dev/null; then
+    COMPOSE_VERSION=$(docker compose version | awk '{print $4}' | tr -d ',')
+    check_pass "Docker Compose (plugin) installed: $COMPOSE_VERSION"
 else
     check_fail "Docker Compose not installed"
 fi
@@ -123,7 +132,7 @@ if [ -f "$SIGNALS_FILE" ]; then
     check_pass "Historical signals file: $SIGNAL_COUNT signals"
 
     # Validate JSONL format
-    if python3 -c "
+    if command -v python3 &> /dev/null && python3 -c "
 import sys
 import json
 errors = 0
@@ -215,16 +224,20 @@ echo "🌐 Network Connectivity"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # Test network latency to Helius (if configured)
-if grep -q "your_helius_api_key_here" docker/env.evaluation.local; then
+if [ ! -f "docker/env.evaluation.local" ] || grep -q "your_helius_api_key_here" docker/env.evaluation.local; then
     check_warn "Helius API key not configured - skipping network test"
 else
-    # Test basic connectivity
-    if ping -c 1 -W 2 mainnet.helius-rpc.com &> /dev/null; then
-        LATENCY=$(ping -c 1 mainnet.helius-rpc.com | awk '/time=/ {print $7}' | cut -d'=' -f2)
-        if [ $(echo "$LATENCY < 50" | bc) -eq 1 ]; then
+    # Test basic connectivity (note: -W is milliseconds on macOS, seconds on Linux)
+    PING_WAIT=2
+    [[ "$OSTYPE" == "darwin"* ]] && PING_WAIT=2000
+    if ping -c 1 -W "$PING_WAIT" mainnet.helius-rpc.com &> /dev/null; then
+        LATENCY=$(ping -c 1 -W "$PING_WAIT" mainnet.helius-rpc.com 2>/dev/null | sed -n 's/.*time=\([0-9.]*\) ms.*/\1/p' | head -1)
+        if [ -n "$LATENCY" ] && [ "${LATENCY%%.*}" -lt 50 ]; then
             check_pass "Network latency: ${LATENCY}ms (<50ms required)"
-        else
+        elif [ -n "$LATENCY" ]; then
             check_warn "Network latency: ${LATENCY}ms (above optimal but acceptable)"
+        else
+            check_warn "Could not parse latency from ping output"
         fi
     else
         check_fail "Cannot reach Helius RPC endpoint"

@@ -1,6 +1,7 @@
 #!/bin/bash
 # PostgreSQL recovery script
 set -e
+set -o pipefail
 
 # Configuration
 BACKUP_FILE="${1:-}"
@@ -15,7 +16,7 @@ echo "=== PostgreSQL Recovery ==="
 # Check if backup file is provided
 if [ -z "$BACKUP_FILE" ]; then
     # Find the latest backup if not specified
-    BACKUP_FILE=$(ls -t "$BACKUP_DIR"/chimera_*.sql.gz 2>/dev/null | head -1)
+    BACKUP_FILE=$(ls -t "$BACKUP_DIR"/chimera_[0-9]*.sql.gz 2>/dev/null | head -1)
     if [ -z "$BACKUP_FILE" ]; then
         echo "❌ No backup file found in $BACKUP_DIR"
         echo "Usage: $0 [backup_file.sql.gz]"
@@ -32,6 +33,12 @@ fi
 
 echo "Backup file: $BACKUP_FILE"
 echo "Target database: $POSTGRES_DB"
+
+# Validate the database name so it cannot corrupt the DROP/CREATE SQL
+if [[ ! "$POSTGRES_DB" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo "❌ Invalid POSTGRES_DB name: $POSTGRES_DB" >&2
+    exit 1
+fi
 
 # Confirm recovery
 echo ""
@@ -68,10 +75,13 @@ echo ""
 echo "Stopping application services..."
 docker-compose stop operator scout
 
+# Always restart the application services when this script exits
+trap 'docker-compose start operator scout > /dev/null 2>&1 || true' EXIT
+
 # Drop existing database
 echo ""
 echo "Step 1: Dropping existing database..."
-if docker-compose exec postgres psql -U "$POSTGRES_USER" -c "DROP DATABASE IF EXISTS $POSTGRES_DB;" > /dev/null 2>&1; then
+if docker-compose exec -T postgres psql -U "$POSTGRES_USER" -d postgres -c "DROP DATABASE IF EXISTS $POSTGRES_DB;" > /dev/null 2>&1; then
     echo "✓ Database dropped"
 else
     echo "⚠ Warning: Could not drop database (may not exist)"
@@ -79,7 +89,7 @@ fi
 
 # Create fresh database
 echo "Step 2: Creating fresh database..."
-if docker-compose exec postgres psql -U "$POSTGRES_USER" -c "CREATE DATABASE $POSTGRES_DB;" > /dev/null 2>&1; then
+if docker-compose exec -T postgres psql -U "$POSTGRES_USER" -d postgres -c "CREATE DATABASE $POSTGRES_DB;" > /dev/null 2>&1; then
     echo "✓ Database created"
 else
     echo "❌ Failed to create database"
@@ -94,14 +104,24 @@ else
     echo "❌ Failed to restore backup"
     echo "Attempting to restore from safety backup..."
     if [ -f "$SAFETY_BACKUP" ]; then
-        gunzip -c "$SAFETY_BACKUP" | docker-compose exec -T postgres psql -U "$POSTGRES_USER" "$POSTGRES_DB" > /dev/null 2>&1
+        # Recreate the database first so the safety dump lands on a clean schema
+        docker-compose exec -T postgres psql -U "$POSTGRES_USER" -d postgres -c "DROP DATABASE IF EXISTS $POSTGRES_DB;" > /dev/null 2>&1 || true
+        if docker-compose exec -T postgres psql -U "$POSTGRES_USER" -d postgres -c "CREATE DATABASE $POSTGRES_DB;" > /dev/null 2>&1; then
+            if gunzip -c "$SAFETY_BACKUP" | docker-compose exec -T postgres psql -U "$POSTGRES_USER" "$POSTGRES_DB" > /dev/null 2>&1; then
+                echo "✓ Safety backup restored"
+            else
+                echo "❌ Failed to restore from safety backup" >&2
+            fi
+        else
+            echo "❌ Failed to recreate database for safety restore" >&2
+        fi
     fi
     exit 1
 fi
 
 # Verify restoration
 echo "Step 4: Verifying restoration..."
-TABLE_COUNT=$(docker-compose exec postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -c "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null | tr -d ' ')
+TABLE_COUNT=$(docker-compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -c "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null | tr -d ' ' || true)
 if [ -n "$TABLE_COUNT" ] && [ "$TABLE_COUNT" -gt 0 ]; then
     echo "✓ Database verified ($TABLE_COUNT tables found)"
 else

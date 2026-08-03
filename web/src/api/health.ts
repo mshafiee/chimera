@@ -2,13 +2,17 @@ import { useQuery } from '@tanstack/react-query'
 import { apiClient } from './client'
 import type { HealthResponse } from '../types'
 
+const HEALTH_ENDPOINT = '/health'
+const HEALTH_POLL_INTERVAL_MS = 5000
+
 export function useHealth() {
   return useQuery({
     queryKey: ['health'],
     queryFn: async ({ signal }) => {
-      const { data } = await apiClient.get<HealthResponse>('/health', { signal })
+      const { data } = await apiClient.get<HealthResponse>(HEALTH_ENDPOINT, { signal })
       return data
     },
-    refetchInterval: 5000, // Poll every 5 seconds
+    refetchInterval: HEALTH_POLL_INTERVAL_MS,
+    retry: 1,
   })
 }

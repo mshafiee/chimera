@@ -36,6 +36,8 @@ class SignalCapture:
         self.base_url = base_url.rstrip('/')
         self.api_key = api_key
         self.signals = []
+        self._seen_ids = set()
+        self.capture_hours = DEFAULT_DURATION_HOURS
         self.stats = defaultdict(lambda: defaultdict(int))
 
     def _get_headers(self) -> Dict[str, str]:
@@ -60,6 +62,7 @@ class SignalCapture:
         print(f"Poll interval: {interval_seconds} seconds")
         print(f"Output: Will analyze signal patterns\n")
 
+        self.capture_hours = duration_hours
         end_time = datetime.now() + timedelta(hours=duration_hours)
         poll_count = 0
 
@@ -90,9 +93,19 @@ class SignalCapture:
                     trades = await response.json()
 
                     for trade in trades:
+                        # Skip trades already captured on a previous poll so
+                        # the same signal is never counted twice
+                        trade_id = trade.get('id') or trade.get('trade_uuid') or trade.get('signature')
+                        if trade_id is not None:
+                            if trade_id in self._seen_ids:
+                                continue
+                            self._seen_ids.add(trade_id)
                         self._analyze_signal(trade)
+                else:
+                    body = await response.text()
+                    print(f"  Warning: unexpected status {response.status}: {body[:200]}")
 
-        except aiohttp.ClientError as e:
+        except (aiohttp.ClientError, ValueError, asyncio.TimeoutError) as e:
             print(f"  Error fetching signals: {e}")
 
     def _analyze_signal(self, trade: Dict[str, Any]):
@@ -167,8 +180,10 @@ class SignalCapture:
             'signals': self.signals[-1000:],  # Last 1000 signals for reference
         }
 
-        # Create directory if needed
-        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        # Create directory if needed (bare filenames have no parent dir)
+        output_dir = os.path.dirname(output_file)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
 
         with open(output_file, 'w') as f:
             json.dump(output, f, indent=2)
@@ -177,16 +192,18 @@ class SignalCapture:
         print(f"Patterns saved to: {output_file}")
 
         # Print load test configuration suggestions
-        self._print_load_test_suggestions(output)
+        self._print_load_test_suggestions(output_file)
 
     def _print_load_test_suggestions(self, output_file: str):
         """Print suggested load test configurations."""
         if not self.signals:
             return
 
-        # Calculate suggestions based on captured patterns
+        # Calculate suggestions based on captured patterns (use the actual
+        # capture window, not a hardcoded 24h)
         total_signals = len(self.signals)
-        signals_per_hour = total_signals / 24 if total_signals > 0 else 0
+        capture_hours = getattr(self, 'capture_hours', DEFAULT_DURATION_HOURS) or 1
+        signals_per_hour = total_signals / capture_hours if total_signals > 0 else 0
 
         print(f"\n=== Load Test Configuration Suggestions ===")
         print(f"Based on {total_signals} signals captured:")
@@ -210,17 +227,20 @@ class SignalCapture:
         print(f"    --env WEBHOOK_URL={self.base_url}/api/v1/webhook")
 
 
-async def analyze_existing_data(base_url: str, days: int = 7):
+async def analyze_existing_data(base_url: str, days: int = 7, api_key: str = None, output_file: str = None):
     """
     Analyze existing production data without real-time capture.
 
     Args:
         base_url: Chimera API base URL
         days: Number of days to analyze
+        api_key: API key for authenticated endpoints
+        output_file: Output path for the captured patterns
     """
     print(f"\n=== Analyzing Production Data (Last {days} Days) ===")
 
-    capture = SignalCapture(base_url)
+    capture = SignalCapture(base_url, api_key=api_key)
+    capture.capture_hours = days * 24
 
     async with aiohttp.ClientSession() as session:
         # Fetch trades from the last N days
@@ -240,15 +260,24 @@ async def analyze_existing_data(base_url: str, days: int = 7):
                         print(f"  Found {len(trades)} trades")
 
                         for trade in trades:
+                            trade_id = trade.get('id') or trade.get('trade_uuid') or trade.get('signature')
+                            if trade_id is not None:
+                                if trade_id in capture._seen_ids:
+                                    continue
+                                capture._seen_ids.add(trade_id)
                             capture._analyze_signal(trade)
+                    else:
+                        body = await response.text()
+                        print(f"  Warning: unexpected status {response.status}: {body[:200]}")
 
-            except aiohttp.ClientError as e:
+            except (aiohttp.ClientError, ValueError, asyncio.TimeoutError) as e:
                 print(f"  Error: {e}")
 
     capture.print_statistics()
 
-    # Save patterns
-    output_file = f"tests/load/fixtures/production_signals_{datetime.now().strftime('%Y%m%d')}.json"
+    # Save patterns (honor --output when provided)
+    if not output_file:
+        output_file = f"tests/load/fixtures/production_signals_{datetime.now().strftime('%Y%m%d')}.json"
     capture.save_patterns(output_file)
 
 
@@ -295,7 +324,7 @@ def main():
 
     if args.analyze:
         # Analyze existing data
-        asyncio.run(analyze_existing_data(args.url, args.analyze))
+        asyncio.run(analyze_existing_data(args.url, args.analyze, args.api_key, args.output))
     else:
         # Real-time capture
         try:

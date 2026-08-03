@@ -655,8 +655,6 @@ fn detect_dex_from_payload(payload: &crate::monitoring::helius::HeliusWebhookPay
 
     if token_change_count > 2 || native_transfer_count > 4 {
         "Jupiter".to_string() // Multi-hop route — likely Jupiter aggregator
-    } else if native_transfer_count >= 2 {
-        "Unknown".to_string()
     } else {
         "Unknown".to_string()
     }

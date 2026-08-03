@@ -76,9 +76,13 @@ class FeatureEnricher:
             self.mc_extractor = MarketContextFeatures()
             logger.info("Market context features initialized")
 
-        if ScoutConfig.get_advanced_risk_features_enabled() and ADVANCED_RISK_AVAILABLE:
-            self.risk_extractor = AdvancedRiskFeatures()
-            logger.info("Advanced risk features initialized")
+        if ScoutConfig.get_advanced_risk_features_enabled():
+            if ADVANCED_RISK_AVAILABLE:
+                self.risk_extractor = AdvancedRiskFeatures()
+                logger.info("Advanced risk features initialized")
+            elif NUMPY_AVAILABLE:
+                self.risk_extractor = _AdvancedRiskFeatures()
+                logger.info("Advanced risk features initialized (fallback)")
 
     def enrich_wallet_metrics(
         self,
@@ -113,10 +117,14 @@ class FeatureEnricher:
         except Exception:
             pass
 
+        # Fingerprint the inputs so stale cached features (from different
+        # trade/price data) are never served as if they matched this request.
+        fingerprint = self._input_fingerprint(trade_history, sol_price_history)
+
         # Check cache
         if self.cache_enabled and wallet_id and not force_refresh:
             cached = self._get_cached_features(wallet_id)
-            if cached:
+            if cached and cached.pop('_fingerprint', None) == fingerprint:
                 return cached
 
         try:
@@ -131,8 +139,14 @@ class FeatureEnricher:
             else:
                 metrics_dict = {}
 
-            # Start with base metrics
-            enriched.update(metrics_dict)
+            # Start with base metrics (reserved status keys are kept intact so
+            # a caller-supplied dict can't spoof success/error state)
+            reserved = {
+                'enrichment_success', 'enrichment_timestamp', 'error',
+                'base_metrics', 'time_series_enriched',
+                'market_context_enriched', 'advanced_risk_enriched',
+            }
+            enriched.update({k: v for k, v in metrics_dict.items() if k not in reserved})
             enriched['base_metrics'] = True
 
             # Add time-series features
@@ -172,7 +186,7 @@ class FeatureEnricher:
 
             # Cache results
             if self.cache_enabled and wallet_id:
-                self._cache_features(wallet_id, enriched)
+                self._cache_features(wallet_id, enriched, fingerprint)
 
         except Exception as e:
             logger.error(f"Feature enrichment failed: {e}")
@@ -220,7 +234,25 @@ class FeatureEnricher:
 
         return self.risk_extractor.extract_features(trade_history)
 
-    def _cache_features(self, wallet_id: str, features: Dict[str, Any]):
+    def _input_fingerprint(
+        self,
+        trade_history: Optional[List[Dict[str, Any]]],
+        sol_price_history: Optional[List[Dict[str, Any]]]
+    ) -> str:
+        """Fingerprint the inputs so cache reads can detect stale data."""
+        import hashlib
+        h = hashlib.md5()
+        if isinstance(trade_history, list):
+            h.update(b"trades:%d" % len(trade_history))
+            if trade_history:
+                last = trade_history[-1]
+                last_ts = last.get('timestamp', '') if isinstance(last, dict) else ''
+                h.update(str(last_ts).encode())
+        if isinstance(sol_price_history, list):
+            h.update(b"prices:%d" % len(sol_price_history))
+        return h.hexdigest()
+
+    def _cache_features(self, wallet_id: str, features: Dict[str, Any], fingerprint: str = ""):
         """Cache enriched features for a wallet."""
         try:
             cache_dir = Path(os.getenv("SCOUT_FEATURE_CACHE_DIR", "../cache/features"))
@@ -239,8 +271,10 @@ class FeatureEnricher:
 
             # Write to cache
             import json
+            payload = dict(features)
+            payload['_fingerprint'] = fingerprint
             with open(cache_file, 'w') as f:
-                json.dump(features, f, default=str)
+                json.dump(payload, f, default=str)
 
         except Exception as e:
             logger.warning(f"Failed to cache features: {e}")
@@ -294,11 +328,12 @@ class FeatureEnricher:
             logger.warning(f"Failed to clear cache: {e}")
 
 
-class AdvancedRiskFeatures:
+class _AdvancedRiskFeatures:
     """
-    Advanced risk metrics for wallet analysis.
+    Advanced risk metrics for wallet analysis (local fallback).
 
-    Features:
+    Used only when the external scout.core.advanced_risk_features module is
+    unavailable. Features:
     - Conditional Value at Risk (CVaR)
     - Maximum drawdown duration
     - Tail risk metrics (95th/99th percentile)
@@ -381,17 +416,23 @@ class AdvancedRiskFeatures:
         self,
         pnl_values: List[float]
     ) -> int:
-        """Calculate maximum drawdown duration in trades."""
+        """Calculate maximum drawdown duration in trades.
+
+        Tracks cumulative equity and its running peak, so the duration
+        reflects how long equity stayed below its prior high.
+        """
         if not pnl_values:
             return 0
 
-        peak = pnl_values[0]
+        equity = 0.0
+        peak = float('-inf')
         max_duration = 0
         current_duration = 0
 
         for value in pnl_values:
-            if value > peak:
-                peak = value
+            equity += float(value)
+            if equity > peak:
+                peak = equity
                 current_duration = 0
             else:
                 current_duration += 1

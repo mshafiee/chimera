@@ -96,22 +96,31 @@ pub struct ErrorResponse {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status_code, error_response) = match &self {
-            AppError::Config(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorResponse {
-                    status: "error",
-                    reason: "configuration_error".to_string(),
-                    details: Some(e.to_string()),
-                },
-            ),
-            AppError::Database(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorResponse {
-                    status: "error",
-                    reason: "database_error".to_string(),
-                    details: Some(e.to_string()),
-                },
-            ),
+            AppError::Config(e) => {
+                // Never echo internal error details (DB URL, connection strings)
+                // to clients — log them server-side instead.
+                tracing::error!(error = %e, "Configuration error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ErrorResponse {
+                        status: "error",
+                        reason: "configuration_error".to_string(),
+                        details: None,
+                    },
+                )
+            }
+            AppError::Database(e) => {
+                // Never echo SQL/connection details to clients.
+                tracing::error!(error = %e, "Database error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ErrorResponse {
+                        status: "error",
+                        reason: "database_error".to_string(),
+                        details: None,
+                    },
+                )
+            }
             AppError::Validation(msg) => (
                 StatusCode::BAD_REQUEST,
                 ErrorResponse {
@@ -172,7 +181,7 @@ impl IntoResponse for AppError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 ErrorResponse {
                     status: "rejected",
-                    reason: "queue_full".to_string(),
+                    reason: "queue_error".to_string(),
                     details: Some(msg.clone()),
                 },
             ),
@@ -209,9 +218,9 @@ impl IntoResponse for AppError {
                 },
             ),
             AppError::Parse(msg) => (
-                StatusCode::BAD_GATEWAY,
+                StatusCode::BAD_REQUEST,
                 ErrorResponse {
-                    status: "error",
+                    status: "rejected",
                     reason: "parse_error".to_string(),
                     details: Some(msg.clone()),
                 },
@@ -242,12 +251,22 @@ impl IntoResponse for AppError {
             ),
         };
 
-        // Log the error
-        tracing::error!(
-            error_type = %self,
-            status_code = %status_code,
-            "Request error"
-        );
+        // Log the error: reserve `error!` for genuine server failures (5xx) and
+        // log expected 4xx client rejections at `warn!` so the error log is not
+        // flooded with routine client behavior.
+        if status_code.is_server_error() {
+            tracing::error!(
+                error_type = %self,
+                status_code = %status_code,
+                "Request error"
+            );
+        } else {
+            tracing::warn!(
+                error_type = %self,
+                status_code = %status_code,
+                "Request rejected"
+            );
+        }
 
         (status_code, Json(json!(error_response))).into_response()
     }

@@ -86,23 +86,28 @@ class MEVDetector:
         confidence = 0.5
 
         swap_txs = [tx for tx in transactions if tx.get("type") == "SWAP"]
-        total_txs = len(transactions)
 
         # Detect for each transaction
         for tx in transactions:
-            # Detect limit orders
+            # Detect limit orders (limit orders also avoid sandwich attacks,
+            # so they count as MEV protection for the summary path)
             if not uses_limit_orders:
                 if tx.get("source") == "JUPITER_LIMIT":
                     uses_limit_orders = True
                 else:
-                    for ix in tx.get("instructions", []):
+                    for ix in (tx.get("instructions") or []):
                         if ix.get("programId") == self.JUPITER_LIMIT_PROGRAM:
                             uses_limit_orders = True
                             break
 
+            if uses_limit_orders and protection_service is None:
+                uses_mev_protection = True
+                protection_service = "JupiterLimitOrder"
+                confidence = 0.75
+
             # Detect Jito tips
             if not uses_mev_protection:
-                for nt in tx.get("nativeTransfers", []):
+                for nt in (tx.get("nativeTransfers") or []):
                     if nt.get("toUserAccount") in self.JITO_TIP_ACCOUNTS:
                         uses_mev_protection = True
                         protection_service = "Jito"
@@ -111,7 +116,7 @@ class MEVDetector:
 
             # Detect bundle transactions
             if not uses_bundles:
-                if tx.get("type") == "BUNDLE" or "bundle" in tx.get("description", "").lower():
+                if tx.get("type") == "BUNDLE" or "bundle" in (tx.get("description") or "").lower():
                     uses_bundles = True
                     if not uses_mev_protection:
                         uses_mev_protection = True
@@ -121,7 +126,7 @@ class MEVDetector:
 
                 # Check for MEV protection programs
                 if not uses_mev_protection:
-                    for ix in tx.get("instructions", []):
+                    for ix in (tx.get("instructions") or []):
                         prog_id = ix.get("programId", "")
                         if prog_id in self.MEV_PROTECTION_PROGRAMS:
                             uses_mev_protection = True
@@ -131,11 +136,12 @@ class MEVDetector:
                                 confidence = 0.8  # Medium-high confidence for program ID
                             break
 
-        # Heuristic: wallets that consistently avoid sandwich-able trades
-        # If wallet has many trades but low MEV risk score, they likely use protection
-        if swap_txs and total_txs > 10:
+        # Heuristic: wallets that consistently avoid sandwich-able trades.
+        # Requires a meaningful swap sample (>=5) — total transaction count
+        # is a misleading gate (11 txs with 1 swap ≠ protected).
+        if len(swap_txs) >= 5:
             # Calculate ratio of swaps that are "complex" (likely protected)
-            complex_swaps = sum(1 for tx in swap_txs if len(tx.get("tokenTransfers", [])) > 2)
+            complex_swaps = sum(1 for tx in swap_txs if len(tx.get("tokenTransfers") or []) > 2)
             complex_ratio = complex_swaps / len(swap_txs) if swap_txs else 0.0
 
             # High ratio of complex swaps suggests MEV protection usage

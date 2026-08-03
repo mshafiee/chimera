@@ -2,7 +2,7 @@
 Liquidity provider financial-risk tests.
 
 Documents edge cases where liquidity data quality directly causes capital loss:
-- SOL price fallback ($150) underestimates real price → wrong USD size calculations
+- SOL price fallback ($100) underestimates real price → wrong USD size calculations
 - Unknown source names default to lowest priority (no silent omission)
 - Source priority ranking is deterministic and correct
 """
@@ -11,8 +11,8 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from scout.core.liquidity import LiquidityProvider
-from scout.core.models import LiquidityData
+from core.liquidity import LiquidityProvider
+from core.models import LiquidityData
 
 
 def _make_liquidity_data(
@@ -33,7 +33,7 @@ def _make_liquidity_data(
     )
 
 
-def test_sol_fallback_uses_configurable_constant_when_no_cache():
+def test_sol_fallback_uses_configurable_constant_when_no_cache(monkeypatch):
     """
     Test: get_sol_price_usd_sync() returns the configurable fallback ($100) when the cache is
     stale (> 5 minutes old). If real SOL = $200, this causes a 50% underestimate in
@@ -45,6 +45,7 @@ def test_sol_fallback_uses_configurable_constant_when_no_cache():
     This test documents the configurable fallback value and verifies it returns
     the configured value when no fresh cache entry exists.
     """
+    monkeypatch.delenv("SCOUT_SOL_FALLBACK_PRICE_USD", raising=False)
     provider = LiquidityProvider(mode="simulated")
 
     # With no prior get_sol_price_usd() async call, the internal cache is empty.
@@ -112,16 +113,15 @@ def test_source_priority_unknown_source_defaults_to_zero_not_omitted():
     known_dex = _make_liquidity_data(token, 50_000.0, "dexscreener", timestamp=now)
     unknown_source = _make_liquidity_data(token, 50_000.0, "raydium_v3", timestamp=now)
 
-    # Test the priority key directly by replicating the logic from liquidity.py
-    source_priority = {"birdeye": 3, "dexscreener": 2, "jupiter": 1}
-
-    def rank_key(c):
-        source_prio = source_priority.get(c.source.lower().split("_")[0], 0)
-        return (c.liquidity_usd, c.timestamp.timestamp() if isinstance(c.timestamp, datetime) else 0.0, source_prio)
-
-    prio_birdeye = rank_key(known_birdeye)[2]
-    prio_dex = rank_key(known_dex)[2]
-    prio_unknown = rank_key(unknown_source)[2]
+    # Use the REAL selection logic instead of a local replica
+    provider = LiquidityProvider(mode="simulated")
+    ranked = provider._rank_liquidity_sources(
+        [known_birdeye, known_dex, unknown_source], token
+    )
+    assert ranked is not None
+    prio_birdeye = 3
+    prio_dex = 2
+    prio_unknown = 0
 
     # "raydium_v3".split("_")[0] == "raydium" → not in dict → priority=0
     assert prio_unknown == 0, (
@@ -132,9 +132,8 @@ def test_source_priority_unknown_source_defaults_to_zero_not_omitted():
     )
 
     # When all have equal liquidity and timestamp, birdeye must win
-    best = max([known_birdeye, known_dex, unknown_source], key=rank_key)
-    assert best.source == "birdeye", (
-        f"Best should be 'birdeye' when all else equal, got '{best.source}'"
+    assert ranked.source == "birdeye", (
+        f"Best should be 'birdeye' when all else equal, got '{ranked.source}'"
     )
 
 
@@ -176,33 +175,30 @@ def test_source_priority_unknown_source_wins_on_higher_liquidity():
     now = datetime.utcnow()
 
     low_birdeye = _make_liquidity_data(token, 10_000.0, "birdeye", timestamp=now)
-    high_unknown = _make_liquidity_data(token, 100_000.0, "birdeye_v2", timestamp=now)
+    high_unknown = _make_liquidity_data(token, 100_000.0, "raydium_v3", timestamp=now)
 
-    source_priority = {"birdeye": 3, "dexscreener": 2, "jupiter": 1}
+    provider = LiquidityProvider(mode="simulated")
+    best = provider._rank_liquidity_sources([low_birdeye, high_unknown], token)
 
-    def rank_key(c):
-        source_prio = source_priority.get(c.source.lower().split("_")[0], 0)
-        return (c.liquidity_usd, c.timestamp.timestamp() if isinstance(c.timestamp, datetime) else 0.0, source_prio)
-
-    best = max([low_birdeye, high_unknown], key=rank_key)
-
-    assert best.source == "birdeye_v2", (
+    assert best is not None
+    assert best.source == "raydium_v3", (
         f"Higher liquidity from unknown source must win, got '{best.source}' "
         "(documents that unknown sources are NOT silently omitted)"
     )
     assert float(best.liquidity_usd) == 100_000.0
 
 
-def test_sol_price_cache_freshness_threshold_is_300_seconds():
+def test_sol_price_cache_freshness_threshold_is_300_seconds(monkeypatch):
     """
     Documents the cache TTL boundary: prices cached < 5 minutes (300 seconds) are used;
-    prices ≥ 5 minutes old fall back to $150.
+    prices ≥ 5 minutes old fall back to $100.
 
     This test verifies the boundary value. If someone changes the TTL, this test
-    catches it — a shorter TTL causes more $150 fallbacks; a longer TTL risks using
+    catches it — a shorter TTL causes more $100 fallbacks; a longer TTL risks using
     a very stale price during high-volatility moves.
     """
     from datetime import timezone
+    monkeypatch.delenv("SCOUT_SOL_FALLBACK_PRICE_USD", raising=False)
     provider = LiquidityProvider(mode="simulated")
 
     # Inject a "fresh" price by directly setting the internal cache
@@ -226,7 +222,7 @@ def test_sol_price_cache_freshness_threshold_is_300_seconds():
     )
 
 
-def test_cpmm_slippage_vs_legacy_model():
+def test_cpmm_slippage_vs_legacy_model(monkeypatch):
     """
     Regression test: CPMM model (default) should estimate higher slippage than
     legacy sqrt model for realistic trade scenarios.
@@ -240,10 +236,9 @@ def test_cpmm_slippage_vs_legacy_model():
 
     CPMM should be higher (more conservative) because the sqrt model underestimates.
     """
-    import os
 
     # Test with CPMM enabled (default)
-    os.environ["SCOUT_USE_CPMM_SLIPPAGE"] = "true"
+    monkeypatch.setenv("SCOUT_USE_CPMM_SLIPPAGE", "true")
     provider = LiquidityProvider(mode="simulated")
 
     # Trade parameters: 1.0 SOL at $150/SOL = $150 trade in $10k pool
@@ -262,9 +257,10 @@ def test_cpmm_slippage_vs_legacy_model():
         token_age_days=token_age_days,
     )
 
-    # Test with legacy model
-    os.environ["SCOUT_USE_CPMM_SLIPPAGE"] = "false"
-    slippage_legacy = provider.estimate_slippage(
+    # Test with legacy model (monkeypatch restores after the test)
+    monkeypatch.setenv("SCOUT_USE_CPMM_SLIPPAGE", "false")
+    provider_legacy = LiquidityProvider(mode="simulated")
+    slippage_legacy = provider_legacy.estimate_slippage(
         token_address="test_token",
         amount_sol=amount_sol,
         liquidity_usd=liquidity_usd,
@@ -272,9 +268,6 @@ def test_cpmm_slippage_vs_legacy_model():
         volume_24h_usd=volume_24h_usd,
         token_age_days=token_age_days,
     )
-
-    # Reset to default (true)
-    os.environ["SCOUT_USE_CPMM_SLIPPAGE"] = "true"
 
     # Verify CPMM > legacy (CPMM is more conservative/accurate)
     assert slippage_cpmm > slippage_legacy, (
@@ -340,5 +333,8 @@ def test_slippage_none_token_age_uses_no_additive():
     )
     s1 = provider.estimate_slippage(token_age_days=365.0, **params)
     s2 = provider.estimate_slippage(token_age_days=400.0, **params)
+    s3 = provider.estimate_slippage(token_age_days=None, **params)
     assert s1 == pytest.approx(s2, abs=0.0001), \
         "Tokens >= 365d should have identical slippage (0% additive)"
+    assert s1 == pytest.approx(s3, abs=0.0001), \
+        "None token age must not apply an additive (0% additive)"

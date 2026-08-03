@@ -10,6 +10,11 @@ set -euo pipefail
 EVAL_DIR="${EVAL_DIR:-/opt/chimera/evaluation}"
 DAY_NUM="${DAY_NUM:-1}"
 HOUR_NUM="${HOUR_NUM:-0}"
+
+if ! [[ "${DAY_NUM}" =~ ^[0-9]+$ ]] || ! [[ "${HOUR_NUM}" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: DAY_NUM and HOUR_NUM must be non-negative integers" >&2
+    exit 1
+fi
 DB_PATH="${EVAL_DIR}/evaluation.db"
 CHIMERA_DB_PATH="${CHIMERA_DB_PATH:-/opt/chimera/data/chimera.db}"
 
@@ -17,6 +22,10 @@ CHIMERA_DB_PATH="${CHIMERA_DB_PATH:-/opt/chimera/data/chimera.db}"
 OPERATOR_METRICS_URL="${OPERATOR_METRICS_URL:-http://localhost:8080/metrics}"
 SCOUT_METRICS_URL="${SCOUT_METRICS_URL:-http://localhost:8081/metrics}"
 PROMETHEUS_URL="${PROMETHEUS_URL:-http://localhost:9090}"
+
+# Exclusive lock so two hourly runs cannot race on the same files
+exec 9>"${EVAL_DIR}/.collection.lock"
+flock -n 9 || { echo "Another collection run is in progress; exiting"; exit 0; }
 
 # Create evaluation directory structure
 mkdir -p "${EVAL_DIR}/day-${DAY_NUM}"
@@ -58,8 +67,12 @@ fi
 
 # Main Prometheus metrics (if available)
 if curl -sf "${PROMETHEUS_URL}/api/v1/query?query=up" > /dev/null 2>&1; then
-    curl -sf "${PROMETHEUS_URL}/api/v1/query?query={__name__=~\".*\"}" | jq '.data.result' > "${EVAL_DIR}/day-${DAY_NUM}/metrics/prometheus-snapshot-${TIMESTAMP_FILE}.json" 2>/dev/null
-    echo "✓ Prometheus snapshot collected"
+    if curl -sfG "${PROMETHEUS_URL}/api/v1/query" \
+        --data-urlencode 'query={__name__=~".*"}' | jq '.data.result' > "${EVAL_DIR}/day-${DAY_NUM}/metrics/prometheus-snapshot-${TIMESTAMP_FILE}.json" 2>/dev/null; then
+        echo "✓ Prometheus snapshot collected"
+    else
+        echo "✗ Failed to collect Prometheus snapshot"
+    fi
 fi
 
 # ===================================================================
@@ -70,8 +83,7 @@ echo "Collecting database snapshots..."
 # Main Chimera database
 if [ -f "${CHIMERA_DB_PATH}" ]; then
     # Create a compressed backup
-    sqlite3 "${CHIMERA_DB_PATH}" ".backup ${EVAL_DIR}/day-${DAY_NUM}/database/chimera-snapshot-${TIMESTAMP_FILE}.db" 2>/dev/null
-    if [ $? -eq 0 ]; then
+    if sqlite3 "${CHIMERA_DB_PATH}" ".backup ${EVAL_DIR}/day-${DAY_NUM}/database/chimera-snapshot-${TIMESTAMP_FILE}.db" 2>/dev/null; then
         # Compress the database
         gzip -f "${EVAL_DIR}/day-${DAY_NUM}/database/chimera-snapshot-${TIMESTAMP_FILE}.db"
         echo "✓ Chimera database snapshot created and compressed"
@@ -80,8 +92,8 @@ if [ -f "${CHIMERA_DB_PATH}" ]; then
     fi
 
     # Export current trades and positions for quick analysis
-    sqlite3 "${CHIMERA_DB_PATH}" "SELECT * FROM trades ORDER BY created_at DESC LIMIT 1000;" > "${EVAL_DIR}/day-${DAY_NUM}/database/recent-trades-${TIMESTAMP_FILE}.csv" 2>/dev/null
-    sqlite3 "${CHIMERA_DB_PATH}" "SELECT * FROM positions;" > "${EVAL_DIR}/day-${DAY_NUM}/database/active-positions-${TIMESTAMP_FILE}.csv" 2>/dev/null
+    sqlite3 "${CHIMERA_DB_PATH}" "SELECT * FROM trades ORDER BY created_at DESC LIMIT 1000;" > "${EVAL_DIR}/day-${DAY_NUM}/database/recent-trades-${TIMESTAMP_FILE}.csv" 2>/dev/null || echo "✗ Failed to export recent trades"
+    sqlite3 "${CHIMERA_DB_PATH}" "SELECT * FROM positions;" > "${EVAL_DIR}/day-${DAY_NUM}/database/active-positions-${TIMESTAMP_FILE}.csv" 2>/dev/null || echo "✗ Failed to export active positions"
     echo "✓ Database exports created"
 else
     echo "✗ Chimera database not found at ${CHIMERA_DB_PATH}"
@@ -89,10 +101,11 @@ fi
 
 # Evaluation database
 if [ -f "${DB_PATH}" ]; then
-    sqlite3 "${DB_PATH}" ".backup ${EVAL_DIR}/day-${DAY_NUM}/database/evaluation-snapshot-${TIMESTAMP_FILE}.db" 2>/dev/null
-    if [ $? -eq 0 ]; then
+    if sqlite3 "${DB_PATH}" ".backup ${EVAL_DIR}/day-${DAY_NUM}/database/evaluation-snapshot-${TIMESTAMP_FILE}.db" 2>/dev/null; then
         gzip -f "${EVAL_DIR}/day-${DAY_NUM}/database/evaluation-snapshot-${TIMESTAMP_FILE}.db"
         echo "✓ Evaluation database snapshot created"
+    else
+        echo "✗ Failed to create evaluation database snapshot"
     fi
 fi
 
@@ -103,22 +116,29 @@ echo "Collecting system resources..."
 
 # Docker container stats
 if command -v docker &> /dev/null; then
-    docker stats --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}" > "${EVAL_DIR}/day-${DAY_NUM}/system/docker-stats-${TIMESTAMP_FILE}.txt" 2>/dev/null
-    echo "✓ Docker stats collected"
+    if docker stats --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}" > "${EVAL_DIR}/day-${DAY_NUM}/system/docker-stats-${TIMESTAMP_FILE}.txt" 2>/dev/null; then
+        echo "✓ Docker stats collected"
+    else
+        echo "✗ Docker daemon not available"
+    fi
 
     # Individual container stats (JSON format for analysis)
-    for container in $(docker ps --format "{{.Names}}"); do
-        docker inspect "$container" | jq '.[0]' > "${EVAL_DIR}/day-${DAY_NUM}/system/container-${container}-${TIMESTAMP_FILE}.json" 2>/dev/null
+    for container in $(docker ps --format "{{.Names}}" 2>/dev/null || true); do
+        docker inspect "$container" | jq '.[0]' > "${EVAL_DIR}/day-${DAY_NUM}/system/container-${container}-${TIMESTAMP_FILE}.json" 2>/dev/null || true
     done
     echo "✓ Container details collected"
 else
     echo "✗ Docker not available"
 fi
 
-# System resource usage
-top -l 1 -n 0 -b -o cpu | head -20 > "${EVAL_DIR}/day-${DAY_NUM}/system/cpu-usage-${TIMESTAMP_FILE}.txt" 2>/dev/null
-vm_stat > "${EVAL_DIR}/day-${DAY_NUM}/system/memory-usage-${TIMESTAMP_FILE}.txt" 2>/dev/null
-df -h > "${EVAL_DIR}/day-${DAY_NUM}/system/disk-usage-${TIMESTAMP_FILE}.txt" 2>/dev/null
+# System resource usage (platform-aware)
+if command -v vm_stat >/dev/null 2>&1; then
+    vm_stat > "${EVAL_DIR}/day-${DAY_NUM}/system/memory-usage-${TIMESTAMP_FILE}.txt" 2>/dev/null || true
+else
+    free -h > "${EVAL_DIR}/day-${DAY_NUM}/system/memory-usage-${TIMESTAMP_FILE}.txt" 2>/dev/null || true
+fi
+top -bn1 | head -20 > "${EVAL_DIR}/day-${DAY_NUM}/system/cpu-usage-${TIMESTAMP_FILE}.txt" 2>/dev/null || true
+df -h > "${EVAL_DIR}/day-${DAY_NUM}/system/disk-usage-${TIMESTAMP_FILE}.txt" 2>/dev/null || true
 echo "✓ System resources collected"
 
 # ===================================================================
@@ -162,7 +182,7 @@ if [ -f "${CHIMERA_DB_PATH}" ]; then
         julianday('now') - julianday(created_at) as execution_delay_seconds
     FROM trades
     WHERE created_at >= datetime('now', '-1 hour')
-    ORDER BY created_at DESC;" > "${EVAL_DIR}/day-${DAY_NUM}/metrics/recent-trades-${TIMESTAMP_FILE}.csv" 2>/dev/null
+    ORDER BY created_at DESC;" > "${EVAL_DIR}/day-${DAY_NUM}/metrics/recent-trades-${TIMESTAMP_FILE}.csv" 2>/dev/null || echo "✗ Failed to collect trade execution details"
     echo "✓ Trade execution details collected"
 fi
 
@@ -244,7 +264,7 @@ echo "✓ Collection summary created"
 echo "Cleaning up old data..."
 
 # Remove files older than 12 days (keep 2 extra days for safety)
-find "${EVAL_DIR}" -type f -mtime +12 -delete 2>/dev/null || true
+find "${EVAL_DIR}" -type f ! -name "*.db" ! -name "*.db.gz" -mtime +12 -delete 2>/dev/null || true
 echo "✓ Old data cleaned up"
 
 # ===================================================================
@@ -268,8 +288,8 @@ Files: $(find "${EVAL_DIR}/day-${DAY_NUM}" -type f | wc -l)
 Size: $(du -sh "${EVAL_DIR}/day-${DAY_NUM}" | cut -f1)"
 
     curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        -d "chat_id=${TELEGRAM_CHAT_ID}" \
-        -d "text=${MESSAGE}" > /dev/null 2>&1
+        --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+        --data-urlencode "text=${MESSAGE}" > /dev/null 2>&1 || true
 fi
 
 exit 0

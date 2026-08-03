@@ -174,6 +174,7 @@ impl ExecutionOutcome {
         fill_price_sol_per_token: Option<Decimal>,
         price_impact_pct: Option<Decimal>,
         route_fee_sol: Option<Decimal>,
+        executed_output_sol: Option<Decimal>,
     ) -> Self {
         Self {
             signature,
@@ -183,7 +184,7 @@ impl ExecutionOutcome {
             token_amount: None,
             estimated_fee_sol: None,
             route_fee_sol,
-            executed_output_sol: None,
+            executed_output_sol,
         }
     }
 }
@@ -252,6 +253,24 @@ pub fn derive_token_amount(
     let scale = Decimal::from(10u64.pow(decimals));
     let raw = (entry_amount_sol / fp) * scale;
     raw.to_u64()
+}
+
+/// SELL gross SOL proceeds from a built transaction's quote `outAmount`
+/// (`outAmount / 1e9` — for a SELL the output side is SOL). `None` for BUY or
+/// when the quote lacked output info (A1: exit-side cost attribution must use
+/// this executed notional, never the copied wallet's signal amount).
+fn executed_output_sol_for(
+    built_tx: &crate::engine::transaction_builder::BuiltTransaction,
+    signal: &Signal,
+) -> Option<Decimal> {
+    if signal.payload.action != Action::Sell {
+        return None;
+    }
+    let out = built_tx.out_amount()?;
+    if out == 0 {
+        return None;
+    }
+    Some(Decimal::from(out) / Decimal::from(crate::engine::dex_comparator::LAMPORTS_PER_SOL))
 }
 
 /// Mutable execution state — wrapped in a Mutex so `execute` can take `&self`,
@@ -687,6 +706,33 @@ impl Executor {
                             );
                         }
                     }
+                // The TPU submission paths wrap ALL sendTransaction failures —
+                // including HTTP 429 / rate-limit responses — in
+                // TransactionFailed, so the dedicated degradation backoff must
+                // classify rate-limit hints from that variant too, or a
+                // rate-limited primary submission would skip it entirely.
+                Err(ExecutorError::TransactionFailed(ref msg))
+                    if Self::is_rate_limit_error(msg) && self.config.degradation.rpc_rate_limit_enabled => {
+                        if attempts < 10 {
+                            let backoff = crate::engine::handle_rpc_rate_limit().await;
+                            tracing::warn!(
+                                trade_uuid = %signal.trade_uuid,
+                                attempt = attempts,
+                                backoff_ms = backoff.as_millis(),
+                                error = %msg,
+                                "RPC rate limit detected in transaction submission. Applying degradation backoff..."
+                            );
+                            tokio::time::sleep(backoff).await;
+                            continue;
+                        } else {
+                            tracing::error!(
+                                trade_uuid = %signal.trade_uuid,
+                                attempts = attempts,
+                                error = %msg,
+                                "RPC rate limit: maximum retries exceeded"
+                            );
+                        }
+                    }
                 _ => {}
             }
 
@@ -998,7 +1044,7 @@ impl Executor {
         // specific token's price action before opening a new position.
         if let Some(ref price_cache) = self.price_cache {
             let history = price_cache.price_history_read();
-            if let Some(token_history) = history.get(signal.token_address()) {
+            if let Some(token_history) = history.get(signal.token_address().unwrap_or("")) {
                 if token_history.len() >= 2 {
                     let fifteen_min_ago = Utc::now() - chrono::Duration::minutes(15);
                     let mut price_15m_ago = None;
@@ -1520,7 +1566,11 @@ impl Executor {
     }
 
     /// Execute via Jito bundle
-    async fn execute_jito(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
+    async fn execute_jito_with_tip(
+        &self,
+        signal: &Signal,
+        tip_override: Option<Decimal>,
+    ) -> Result<ExecutionOutcome, ExecutorError> {
         // Check if this is an exit trade and Helius Staked Connections are enabled
         let is_exit = signal.payload.action == crate::models::Action::Sell;
         let use_helius_for_exit = is_exit && self.config.jito.helius_staked_exits;
@@ -1580,8 +1630,11 @@ impl Executor {
         // A2: absolute price-impact gate BEFORE tip calculation / submission.
         enforce_price_impact_cap(signal, price_impact)?;
 
-        // Calculate dynamic tip
-        let tip = self.calculate_jito_tip(signal).await;
+        // Calculate dynamic tip (or use the retry-increased override)
+        let tip = match tip_override {
+            Some(t) => t,
+            None => self.calculate_jito_tip(signal).await,
+        };
 
         // Check total execution cost cap (uses the unified estimate now)
         self.check_execution_costs(
@@ -1716,6 +1769,7 @@ impl Executor {
                         fill_price_sol,
                         price_impact,
                         built_tx.route_fee_sol(),
+                        executed_output_sol_for(&built_tx, signal),
                     ));
                 }
                 Err(e) => {
@@ -1828,6 +1882,7 @@ impl Executor {
                         fill_price_sol,
                         price_impact,
                         built_tx.route_fee_sol(),
+                        executed_output_sol_for(&built_tx, signal),
                     ));
                 }
             }
@@ -1879,6 +1934,7 @@ impl Executor {
             fill_price_sol,
             price_impact,
             built_tx.route_fee_sol(),
+            executed_output_sol_for(&built_tx, signal),
         ))
     }
 
@@ -2085,29 +2141,11 @@ impl Executor {
             }
         };
 
-        // Record costs (tip is tracked but Helius uses priority fees)
-        let dex_fee_sol = built_tx.route_fee_sol().unwrap_or_else(|| {
-            signal.payload.amount_sol * self.config.strategy.dex_fee_rate
-        });
-        let slippage = self.slippage_estimate(signal, built_tx.price_impact_pct());
-        let slippage_cost_sol = slippage.expected_cost_sol(signal.payload.amount_sol);
-
-        if let Err(e) = self
-            .db
-            .update_trade_costs(
-                &signal.trade_uuid,
-                tip, // Track tip for consistency, though Helius uses priority fees
-                dex_fee_sol,
-                slippage_cost_sol,
-            )
-            .await
-        {
-            tracing::warn!(
-                trade_uuid = %signal.trade_uuid,
-                error = %e,
-                "Failed to update trade costs for Helius exit"
-            );
-        }
+        // NOTE: costs are NOT recorded here — the outer execute() success
+        // branch is the single accounting point for trade costs (jito tip +
+        // DEX fee + slippage). A write here would be overwritten by it, and
+        // the two writes could silently diverge because calculate_jito_tip is
+        // time/failure-rate dependent.
 
         Ok(ExecutionOutcome::live(
             signature,
@@ -2115,6 +2153,7 @@ impl Executor {
             fill_price_sol,
             price_impact,
             built_tx.route_fee_sol(),
+            executed_output_sol_for(&built_tx, signal),
         ))
     }
 
@@ -2422,6 +2461,7 @@ impl Executor {
             fill_price_sol,
             price_impact,
             built_tx.route_fee_sol(),
+            executed_output_sol_for(&built_tx, signal),
         ))
     }
 
@@ -2941,10 +2981,10 @@ impl Executor {
     fn calculate_jito_backoff(&self, attempt: u32) -> Duration {
         // Exponential backoff: 200ms * 2^(attempt-1), with ±25% jitter
         let base_ms = 200u64;
-        let exponential = base_ms.saturating_mul(1u64.saturating_pow(attempt.saturating_sub(1)));
+        let exponential = base_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
 
         // Add ±25% jitter
-        let jitter_factor = 0.75 + (rand::random::<f64>() * 0.5); // 0.75 to 1.25
+        let jitter_factor = rand::rng().random_range(0.75..1.25); // 0.75 to 1.25
         let with_jitter = (exponential as f64 * jitter_factor) as u64;
 
         // Cap at 5 seconds max backoff
@@ -2964,7 +3004,21 @@ impl Executor {
         loop {
             attempts += 1;
 
-            match self.execute_jito(signal).await {
+            // On retries, actually increase the tip (20%/attempt) — the log
+            // below promises it and a flat tip burns retries on insufficient-
+            // tip failures. `calculate_adaptive_jito_tip` returns lamports;
+            // convert back to SOL for the override.
+            let tip_override = if attempts > 1 {
+                let tip_lamports = self.calculate_adaptive_jito_tip(signal, attempts).await;
+                Some(
+                    Decimal::from(tip_lamports)
+                        / Decimal::from(crate::engine::dex_comparator::LAMPORTS_PER_SOL),
+                )
+            } else {
+                None
+            };
+
+            match self.execute_jito_with_tip(signal, tip_override).await {
                 Ok(result) => {
                     // Success - log retry if it took multiple attempts
                     if attempts > 1 {
@@ -3185,7 +3239,7 @@ impl Executor {
                 use crate::engine::market_regime::MarketRegime;
                 use std::str::FromStr;
 
-                let regime = detector.detect_token_regime(signal.token_address());
+                let regime = detector.detect_token_regime(signal.token_address().unwrap_or(""));
 
                 let multiplier = match regime {
                     MarketRegime::Bull | MarketRegime::Bear => {
@@ -3402,7 +3456,7 @@ impl Executor {
                     ExecutorError::TransactionFailed(format!("Failed to convert SOL amount to lamports: {}", e))
                 })?;
                 let result = tx_builder
-                    .get_quote_prices(sol_mint, signal.token_address(), amount_lamports)
+                    .get_quote_prices(sol_mint, signal.token_address().unwrap_or(""), amount_lamports)
                     .await
                     .map_err(|e| {
                         ExecutorError::TransactionFailed(format!("Jupiter quote: {}", e))
@@ -3458,7 +3512,7 @@ impl Executor {
                     .db
                     .get_active_position_by_wallet_token(
                         &signal.payload.wallet_address,
-                        signal.token_address(),
+                        signal.token_address().unwrap_or(""),
                     )
                     .await
                     .map_err(|e| ExecutorError::TransactionFailed(format!("DB lookup: {}", e)))?
@@ -3466,7 +3520,7 @@ impl Executor {
                         ExecutorError::TransactionFailed(format!(
                             "No active position for SELL: wallet={}, token={}",
                             signal.payload.wallet_address,
-                            signal.token_address()
+                            signal.token_address().unwrap_or("")
                         ))
                     })?;
 
@@ -3486,7 +3540,7 @@ impl Executor {
                     .unwrap_or(0);
 
                 let result = tx_builder
-                    .get_quote_prices(signal.token_address(), sol_mint, sell_amount)
+                    .get_quote_prices(signal.token_address().unwrap_or(""), sol_mint, sell_amount)
                     .await
                     .map_err(|e| {
                         ExecutorError::TransactionFailed(format!("Jupiter quote: {}", e))
@@ -3534,7 +3588,7 @@ impl Executor {
 
     async fn execute_paper(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
         tracing::info!(
-            trade_uuid = %signal.payload.action,
+            trade_uuid = %signal.trade_uuid,
             action = %signal.payload.action,
             "Paper mode: fetching real Jupiter quote, no on-chain submission"
         );
@@ -3576,6 +3630,12 @@ impl Executor {
         let (price_impact, fill_price_sol, token_amount, route_fee_sol, executed_output_sol) =
             self.get_paper_prices(signal).await?;
         let estimated_fee_sol = self.estimate_network_fee().await;
+
+        // A2: absolute price-impact gate BEFORE the simulated fill is accepted
+        // and before devnet submission. Without this, a devnet BUY with >5%
+        // Jupiter price impact proceeds to submission, breaking the documented
+        // absolute-gate contract (every other execution path enforces it).
+        enforce_price_impact_cap(signal, price_impact)?;
 
         let secrets = load_secrets_with_fallback().map_err(|e| {
             ExecutorError::TransactionFailed(format!("Failed to load vault: {}", e))
@@ -3680,6 +3740,11 @@ impl Executor {
     ///
     /// Callers that get `false` should record the signature and let the recovery manager
     /// handle the stuck position — do NOT re-submit without first verifying the tx is gone.
+    ///
+    /// Polls the ACTIVE RPC client (the same one used for submission): in
+    /// fallback mode the primary endpoint is typically the unhealthy one that
+    /// triggered the failover, and polling it would error on every attempt,
+    /// reporting a landed transaction as unconfirmed.
     async fn poll_signature_confirmation(
         &self,
         signature: &str,
@@ -3694,11 +3759,12 @@ impl Executor {
 
         let max_polls = 3u32;
         let interval = Duration::from_secs(2);
+        let rpc_client = self.active_rpc_client();
 
         for attempt in 1..=max_polls {
             tokio::time::sleep(interval).await;
 
-            match self.rpc_client.get_signature_status(&sig).await {
+            match rpc_client.get_signature_status(&sig).await {
                 Ok(Some(Ok(()))) => {
                     tracing::info!(
                         trade_uuid = %trade_uuid,

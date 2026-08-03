@@ -10,6 +10,24 @@ from datetime import datetime, timedelta
 from core.helius_client import HeliusClient
 
 
+@pytest.fixture(autouse=True)
+def clean_credit_tracker():
+    """Give every test a fresh credit tracker with no persisted usage.
+
+    The module-level singleton persists daily usage to a state file (default
+    /tmp/helius_credit_state.json); a stale file can exhaust the daily budget
+    and short-circuit discovery with "Monthly credit cap reached".
+    """
+    from core.helius_credit_tracker import reset_credit_tracker
+
+    with patch.dict(
+        "os.environ", {"SCOUT_CREDIT_STATE_FILE": "/tmp/nonexistent_credit_state.json"}
+    ):
+        reset_credit_tracker()
+        yield
+        reset_credit_tracker()
+
+
 class TestHeliusDiscovery:
     """Test suite for wallet discovery."""
 
@@ -80,10 +98,12 @@ class TestHeliusDiscovery:
         assert helius_client._extract_wallets_from_transaction(None) == []
         assert helius_client._extract_wallets_from_transaction("invalid") == []
 
-    def test_load_active_tokens(self, helius_client, tmp_path):
+    def test_load_active_tokens(self, helius_client):
         """Test loading active tokens from config."""
-        # Test with default tokens
-        tokens = helius_client._load_active_tokens()
+        # Stub the SCOUT_ACTIVE_TOKENS env var so the config-file path is
+        # exercised deterministically regardless of the ambient environment.
+        with patch("core.helius_client.os.getenv", return_value=""):
+            tokens = helius_client._load_active_tokens()
         assert len(tokens) > 0
         assert "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263" in tokens  # BONK
 
@@ -128,13 +148,15 @@ class TestHeliusDiscovery:
             ]
             assert await helius_client._validate_wallet_activity("test_wallet", min_trades=3, days_back=7)
 
-        # Mock insufficient transactions
+        # Mock insufficient transactions. Use a DISTINCT wallet address so the
+        # positive scenario's cached validation result cannot short-circuit this
+        # negative case (the global validation cache is keyed per wallet).
         with patch.object(
             helius_client, 'get_wallet_transactions',
             new_callable=AsyncMock
         ) as mock_get_txns:
             mock_get_txns.return_value = [{"signature": "tx1"}]
-            assert not await helius_client._validate_wallet_activity("test_wallet", min_trades=3, days_back=7)
+            assert not await helius_client._validate_wallet_activity("test_wallet_insufficient", min_trades=3, days_back=7)
 
     async def test_discover_from_active_tokens(self, helius_client):
         """Test discovery from active tokens."""
@@ -272,8 +294,11 @@ class TestHeliusDiscovery:
 
     async def test_discover_wallets_no_api_key(self):
         """Test discovery without API key."""
-        client = HeliusClient(api_key=None)
-        wallets = await client.discover_wallets_from_recent_swaps()
+        # Clear the environment so an ambient HELIUS_API_KEY / RPC api-key
+        # cannot enable real discovery on this machine.
+        with patch.dict("os.environ", {}, clear=True):
+            client = HeliusClient(api_key=None)
+            wallets = await client.discover_wallets_from_recent_swaps()
         assert wallets == []
 
     async def test_discover_wallets_caching(self, helius_client):
@@ -286,7 +311,7 @@ class TestHeliusDiscovery:
         helius_client._discovery_cache = {}
         helius_client._discovery_cache_time = 0.0
 
-        # First call — cache miss, discovery runs
+        # First call — cache miss, discovery runs and refreshes the cache
         with patch.object(helius_client, '_discover_from_active_tokens', new_callable=AsyncMock) as mock_tokens, \
              patch.object(helius_client, '_discover_from_dex_programs', new_callable=AsyncMock) as mock_programs, \
              patch.object(helius_client, '_discover_from_seed_wallets', new_callable=AsyncMock) as mock_seeds:
@@ -301,8 +326,8 @@ class TestHeliusDiscovery:
             )
             assert mock_tokens.called
 
-        # Set cache timestamp to now so second call hits cache
-        helius_client._discovery_cache_time = time.time()
+        # The first call itself must have refreshed the in-memory cache
+        assert helius_client._discovery_cache_time > 0.0
 
         # Second call — should return cached results without calling discovery
         with patch.object(helius_client, '_discover_from_active_tokens', new_callable=AsyncMock) as mock_tokens:
@@ -321,37 +346,3 @@ class TestHeliusDiscovery:
 
         result = await helius_client._make_request("/test", {})
         assert result is None
-
-    def test_filter_by_trade_count(self, helius_client):
-        """Test filtering wallets by trade count."""
-        wallet_counts = {
-            "wallet1": 10,
-            "wallet2": 5,
-            "wallet3": 2,  # Below threshold
-            "wallet4": 1,  # Below threshold
-        }
-
-        # Filter wallets with min_trade_count=3
-        filtered = {
-            wallet: count for wallet, count in wallet_counts.items()
-            if count >= 3
-        }
-
-        assert len(filtered) == 2
-        assert "wallet1" in filtered
-        assert "wallet2" in filtered
-        assert "wallet3" not in filtered
-
-    def test_sort_by_activity(self, helius_client):
-        """Test sorting wallets by activity."""
-        wallet_counts = {
-            "wallet1": 5,
-            "wallet2": 10,
-            "wallet3": 3,
-        }
-
-        wallets = list(wallet_counts.keys())
-        wallets.sort(key=lambda w: wallet_counts[w], reverse=True)
-
-        assert wallets[0] == "wallet2"  # Most active
-        assert wallets[-1] == "wallet3"  # Least active

@@ -23,9 +23,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OPTIMIZATION_SQL="${SCRIPT_DIR}/functional_indexes.sql"
 TEST_SQL="${SCRIPT_DIR}/verification.sql"
 
-# Default PostgreSQL URL (can be overridden by argument)
+# Default PostgreSQL URL (can be overridden by argument or POSTGRES_URL env var)
 DEFAULT_URL="postgresql://chimera:chimera@localhost:5432/chimera"
-POSTGRES_URL="${1:-$DEFAULT_URL}"
+POSTGRES_URL="${1:-${POSTGRES_URL:-$DEFAULT_URL}}"
+
+if [[ "$POSTGRES_URL" == *"chimera:chimera@"* ]]; then
+    echo -e "${YELLOW}Warning: Using default dev credentials (chimera:chimera). ${NC}"
+    echo -e "${YELLOW}For production, set POSTGRES_URL or use a .pgpass / PGPASSWORD instead of passing credentials on the command line.${NC}"
+fi
 
 echo -e "${BLUE}============================================================================${NC}"
 echo -e "${BLUE}Chimera PostgreSQL Query Optimization Deployment${NC}"
@@ -64,7 +69,8 @@ create_backup() {
     mkdir -p "$BACKUP_DIR"
     BACKUP_FILE="${BACKUP_DIR}/chimera_backup_$(date +%Y%m%d_%H%M%S).sql"
 
-    if pg_dump "$POSTGRES_URL" > "$BACKUP_FILE" 2>/dev/null; then
+    if pg_dump "$POSTGRES_URL" > "$BACKUP_FILE"; then
+        chmod 600 "$BACKUP_FILE"
         echo -e "${GREEN}✓ Backup created: $BACKUP_FILE${NC}"
         return 0
     else
@@ -77,7 +83,7 @@ create_backup() {
 deploy_optimizations() {
     echo -e "${YELLOW}Deploying optimization indexes...${NC}"
 
-    if psql "$POSTGRES_URL" -f "$OPTIMIZATION_SQL"; then
+    if psql -v ON_ERROR_STOP=1 "$POSTGRES_URL" -f "$OPTIMIZATION_SQL"; then
         echo -e "${GREEN}✓ Optimization indexes deployed successfully${NC}"
         return 0
     else
@@ -95,11 +101,11 @@ verify_indexes() {
         SELECT COUNT(*)
         FROM pg_indexes
         WHERE schemaname = 'public'
-          AND (
-            indexname LIKE 'idx_trades_pnl_percent'
-            OR indexname LIKE 'idx_trades_strategy_pnl'
-            OR indexname LIKE 'idx_wallets_roi_percent'
-            OR indexname LIKE 'idx_positions_unrealized_pnl_percent'
+          AND indexname IN (
+            'idx_trades_pnl_percent',
+            'idx_trades_strategy_pnl',
+            'idx_wallets_roi_percent',
+            'idx_positions_unrealized_pnl_percent'
           );
     ")
 
@@ -117,9 +123,13 @@ run_performance_test() {
     echo -e "${YELLOW}Running performance verification...${NC}"
 
     if [ -f "$TEST_SQL" ]; then
-        psql "$POSTGRES_URL" -f "$TEST_SQL"
-        echo -e "${GREEN}✓ Performance test completed${NC}"
-        return 0
+        if psql -v ON_ERROR_STOP=1 "$POSTGRES_URL" -f "$TEST_SQL"; then
+            echo -e "${GREEN}✓ Performance test completed${NC}"
+            return 0
+        else
+            echo -e "${RED}✗ Performance test failed${NC}"
+            return 1
+        fi
     else
         echo -e "${YELLOW}⚠ Test SQL file not found, skipping performance test${NC}"
         return 1
@@ -172,7 +182,10 @@ main() {
     echo ""
 
     # Step 4: Verify indexes
-    verify_indexes
+    if ! verify_indexes; then
+        echo -e "${RED}Index verification failed. Restore from backup if needed: ${BACKUP_FILE:-see backups/ dir}.${NC}"
+        exit 1
+    fi
     echo ""
 
     # Step 5: Show statistics
@@ -181,9 +194,9 @@ main() {
 
     # Step 6: Run performance test (optional)
     echo -e "${YELLOW}Run performance test? (y/n)${NC}"
-    read -r response
+    read -r response || response="n"
     if [[ "$response" =~ ^[Yy]$ ]]; then
-        run_performance_test
+        run_performance_test || true
     else
         echo -e "${YELLOW}Skipping performance test. Run manually:${NC}"
         echo -e "${BLUE}psql \"$POSTGRES_URL\" < \"$TEST_SQL\"${NC}"

@@ -1,15 +1,17 @@
 //! Integration tests module
 //!
-//! This file serves as the entry point for all integration tests.
-//! Rust's test runner will discover this file and run the tests
-//! in the integration subdirectory.
+//! This file is the entry point for all integration tests. Cargo only
+//! auto-discovers files directly under `tests/`; files in the `integration/`
+//! subdirectory are NEVER compiled unless they are explicitly registered here
+//! via `mod` + `#[path]`. Every new test file added to `tests/integration/`
+//! MUST be registered in this module list or its tests are silently skipped.
 
 mod common;
 
 #[path = "integration/api_tests.rs"]
 mod api_tests;
 
-#[path = "reconciliation_tests.rs"]
+#[path = "integration/reconciliation_tests.rs"]
 mod reconciliation_tests;
 
 #[path = "integration/auth_tests.rs"]
@@ -73,6 +75,12 @@ mod parallel_execution_test;
 
 #[path = "integration/jupiter_v2_integration_tests.rs"]
 mod jupiter_v2_integration_tests;
+
+#[path = "integration/jito_integration_tests.rs"]
+mod jito_integration_tests;
+
+#[path = "integration/friction_gating_tests.rs"]
+mod friction_gating_tests;
 
 // ── Profitability verdict gate tests (Phase C4 go/no-go) ──────────────────────
 

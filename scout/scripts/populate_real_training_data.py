@@ -15,6 +15,7 @@ import asyncio
 import argparse
 import logging
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -32,7 +33,6 @@ async def populate_real_wallet_data(
     min_wallets: int = 500,
     min_trade_count: int = 5,
     hours_back: int = 168,  # 7 days
-    output_db: str = "data/chimera.db"
 ):
     """
     Fetch and populate real wallet data from Helius.
@@ -42,15 +42,15 @@ async def populate_real_wallet_data(
         min_wallets: Minimum number of wallets to fetch
         min_trade_count: Minimum trades required per wallet
         hours_back: Hours to look back for discovering wallets
-        output_db: Path to output database
+
+    Note: records are written via the shared scout.core.db connection
+    (PostgreSQL from DATABASE_URL), not to a local db file.
     """
     logger.info("Starting real wallet data collection from Solana blockchain")
     logger.info(f"Target: {min_wallets} wallets with {min_trade_count}+ trades")
 
     # Initialize Helius client
     helius = HeliusClient(api_key=api_key)
-    # Initialize WalletAnalyzer
-    analyzer = WalletAnalyzer(helius_api_key=api_key)
 
     # Discover wallets from recent swaps
     logger.info(f"Discovering wallets from last {hours_back} hours...")
@@ -102,23 +102,22 @@ async def populate_real_wallet_data(
             # Calculate WQS score if not present
             # Import WQS calculator
             from scout.core.wqs import calculate_wqs
-            wqs_result = calculate_wqs(metrics, strategy="SHIELD")
-            wqs_score = wqs_result.get("score", 50.0)
+            wqs_score = calculate_wqs(metrics, strategy="SHIELD")
 
             # Create wallet record
             record = WalletRecord(
                 address=wallet_address,
                 status="CANDIDATE",
-                wqs_score=float(wqs_score) if wqs_score else 50.0,
-                roi_7d=float(metrics.roi_7d) if metrics.roi_7d else 0.0,
-                roi_30d=float(metrics.roi_30d) if metrics.roi_30d else 0.0,
-                trade_count_30d=int(metrics.trade_count_30d) if metrics.trade_count_30d else 0,
-                win_rate=float(metrics.win_rate) if metrics.win_rate else 0.5,
-                max_drawdown_30d=float(metrics.max_drawdown_30d) if metrics.max_drawdown_30d else 0.0,
-                avg_trade_size_sol=float(metrics.avg_trade_size_sol) if metrics.avg_trade_size_sol else 0.1,
-                profit_factor=float(metrics.profit_factor) if metrics.profit_factor else 1.0,
+                wqs_score=float(wqs_score) if wqs_score is not None else 50.0,
+                roi_7d=float(metrics.roi_7d) if metrics.roi_7d is not None else 0.0,
+                roi_30d=float(metrics.roi_30d) if metrics.roi_30d is not None else 0.0,
+                trade_count_30d=int(metrics.trade_count_30d) if metrics.trade_count_30d is not None else 0,
+                win_rate=float(metrics.win_rate) if metrics.win_rate is not None else 0.5,
+                max_drawdown_30d=float(metrics.max_drawdown_30d) if metrics.max_drawdown_30d is not None else 0.0,
+                avg_trade_size_sol=metrics.avg_trade_size_sol if metrics.avg_trade_size_sol is not None else Decimal('0.1'),
+                profit_factor=float(metrics.profit_factor) if metrics.profit_factor is not None else 1.0,
                 archetype=str(metrics.archetype) if metrics.archetype else None,
-                avg_entry_delay_seconds=float(metrics.avg_entry_delay_seconds) if metrics.avg_entry_delay_seconds else 1.0,
+                avg_entry_delay_seconds=float(metrics.avg_entry_delay_seconds) if metrics.avg_entry_delay_seconds is not None else 1.0,
                 last_trade_at=str(metrics.last_trade_at) if metrics.last_trade_at else None,
             )
 
@@ -199,7 +198,6 @@ Examples:
     parser.add_argument("--wallets", type=int, default=500, help="Number of wallets to collect (default: 500)")
     parser.add_argument("--min-trades", type=int, default=5, help="Minimum trade count per wallet (default: 5)")
     parser.add_argument("--hours-back", type=int, default=168, help="Hours to look back for discovery, default: 168 (7 days)")
-    parser.add_argument("--output-db", default="data/chimera.db", help="Output database path (default: data/chimera.db)")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
     args = parser.parse_args()
@@ -212,14 +210,13 @@ Examples:
             api_key=args.api_key,
             min_wallets=args.wallets,
             min_trade_count=args.min_trades,
-            hours_back=args.hours_back,
-            output_db=args.output_db
+            hours_back=args.hours_back
         ))
 
         if count > 0:
             print(f"\n✓ Successfully collected {count} real wallet records")
-            print(f"  Database: {args.output_db}")
-            print(f"  Next: Run 'python -m scout.scripts.train_ml_models --db-path {args.output_db}' to train models")
+            print("  Database: configured via DATABASE_URL (scout.core.db)")
+            print("  Next: Run 'python -m scout.scripts.train_ml_models' to train models")
             sys.exit(0)
         else:
             print("\n✗ Failed to collect wallet data")

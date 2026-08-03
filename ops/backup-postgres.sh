@@ -1,6 +1,7 @@
 #!/bin/bash
 # PostgreSQL automated backup script
 set -e
+set -o pipefail
 
 # Configuration
 BACKUP_DIR="${BACKUP_DIR:-/backups/postgres}"
@@ -18,30 +19,34 @@ echo "Timestamp: $TIMESTAMP"
 
 # Create backup directory if it doesn't exist
 mkdir -p "$BACKUP_DIR"
+# The dump contains the full database contents; never leave it world-readable
+umask 077
 
-# Check if PostgreSQL container is running
-if ! docker-compose ps | grep -q "chimera-postgres.*Up"; then
-    echo "❌ PostgreSQL container is not running"
+# Check if PostgreSQL is reachable (via pg_isready, which is compose-version agnostic)
+if ! docker-compose exec -T postgres pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" > /dev/null 2>&1; then
+    echo "❌ PostgreSQL is not reachable"
     exit 1
 fi
 
 # Create backup
 echo "Creating PostgreSQL backup..."
-if docker-compose exec postgres pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" | gzip > "$BACKUP_FILE"; then
+if docker-compose exec -T postgres pg_dump -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" "$POSTGRES_DB" | gzip > "$BACKUP_FILE"; then
     echo "✓ Backup created successfully"
 else
     echo "❌ Backup failed"
+    rm -f "$BACKUP_FILE"
     exit 1
 fi
 
-# Verify backup
-if [ -f "$BACKUP_FILE" ] && [ -s "$BACKUP_FILE" ]; then
+# Verify backup (non-empty + gzip integrity)
+if [ -f "$BACKUP_FILE" ] && [ -s "$BACKUP_FILE" ] && gzip -t "$BACKUP_FILE"; then
     BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
     BACKUP_SIZE_BYTES=$(stat -f%z "$BACKUP_FILE" 2>/dev/null || stat -c%s "$BACKUP_FILE" 2>/dev/null)
 
     echo "✓ Backup file: $BACKUP_FILE"
     echo "✓ Backup size: $BACKUP_SIZE"
     echo "✓ Backup size (bytes): $BACKUP_SIZE_BYTES"
+    echo "✓ Backup integrity (gzip) verified"
 
     # Clean old backups (keep last 7 days)
     echo "Cleaning old backups (keeping last 7 days)..."

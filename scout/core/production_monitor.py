@@ -250,6 +250,11 @@ class ProductionMonitor:
         self._alert_cooldown = int(os.getenv("SCOUT_ALERT_COOLDOWN", "300"))  # 5 minutes
         self._last_alert_time: Dict[str, float] = {}
 
+        # Guards shared state mutated by the monitor thread and read by
+        # API/threads (get_health_status, get_recent_alerts, create_alert...)
+        self._alert_lock = threading.Lock()
+        self._metrics_lock = threading.Lock()
+
         # Thresholds
         self._thresholds = {
             'cpu_critical': 90.0,
@@ -273,8 +278,6 @@ class ProductionMonitor:
     def _init_database(self):
         """Initialize monitoring database."""
         try:
-            os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
-
             conn = get_connection(self._db_path)
             cursor = conn.cursor()
 
@@ -430,9 +433,10 @@ class ProductionMonitor:
             )
 
             # Store in history
-            self._metrics_history.append(metrics)
-            if len(self._metrics_history) > self._max_metrics_history:
-                self._metrics_history.pop(0)
+            with self._metrics_lock:
+                self._metrics_history.append(metrics)
+                if len(self._metrics_history) > self._max_metrics_history:
+                    self._metrics_history.pop(0)
 
             # Store in database
             self._store_metrics(metrics)
@@ -536,7 +540,9 @@ class ProductionMonitor:
         Returns:
             Created alert
         """
-        alert_id = f"{source}_{int(time.time())}_{severity.value}"
+        # Nanosecond-resolution id so same-second, same-severity alerts from
+        # one source don't collide (and overwrite each other in the DB)
+        alert_id = f"{source}_{time.time_ns()}_{severity.value}"
 
         alert = Alert(
             id=alert_id,
@@ -548,7 +554,8 @@ class ProductionMonitor:
             details=details or {}
         )
 
-        self._alerts.append(alert)
+        with self._alert_lock:
+            self._alerts.append(alert)
 
         # Store in database
         self._store_alert(alert)
@@ -674,8 +681,12 @@ class ProductionMonitor:
 
     def _can_alert(self, alert_key: str) -> bool:
         """Check if alert can be sent (cooldown check)."""
-        last_alert = self._last_alert_time.get(alert_key, 0)
-        return (time.time() - last_alert) >= self._alert_cooldown
+        now = time.time()
+        if (now - self._last_alert_time.get(alert_key, 0)) >= self._alert_cooldown:
+            # Record the alert time so the cooldown is actually enforced
+            self._last_alert_time[alert_key] = now
+            return True
+        return False
 
     def _monitoring_loop(self):
         """Main monitoring loop."""
@@ -734,16 +745,23 @@ class ProductionMonitor:
         else:
             overall_status = HealthStatus.HEALTHY
 
+        with self._alert_lock:
+            active_alerts = len([a for a in self._alerts if not a.resolved])
+
         return {
             'overall_status': overall_status.value,
             'timestamp': time.time(),
             'health_checks': [r.to_dict() for r in health_results],
             'metrics': metrics.to_dict(),
-            'active_alerts': len([a for a in self._alerts if not a.resolved]),
+            'active_alerts': active_alerts,
         }
 
     def get_recent_alerts(self, limit: int = 50) -> List[Alert]:
         """Get recent alerts."""
+        # Snapshot of in-memory alerts (thread-safe)
+        with self._alert_lock:
+            in_memory = list(self._alerts)
+
         # Get from database
         conn = None
         try:
@@ -772,11 +790,17 @@ class ProductionMonitor:
                 )
                 alerts.append(alert)
 
-            return alerts
+            # Merge any in-memory alerts not yet persisted (dedup by id)
+            db_ids = {a.id for a in alerts}
+            for alert in in_memory:
+                if alert.id not in db_ids:
+                    alerts.append(alert)
+            alerts.sort(key=lambda a: a.timestamp, reverse=True)
+            return alerts[:limit]
 
         except Exception as e:
             logger.error(f"Failed to get recent alerts: {e}")
-            return []
+            return in_memory[:limit]
         finally:
             if conn:
                 conn.close()
@@ -910,8 +934,6 @@ class GrowthTracker:
     def _init_database(self):
         """Initialize growth tracking database."""
         try:
-            os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
-
             conn = get_connection(self._db_path)
             cursor = conn.cursor()
 
@@ -963,11 +985,7 @@ class GrowthTracker:
             """)
 
             conn.commit()
-            
-            # Enable WAL mode for better concurrency
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA busy_timeout=5000")
-            conn.commit()
+
             conn.close()
 
             logger.debug(f"Growth database initialized: {self._db_path}")
@@ -1049,24 +1067,25 @@ class GrowthTracker:
             conn = get_connection(self._db_path)
             cursor = conn.cursor()
 
-            # Get capital at different time periods
+            # Get capital at different time periods (latest snapshot at or
+            # before the cutoff, so ROI baselines reflect "one day/week/month ago")
             cursor.execute("""
                 SELECT current_capital, timestamp FROM growth_history
-                WHERE timestamp >= %s ORDER BY timestamp ASC LIMIT 1
+                WHERE timestamp <= %s ORDER BY timestamp DESC LIMIT 1
             """, (month_ago,))
             month_row = cursor.fetchone()
             capital_month_ago = month_row["current_capital"] if month_row else self.starting_capital
 
             cursor.execute("""
                 SELECT current_capital, timestamp FROM growth_history
-                WHERE timestamp >= %s ORDER BY timestamp ASC LIMIT 1
+                WHERE timestamp <= %s ORDER BY timestamp DESC LIMIT 1
             """, (week_ago,))
             week_row = cursor.fetchone()
             capital_week_ago = week_row["current_capital"] if week_row else self.starting_capital
 
             cursor.execute("""
                 SELECT current_capital, timestamp FROM growth_history
-                WHERE timestamp >= %s ORDER BY timestamp ASC LIMIT 1
+                WHERE timestamp <= %s ORDER BY timestamp DESC LIMIT 1
             """, (day_ago,))
             day_row = cursor.fetchone()
             capital_day_ago = day_row["current_capital"] if day_row else self.starting_capital
@@ -1131,15 +1150,17 @@ class GrowthTracker:
         Returns:
             Estimated days, or None if growth rate is non-positive
         """
-        if daily_growth_rate <= 0.001:  # Less than 0.1% daily growth
+        if daily_growth_rate <= 0.1:  # Less than 0.1% daily growth
             return None
 
         remaining_ratio = self.target_capital / self.current_capital
 
         # days = log(remaining_ratio) / log(1 + daily_rate)
+        # growth_rate_daily is a percentage (e.g. 12.5 = 12.5%); convert to
+        # a fraction before compounding.
         import math
         try:
-            days = math.log(remaining_ratio) / math.log(1 + daily_growth_rate)
+            days = math.log(remaining_ratio) / math.log(1 + daily_growth_rate / 100.0)
             return max(0, days)
         except (ValueError, ZeroDivisionError):
             return None
@@ -1161,7 +1182,7 @@ class GrowthTracker:
 
             cursor.execute("""
                 INSERT INTO growth_history VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 metrics.timestamp,
                 metrics.current_capital,
@@ -1208,7 +1229,7 @@ class GrowthTracker:
 
             cursor.execute("""
                 INSERT INTO capital_events VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 event_id,
                 time.time(),

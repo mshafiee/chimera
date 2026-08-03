@@ -24,14 +24,15 @@ class MockHistoricalLiquidityProvider(LiquidityProvider):
     S5 Fix: No fallback to current liquidity - only returns historical data.
     """
 
-    def __init__(self, historical_map=None):
+    def __init__(self, historical_map=None, mode="simulated"):
         """
         Initialize with historical liquidity map.
 
         Args:
             historical_map: Dict mapping (token_address, date) -> liquidity_usd
+            mode: Provider mode ('simulated' keeps the tests offline)
         """
-        super().__init__()
+        super().__init__(mode=mode)
         self.historical_map = historical_map or {}
         self.calls_made = []
 
@@ -148,16 +149,19 @@ class TestBacktesterHistoricalLiquidity:
             "Trade must be rejected when historical liquidity unavailable "
             "(prevents survivorship bias from mooned tokens)"
         )
-        assert "liquidity" in rejection_reason.lower() or "fetch" in rejection_reason.lower()
+        assert rejection_reason == "Could not fetch liquidity data"
 
     def test_backtester_simulates_wallet_with_historical_liquidity(self):
         """Test full wallet simulation with historical liquidity - rejects trades without data."""
         token = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+        # Capture a single reference time so the map keys and trade timestamps
+        # always align (no UTC-midnight boundary flakiness)
+        now = datetime.utcnow()
 
         # Create historical liquidity for only some dates
         historical_map = {
-            (token, (datetime.utcnow() - timedelta(days=5)).date()): 50000.0,
-            (token, (datetime.utcnow() - timedelta(days=3)).date()): 60000.0,
+            (token, (now - timedelta(days=5)).date()): 50000.0,
+            (token, (now - timedelta(days=3)).date()): 60000.0,
             # Day 4 has NO historical data - should be rejected
         }
 
@@ -180,7 +184,7 @@ class TestBacktesterHistoricalLiquidity:
                 action=TradeAction.BUY if i % 2 == 0 else TradeAction.SELL,
                 amount_sol=0.5,
                 price_at_trade=0.000012,
-                timestamp=datetime.utcnow() - timedelta(days=5-i),
+                timestamp=now - timedelta(days=5 - i),
                 tx_signature=f"tx{i}",
                 pnl_sol=0.05 if i % 2 == 1 else None,
             )
@@ -215,6 +219,7 @@ class TestBacktesterHistoricalLiquidity:
             min_liquidity_spear_usd=5000.0,
             dex_fee_percent=0.003,
             max_slippage_percent=0.05,
+            enforce_current_liquidity=False,
         )
         simulator = BacktestSimulator(provider, config)
 
@@ -235,4 +240,4 @@ class TestBacktesterHistoricalLiquidity:
 
         # Verify trade was rejected
         assert result.rejected is True
-        assert "liquidity" in rejection_reason.lower() or "Insufficient" in rejection_reason
+        assert "Insufficient historical liquidity" in rejection_reason

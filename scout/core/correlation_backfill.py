@@ -95,9 +95,9 @@ def backfill_correlation_pnl(db_path: str) -> int:
                            last_updated_at = %s
                        WHERE wallet_address = %s""",
                     (
-                        pnl["copy_pnl_7d"],
-                        pnl["copy_pnl_30d"],
-                        pnl["copy_pnl_all"],
+                        pnl["copy_pnl_7d"] if pnl["copy_pnl_7d"] is not None else 0,
+                        pnl["copy_pnl_30d"] if pnl["copy_pnl_30d"] is not None else 0,
+                        pnl["copy_pnl_all"] if pnl["copy_pnl_all"] is not None else 0,
                         pnl["count_7d"] or 0,
                         pnl["count_30d"] or 0,
                         pnl["count_all"] or 0,
@@ -109,8 +109,12 @@ def backfill_correlation_pnl(db_path: str) -> int:
         if updated:
             print(f"[Scout] Backfilled PnL for {updated} wallets (from trades)")
     except Exception as e:
-        print(f"[Scout] PnL backfill skipped: {e}")
+        # The Connection context manager wraps the batch in an explicit
+        # transaction: nothing is committed on failure, so surface the error
+        # instead of returning a misleading partial count.
+        print(f"[Scout] PnL backfill failed: {e}")
         traceback.print_exc()
+        raise
     return updated
 
 

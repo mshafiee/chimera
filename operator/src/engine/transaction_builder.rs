@@ -47,6 +47,9 @@ pub enum BuiltTransaction {
         /// Real per-route DEX fee in SOL (summed `routePlan[].swapInfo.feeAmount`).
         /// P2-17: replaces the flat `dex_fee_rate` estimate in cost tracking.
         route_fee_sol: Option<Decimal>,
+        /// Raw `outAmount` from the Jupiter response. For a SELL (token→SOL)
+        /// this is SOL lamports — the executed gross proceeds basis.
+        out_amount: Option<u64>,
     },
     /// Versioned transaction (v0/v1) - stored as raw bytes for RPC submission
     Versioned {
@@ -58,6 +61,9 @@ pub enum BuiltTransaction {
         fill_price_lamports_per_base: Option<Decimal>,
         /// Real per-route DEX fee in SOL. See [`BuiltTransaction::Legacy::route_fee_sol`].
         route_fee_sol: Option<Decimal>,
+        /// Raw `outAmount` from the Jupiter response. For a SELL (token→SOL)
+        /// this is SOL lamports — the executed gross proceeds basis.
+        out_amount: Option<u64>,
     },
 }
 
@@ -101,6 +107,14 @@ impl BuiltTransaction {
         match self {
             BuiltTransaction::Legacy { route_fee_sol, .. } => *route_fee_sol,
             BuiltTransaction::Versioned { route_fee_sol, .. } => *route_fee_sol,
+        }
+    }
+
+    /// Raw `outAmount` from the Jupiter response (the swap's output side).
+    pub fn out_amount(&self) -> Option<u64> {
+        match self {
+            BuiltTransaction::Legacy { out_amount, .. } => *out_amount,
+            BuiltTransaction::Versioned { out_amount, .. } => *out_amount,
         }
     }
 }
@@ -183,13 +197,18 @@ impl TransactionBuilder {
         slippage_bps: u16,
     ) -> AppResult<BuiltTransaction> {
         // Determine input and output mints
+        let token_address = signal.token_address().ok_or_else(|| {
+            crate::error::AppError::Validation(
+                "Signal has no token address — cannot build transaction".to_string(),
+            )
+        })?;
         let (input_mint, output_mint, amount) = match signal.payload.action {
             Action::Buy => {
                 // Buying token with SOL
                 let sol_mint = Pubkey::from_str(crate::constants::mints::SOL).map_err(|e| {
                     crate::error::AppError::Validation(format!("Invalid SOL mint: {}", e))
                 })?;
-                let token_mint = Pubkey::from_str(signal.token_address()).map_err(|e| {
+                let token_mint = Pubkey::from_str(token_address).map_err(|e| {
                     crate::error::AppError::Validation(format!("Invalid token mint: {}", e))
                 })?;
 
@@ -201,7 +220,7 @@ impl TransactionBuilder {
             }
             Action::Sell => {
                 // Selling token for SOL
-                let token_mint = Pubkey::from_str(signal.token_address()).map_err(|e| {
+                let token_mint = Pubkey::from_str(token_address).map_err(|e| {
                     crate::error::AppError::Validation(format!("Invalid token mint: {}", e))
                 })?;
                 let sol_mint = Pubkey::from_str(crate::constants::mints::SOL).map_err(|e| {
@@ -297,19 +316,27 @@ impl TransactionBuilder {
                 // Record failure with circuit breaker
                 if let Some(cb) = &self.circuit_breaker {
                     let error_type = format!("swap_error: {}", e);
-                    if cb.record_jupiter_failure(error_type).unwrap_or(false) {
+                    if cb.record_jupiter_failure(error_type).await.unwrap_or(false) {
                         // Circuit breaker was tripped, return with circuit breaker error
                         return Err(AppError::CircuitBreaker(
                             "Jupiter API failures exceeded threshold - trading halted".to_string()
                         ));
                     }
                 }
-                return Err(Self::wrap_jupiter_error(&e)); // Re-throw the original error if circuit breaker didn't trip
+                // Fall through — swap_response is consumed by value below so the
+                // original typed error (AppError::Http / Parse / Rpc etc.) is
+                // preserved. Wrapping it in AppError::Internal would discard the
+                // variant that downstream error classification (e.g.
+                // BlockhashExpired / retryable HTTP checks) relies on.
             }
         };
 
-        // Extract quote-derived fields before consuming swap_response
-        let swap_response = swap_response?; // Unwrap the Result
+        // Extract quote-derived fields before consuming swap_response.
+        // (Consume by value so the original AppError variant is preserved.)
+        let swap_response = match swap_response {
+            Ok(r) => r,
+            Err(e) => return Err(e),
+        };
         let price_impact_pct = swap_response.price_impact_pct;
         let fill_price_lamports_per_base = swap_response.fill_price_lamports_per_base;
         let route_fee_sol = swap_response.route_fee_sol;
@@ -397,6 +424,13 @@ impl TransactionBuilder {
                 }
             }
 
+            // The serialized message carries the blockhash that will actually
+            // be submitted. Advertise THAT blockhash (not the freshly-fetched
+            // one) so submitters don't report a fresh blockhash that disagrees
+            // with the tx bytes — a stale-blockhash tx reported as fresh would
+            // mask BlockhashExpired and skip the executor's retry path.
+            let message_blockhash = versioned_tx.message.recent_blockhash();
+
             // Sign with our keypair
             let message_hash = versioned_tx.message.hash();
             let signature = wallet_keypair
@@ -420,10 +454,11 @@ impl TransactionBuilder {
 
             Ok(BuiltTransaction::Versioned {
                 transaction_bytes: signed_bytes,
-                blockhash,
+                blockhash: *message_blockhash,
                 price_impact_pct,
                 fill_price_lamports_per_base,
                 route_fee_sol,
+                out_amount: swap_response.out_amount,
             })
         } else {
             // Legacy Transaction
@@ -454,6 +489,7 @@ impl TransactionBuilder {
                 price_impact_pct,
                 fill_price_lamports_per_base,
                 route_fee_sol,
+                out_amount: swap_response.out_amount,
             })
         }
     }
@@ -483,13 +519,17 @@ impl TransactionBuilder {
             price_impact_pct: None,
             fill_price_lamports_per_base: None,
             route_fee_sol: None,
+            out_amount: None,
         })
     }
 
     /// Fetch the actual SPL token balance for `wallet_pubkey` / `token_mint` via RPC.
     ///
-    /// Returns the largest balance found across all token accounts for that
-    /// (owner, mint) pair, or `None` if the RPC call fails or no accounts exist.
+    /// Returns the TOTAL balance summed (saturating) across ALL token accounts
+    /// for that (owner, mint) pair — a wallet can hold the same mint in
+    /// multiple accounts (main ATA + PDA/auxiliary), and a full-exit sell
+    /// would otherwise under-sell by the amounts in the other accounts.
+    /// Returns `None` if the RPC call fails or no accounts exist.
     async fn fetch_token_balance(
         &self,
         wallet_pubkey: &Pubkey,
@@ -509,22 +549,24 @@ impl TransactionBuilder {
         .await
         .ok()?;
 
-        accounts
-            .iter()
-            .filter_map(|keyed| {
-                if let UiAccountData::Json(parsed) = &keyed.account.data {
-                    parsed
-                        .parsed
-                        .get("info")
-                        .and_then(|i| i.get("tokenAmount"))
-                        .and_then(|ta| ta.get("amount"))
-                        .and_then(|a| a.as_str())
-                        .and_then(|s| s.parse::<u64>().ok())
-                } else {
-                    None
-                }
-            })
-            .max()
+        Some(
+            accounts
+                .iter()
+                .filter_map(|keyed| {
+                    if let UiAccountData::Json(parsed) = &keyed.account.data {
+                        parsed
+                            .parsed
+                            .get("info")
+                            .and_then(|i| i.get("tokenAmount"))
+                            .and_then(|ta| ta.get("amount"))
+                            .and_then(|a| a.as_str())
+                            .and_then(|s| s.parse::<u64>().ok())
+                    } else {
+                        None
+                    }
+                })
+                .fold(0u64, |acc, b| acc.saturating_add(b)),
+        )
     }
 
     /// Get swap transaction from Jupiter Swap API.
@@ -655,10 +697,13 @@ impl TransactionBuilder {
             })?
             .to_string();
 
-        // Extract price impact from v2 response (decimal, e.g., -0.001 = -0.1%)
-        let price_impact_pct: Option<Decimal> = raw.get("priceImpact")
+        // Extract price impact from v2 response (decimal, e.g., -0.001 = -0.1%).
+        // A present-but-unparseable value returns None (a fabricated 0% would
+        // skew cost tracking), and the sign is stripped like the v1 path.
+        let price_impact_pct: Option<Decimal> = raw
+            .get("priceImpact")
             .and_then(|v| v.as_f64())
-            .map(|p| Decimal::from_f64((p * 100.0).abs()).unwrap_or(Decimal::ZERO));
+            .and_then(|p| Decimal::from_f64((p * 100.0).abs()));
 
         // Extract route information for logging
         let router = raw.get("router")
@@ -676,7 +721,10 @@ impl TransactionBuilder {
             "Jupiter v2 /order successful"
         );
 
-        // Compute fill price from amounts
+        // Compute fill price from amounts.
+        // Direction-aware (mirrors get_quote_prices): for a SELL (token→SOL)
+        // the raw inAmount/outAmount ratio would be token-units-per-lamport —
+        // the inverse of the documented 'lamports per base unit' semantics.
         let in_amount = raw.get("inAmount")
             .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()))
             .or_else(|| raw.get("inAmount").and_then(|v| v.as_u64()));
@@ -686,9 +734,15 @@ impl TransactionBuilder {
             .or_else(|| raw.get("outAmount").and_then(|v| v.as_u64()));
 
         let fill_price_lamports_per_base = match (in_amount, out_amount) {
+            // BUY (SOL→token): lamports per base unit. SELL (token→SOL):
+            // invert so the value is always lamports per token base unit.
             (Some(inn), Some(out)) if out > 0 && inn > 0 => {
-                Some(Decimal::from(inn) / Decimal::from(out))
-            },
+                if output_mint == Pubkey::from_str(crate::constants::mints::SOL).unwrap() {
+                    Some(Decimal::from(out) / Decimal::from(inn))
+                } else {
+                    Some(Decimal::from(inn) / Decimal::from(out))
+                }
+            }
             _ => None,
         };
 
@@ -717,6 +771,7 @@ impl TransactionBuilder {
             price_impact_pct,
             fill_price_lamports_per_base,
             route_fee_sol,
+            out_amount,
         })
     }
 
@@ -795,7 +850,10 @@ impl TransactionBuilder {
             })?
             .to_string();
 
-        // Compute fill price from quote amounts
+        // Compute fill price from quote amounts.
+        // Direction-aware (mirrors get_quote_prices): for a SELL (token→SOL)
+        // the raw ratio would be token-units-per-lamport — the inverse of the
+        // documented 'lamports per base unit' semantics.
         let in_amount = quote
             .get("inAmount")
             .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()))
@@ -807,9 +865,15 @@ impl TransactionBuilder {
             .or_else(|| quote.get("outAmount").and_then(|v| v.as_u64()));
 
         let fill_price_lamports_per_base = match (in_amount, out_amount) {
+            // BUY (SOL→token): lamports per base unit. SELL (token→SOL):
+            // invert so the value is always lamports per token base unit.
             (Some(inn), Some(out)) if out > 0 && inn > 0 => {
-                Some(Decimal::from(inn) / Decimal::from(out))
-            },
+                if output_mint == Pubkey::from_str(crate::constants::mints::SOL).unwrap() {
+                    Some(Decimal::from(out) / Decimal::from(inn))
+                } else {
+                    Some(Decimal::from(inn) / Decimal::from(out))
+                }
+            }
             _ => None,
         };
 
@@ -818,6 +882,7 @@ impl TransactionBuilder {
             price_impact_pct,
             fill_price_lamports_per_base,
             route_fee_sol: Some(route.fee_sol),
+            out_amount,
         })
     }
 
@@ -826,6 +891,12 @@ impl TransactionBuilder {
     /// shadow-fill model to capture decision-time and delayed requotes.
     ///
     /// `dexes`, when set, restricts routing (used by route comparison).
+    ///
+    /// NOTE: this intentionally bypasses `execute_with_jupiter_error_handling`
+    /// and the circuit breaker. It serves paper/devnet/shadow-fill only — a
+    /// quote failure there must never trip the live-trading circuit breaker or
+    /// inherit the swap path's retry semantics. Its own bounded retry loop
+    /// (3 attempts, 200ms doubling) is sufficient for telemetry-grade quotes.
     pub async fn get_jupiter_quote(
         &self,
         input_mint: Pubkey,
@@ -968,11 +1039,6 @@ impl TransactionBuilder {
             route_fee_sol,
         })
     }
-
-    /// Helper function to wrap Jupiter errors consistently
-    fn wrap_jupiter_error(error: &dyn std::error::Error) -> AppError {
-        AppError::Internal(format!("Jupiter API failure: {}", error))
-    }
 }
 
 /// Jupiter quote response (v1 API format)
@@ -998,6 +1064,11 @@ pub struct JupiterSwapResponse {
     /// `routePlan[].swapInfo.feeAmount`. `None` if the quote lacked route info.
     #[serde(skip)]
     pub route_fee_sol: Option<Decimal>,
+    /// Raw `outAmount` from the Jupiter response (output side, in base units /
+    /// lamports depending on direction). Used to derive the SELL's executed
+    /// gross SOL proceeds (`outAmount / 1e9`).
+    #[serde(skip)]
+    pub out_amount: Option<u64>,
 }
 
 /// Load wallet keypair from vault

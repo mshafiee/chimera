@@ -55,6 +55,10 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --version=*)
             VERSION="${1#*=}"
+            if [[ ! "$VERSION" =~ ^[0-9A-Za-z._-]+$ ]]; then
+                echo "Error: invalid --version value: $VERSION" >&2
+                exit 1
+            fi
             shift
             ;;
         --skip-backup)
@@ -76,6 +80,10 @@ done
 # Ensure log directory exists
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$BACKUP_DIR"
+
+# Mutual exclusion: never run two deployments concurrently
+exec 9>"${CHIMERA_HOME}/deploy.lock"
+flock -n 9 || error_exit "Another deployment is already in progress"
 
 log "INFO" "Starting deployment process"
 [[ "$DRY_RUN" == "true" ]] && log "WARNING" "DRY RUN MODE - No changes will be made"
@@ -128,7 +136,7 @@ if [[ "$SKIP_BACKUP" != "true" ]]; then
         fi
         
         # Compress backup
-        gzip "$BACKUP_FILE"
+        gzip "$BACKUP_FILE" || error_exit "Backup compression failed"
         BACKUP_FILE="${BACKUP_FILE}.gz"
         
         log "SUCCESS" "Backup created: $BACKUP_FILE"
@@ -152,20 +160,17 @@ SELECT value FROM schema_version WHERE key = 'version';
 
 log "INFO" "Current schema version: $SCHEMA_VERSION"
 
-# Check for migration scripts
-# Note: SQLx migrations are applied automatically by the operator during startup
-# This check is for legacy manual migrations only
-MIGRATION_DIR="${CHIMERA_HOME}/database/migrations_sqlite"
-if [[ -d "$MIGRATION_DIR" ]]; then
-    PENDING_MIGRATIONS=$(find "$MIGRATION_DIR" -name "*.sql" -newer "$DB_PATH" 2>/dev/null | wc -l)
+# Check for pending migrations via the SQLx migrations table (applied at
+# startup by the operator); mtime heuristics are unreliable.
+if sqlite3 "$DB_PATH" "SELECT 1 FROM _sqlx_migrations LIMIT 1;" > /dev/null 2>&1; then
+    PENDING_MIGRATIONS=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM _sqlx_migrations WHERE success = 0;" 2>/dev/null || echo "0")
     if [[ $PENDING_MIGRATIONS -gt 0 ]]; then
-        log "WARNING" "Found $PENDING_MIGRATIONS pending migration(s)"
-        log "INFO" "Migrations will be applied during service start"
+        log "WARNING" "Found $PENDING_MIGRATIONS failed migration record(s)"
     else
         log "INFO" "No pending migrations"
     fi
 else
-    log "INFO" "Migration directory not found, skipping migration check"
+    log "INFO" "No _sqlx_migrations table found (migrations applied on first startup)"
 fi
 
 # Step 4: Stop service gracefully
@@ -200,18 +205,9 @@ if [[ -n "$VERSION" ]]; then
     log "INFO" "Step 5: Updating application to version $VERSION"
     
     if [[ "$DRY_RUN" != "true" ]]; then
-        # This would typically:
-        # 1. Download new version
-        # 2. Verify checksum
-        # 3. Extract to staging
-        # 4. Run pre-install checks
-        # 5. Replace binaries
-        
-        log "INFO" "Application update logic would run here"
-        # Example:
-        # wget "https://releases.chimera.dev/v${VERSION}/chimera_operator" -O /tmp/chimera_operator
-        # chmod +x /tmp/chimera_operator
-        # mv /tmp/chimera_operator "${CHIMERA_HOME}/bin/chimera_operator"
+        # Application update is not implemented yet; refusing to silently
+        # report success while the old binary keeps running.
+        error_exit "Version updates are not implemented yet (remove --version or use --dry-run)"
     else
         log "INFO" "[DRY RUN] Would update application to version $VERSION"
     fi
@@ -255,7 +251,7 @@ if [[ "$DRY_RUN" != "true" ]]; then
     while [[ $RETRY_COUNT -lt $MAX_RETRIES ]]; do
         if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
             HEALTH_RESPONSE=$(curl -s http://localhost:8080/health)
-            if echo "$HEALTH_RESPONSE" | jq -e '.status == "healthy" or .status == "degraded"' > /dev/null 2>&1; then
+            if echo "$HEALTH_RESPONSE" | jq -e '.status == "healthy"' > /dev/null 2>&1; then
                 HEALTH_OK=true
                 break
             fi
@@ -301,13 +297,15 @@ if [[ "$DRY_RUN" != "true" ]]; then
     curl -sf http://localhost:8080/api/v1/health > /dev/null && log "INFO" "✓ Health endpoint OK" || log "WARNING" "✗ Health endpoint failed"
     curl -sf http://localhost:8080/api/v1/config > /dev/null && log "INFO" "✓ Config endpoint OK" || log "WARNING" "✗ Config endpoint failed"
     
-    # Log deployment to config audit
+    # Log deployment to config audit (values escaped for SQL)
+    OLD_VERSION=$(systemctl show -p Version "$SERVICE_NAME" 2>/dev/null || echo "unknown")
+    NEW_VERSION="${VERSION:-$OLD_VERSION}"
     sqlite3 "$DB_PATH" "
     INSERT INTO config_audit (key, old_value, new_value, changed_by, change_reason)
     VALUES (
         'deployment',
-        '$(systemctl show -p Version "$SERVICE_NAME" 2>/dev/null || echo "unknown")',
-        '${VERSION:-$(systemctl show -p Version "$SERVICE_NAME" 2>/dev/null || echo "current")}',
+        '${OLD_VERSION//'/''}',
+        '${NEW_VERSION//'/''}',
         'DEPLOY_SCRIPT',
         'Deployment completed at $(date -u +%Y-%m-%dT%H:%M:%SZ)'
     );" 2>/dev/null || log "WARNING" "Failed to log deployment to config_audit"

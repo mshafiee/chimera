@@ -6,9 +6,9 @@ import pytest
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from scout.core.models import TraderArchetype, TradeAction, HistoricalTrade
-from scout.core.wqs import WalletMetrics
-from scout.core.analyzer import WalletAnalyzer
+from core.models import TraderArchetype, TradeAction, HistoricalTrade
+from core.wqs import WalletMetrics
+from core.analyzer import WalletAnalyzer
 
 
 class TestArbitrageDetection:
@@ -103,19 +103,15 @@ class TestArbitrageDetection:
             ]
         }
 
-        transactions = [tx1, tx2, tx3]
-        
-        # Debug: print what the detection method sees
-        print("Testing round-trip detection...")
-        print(f"Number of transactions: {len(transactions)}")
-        
+        # Production only flags round-trips for wallets with >= 10 transactions,
+        # so pad to 10 (6 round-trips + 4 normal swaps => ratio 0.6)
+        transactions = [tx1, tx2] * 3 + [tx3] * 4
+
         ratio = analyzer._detect_round_trip_ratio_from_transactions(
             transactions, "test_wallet_address"
         )
 
-        print(f"Detected round-trip ratio: {ratio:.2f}")
-
-        # Should detect 2 round-trips out of 3 swaps = ~67%
+        # 6 round-trips out of 10 swaps = 60%
         assert ratio >= 0.6, f"Expected ratio >= 0.6, got {ratio}"
 
     def test_detect_round_trip_ratio_low(self, analyzer):
@@ -175,12 +171,13 @@ class TestArbitrageDetection:
             ]
         }
 
-        transactions = [tx1, tx2, tx3]
+        # Production only flags round-trips for wallets with >= 10 transactions
+        transactions = [tx1, tx2, tx3] * 3 + [tx1]
         ratio = analyzer._detect_round_trip_ratio_from_transactions(
             transactions, "test_wallet_address"
         )
 
-        # Should detect 0 round-trips out of 3 swaps = 0%
+        # Should detect 0 round-trips out of 10 swaps = 0%
         assert ratio == 0.0
 
     def test_archetype_arbitrage(self, analyzer):
@@ -258,7 +255,7 @@ class TestArbitrageDetection:
 
     def test_wqs_short_circuit_arbitrage(self):
         """Test that WQS short-circuits ARBITRAGE wallets."""
-        from scout.core.wqs import calculate_wqs
+        from core.wqs import calculate_wqs
 
         metrics = WalletMetrics(
             address="arb_wallet",
@@ -277,7 +274,7 @@ class TestArbitrageDetection:
 
     def test_wqs_short_circuit_arbitrage_with_confidence(self):
         """Test that WQS with confidence short-circuits ARBITRAGE wallets."""
-        from scout.core.wqs import calculate_wqs_with_confidence, WqsResult
+        from core.wqs import calculate_wqs_with_confidence
 
         metrics = WalletMetrics(
             address="arb_wallet",
@@ -297,8 +294,14 @@ class TestArbitrageDetection:
         assert result.adjusted_score == 0.0
 
     def test_round_trip_insufficient_trades(self, analyzer):
-        """Test that round-trip detection requires minimum trades."""
-        # Create only 2 transactions (below default threshold of 10)
+        """Test that round-trip detection requires >= 3 transactions.
+
+        (The production caller additionally requires 10+ transactions before
+        round_trip_ratio is set at all — see analyzer.py around the caller.)
+        """
+        # Create only 2 transactions (below the method's 3-transaction minimum),
+        # but make tx1 a GENUINE round-trip so a regression in the minimum-trade
+        # gate would be caught (ratio would become 0.5 instead of 0.0)
         tx1 = {
             "type": "SWAP",
             "tokenTransfers": [
@@ -312,7 +315,7 @@ class TestArbitrageDetection:
                     "mint": "TokenA1111111111111111111111111111111",
                     "fromUserAccount": "other_wallet",
                     "toUserAccount": "test_wallet_address",
-                    "tokenAmount": "999"
+                    "tokenAmount": "1000"  # Equal amounts = genuine round-trip
                 },
             ]
         }

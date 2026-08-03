@@ -50,7 +50,7 @@ export interface DivergenceAlert {
 export interface WalletCluster {
   cluster_id: string
   wallet_addresses: string[]
-  signal: string // 'BUY' or 'SELL'
+  signal: 'BUY' | 'SELL'
 }
 
 // Wallet Clustering Analysis
@@ -87,62 +87,45 @@ export interface AggregatedSignal {
   confidence: number
 }
 
-// Fetch Consensus Data
-export function useConsensus() {
+const CONSENSUS_ENDPOINT = '/signals/consensus'
+const CLUSTERING_ENDPOINT = '/signals/clustering'
+const AGGREGATION_ENDPOINT = '/signals/aggregation'
+
+function useConsensusPolling<T>(
+  queryKey: unknown[],
+  url: string,
+  refetchInterval: number,
+  staleTime: number,
+  label: string
+) {
   return useQuery({
-    queryKey: ['consensus'],
+    queryKey,
     queryFn: async ({ signal }) => {
-      const response = await apiClient.get<ConsensusResponse>('/signals/consensus', { signal })
+      const response = await apiClient.get<T>(url, { signal })
       return response.data
     },
-    refetchInterval: 15000,
-    staleTime: 5000,
+    refetchInterval,
+    staleTime,
     retry: 1,
     meta: {
       onError: (error: unknown) => {
-        console.error('[Consensus API] Failed to fetch consensus data:', error)
-        // Consensus is optional - console only
+        console.error(`[Consensus API] Failed to fetch ${label}:`, error)
       },
     },
   })
+}
+
+// Fetch Consensus Data
+export function useConsensus() {
+  return useConsensusPolling<ConsensusResponse>(['consensus'], CONSENSUS_ENDPOINT, 15000, 5000, 'consensus data')
 }
 
 // Fetch Wallet Clustering
 export function useWalletClustering() {
-  return useQuery({
-    queryKey: ['consensus', 'clustering'],
-    queryFn: async ({ signal }) => {
-      const response = await apiClient.get<WalletClusteringResponse>('/signals/clustering', { signal })
-      return response.data
-    },
-    refetchInterval: 60000,
-    staleTime: 30000,
-    retry: 1,
-    meta: {
-      onError: (error: unknown) => {
-        console.error('[Consensus API] Failed to fetch wallet clustering:', error)
-        // Clustering is optional - console only
-      },
-    },
-  })
+  return useConsensusPolling<WalletClusteringResponse>(['consensus', 'clustering'], CLUSTERING_ENDPOINT, 60000, 30000, 'wallet clustering')
 }
 
 // Fetch Signal Aggregation
 export function useSignalAggregation() {
-  return useQuery({
-    queryKey: ['consensus', 'aggregation'],
-    queryFn: async ({ signal }) => {
-      const response = await apiClient.get<SignalAggregationResponse>('/signals/aggregation', { signal })
-      return response.data
-    },
-    refetchInterval: 10000,
-    staleTime: 5000,
-    retry: 1,
-    meta: {
-      onError: (error: unknown) => {
-        console.error('[Consensus API] Failed to fetch signal aggregation:', error)
-        // Aggregation is optional - console only
-      },
-    },
-  })
+  return useConsensusPolling<SignalAggregationResponse>(['consensus', 'aggregation'], AGGREGATION_ENDPOINT, 10000, 5000, 'signal aggregation')
 }

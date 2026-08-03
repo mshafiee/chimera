@@ -11,7 +11,7 @@ This service:
 5. Supports real-time policy evaluation
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Response
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
@@ -238,12 +238,14 @@ async def reload_haproxy() -> bool:
     """Reload HAProxy configuration"""
     try:
         with policy_reload_duration.time():
-            # Execute HAProxy reload command
-            result = subprocess.run(
+            # Execute HAProxy reload command off the event loop so a slow
+            # reload cannot stall every other request
+            result = await asyncio.to_thread(
+                subprocess.run,
                 HAPROXY_RELOAD_COMMAND.split(),
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=30,
             )
 
             if result.returncode == 0:
@@ -300,7 +302,7 @@ async def get_policy_config():
         raise HTTPException(status_code=500, detail=f"Error loading config: {e}")
 
 @app.post("/policies/validate")
-async def validate_policy(policy: AccessPolicy):
+async def validate_policy_endpoint(policy: AccessPolicy):
     """Validate a policy configuration"""
     try:
         validation = validate_policy(policy)
@@ -351,6 +353,8 @@ async def update_endpoint_policy(endpoint: str, endpoint_policy: EndpointPolicy)
 
         # Load current configuration
         config = load_policy_config()
+        if "access_control" not in config:
+            raise HTTPException(status_code=500, detail="Policy config is missing the access_control section")
         if "endpoint_policies" not in config["access_control"]:
             config["access_control"]["endpoint_policies"] = {}
 
@@ -530,8 +534,8 @@ async def startup_event():
                 active_policies.labels(policy_type="endpoints").set(
                     len(config["access_control"]["endpoint_policies"])
                 )
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Error updating active policies gauge: {e}")
 
     logger.info("Policy manager started successfully")
 

@@ -2,8 +2,29 @@
 -- Existing rows with orphaned wallet_address values are deleted before the constraint
 -- is applied so the migration does not fail on dirty data.
 
+BEGIN TRANSACTION;
+
+-- Pre-flight cleanup: remove orphaned wallet_address rows
 DELETE FROM signal_aggregation
-WHERE wallet_address NOT IN (SELECT address FROM wallets);
+WHERE NOT EXISTS (SELECT 1 FROM wallets WHERE wallets.address = signal_aggregation.wallet_address);
+
+-- Pre-flight dedupe: keep only the most recent row per unique key so the
+-- unique indexes created below cannot fail on duplicate data.
+DELETE FROM signal_aggregation
+WHERE signature IS NOT NULL
+  AND id NOT IN (
+      SELECT MAX(id) FROM signal_aggregation
+      WHERE signature IS NOT NULL
+      GROUP BY token_address, wallet_address, signature
+  );
+
+DELETE FROM signal_aggregation
+WHERE signature IS NULL
+  AND id NOT IN (
+      SELECT MAX(id) FROM signal_aggregation
+      WHERE signature IS NULL
+      GROUP BY token_address, wallet_address, direction, created_at
+  );
 
 -- SQLite does not support ADD CONSTRAINT on existing tables, so we recreate the table.
 CREATE TABLE signal_aggregation_new (
@@ -19,7 +40,9 @@ CREATE TABLE signal_aggregation_new (
     FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
 );
 
-INSERT INTO signal_aggregation_new SELECT * FROM signal_aggregation;
+INSERT INTO signal_aggregation_new (id, token_address, wallet_address, direction, amount_sol, signature, is_consensus, consensus_wallet_count, created_at)
+SELECT id, token_address, wallet_address, direction, amount_sol, signature, is_consensus, consensus_wallet_count, created_at
+FROM signal_aggregation;
 DROP TABLE signal_aggregation;
 ALTER TABLE signal_aggregation_new RENAME TO signal_aggregation;
 
@@ -36,3 +59,5 @@ CREATE INDEX IF NOT EXISTS idx_signal_aggregation_token_time
 
 CREATE INDEX IF NOT EXISTS idx_signal_aggregation_consensus
     ON signal_aggregation(is_consensus) WHERE is_consensus = 1;
+
+COMMIT;

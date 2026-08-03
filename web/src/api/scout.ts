@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { apiClient } from './client'
+import { apiClient, getApiError } from './client'
 
 // Scout Status Response
 export interface ScoutStatusResponse {
@@ -53,13 +53,20 @@ export interface ScoutMetricsResponse {
   liquidity_validation_rate: number
 }
 
+function requireData<T>(data: T | undefined, label: string): T {
+  if (data === undefined || data === null) {
+    throw new Error(`Empty response from ${label}`)
+  }
+  return data
+}
+
 // Fetch Scout Status
 export function useScoutStatus(refetchInterval?: number) {
   return useQuery({
     queryKey: ['scout', 'status'],
     queryFn: async ({ signal }) => {
       const response = await apiClient.get<ScoutStatusResponse>('/scout/status', { signal })
-      return response.data
+      return requireData(response.data, 'scout status')
     },
     refetchInterval,
     staleTime: 5000,
@@ -83,7 +90,7 @@ export function useWQSDistribution(timeRange?: string) {
         params: timeRange ? { range: timeRange } : undefined,
         signal,
       })
-      return response.data
+      return requireData(response.data, 'WQS distribution')
     },
     staleTime: 30000,
     retry: 3,
@@ -106,7 +113,7 @@ export function useScoutMetrics(timeRange?: string) {
         params: timeRange ? { range: timeRange } : undefined,
         signal,
       })
-      return response.data
+      return requireData(response.data, 'scout metrics')
     },
     staleTime: 60000,
     retry: 3,
@@ -122,8 +129,12 @@ export function useScoutMetrics(timeRange?: string) {
 
 // Manual Scout Run Trigger
 export async function triggerScoutRun(): Promise<{ run_id: string; scheduled_at: string }> {
-  const response = await apiClient.post<{ run_id: string; scheduled_at: string }>('/scout/run', {})
-  return response.data
+  try {
+    const response = await apiClient.post<{ run_id: string; scheduled_at: string }>('/scout/run', {})
+    return requireData(response.data, 'scout run')
+  } catch (error) {
+    throw new Error(getApiError(error))
+  }
 }
 
 // =============================================================================
@@ -226,7 +237,7 @@ export function useBudgetStatus() {
     queryKey: ['scout', 'budget'],
     queryFn: async ({ signal }) => {
       const response = await apiClient.get<BudgetStatusResponse>('/scout/budget', { signal })
-      return response.data
+      return requireData(response.data, 'budget status')
     },
     refetchInterval: 60000, // Refetch every minute
     retry: 2,
@@ -245,7 +256,7 @@ export function useCacheStats() {
     queryKey: ['scout', 'cache'],
     queryFn: async ({ signal }) => {
       const response = await apiClient.get<CacheStatsResponse>('/scout/cache', { signal })
-      return response.data
+      return requireData(response.data, 'cache statistics')
     },
     refetchInterval: 30000, // Refetch every 30 seconds
     retry: 2,
@@ -264,7 +275,7 @@ export function useConvictionAllocation() {
     queryKey: ['scout', 'conviction'],
     queryFn: async ({ signal }) => {
       const response = await apiClient.get<ConvictionAllocationResponse>('/scout/conviction', { signal })
-      return response.data
+      return requireData(response.data, 'conviction allocation')
     },
     refetchInterval: 120000, // Refetch every 2 minutes
     retry: 2,

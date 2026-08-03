@@ -1,12 +1,16 @@
 //! API Integration Tests
 //!
-//! Tests REST API endpoints for:
+//! Tests REST API endpoint shapes for:
 //! - Health check
 //! - Positions listing
 //! - Wallet management
 //! - Configuration
 //!
-//! Uses axum-test for HTTP testing.
+//! NOTE: these are router-shape smoke tests against inline stub routers that
+//! re-implement each endpoint's response contract. The real application router
+//! (assembled in main.rs with auth middleware, rate limiting and error
+//! handling) is not exercised here — regressions in the real routes require
+//! exposing the production `build_app`/`build_router` for tests.
 
 use axum::{
     body::Body,
@@ -268,6 +272,8 @@ async fn test_wallets_list_returns_array() {
         .await
         .unwrap();
 
+    assert_eq!(response.status(), StatusCode::OK);
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -305,6 +311,8 @@ async fn test_wallets_filter_by_status() {
         )
         .await
         .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
 
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -347,6 +355,8 @@ async fn test_config_response_structure() {
         )
         .await
         .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
 
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -574,6 +584,8 @@ async fn test_trades_list_with_filters() {
         .await
         .unwrap();
 
+    assert_eq!(response.status(), StatusCode::OK);
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -591,6 +603,8 @@ async fn test_trades_list_with_filters() {
         )
         .await
         .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
 
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -1050,6 +1064,8 @@ async fn test_dead_letter_queue_pagination() {
         .await
         .unwrap();
 
+    assert_eq!(response.status(), StatusCode::OK);
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -1147,6 +1163,8 @@ async fn test_positions_list_with_state_filter() {
         )
         .await
         .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
 
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -1291,6 +1309,8 @@ async fn test_trades_pagination() {
         .await
         .unwrap();
 
+    assert_eq!(response.status(), StatusCode::OK);
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -1308,6 +1328,8 @@ async fn test_trades_pagination() {
         )
         .await
         .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
 
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await

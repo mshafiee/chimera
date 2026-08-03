@@ -19,7 +19,7 @@ use crate::handlers::{PositionUpdateData, WsEvent, WsState};
 use chrono::Utc;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signature::{Signature, Signer};
+use solana_sdk::signature::Signature;
 use std::sync::Arc;
 use tokio::time::interval;
 
@@ -173,6 +173,12 @@ impl RecoveryManager {
         let mut recovered = 0;
         for position in stuck_positions {
             match self.recover_position(&position).await {
+                Ok(RecoveryAction::StillPending) => {
+                    tracing::debug!(
+                        trade_uuid = %position.trade_uuid,
+                        "Position still pending; no recovery action taken"
+                    );
+                }
                 Ok(action) => {
                     tracing::info!(
                         trade_uuid = %position.trade_uuid,
@@ -233,11 +239,13 @@ impl RecoveryManager {
         match on_chain_state {
             OnChainState::TransactionConfirmed => {
                 // Exit transaction confirmed on-chain, mark CLOSED.
+                // Both the position row and the trade status must move together:
+                // a partial failure would leave CLOSED position + EXITING trade,
+                // an inconsistent state that is never retried.
                 self.db
                     .update_position_state(&position.trade_uuid, "CLOSED")
                     .await?;
-                let _ = self
-                    .db
+                self.db
                     .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
                         trade_uuid: position.trade_uuid.clone(),
                         status: "CLOSED".to_string(),
@@ -245,7 +253,7 @@ impl RecoveryManager {
                         error_message: None,
                         network_fee_sol: None,
                     })
-                    .await;
+                    .await?;
 
                 let tx_sig = position
                     .exit_tx_signature
@@ -283,6 +291,18 @@ impl RecoveryManager {
                 self.revert_or_close_position(position, Some("MISSING"), "MISSING_TX", &note)
                     .await
             }
+            OnChainState::TransactionFailed(ref failure) => {
+                // The exit tx landed but reverted — the sell did not execute,
+                // so the position must be reverted to ACTIVE for the exit path
+                // to retry it. The failure reason is preserved in the log.
+                let note = format!(
+                    "Auto-recovery: exit transaction failed on-chain ({}); reverted to ACTIVE after {}s stuck",
+                    failure,
+                    stuck_duration.num_seconds()
+                );
+                self.revert_or_close_position(position, Some("FAILED"), "TX_FAILED", &note)
+                    .await
+            }
             OnChainState::RpcError(ref rpc_err) => {
                 // Transient RPC error. If the position has been stuck long enough
                 // (> 5 min) we escalate to dead letter rather than waiting forever.
@@ -292,7 +312,7 @@ impl RecoveryManager {
                         trade_uuid = %position.trade_uuid,
                         stuck_secs = stuck_duration.num_seconds(),
                         rpc_error = %rpc_err,
-                        "Persistent RPC errors checking EXITING position — escalating to dead letter and reverting to ACTIVE"
+                        "Persistent RPC errors checking EXITING position — escalating to dead letter"
                     );
                     self.db
                         .insert_dlq(
@@ -317,17 +337,15 @@ impl RecoveryManager {
                             )),
                         )
                         .await?;
-                    // Revert to ACTIVE so portfolio heat is freed and the exit can be
-                    // retried by the normal exit path. Leaving the position in EXITING
-                    // would permanently lock capital in the heat calculation.
-                    // The dead letter entry ensures a human reviews the final outcome.
-                    let note = format!(
-                        "Escalated to dead letter after {}s: RPC error: {}",
-                        stuck_duration.num_seconds(),
-                        rpc_err
-                    );
-                    self.revert_or_close_position(position, None, "STATE_MISMATCH", &note)
-                        .await
+                    // Keep the position EXITING: the exit tx's on-chain status is
+                    // genuinely unknown, and reverting to ACTIVE could let the
+                    // normal exit/stop-loss path sell a second time if the
+                    // original exit later confirms — a duplicate exit. The dead
+                    // letter entry flags human review; recovery keeps re-checking
+                    // every cycle, so the position resolves as soon as the RPC
+                    // recovers (portfolio heat already excludes EXITING positions
+                    // stuck >30 min, so capital is not locked).
+                    Ok(RecoveryAction::StillPending)
                 } else {
                     tracing::warn!(
                         trade_uuid = %position.trade_uuid,
@@ -344,11 +362,14 @@ impl RecoveryManager {
     /// Check if the on-chain SPL token balance is zero, indicating the position has already been exited.
     /// Returns `Ok(true)` if balance is confirmed to be 0 or if the token account does not exist.
     /// Returns `Ok(false)` if balance is > 0.
-    async fn check_is_balance_zero(&self, token_address: &str) -> AppResult<bool> {
-        let secrets = crate::vault::load_secrets_with_fallback()
-            .map_err(|e| AppError::Internal(format!("Failed to load secrets: {}", e)))?;
-        let wallet_keypair = crate::engine::transaction_builder::load_wallet_keypair(&secrets)?;
-        let wallet_pubkey = wallet_keypair.pubkey();
+    ///
+    /// The balance is queried for the position's OWNING wallet (`wallet_address`),
+    /// never the default wallet — in a multi-wallet setup the default keypair
+    /// may hold no tokens for this position and would produce a false zero.
+    async fn check_is_balance_zero(&self, token_address: &str, wallet_address: &str) -> AppResult<bool> {
+        let wallet_pubkey = wallet_address
+            .parse::<Pubkey>()
+            .map_err(|e| AppError::Internal(format!("Invalid wallet address: {}", e)))?;
 
         let token_mint = token_address
             .parse::<Pubkey>()
@@ -400,7 +421,10 @@ impl RecoveryManager {
         discrepancy: &str,
         notes: &str,
     ) -> AppResult<RecoveryAction> {
-        let is_zero = match self.check_is_balance_zero(&position.token_address).await {
+        let is_zero = match self
+            .check_is_balance_zero(&position.token_address, &position.wallet_address)
+            .await
+        {
             Ok(zero) => zero,
             Err(e) => {
                 tracing::error!(
@@ -420,8 +444,7 @@ impl RecoveryManager {
             self.db
                 .update_position_state(&position.trade_uuid, "CLOSED")
                 .await?;
-            let _ = self
-                .db
+            self.db
                 .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
                     trade_uuid: position.trade_uuid.clone(),
                     status: "CLOSED".to_string(),
@@ -431,7 +454,7 @@ impl RecoveryManager {
                     ),
                     network_fee_sol: None,
                 })
-                .await;
+                .await?;
             self.db.insert_reconciliation_log(
                 &position.trade_uuid,
                 "EXITING",
@@ -506,13 +529,16 @@ impl RecoveryManager {
                 // Transaction found - check if it's confirmed
                 if let Some(meta) = tx.transaction.meta {
                     if meta.err.is_some() {
-                        // Transaction failed on-chain
+                        // Transaction found but failed on-chain. Distinct from
+                        // TransactionNotFound: the tx landed and reverted (never
+                        // submitted vs. failed) — the failure reason is preserved
+                        // so the recovery path can log it accurately.
                         tracing::warn!(
                             signature = %tx_signature,
                             error = ?meta.err,
                             "Transaction found but failed on-chain"
                         );
-                        Ok(OnChainState::TransactionNotFound)
+                        Ok(OnChainState::TransactionFailed(format!("{:?}", meta.err)))
                     } else {
                         // Transaction confirmed successfully
                         tracing::debug!(
@@ -562,6 +588,8 @@ enum OnChainState {
     TransactionConfirmed,
     /// Transaction not found
     TransactionNotFound,
+    /// Transaction found but failed on-chain (the failure reason is preserved)
+    TransactionFailed(String),
     /// Blockhash expired
     #[allow(dead_code)] // Reserved for future use
     BlockhashExpired,

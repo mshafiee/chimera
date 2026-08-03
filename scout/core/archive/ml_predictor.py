@@ -18,11 +18,11 @@ designed for interpretability and zero-dependency operation.
 """
 
 import logging
+import json
 import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
-import pickle
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +130,10 @@ class HeuristicPredictor:
             pnl = record.get('actual_pnl_sol')
             if pnl is None:
                 continue
+            # Skip records missing any feature so feature_values and
+            # pnl_values stay index-aligned for the correlation step
+            if any(record.get(feature_name) is None for feature_name in self.feature_weights.keys()):
+                continue
             pnl_values.append(pnl)
 
             for feature_name in self.feature_weights.keys():
@@ -179,6 +183,7 @@ class HeuristicPredictor:
     ) -> Optional[float]:
         """Calculate Pearson correlation coefficient."""
         if len(xs) != len(ys) or len(xs) < 2:
+            logger.debug("Correlation for %s skipped: %d vs %d values", feature_name, len(xs), len(ys))
             return None
 
         n = len(xs)
@@ -278,8 +283,10 @@ class HeuristicProfitabilityPredictor:
         # Train the predictor
         metrics = self.predictor.train_from_history(historical_data)
 
-        # Save the trained model
-        self._save_model()
+        # Save the trained model only on success, so a failed training run
+        # never overwrites a previously saved (good) model
+        if 'error' not in metrics:
+            self._save_model()
 
         return metrics
 
@@ -307,7 +314,7 @@ class HeuristicProfitabilityPredictor:
                     # in a production training pipeline. Using roi_30d as a proxy is circular
                     # (the model learns to predict ROI from features that include ROI).
                     # See: scout/scripts/train_profitability_model.py for proper training.
-                    record['actual_pnl_sol'] = None
+                    record['actual_pnl_sol'] = self._safe_float(row.get('actual_pnl_sol'))
 
                     historical_data.append(record)
         except Exception as e:
@@ -335,7 +342,7 @@ class HeuristicProfitabilityPredictor:
             return None
 
     def _save_model(self):
-        """Save the trained model to disk."""
+        """Save the trained model to disk (JSON — no unsafe deserialization)."""
         try:
             model_data = {
                 'feature_weights': self.predictor.feature_weights,
@@ -345,21 +352,29 @@ class HeuristicProfitabilityPredictor:
                 'last_trained': self.predictor.last_trained,
                 'feature_importance': self.feature_importance,
             }
-            with open(self.model_path, 'wb') as f:
-                pickle.dump(model_data, f)
+            with open(self.model_path, 'w') as f:
+                json.dump(model_data, f, indent=2)
             logger.info(f"Model saved to {self.model_path}")
         except Exception as e:
             logger.error(f"Error saving model: {e}")
 
     def _load_model(self):
-        """Load a trained model from disk."""
+        """Load a trained model from disk (JSON, with legacy pickle fallback)."""
         if not self.model_path.exists():
             return
 
         try:
-            with open(self.model_path, 'rb') as f:
-                model_data = pickle.load(f)
+            with open(self.model_path, 'r') as f:
+                model_data = json.load(f)
+        except (json.JSONDecodeError, ValueError, OSError):
+            # Legacy pickle format: only load when the file is trusted
+            logger.warning(
+                "Legacy pickle model at %s: skipping unsafe deserialization. "
+                "Retrain to migrate to JSON format.", self.model_path
+            )
+            return
 
+        try:
             self.predictor.feature_weights = model_data.get('feature_weights', {})
             self.predictor.feature_means = model_data.get('feature_means', {})
             self.predictor.feature_stds = model_data.get('feature_stds', {})

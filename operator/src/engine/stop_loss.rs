@@ -1,7 +1,7 @@
 //! Hard and dynamic stop-loss system
 //!
 //! Implements:
-//! - Hard stop-loss at -15% (never let losses run)
+//! - Hard stop-loss at -25% (never let losses run)
 //! - Dynamic stops (tighter for low-WQS wallets, wider for high-WQS)
 //! - Portfolio-level stop (pause all trading if daily loss >5%)
 //! - ATR-based stop-loss optimization with market regime adjustment
@@ -37,12 +37,20 @@ impl MarketRegime {
     }
 
     /// Parse from string (for config loading)
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_regime(s: &str) -> Self {
         match s.to_uppercase().as_str() {
             "BULL" => MarketRegime::Bull,
             "BEAR" => MarketRegime::Bear,
             "VOLATILE" => MarketRegime::Volatile,
-            _ => MarketRegime::Neutral,
+            other => {
+                // A config typo silently mapping to Neutral hides the error —
+                // surface it so the operator notices.
+                tracing::warn!(
+                    value = other,
+                    "Unknown market regime in config — defaulting to NEUTRAL"
+                );
+                MarketRegime::Neutral
+            }
         }
     }
 }
@@ -86,46 +94,31 @@ impl StopLossManager {
         *self.signal_aggregator.write().await = Some(agg);
     }
 
-    /// Calculate ATR (Average True Range) from price history
+    /// Calculate ATR (Average True Range) from a close-price series.
     ///
-    /// ATR measures market volatility by analyzing the range of price movements
-    /// over a specified period. Used for dynamic stop-loss calculation.
+    /// The input is a close-price series only (no OHLC bars), so the per-period
+    /// range is the close-to-close move — a proxy for True Range. Only the
+    /// last `period` samples define the lookback window.
     pub fn calculate_atr(&self, price_history: &[Decimal], period: usize) -> Option<Decimal> {
-        if price_history.len() < period {
+        if period == 0 || price_history.len() < period + 1 {
             return None;
         }
 
-        let mut true_ranges = Vec::with_capacity(price_history.len() - 1);
-
-        // Calculate True Range for each period
-        for i in 1..price_history.len() {
-            let high = price_history[i];
-            let low = price_history[i];
-            let prev_close = price_history[i - 1];
-
-            // True Range = max(high - low, abs(high - prev_close), abs(low - prev_close))
-            let tr = (high - low)
-                .abs()
-                .max((high - prev_close).abs())
-                .max((low - prev_close).abs());
-
-            true_ranges.push(tr);
+        // Only the last `period` closes participate: with closes-only data the
+        // per-period range is |close_i - close_{i-1}|.
+        let window = &price_history[price_history.len() - period - 1..];
+        let mut ranges = Vec::with_capacity(period);
+        for pair in window.windows(2) {
+            ranges.push((pair[1] - pair[0]).abs());
         }
 
-        // Calculate ATR as average of true ranges
-        if true_ranges.is_empty() {
-            return None;
-        }
-
-        let sum: Decimal = true_ranges.iter().sum();
-        let atr = sum / Decimal::from(true_ranges.len());
-
-        Some(atr)
+        let sum: Decimal = ranges.iter().sum();
+        Some(sum / Decimal::from(ranges.len()))
     }
 
     /// Get current market regime from configuration
     pub fn get_market_regime(&self) -> MarketRegime {
-        MarketRegime::from_str(&self.config.market_regime)
+        MarketRegime::parse_regime(&self.config.market_regime)
     }
 
     /// Calculate ATR-based stop-loss price
@@ -202,8 +195,11 @@ impl StopLossManager {
                 price
             }
             None => {
-                // No cached price at all — check if this is a tracked token with a stale feed
-                if self.price_cache.is_price_stale(token_address) {
+                // No cached price at all — check if this is a tracked token with a stale feed.
+                // is_tracked_price_stale only reports staleness for tokens that are actually
+                // being tracked, so this branch fires exactly when a tracked token's feed
+                // has gone silent (>90s) — the force-exit safety net.
+                if self.price_cache.is_tracked_price_stale(token_address) {
                     tracing::error!(
                         trade_uuid = %trade_uuid,
                         token_address = token_address,
@@ -239,7 +235,8 @@ impl StopLossManager {
 
         let elapsed_secs = chrono::Utc::now()
             .signed_duration_since(entry_time)
-            .num_seconds();
+            .num_seconds()
+            .max(0); // Clock-skew guard: a future-dated entry must not suppress stops indefinitely
         let is_hard_stop = loss_percent <= dec!(-25);
 
         // Recovery Gate: after wick protection + buffer (~90s), if the position
@@ -262,36 +259,64 @@ impl StopLossManager {
             return StopLossAction::Exit;
         }
 
-        // Get wallet WQS for dynamic stop calculation
+        // Get wallet WQS for dynamic stop calculation.
+        // A DB failure is distinguished from a missing score: both fall back
+        // to the neutral 50.0, but the error is surfaced so an operator
+        // watching stop behavior can tell the dynamic stop is on defaults.
         let wallet_opt = self.db.get_wallet(wallet_address).await;
         let wqs: f64 = match wallet_opt {
             Ok(Some(w)) => w
                 .wqs_score
                 .map(|s| s.to_f64().unwrap_or(50.0))
                 .unwrap_or(50.0),
-            _ => 50.0,
+            Ok(None) => 50.0,
+            Err(e) => {
+                tracing::warn!(
+                    trade_uuid = %trade_uuid,
+                    wallet_address = %wallet_address,
+                    error = %e,
+                    "Failed to fetch wallet for dynamic stop — using default WQS 50"
+                );
+                50.0
+            }
         };
 
         // Check if this is a consensus signal — read from SignalAggregator in-memory cache
         // (O(1), no DB query per position per 5-second tick).
         let is_consensus = {
-            let agg_guard = self.signal_aggregator.read().await;
-            if let Some(ref agg) = *agg_guard {
+            // Clone the Arc under a short-lived guard and drop the guard before
+            // awaiting: the in-memory check (and the DB fallback) must not hold
+            // the signal_aggregator write lock open across an await.
+            let agg = { self.signal_aggregator.read().await.clone() };
+            if let Some(ref agg) = agg {
                 agg.is_consensus_token(token_address).await
             } else {
                 // Fallback: DB query when in-memory aggregator is not wired
                 let count = match self.db.pool() {
                     crate::db_abstraction::DbPool::PostgreSQL(ref pool) => {
-                        let c: i64 = sqlx::query_scalar(
+                        let c: i64 = match sqlx::query_scalar(
                             "SELECT COUNT(DISTINCT wallet_address) FROM signal_aggregation WHERE token_address = $1 AND created_at >= NOW() - INTERVAL '5 minutes'",
                         )
                         .bind(token_address)
                         .fetch_one(pool)
                         .await
-                        .unwrap_or(0);
+                        {
+                            Ok(c) => c,
+                            Err(e) => {
+                                // A DB failure must not silently read as "no
+                                // consensus" — that would tighten stops during
+                                // exactly the outage when widening matters.
+                                tracing::error!(
+                                    trade_uuid = %trade_uuid,
+                                    token_address = %token_address,
+                                    error = %e,
+                                    "Failed to query consensus for stop-loss; treating as no consensus"
+                                );
+                                0
+                            }
+                        };
                         c >= 2
                     }
-                    _ => false,
                 };
                 count
             }
@@ -333,30 +358,35 @@ impl StopLossManager {
 
         // Adaptive stop-loss: adjust based on token volatility (ATR-like calculation).
         // If token is highly volatile, widen stops to avoid getting wicked out.
-        if let Some(volatility) = self.price_cache.calculate_volatility(token_address) {
-            // Volatility is returned as percentage (e.g., 15.0 = 15%)
-            // If volatility > 20%, widen stop by 1.5x
-            // If volatility > 30%, widen stop by 2x
-            // If volatility < 10%, tighten stop by 0.9x
-            let volatility_multiplier = if volatility > 30.0 {
-                dec!(2.0)
-            } else if volatility > 20.0 {
-                dec!(1.5)
-            } else if volatility < 10.0 {
-                dec!(0.9)
-            } else {
-                Decimal::ONE
-            };
+        // Skipped when atr_stop_loss_enabled: the ATR override above already
+        // applies this same volatility reading — applying it a second time
+        // would compound one signal into two adjustments.
+        if !self.config.atr_stop_loss_enabled {
+            if let Some(volatility) = self.price_cache.calculate_volatility(token_address) {
+                // Volatility is returned as percentage (e.g., 15.0 = 15%)
+                // If volatility > 20%, widen stop by 1.5x
+                // If volatility > 30%, widen stop by 2x
+                // If volatility < 10%, tighten stop by 0.9x
+                let volatility_multiplier = if volatility > 30.0 {
+                    dec!(2.0)
+                } else if volatility > 20.0 {
+                    dec!(1.5)
+                } else if volatility < 10.0 {
+                    dec!(0.9)
+                } else {
+                    Decimal::ONE
+                };
 
-            stop_loss_threshold *= volatility_multiplier;
+                stop_loss_threshold *= volatility_multiplier;
 
-            tracing::debug!(
-                trade_uuid = %trade_uuid,
-                token_address = token_address,
-                volatility_percent = volatility,
-                adjusted_threshold = %stop_loss_threshold,
-                "Adaptive stop-loss adjusted based on volatility"
-            );
+                tracing::debug!(
+                    trade_uuid = %trade_uuid,
+                    token_address = token_address,
+                    volatility_percent = volatility,
+                    adjusted_threshold = %stop_loss_threshold,
+                    "Adaptive stop-loss adjusted based on volatility"
+                );
+            }
         }
 
         // Widen stop-loss for consensus signals (applied after volatility).
@@ -404,7 +434,7 @@ impl StopLossManager {
             if elapsed_secs < self.config.wick_protection_secs as i64 {
                 // Hard stop at -25% always bypasses wick protection — a 25%+ crash
                 // in the first seconds is never "normal entry slippage."
-                if loss_percent <= dec!(-25) {
+                if is_hard_stop {
                     tracing::warn!(
                         trade_uuid = %trade_uuid,
                         token_address = token_address,

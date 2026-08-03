@@ -13,6 +13,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 // Pre-computed Redis key prefix constant
+#[cfg(feature = "redis-cache")]
 const METADATA_KEY_PREFIX: &str = "metadata:";
 
 /// Cache entry with timestamp for TTL checking

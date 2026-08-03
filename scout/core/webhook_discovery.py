@@ -131,16 +131,21 @@ class WebhookReceiver:
         async def receive_webhook(request: Request):
             """Receive webhook events from Helius."""
             try:
-                # Verify HMAC signature if secret is configured
-                if self.webhook_secret:
-                    await self._verify_signature(request)
+                # Fail CLOSED when no secret is configured: the endpoint is
+                # publicly reachable, so unauthenticated events must be rejected
+                if not self.webhook_secret:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Webhook secret not configured",
+                    )
+                await self._verify_signature(request)
 
                 # Parse JSON payload
                 payload = await request.json()
 
-                # Queue event for processing
+                # Queue event for processing (derive the type from the payload)
                 event = WebhookEvent(
-                    event_type=WebhookEventType.TRANSACTION,
+                    event_type=self._detect_event_type(payload),
                     timestamp=time.time(),
                     signature=payload.get("signature", ""),
                     data=payload,
@@ -163,9 +168,41 @@ class WebhookReceiver:
                     content={"status": "accepted", "message": "Event queued for processing"}
                 )
 
+            except HTTPException:
+                # Re-raise signature/verification failures with their original
+                # status (401/503) instead of collapsing them to 400
+                raise
             except Exception as e:
                 logger.error(f"[WebhookReceiver] Error processing webhook: {e}")
                 raise HTTPException(status_code=400, detail=str(e))
+
+    def _detect_event_type(self, payload: Dict[str, Any]) -> WebhookEventType:
+        """Derive the event type from the payload instead of hardcoding TRANSACTION."""
+        event_type = payload.get("type")
+        if isinstance(event_type, str):
+            mapping = {
+                "SWAP": WebhookEventType.SWAP,
+                "TRANSFER": WebhookEventType.TRANSFER,
+                "TRANSACTION": WebhookEventType.TRANSACTION,
+                "ACCOUNT": WebhookEventType.ACCOUNT,
+                "COMPRESSED_NFT": WebhookEventType.COMPRESSED_NFT,
+                "COMPRESSEDNFT": WebhookEventType.COMPRESSED_NFT,
+                "TOKEN": WebhookEventType.TOKEN,
+            }
+            matched = mapping.get(event_type.upper())
+            if matched is not None:
+                return matched
+
+        # Infer from fields
+        events = payload.get("events") or {}
+        if isinstance(events, dict) and events.get("swap"):
+            return WebhookEventType.SWAP
+        if payload.get("tokenTransfers") or payload.get("nativeTransfers"):
+            return WebhookEventType.TRANSACTION
+        if "nft" in str(event_type or "").lower():
+            return WebhookEventType.COMPRESSED_NFT
+
+        return WebhookEventType.TRANSACTION
 
         @self.app.get("/health")
         async def health_check():
@@ -271,7 +308,12 @@ class EventProcessor:
                 for _ in range(self.max_workers)
             ]
 
-            # Wait for all workers to complete
+            # Signal workers to stop BEFORE awaiting gather: each worker loops
+            # `while self.processing`, so without this the gather would never
+            # return (and final stats would never be computed)
+            self.processing = False
+
+            # Wait for all workers to drain and exit
             await asyncio.gather(*tasks, return_exceptions=True)
 
         except Exception as e:
@@ -366,7 +408,10 @@ class EventProcessor:
                         ))
 
         except Exception as e:
+            # Extraction failures must reach the worker's error path so
+            # stats["failed"] reflects them instead of counting as successes
             logger.error(f"[EventProcessor] Error extracting wallets: {e}")
+            raise
 
         return wallets
 
@@ -425,6 +470,7 @@ class QualityFilter:
         """Initialize the quality filter."""
         self.min_quality_score = float(os.getenv("SCOUT_MIN_QUALITY_SCORE", "20.0"))
         self.min_trades = int(os.getenv("SCOUT_MIN_TRADES", "3"))
+        self.require_recent_activity = os.getenv("SCOUT_REQUIRE_RECENT_ACTIVITY", "false").lower() == "true"
 
     async def assess_wallet_quality(
         self,
@@ -442,8 +488,15 @@ class QualityFilter:
         if "webhook" in wallet.discovery_source:
             score += 30.0
 
+        # Trade-count gate: wallets below the configured minimum are not
+        # eligible regardless of other signals
+        if self.min_trades > 0 and wallet.trade_count < self.min_trades:
+            return 0.0
+
         # Bonus for recent activity
         time_since_discovery = time.time() - wallet.discovery_timestamp
+        if self.require_recent_activity and time_since_discovery > 86400:
+            return 0.0  # Stale wallet: rejected when recent activity is required
         if time_since_discovery < 3600:  # Within 1 hour
             score += 20.0
         elif time_since_discovery < 86400:  # Within 1 day
@@ -474,7 +527,8 @@ class QualityFilter:
         min_score: Optional[float] = None
     ) -> List[DiscoveredWallet]:
         """Filter wallets by minimum quality score."""
-        min_score = min_score or self.min_quality_score
+        # Explicit None check: an explicit 0 (accept everything) is honored
+        min_score = self.min_quality_score if min_score is None else min_score
 
         filtered = []
         for wallet in wallets:

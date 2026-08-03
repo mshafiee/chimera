@@ -16,11 +16,11 @@ Target: Grow from $200 to $1,000 to afford Helius Business Plan upgrade
 
 import time
 import logging
-from typing import Dict, List, Optional, Any, Set
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
 import threading
-from collections import deque
+from collections import deque, OrderedDict
 
 logger = logging.getLogger(__name__)
 
@@ -160,8 +160,11 @@ class RealtimeProfitTracker:
         # Last velocity calculation
         self._last_velocity: Optional[ProfitVelocity] = None
 
-        # Trade ID deduplication set
-        self._seen_trade_ids: Set[str] = set()
+        # Trade ID deduplication — FIFO bounded so the OLDEST ids are evicted.
+        # A plain set + slicing is unordered, so it can evict recently-seen ids
+        # and cause double counting once volume exceeds the cap.
+        self._seen_trade_ids: OrderedDict[str, None] = OrderedDict()
+        self._max_seen_trade_ids = 5000
 
         logger.info(f"RealtimeProfitTracker initialized: ${self._current_capital:.2f}")
 
@@ -181,7 +184,7 @@ class RealtimeProfitTracker:
         with self._lock:
             if trade_id in self._seen_trade_ids:
                 return
-            self._seen_trade_ids.add(trade_id)
+            self._seen_trade_ids[trade_id] = None
 
             now = timestamp if timestamp is not None else time.time()
 
@@ -226,6 +229,11 @@ class RealtimeProfitTracker:
                 band = self._get_wqs_band(wqs)
                 self._wqs_band_roi[band]['profit'] += pnl
                 self._wqs_band_roi[band]['trades'] += 1
+
+            # Bound the dedup map FIFO so it doesn't grow without bound.
+            # Evict the oldest inserted ids, not an arbitrary subset.
+            while len(self._seen_trade_ids) > self._max_seen_trade_ids:
+                self._seen_trade_ids.popitem(last=False)
 
             logger.debug(
                 f"Updated profit: ${pnl:+.2f} -> Total: ${self._current_capital:.2f} "
@@ -539,8 +547,12 @@ class RealtimeProfitTracker:
             data = self._wqs_band_roi[band]
             avg_pnl = data['profit'] / max(1, data['trades'])
 
-            # Calculate win rate from trade history
-            band_trades = [t for t in self._trade_history if self._get_wqs_band(t.get('wqs', 0)) == band]
+            # Calculate win rate from trade history (trades with unknown WQS
+            # are excluded — comparing None against bands would raise)
+            band_trades = [
+                t for t in self._trade_history
+                if t.get('wqs') is not None and self._get_wqs_band(t['wqs']) == band
+            ]
             wins = sum(1 for t in band_trades if t.get('win', False)) if band_trades else 0
             win_rate = wins / len(band_trades) if band_trades else 0.0
 
@@ -613,4 +625,10 @@ class RealtimeProfitTracker:
             self._peak_capital = new_capital
             self._profit_history.clear()
             self._trade_history.clear()
+            # Clear all derived state so replayed trades are not silently
+            # dropped and stale ROI/velocity don't pollute the new run
+            self._seen_trade_ids.clear()
+            self._category_roi.clear()
+            self._wqs_band_roi = {k: {'profit': 0.0, 'trades': 0} for k in self._wqs_band_roi}
+            self._last_velocity = None
             logger.info(f"Reset tracker to capital: ${new_capital:.2f}")

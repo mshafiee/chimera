@@ -78,6 +78,10 @@ bump_version() {
   fi
 
   if [ "$final" = true ]; then
+    if [ -z "$pre_id" ]; then
+      echo "ERROR: --final requires a pre-release version (e.g. 1.1.0-beta.1)" >&2
+      exit 1
+    fi
     echo "${major}.${minor}.${patch}"
     return
   fi
@@ -90,7 +94,11 @@ bump_version() {
       minor=$((minor + 1)); patch=0
       ;;
     patch)
-      patch=$((patch + 1))
+      if [ -n "$pre" ] && [ "$pre_id" = "$pre" ] && [ -n "$pre_num" ]; then
+        : # continue existing pre-release series; keep base version
+      else
+        patch=$((patch + 1))
+      fi
       ;;
   esac
 
@@ -165,7 +173,7 @@ for doc_file in \
 do
   if [ -f "$doc_file" ]; then
     set_version "$doc_file" \
-      '|**Version:** [0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*|**Version:** '"$NEXT"'|' \
+      '|\*\*Version:\*\* [0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*|\*\*Version:\*\* '"$NEXT"'|' \
       ""
     echo "  Updated $(basename "$doc_file")"
   else
@@ -195,6 +203,10 @@ if [ -n "$CHANGES" ]; then
   FIXES=$(echo "$CHANGES" | grep -E '^fix' | sed 's/^/  - /' || true)
   CHANGED=$(echo "$CHANGES" | grep -E '^(perf|refactor|build|ci)' | sed 's/^/  - /' || true)
 
+  if [ -z "$FEATS$FIXES$CHANGED" ]; then
+    echo "No categorized conventional commits found; skipping CHANGELOG generation"
+  else
+
   ENTRY="## [${NEXT}] - $(date +%Y-%m-%d)
 
 "
@@ -217,7 +229,7 @@ ${CHANGED}
 "
   fi
 
-  if [ -n "$PRE_RELEASE" ] || [ "$FINAL" = true ]; then
+  if [ -n "$PRE_RELEASE" ]; then
     ENTRY="${ENTRY}_Pre-release ${NEXT}_
 "
   fi
@@ -231,13 +243,14 @@ ${CHANGED}
     printf "# Changelog\n\n%s" "$ENTRY" > "$CHANGELOG_FILE"
   fi
   echo "CHANGELOG entry added for $NEXT"
+  fi
 else
   echo "No conventional commits found since last tag; skipping CHANGELOG generation"
 fi
 
 echo ""
 echo "Committing and tagging..."
-git -C "$ROOT_DIR" add -A
+git -C "$ROOT_DIR" add   "$VERSION_FILE"   "$ROOT_DIR/operator/Cargo.toml"   "$ROOT_DIR/web/package.json"   "$ROOT_DIR/scout/pyproject.toml"   "$ROOT_DIR/scout/_version.py"   "$ROOT_DIR/config/config.yaml"   "$CHANGELOG_FILE"   "$ROOT_DIR/README.md"   "$ROOT_DIR/docs/core/pdd.md"   "$ROOT_DIR/docs/monitoring/gateway-implementation-summary.md"   "$ROOT_DIR/docs/monitoring/access-guide.md"   "$ROOT_DIR/docs/operations/security-audit.md"   "$ROOT_DIR/docs/guides/scout-user-guide.md"   "$ROOT_DIR/docs/guides/scout-deployment-guide.md"
 git -C "$ROOT_DIR" commit -m "chore(release): v${NEXT}"
 git -C "$ROOT_DIR" tag -a "v${NEXT}" -m "Release v${NEXT}"
 

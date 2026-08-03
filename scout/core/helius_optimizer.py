@@ -158,7 +158,6 @@ class HeliusOptimizer:
         self._stats = {
             'requests_processed': 0,
             'requests_failed': 0,
-            'credits_saved': 0,
             'batches_processed': 0,
         }
 
@@ -168,8 +167,19 @@ class HeliusOptimizer:
         logger.info(f"  Target capital: ${self._target_capital:.0f}")
         logger.info(f"  Request batching: {self._enable_batching}")
 
+    def _rollover_daily_budget(self) -> None:
+        """Reset the daily credit counter when a new day starts."""
+        if time.time() - self._day_start_time >= 86400:
+            self._credits_used_today = 0
+            self._day_start_time = time.time()
+            logger.info("Daily credit budget rolled over")
+
     def _can_make_request(self, cost: int) -> bool:
         """Check if we can make a request given current constraints."""
+        # Roll over the daily budget when a new day starts so the counter
+        # never permanently refuses all work after ~24h of runtime
+        self._rollover_daily_budget()
+
         # Check rate limit
         if not self._check_rate_limit():
             return False
@@ -190,10 +200,10 @@ class HeliusOptimizer:
 
         return current_rps < self._max_requests_per_second
 
-    def _wait_for_rate_limit(self):
-        """Wait until we can make a request."""
+    async def _wait_for_rate_limit(self):
+        """Wait until we can make a request (async — never blocks the loop)."""
         while not self._check_rate_limit():
-            time.sleep(0.1)
+            await asyncio.sleep(0.1)
 
     def queue_request(self, request_type: RequestType, callback: Callable,
                     priority: GrowthPriority = GrowthPriority.MEDIUM,
@@ -232,20 +242,27 @@ class HeliusOptimizer:
         return True
 
     def _should_process_request(self, request: QueuedRequest) -> bool:
-        """Determine if a request should be processed."""
+        """Determine if a request should be processed.
+
+        Only budget/expiry checks happen here — RATE LIMITING is handled by
+        `_wait_for_rate_limit` at execution time, so a momentarily saturated
+        1-second window never permanently drops valid queued work.
+        """
         # Check if expired
         if request.is_expired:
             logger.debug(f"Request expired: {request.request_type.value}")
             return False
 
-        # Check credit availability
-        if not self._can_make_request(request.credit_cost):
+        # Check credit availability (this also rolls the daily budget over)
+        self._rollover_daily_budget()
+        remaining_budget = self.DAILY_CREDIT_TARGET - self._credits_used_today
+        if remaining_budget < request.credit_cost:
             return False
 
         # Growth optimization: prioritize high-growth requests
         if self._growth_optimized:
             # Skip low-growth requests when budget is tight
-            budget_ratio = (self.DAILY_CREDIT_TARGET - self._credits_used_today) / self.DAILY_CREDIT_TARGET
+            budget_ratio = remaining_budget / self.DAILY_CREDIT_TARGET
 
             if budget_ratio < 0.3 and request.priority == GrowthPriority.LOW:
                 return False
@@ -283,7 +300,7 @@ class HeliusOptimizer:
 
             try:
                 # Wait for rate limit if needed
-                self._wait_for_rate_limit()
+                await self._wait_for_rate_limit()
 
                 # Execute request
                 if asyncio.iscoroutinefunction(request.callback):
@@ -327,12 +344,15 @@ class HeliusOptimizer:
         if not self._enable_batching:
             results = []
             for request_type, callback, args, kwargs in requests:
-                self._wait_for_rate_limit()
+                await self._wait_for_rate_limit()
                 try:
                     if asyncio.iscoroutinefunction(callback):
                         result = await callback(*args, **kwargs)
                     else:
                         result = callback(*args, **kwargs)
+                    # Record rate-limit + credit accounting for this request
+                    self._request_times.append(time.time())
+                    self._credits_used_today += self.CREDIT_COSTS.get(request_type, 10)
                     results.append(result)
                 except Exception as e:
                     logger.warning(f"Batch request failed: {e}")
@@ -379,13 +399,17 @@ class HeliusOptimizer:
         results = []
 
         for callback, args, kwargs in group:
-            self._wait_for_rate_limit()
+            await self._wait_for_rate_limit()
 
             try:
                 if asyncio.iscoroutinefunction(callback):
                     result = await callback(*args, **kwargs)
                 else:
                     result = callback(*args, **kwargs)
+                # Keep the rate-limit ledger and daily budget accurate for
+                # every executed request (not just process_queue)
+                self._request_times.append(time.time())
+                self._credits_used_today += self.CREDIT_COSTS.get(request_type, 10)
                 results.append(result)
             except Exception as e:
                 logger.warning(f"Batch item failed: {e}")
@@ -395,7 +419,7 @@ class HeliusOptimizer:
 
     async def _execute_single(self, callback: Callable, args: tuple, kwargs: dict) -> Any:
         """Execute a single request."""
-        self._wait_for_rate_limit()
+        await self._wait_for_rate_limit()
 
         try:
             if asyncio.iscoroutinefunction(callback):
@@ -444,13 +468,16 @@ class HeliusOptimizer:
         """
         budget_ratio = (self.DAILY_CREDIT_TARGET - self._credits_used_today) / self.DAILY_CREDIT_TARGET
 
-        # Reduce discovery depth when budget is tight
+        # Reduce discovery depth when budget is tight.
+        # Clamp so the result never EXCEEDS the input (with a small depth,
+        # max(current//2, 24) would increase the lookback exactly when the
+        # budget is tight).
         if budget_ratio > 0.5:
             return current_depth_hours
         elif budget_ratio > 0.3:
-            return max(current_depth_hours // 2, 24)  # At least 24 hours
+            return min(current_depth_hours, max(current_depth_hours // 2, 24))
         else:
-            return max(current_depth_hours // 4, 4)  # At least 4 hours
+            return min(current_depth_hours, max(current_depth_hours // 4, 4))
 
     def get_growth_allocation(self, wallet_predictions: List[Tuple[str, float]]) -> Dict[str, float]:
         """

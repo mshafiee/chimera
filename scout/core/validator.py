@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Dict, List, Optional
+import asyncio
 import logging
 
 from .models import (
@@ -339,7 +340,11 @@ class PrePromotionValidator:
         # applies the gate. Mirrors selection gates: BUY decisions only.
         try:
             from core.db import execute_and_fetchone
-            _row = execute_and_fetchone(
+            # Sync DB call — offload so the event loop isn't blocked per wallet
+            loop = asyncio.get_running_loop()
+            _row = await loop.run_in_executor(
+                None,
+                execute_and_fetchone,
                 """
                 SELECT COUNT(*) AS total,
                        COUNT(*) FILTER (WHERE admitted) AS admitted
@@ -487,6 +492,31 @@ class PrePromotionValidator:
                     f"risky_tokens=0 total_tokens={len(trades)} PASS"
                 )
 
+        # Re-evaluate the trade-count gates against the RugCheck-FILTERED list.
+        # A wallet must not be fast-tracked (or promoted) with fewer verified
+        # trades than the criteria require.
+        if fast_track and len(trades) < self.criteria.fast_track_min_trades:
+            logger.info(
+                f"[Validator] gate=fast_track addr={wallet_address} "
+                f"fast_track revoked: only {len(trades)} safe trades "
+                f"< {self.criteria.fast_track_min_trades} required"
+            )
+            fast_track = False
+
+        if not fast_track and len(trades) < self.criteria.min_trades:
+            logger.info(
+                f"[Validator] gate=min_trades(rugcheck-filtered) addr={wallet_address} "
+                f"trades={len(trades)} min_trades={self.criteria.min_trades} FAIL"
+            )
+            return ValidationResult(
+                wallet_address=wallet_address,
+                status=ValidationStatus.FAILED_INSUFFICIENT_TRADES,
+                passed=False,
+                reason=f"Insufficient verified trades after RugCheck filtering: {len(trades)} < {self.criteria.min_trades}",
+                recommended_status="CANDIDATE",
+                notes="Too many trades removed by token safety filtering",
+            )
+
         # Fast-track promotion: WQS above threshold with at least 1 trade
         # and no RugCheck rejection → promote immediately.
         if fast_track:
@@ -580,9 +610,12 @@ class PrePromotionValidator:
                     "falling back to full-set validation with penalty — result may be overfit",
                     wallet_address[:8], len(wf_closes), self.criteria.walk_forward_min_trades,
                 )
-                # Apply penalty: require higher WQS when walk-forward is skipped
-                effective_min_wqs = self.criteria.min_wqs_score + self.criteria.walk_forward_fallback_penalty
-                if wqs_score < effective_min_wqs:
+                # Apply penalty: require higher WQS when walk-forward is skipped.
+                # The penalty applies to the ARCHETYPE-AWARE threshold (with the
+                # momentum boost), matching the gate the wallet already passed —
+                # not the raw base threshold.
+                effective_min_wqs = archetype_threshold + self.criteria.walk_forward_fallback_penalty
+                if boosted_wqs_score < effective_min_wqs:
                     logger.info(
                         f"[Validator] gate=wf_fallback_wqs addr={wallet_address} "
                         f"wqs={wqs_score:.1f} threshold={effective_min_wqs:.1f} "
@@ -593,7 +626,7 @@ class PrePromotionValidator:
                         wallet_address=wallet_address,
                         status=ValidationStatus.FAILED_WQS,
                         passed=False,
-                        reason=f"WQS {wqs_score:.1f} below adjusted threshold {effective_min_wqs:.1f} (walk-forward unavailable, {self.criteria.walk_forward_fallback_penalty}pt penalty applied)",
+                        reason=f"Boosted WQS {boosted_wqs_score:.1f} below adjusted threshold {effective_min_wqs:.1f} (walk-forward unavailable, {self.criteria.walk_forward_fallback_penalty}pt penalty applied)",
                         recommended_status="CANDIDATE",
                         notes=f"Walk-forward skipped; WQS must be >= {effective_min_wqs:.1f} without OOS validation",
                     )
@@ -646,7 +679,18 @@ class PrePromotionValidator:
                         f"rejected={is_result.rejected_trades} PASS"
                     )
             except Exception as e:
-                logger.warning(f"In-sample backtest error (non-fatal): {e}")
+                # The in-sample gate is part of the anti-curve-fitting defense:
+                # if it cannot be evaluated, FAIL CLOSED instead of silently
+                # proceeding to the OOS gates.
+                logger.error(f"In-sample simulation error (fatal): {e}")
+                return ValidationResult(
+                    wallet_address=wallet_address,
+                    status=ValidationStatus.ERROR,
+                    passed=False,
+                    reason=f"In-sample validation error: {str(e)}",
+                    recommended_status="CANDIDATE",
+                    notes="In-sample gate could not be evaluated — wallet not promoted",
+                )
 
         # Step 4: Run backtest simulation (on walk-forward OOS set if enabled)
         try:
@@ -951,9 +995,13 @@ class PrePromotionValidator:
                 if metrics.avg_hold_time_hours < self.criteria.min_avg_hold_time_hours:
                     return False
 
-        # Check WQS
+        # Check WQS (archetype-aware threshold with momentum boost, matching
+        # the full validator's gate — the base threshold would reject wallets
+        # the main gate would accept)
         wqs = calculate_wqs(metrics)
-        if wqs < self.criteria.min_wqs_score:
+        archetype_threshold = self._get_archetype_threshold(getattr(metrics, 'archetype', None))
+        boosted_wqs = self._apply_momentum_boost(wqs, getattr(metrics, 'trajectory', None))
+        if boosted_wqs < archetype_threshold:
             return False
 
         # Check trade count

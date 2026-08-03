@@ -30,6 +30,10 @@ pub struct KellyResult {
     pub recommended_size_percent: Decimal,
     /// Win rate (0.0-1.0, using Decimal for precision)
     pub win_rate: Decimal,
+    /// Empirical loss rate (loss_count / total valid trades, 0.0-1.0).
+    /// Break-even trades are counted in the total but in neither win nor loss,
+    /// so `loss_rate` is NOT `1 - win_rate`.
+    pub loss_rate: Decimal,
     /// Average win amount (using Decimal for precision)
     pub avg_win: Decimal,
     /// Average loss amount (using Decimal for precision)
@@ -38,6 +42,21 @@ pub struct KellyResult {
     pub trade_count: usize,
     /// Velocity multiplier based on trade frequency
     pub velocity_multiplier: Decimal,
+}
+
+/// Growth-optimal Kelly fraction for per-trade return percentages.
+///
+/// `f* = (p·avg_win − q·avg_loss) / (avg_win·avg_loss)`.
+///
+/// This is the classic edge/odds form `(p·b − q)/b` only when a losing trade
+/// costs the whole stake (avg_loss = 1). With partial losses the growth-optimal
+/// allocation is a factor `1/avg_loss` larger. Result is unbounded; callers
+/// clamp to their risk envelope.
+fn compute_full_kelly(p: Decimal, q: Decimal, avg_win: Decimal, avg_loss: Decimal) -> Decimal {
+    if avg_win.is_zero() || avg_loss.is_zero() {
+        return Decimal::ZERO;
+    }
+    (p * avg_win - q * avg_loss) / (avg_win * avg_loss)
 }
 
 impl KellySizer {
@@ -167,22 +186,17 @@ impl KellySizer {
             (sum / Decimal::from(losses.len())).max(dec!(0.01))
         };
 
-        // Calculate Kelly Criterion using the standard edge/odds form:
-        //   k = (p * b - q) / b   where b = avg_win / avg_loss (win/loss ratio)
-        // This is mathematically equivalent to the fractional-return form but
-        // makes the odds-ratio (b) and edge explicit for auditability.
+        // Calculate Kelly Criterion for fractional per-trade returns:
+        //   f* = (p * avg_win - q * avg_loss) / (avg_win * avg_loss)
+        // avg_win/avg_loss are per-trade return fractions (pnl / amount_sol),
+        // NOT full-stake odds, so the classic (p*b - q)/b form (which assumes a
+        // loss costs the whole stake) would under-allocate by ~1/avg_loss.
         // Hard-cap full_kelly at 0.5 (50%): even wallets with extreme edges must
         // never risk more than half the bankroll on a single trade. Copy-trading
         // edge estimates are inherently unreliable — full Kelly near 100% invites ruin.
-        let full_kelly = if !avg_win.is_zero() && !avg_loss.is_zero() {
-            let b = avg_win / avg_loss;
-            let p = win_rate;
-            let q = loss_rate;
-            let k = ((p * b) - q) / b;
-            k.max(Decimal::ZERO).min(dec!(0.5))
-        } else {
-            Decimal::ZERO
-        };
+        let full_kelly = compute_full_kelly(win_rate, loss_rate, avg_win, avg_loss)
+            .max(Decimal::ZERO)
+            .min(dec!(0.5));
 
         // Trade velocity confidence: a wallet with the same win rate is statistically
         // more reliable when it generates more trades per day because each outcome is
@@ -192,31 +206,37 @@ impl KellySizer {
         //   0.5–1 trades/day  → 1.00× (neutral)
         //   1–2  trades/day   → 1.15× (good statistical depth)
         //   ≥ 2  trades/day   → 1.25× (high frequency, tighter confidence interval)
-        let true_timespan_days = if let (Some(newest), Some(oldest)) =
-            (trades.first(), trades.last())
-        {
-            let parse_time = |s: &str| -> Option<chrono::DateTime<chrono::Utc>> {
-                chrono::DateTime::parse_from_rfc3339(s)
-                    .map(|d| d.with_timezone(&chrono::Utc))
-                    .ok()
-                    .or_else(|| {
-                        let naive =
-                            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()?;
-                        Some(chrono::DateTime::from_naive_utc_and_offset(
-                            naive,
-                            chrono::Utc,
-                        ))
-                    })
-            };
-            if let (Some(newest_time), Some(oldest_time)) = (
-                parse_time(&newest.created_at),
-                parse_time(&oldest.created_at),
-            ) {
-                let span = (newest_time - oldest_time).num_seconds() as f64 / 86400.0;
-                span.min(lookback_days as f64).max(1.0)
-            } else {
-                lookback_days as f64
+        // The span is computed over the same trade set as valid_trades_count
+        // (pnl-valid rows only), taking the min/max over the returned rows so
+        // an unsorted backend cannot produce a negative/meaningless span.
+        let parse_time = |s: &str| -> Option<chrono::DateTime<chrono::Utc>> {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|d| d.with_timezone(&chrono::Utc))
+                .ok()
+                .or_else(|| {
+                    let naive = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()?;
+                    Some(chrono::DateTime::from_naive_utc_and_offset(
+                        naive,
+                        chrono::Utc,
+                    ))
+                })
+        };
+        let mut newest_time: Option<chrono::DateTime<chrono::Utc>> = None;
+        let mut oldest_time: Option<chrono::DateTime<chrono::Utc>> = None;
+        for trade in &trades {
+            if !trade.pnl_data_valid {
+                continue;
             }
+            if let Some(t) = parse_time(&trade.created_at) {
+                newest_time = Some(newest_time.map_or(t, |n| n.max(t)));
+                oldest_time = Some(oldest_time.map_or(t, |o| o.min(t)));
+            }
+        }
+        let true_timespan_days = if let (Some(newest_time), Some(oldest_time)) =
+            (newest_time, oldest_time)
+        {
+            let span = (newest_time - oldest_time).num_seconds() as f64 / 86400.0;
+            span.min(lookback_days as f64).max(1.0)
         } else {
             lookback_days as f64
         };
@@ -248,13 +268,15 @@ impl KellySizer {
         Ok(KellyResult {
             full_kelly,
             conservative_kelly,
-            // [T-H1] recommended_size_percent is simply conservative_kelly * 100 — do not
-            // divide by avg_loss here; avg_loss is already embedded in the Kelly formula.
+            // recommended_size_percent is simply conservative_kelly * 100 —
+            // avg_loss is embedded in the Kelly formula's denominator
+            // (avg_win*avg_loss), so no further division is needed here.
             recommended_size_percent: conservative_kelly * Decimal::from(100),
             win_rate,
+            loss_rate,
             avg_win,
             avg_loss,
-            trade_count: trades.len(),
+            trade_count: valid_trades_count,
             velocity_multiplier,
         })
     }
@@ -278,9 +300,9 @@ impl KellySizer {
         let kelly = self
             .calculate_kelly(wallet_address, strategy, lookback_days)
             .await?;
-        // [T-H1] Do NOT divide by avg_loss here. conservative_kelly already incorporates
-        // avg_loss through the Kelly formula: (win_rate*avg_win - loss_rate*avg_loss)/avg_win.
-        // Dividing again by avg_loss double-penalises the position size, making it far too small.
+        // Do NOT divide by avg_loss here. conservative_kelly already incorporates
+        // avg_loss through the Kelly formula denominator (avg_win*avg_loss).
+        // Dividing again by avg_loss double-penalises the position size.
         let size_sol = total_capital_sol * kelly.conservative_kelly;
         Ok(size_sol)
     }
@@ -298,10 +320,11 @@ impl KellyResult {
     /// # Returns
     /// Expected return as a decimal (e.g., 0.05 = 5%)
     pub fn expected_return_pct(&self) -> Decimal {
-        let win_rate = self.win_rate;
-        let loss_rate = Decimal::ONE - win_rate;
-        let expected_win = win_rate * self.avg_win;
-        let expected_loss = loss_rate * self.avg_loss;
+        // Use the empirical loss rate: break-even trades must not be
+        // reclassified as full average losses (`1 - win_rate` would do exactly
+        // that whenever win_rate + loss_rate < 1).
+        let expected_win = self.win_rate * self.avg_win;
+        let expected_loss = self.loss_rate * self.avg_loss;
         expected_win - expected_loss
     }
 
@@ -326,14 +349,74 @@ impl KellyResult {
 #[cfg(test)]
 mod tests {
 
+    use super::*;
+
+    #[test]
+    fn test_kelly_formula_partial_losses() {
+        // p = 0.6, avg_win = 0.1 (10%), avg_loss = 0.05 (5%).
+        // Growth-optimal allocation: f* = (0.6*0.1 - 0.4*0.05)/(0.1*0.05) = 8.0.
+        // The classic (p*b - q)/b with b = 2 would give 0.4 — a 20x under-allocation.
+        let k = compute_full_kelly(dec!(0.6), dec!(0.4), dec!(0.1), dec!(0.05));
+        assert_eq!(k, dec!(8.0));
+    }
+
+    #[test]
+    fn test_kelly_formula_full_stake_losses_reduces_to_classic() {
+        // With avg_loss = 1.0 (a loss costs the whole stake), f* reduces to the
+        // classic (p*b - q)/b form.
+        let p = dec!(0.6);
+        let q = dec!(0.4);
+        let avg_win = dec!(2.0);
+        let avg_loss = Decimal::ONE;
+        let k = compute_full_kelly(p, q, avg_win, avg_loss);
+        let classic = ((p * (avg_win / avg_loss)) - q) / (avg_win / avg_loss);
+        assert_eq!(k, classic);
+        assert_eq!(k, dec!(0.4));
+    }
+
+    #[test]
+    fn test_kelly_formula_zero_edge() {
+        // p*avg_win == q*avg_loss → zero edge → f* = 0 (no allocation).
+        let k = compute_full_kelly(dec!(0.5), dec!(0.5), dec!(0.1), dec!(0.1));
+        assert_eq!(k, Decimal::ZERO);
+        // Non-positive edge → f* <= 0 (rejected by callers).
+        let k = compute_full_kelly(dec!(0.4), dec!(0.6), dec!(0.1), dec!(0.1));
+        assert!(k < Decimal::ZERO);
+    }
+
     #[test]
     fn test_kelly_calculation() {
         // Example: 60% win rate, avg win = 10% (0.1), avg loss = 5% (0.05)
-        // b = avg_win / avg_loss = 0.1 / 0.05 = 2.0
-        // kelly = (p*b - q) / b = (0.6*2.0 - 0.4) / 2.0 = (1.2 - 0.4) / 2.0 = 0.4
-        // Hard-capped at 0.5 → 0.4 passes through
-        // Conservative (25%) = 0.10 = 10% of capital
+        // f* = (0.6*0.1 - 0.4*0.05)/(0.1*0.05) = 8.0 → hard-capped at 0.5.
+        // Conservative (25%) = 0.125 = 12.5% of capital.
+        let k = compute_full_kelly(dec!(0.6), dec!(0.4), dec!(0.1), dec!(0.05));
+        let full_capped = k.max(Decimal::ZERO).min(dec!(0.5));
+        assert_eq!(full_capped, dec!(0.5));
+        let conservative = (full_capped * dec!(0.25)).min(full_capped).min(Decimal::ONE);
+        assert_eq!(conservative, dec!(0.125));
+    }
 
-        // This would be tested with actual database in integration tests
+    #[test]
+    fn test_expected_return_uses_empirical_loss_rate() {
+        // 6 wins, 3 losses, 1 break-even out of 10 valid trades.
+        // win_rate = 0.6, loss_rate = 0.3 (NOT 0.4 — the break-even is not a loss).
+        let result = KellyResult {
+            full_kelly: dec!(0.5),
+            conservative_kelly: dec!(0.125),
+            recommended_size_percent: dec!(12.5),
+            win_rate: dec!(0.6),
+            loss_rate: dec!(0.3),
+            avg_win: dec!(0.1),
+            avg_loss: dec!(0.05),
+            trade_count: 10,
+            velocity_multiplier: Decimal::ONE,
+        };
+        let expected = dec!(0.6) * dec!(0.1) - dec!(0.3) * dec!(0.05);
+        assert_eq!(result.expected_return_pct(), expected);
+        assert_eq!(result.expected_return_pct(), dec!(0.045));
+        assert_eq!(
+            result.expected_profit_sol(dec!(1.0)),
+            dec!(0.045)
+        );
     }
 }

@@ -29,8 +29,6 @@ from enum import Enum
 import threading
 
 logger = logging.getLogger(__name__)
-
-
 class TimeOfDayQuality(Enum):
     """Quality of time for signal execution."""
     EXCELLENT = 1  # High volume, high volatility
@@ -51,9 +49,10 @@ class SignalQuality(Enum):
 class TimingConfig:
     """Configuration for timing optimization."""
 
-    # Time-of-day quality thresholds (UTC)
-    EXCELLENT_HOURS = [(14, 18), (20, 24)]  # 9AM-1PM & 4PM-8PM UTC (US market hours)
-    POOR_HOURS = [(0, 6), (10, 13)]         # Midnight-6AM & 5AM-8AM UTC
+    # Time-of-day quality thresholds (UTC) — per-instance lists so they can
+    # be configured via the constructor
+    EXCELLENT_HOURS: List[Tuple[int, int]] = field(default_factory=lambda: [(14, 18), (20, 24)])
+    POOR_HOURS: List[Tuple[int, int]] = field(default_factory=lambda: [(0, 6), (10, 13)])
 
     # Momentum thresholds
     POSITIVE_MOMENTUM_THRESHOLD: float = 0.02  # 2% positive momentum required
@@ -227,27 +226,28 @@ class SignalTimingOptimizer:
         Returns:
             Trend score (-1 to 1, positive = uptrend)
         """
-        # Add to price history
-        self._sol_price_history.append((time.time(), sol_price))
+        with self._lock:
+            # Add to price history
+            self._sol_price_history.append((time.time(), sol_price))
 
-        # Keep only recent history
-        cutoff = time.time() - self._config.SOL_TREND_LOOKBACK * 60
-        self._sol_price_history = [(t, p) for t, p in self._sol_price_history if t > cutoff]
+            # Keep only recent history
+            cutoff = time.time() - self._config.SOL_TREND_LOOKBACK * 60
+            self._sol_price_history = [(t, p) for t, p in self._sol_price_history if t > cutoff]
 
-        if len(self._sol_price_history) < 2:
-            return 0.0
+            if len(self._sol_price_history) < 2:
+                return 0.0
 
-        # Calculate trend
-        oldest_price = self._sol_price_history[0][1]
-        newest_price = self._sol_price_history[-1][1]
+            # Calculate trend
+            oldest_price = self._sol_price_history[0][1]
+            newest_price = self._sol_price_history[-1][1]
 
-        if oldest_price <= 0:
-            return 0.0
+            if oldest_price <= 0:
+                return 0.0
 
-        trend = (newest_price - oldest_price) / oldest_price
+            trend = (newest_price - oldest_price) / oldest_price
 
-        # Normalize to -1 to 1
-        return max(-1.0, min(1.0, trend / 0.05))  # 5% move = full trend
+            # Normalize to -1 to 1
+            return max(-1.0, min(1.0, trend / 0.05))  # 5% move = full trend
 
     def evaluate_timing(
         self,
@@ -283,8 +283,18 @@ class SignalTimingOptimizer:
             TimeOfDayQuality.AVOID: 0.0,
         }[time_quality]
 
-        # Wallet momentum
-        momentum = self.calculate_wallet_momentum(wallet_returns)
+        # Wallet momentum (cached per wallet+recent-returns signature)
+        cache_key = (wallet_address, tuple(wallet_returns[-20:]))
+        with self._lock:
+            cached_momentum = self._momentum_cache.get(cache_key)
+        if cached_momentum is None:
+            momentum = self.calculate_wallet_momentum(wallet_returns)
+            with self._lock:
+                self._momentum_cache[cache_key] = momentum
+                if len(self._momentum_cache) > 1000:
+                    self._momentum_cache = dict(list(self._momentum_cache.items())[-500:])
+        else:
+            momentum = cached_momentum
 
         # Volume spike detection
         if current_volume and avg_volume:
@@ -315,6 +325,15 @@ class SignalTimingOptimizer:
             sol_trend = 0.0
             sol_score = 0.5  # Neutral
 
+        # Hard gates: the documented thresholds must actually gate execution
+        # (a strong weighted score must not override a bad wallet trend or
+        # near-zero volume).
+        gate_reason = None
+        if momentum < self._config.NEGATIVE_MOMENTUM_THRESHOLD:
+            gate_reason = f"Wallet momentum ({momentum:+.2f}) below negative threshold"
+        elif current_volume is not None and current_volume < self._config.MIN_VOLUME_THRESHOLD:
+            gate_reason = f"Volume ({current_volume}) below minimum ({self._config.MIN_VOLUME_THRESHOLD})"
+
         # Calculate overall score
         weights = {
             'time': 0.2,
@@ -335,7 +354,11 @@ class SignalTimingOptimizer:
         )
 
         # Determine recommendation
-        if overall >= 0.7:
+        if gate_reason is not None:
+            quality = SignalQuality.REJECT
+            reason = gate_reason
+            delay = -1
+        elif overall >= 0.7:
             quality = SignalQuality.HIGH
             reason = "Excellent timing conditions"
             delay = 0

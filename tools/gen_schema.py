@@ -111,8 +111,9 @@ def format_default(default: Any, dialect: str) -> str:
     if default.upper() == 'NULL':
         return 'NULL'
     
-    # String literal - need to quote
-    return f"'{default}'"
+    # String literal - need to quote (escape embedded quotes/backslashes)
+    escaped = default.replace("'", "''")
+    return f"'{escaped}'"
 
 
 def generate_column_def(column: Dict, dialect: str) -> str:
@@ -161,8 +162,9 @@ def generate_create_table(table_name: str, schema: Dict, dialect: str, if_not_ex
     
     # Table description comment
     if 'description' in schema and dialect == 'postgres':
-        lines.append(f"-- {schema['description']}")
-        lines.append(f"COMMENT ON TABLE {table_name} IS '{schema['description']}';")
+        escaped_desc = schema['description'].replace("'", "''")
+        lines.append(f"-- {escaped_desc}")
+        lines.append(f"COMMENT ON TABLE {table_name} IS '{escaped_desc}';")
     
     # CREATE TABLE
     if_exists = 'IF NOT EXISTS ' if if_not_exists else ''
@@ -178,15 +180,6 @@ def generate_create_table(table_name: str, schema: Dict, dialect: str, if_not_ex
         on_delete = fk.get('on_delete', 'NO ACTION')
         fk_def = f"    FOREIGN KEY ({fk['column']}) REFERENCES {fk['ref_table']}({fk['ref_col']}) ON DELETE {on_delete}"
         column_defs.append(fk_def + ',')
-    
-    # Table-level check constraints
-    for col in schema['columns']:
-        if 'check' in col and 'pk' in col and col['pk']:
-            # Already handled in column definition
-            continue
-        if 'check' in col and not col.get('pk', False):
-            # Already handled in column definition
-            continue
     
     # Remove trailing comma from last column definition
     if column_defs:
@@ -239,8 +232,16 @@ def generate_indexes(table_name: str, schema: Dict, dialect: str) -> str:
     return '\n'.join(lines)
 
 
+KNOWN_TRIGGER_FUNCTIONS = {'updated_at': 'update_updated_at_column', 'last_updated': 'update_last_updated_column'}
+
+
 def generate_triggers(table_name: str, schema: Dict, dialect: str) -> str:
-    """Generate trigger statements (PostgreSQL only)"""
+    """Generate trigger statements (PostgreSQL only).
+
+    The referenced function must exist (see generate_pg_functions); unknown
+    columns are rejected so the generated migration can never reference a
+    function that is not defined.
+    """
     if dialect == 'sqlite':
         return ''
     
@@ -249,7 +250,12 @@ def generate_triggers(table_name: str, schema: Dict, dialect: str) -> str:
     for trigger in schema.get('triggers', []):
         col_name = trigger['column']
         trigger_name = trigger['name']
-        func_name = f"update_{col_name}_column"
+        if col_name not in KNOWN_TRIGGER_FUNCTIONS:
+            raise ValueError(
+                f"Trigger on {table_name}.{col_name}: no trigger function defined "
+                f"(known: {', '.join(KNOWN_TRIGGER_FUNCTIONS)})"
+            )
+        func_name = KNOWN_TRIGGER_FUNCTIONS[col_name]
         
         lines.append(f"CREATE TRIGGER {trigger_name}")
         lines.append(f"    BEFORE UPDATE ON {table_name}")
@@ -274,8 +280,8 @@ def generate_seed_data(table_name: str, schema: Dict, dialect: str) -> str:
         formatted_values = []
         for val in values:
             if isinstance(val, str):
-                # Remove extra quotes if present
-                val = val.strip().strip("'")
+                # Remove extra quotes if present, then escape embedded quotes
+                val = val.strip().strip("'").replace("'", "''")
                 formatted_values.append(f"'{val}'")
             elif val is None:
                 formatted_values.append('NULL')
@@ -290,10 +296,13 @@ def generate_seed_data(table_name: str, schema: Dict, dialect: str) -> str:
         if dialect == 'sqlite':
             lines.append(f"INSERT OR IGNORE INTO {table_name} ({col_list}) VALUES ({val_list});")
         else:
-            # For PostgreSQL, need to handle ON CONFLICT for each row
-            pk_col = columns[0]  # Assume first column is PK
+            # For PostgreSQL, need to handle ON CONFLICT for each row:
+            # derive the conflict target from the schema (columns marked pk)
+            pk_cols = [c['name'] for c in schema['columns'] if c.get('pk', False)]
+            if not pk_cols:
+                raise ValueError(f"Table {table_name} has seed data but no pk columns")
             lines.append(f"INSERT INTO {table_name} ({col_list}) VALUES ({val_list})")
-            lines.append(f"ON CONFLICT ({pk_col}) DO NOTHING;")
+            lines.append(f"ON CONFLICT ({', '.join(pk_cols)}) DO NOTHING;")
     
     return '\n'.join(lines)
 
@@ -339,10 +348,10 @@ def generate_migration(schemas: Dict[str, Dict], dialect: str, scout_tables_only
         lines.append("CREATE EXTENSION IF NOT EXISTS \"pg_trgm\";")
         lines.append("")
         
-        # Add trigger functions
-        if not scout_tables_only:
-            lines.append(generate_pg_functions())
-            lines.append("")
+        # Add trigger functions (also for scout-only output, since scout
+        # schemas may define triggers referencing these functions)
+        lines.append(generate_pg_functions())
+        lines.append("")
     else:
         lines.append("-- Chimera Database Schema - SQLite")
         lines.append("-- Generated from database/schema_yaml/*.yaml")
@@ -350,24 +359,33 @@ def generate_migration(schemas: Dict[str, Dict], dialect: str, scout_tables_only
         lines.append("")
     
     # Determine which tables to include
+    scout_tables = [
+        'ml_predictions', 'exit_recommendations', 'alerts', 'metrics', 'health_checks',
+        'growth_history', 'capital_events', 'growth_alerts', 'credit_history',
+        'wallet_performance_history', 'roi_metrics', 'multi_timeframe_discovery_stats'
+    ]
+    operator_tables = [
+        'schema_migrations', 'trades', 'positions', 'wallets', 'dead_letter_queue',
+        'config_audit', 'kill_switch_state', 'circuit_breaker_state', 'admin_wallets',
+        'jito_tip_history', 'reconciliation_log', 'backups', 'historical_liquidity',
+        'wallet_monitoring', 'exit_targets', 'signal_aggregation', 'wallet_copy_performance',
+        'rate_limit_metrics', 'webhook_lifecycle_audit', 'webhook_configuration',
+        'wqs_pnl_correlation'
+    ]
+
+    # Every loaded schema must be assigned to exactly one list; otherwise the
+    # generated migrations would silently drift from the YAML definitions.
+    known = set(scout_tables) | set(operator_tables)
+    for name in schemas:
+        if name not in known:
+            raise ValueError(
+                f"Schema '{name}' is not in operator_tables or scout_tables; "
+                f"add it to one of the lists before generating"
+            )
+
     if scout_tables_only:
-        # Scout-owned tables
-        scout_tables = [
-            'ml_predictions', 'exit_recommendations', 'alerts', 'metrics', 'health_checks',
-            'growth_history', 'capital_events', 'growth_alerts', 'credit_history',
-            'wallet_performance_history', 'roi_metrics', 'multi_timeframe_discovery_stats'
-        ]
         tables_to_generate = [(name, schemas[name]) for name in scout_tables if name in schemas]
     else:
-        # Operator-owned tables
-        operator_tables = [
-            'schema_migrations', 'trades', 'positions', 'wallets', 'dead_letter_queue',
-            'config_audit', 'kill_switch_state', 'circuit_breaker_state', 'admin_wallets',
-            'jito_tip_history', 'reconciliation_log', 'backups', 'historical_liquidity',
-            'wallet_monitoring', 'exit_targets', 'signal_aggregation', 'wallet_copy_performance',
-            'rate_limit_metrics', 'webhook_lifecycle_audit', 'webhook_configuration',
-            'wqs_pnl_correlation'
-        ]
         tables_to_generate = [(name, schemas[name]) for name in operator_tables if name in schemas]
     
     # Generate table definitions

@@ -14,8 +14,8 @@ fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
     common::pg_pool(db)
 }
 
-/// Setup test database
-async fn setup_test_db() -> (Arc<dyn Database>, tempfile::TempDir) {
+/// Setup test database (drops the created database on teardown via the guard)
+async fn setup_test_db() -> (Arc<dyn Database>, common::TestDbGuard) {
     common::create_test_db().await
 }
 
@@ -115,18 +115,16 @@ async fn test_circuit_breaker_loss_tracking() {
         .await
         .unwrap();
 
-    // Verify the loss is stored correctly
-    let row: (String,) = sqlx::query_as("SELECT net_pnl_sol FROM trades WHERE trade_uuid = $1")
-        .bind(uuid)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    let net_pnl: f64 = row.0.parse().unwrap_or(0.0);
-    assert!(
-        net_pnl < 0.0,
-        "net_pnl_sol should be negative for a losing trade"
-    );
-    assert!((net_pnl + 2.5).abs() < 0.0001, "net_pnl_sol should be -2.5");
+    // Verify the loss is stored exactly (decode NUMERIC as Decimal — sqlx
+    // cannot decode NUMERIC into String, and f64 round-tripping would be lossy
+    // for a 30-digit financial value).
+    let (net_pnl,): (Decimal,) =
+        sqlx::query_as("SELECT net_pnl_sol FROM trades WHERE trade_uuid = $1")
+            .bind(uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(net_pnl, big_loss, "net_pnl_sol should be exactly -2.5");
 }
 
 #[tokio::test]
@@ -215,32 +213,39 @@ async fn test_wallet_insert_and_query() {
 
 #[tokio::test]
 async fn test_backend_agnostic_wallet_insert() {
-    // This test demonstrates the new backend-agnostic test harness.
-    // When TEST_DATABASE_URL is set and the postgres feature is enabled,
-    // it runs against PostgreSQL. Otherwise, it runs against SQLite.
-    
-    let (db, _temp_dir, _backend) = common::create_test_db_from_env().await;
-    
-    // This operation should work on both SQLite and PostgreSQL
-    // because we're using the Database trait abstraction
-    let result = db.upsert_wallet(
-        "test-wallet-backend-agnostic",
-        Some(Decimal::from_str("55.0").unwrap()),
-        Some(Decimal::from_str("12.0").unwrap()),
-        Some(Decimal::from_str("30.0").unwrap()),
-        Some(25),
-        Some(Decimal::from_str("0.65").unwrap()),
-        Some(Decimal::from_str("10.0").unwrap()),
-        Some(Decimal::from_str("0.5").unwrap()),
-        None,
-    )
-    .await;
+    // NOTE: despite the name, the harness is PostgreSQL-only — the Database
+    // trait abstracts the backend, but create_test_db_from_env() always
+    // creates a Postgres database and requires TEST_DATABASE_URL.
+    let (db, _guard, _backend) = common::create_test_db_from_env().await;
 
-    assert!(
-        result.is_ok(),
-        "upsert_wallet should work on both backends"
-    );
-    
-    // The test passes on both backends, proving the harness works
+    let address = "test-wallet-backend-agnostic";
+
+    // This operation should work through the Database trait abstraction
+    let result = db
+        .upsert_wallet(
+            address,
+            Some(Decimal::from_str("55.0").unwrap()),
+            Some(Decimal::from_str("12.0").unwrap()),
+            Some(Decimal::from_str("30.0").unwrap()),
+            Some(25),
+            Some(Decimal::from_str("0.65").unwrap()),
+            Some(Decimal::from_str("10.0").unwrap()),
+            Some(Decimal::from_str("0.5").unwrap()),
+            None,
+        )
+        .await;
+
+    result.expect("upsert_wallet should work through the Database trait");
+
+    // Verify the write actually persisted: re-read the row and assert the
+    // stored fields instead of trusting the upsert result alone.
+    let pool = pg_pool(&db);
+    let (status,): (String,) = sqlx::query_as("SELECT status FROM wallets WHERE address = $1")
+        .bind(address)
+        .fetch_one(&pool)
+        .await
+        .expect("wallet should have been persisted");
+    assert_eq!(status, "CANDIDATE", "upserted wallet must be persisted as CANDIDATE");
+
     println!("Backend-agnostic wallet insert test passed");
 }

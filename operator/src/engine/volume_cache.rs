@@ -9,15 +9,6 @@ use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-/// Volume entry
-#[derive(Debug, Clone)]
-pub struct VolumeEntry {
-    /// Volume in USD (using Decimal for precision)
-    pub volume_usd: Decimal,
-    /// Timestamp
-    pub timestamp: DateTime<Utc>,
-}
-
 /// Volume cache for token trading volumes
 pub struct VolumeCache {
     /// Volume history by token (token -> VecDeque of (timestamp, volume))
@@ -37,6 +28,11 @@ impl VolumeCache {
     pub fn record_volume(&self, token_address: &str, volume_usd: Decimal) {
         let now = Utc::now();
         let mut history = self.volume_history.write();
+        // Evict idle tokens (no updates for 24h) so a long-running operator
+        // processing many ephemeral tokens cannot grow memory without bound.
+        history.retain(|_, h| {
+            h.back().is_none_or(|(t, _)| now.signed_duration_since(*t) <= Duration::hours(24))
+        });
         let token_history = history.entry(token_address.to_string()).or_default();
         token_history.push_back((now, volume_usd));
 
@@ -53,10 +49,18 @@ impl VolumeCache {
 
     /// Get 24h average volume for a token
     ///
-    /// Returns None if insufficient data
+    /// Returns None if insufficient data or the newest sample is stale
+    /// (>10 minutes — same staleness guard as `has_volume_drop`, so callers
+    /// never act on volume signals from indexer lag/downtime).
     pub fn get_24h_average_volume(&self, token_address: &str) -> Option<Decimal> {
         let history = self.volume_history.read();
         let token_history = history.get(token_address)?;
+
+        if let Some((newest_time, _)) = token_history.back() {
+            if Utc::now().signed_duration_since(*newest_time).num_minutes() > 10 {
+                return None;
+            }
+        }
 
         if token_history.is_empty() {
             return None;
@@ -69,10 +73,16 @@ impl VolumeCache {
     }
 
     /// Get current volume (most recent entry)
+    ///
+    /// Returns None when the newest sample is stale (>10 minutes).
     pub fn get_current_volume(&self, token_address: &str) -> Option<Decimal> {
         let history = self.volume_history.read();
         let token_history = history.get(token_address)?;
-        token_history.back().map(|(_, volume)| *volume)
+        let (newest_time, volume) = token_history.back()?;
+        if Utc::now().signed_duration_since(*newest_time).num_minutes() > 10 {
+            return None;
+        }
+        Some(*volume)
     }
 
     /// Check if volume dropped significantly compared to a time-matched baseline.
@@ -128,20 +138,26 @@ impl VolumeCache {
             }
         }
 
-        // Fallback: single most-recent point vs full 24 h average (original behaviour).
-        // Require at least 30 minutes of recorded history — 2 data points spanning 5
-        // minutes produce a meaningless "24h average" and can trigger false exits.
+        // Fallback: single most-recent point vs the remaining history.
+        // The current sample is EXCLUDED from the baseline so a single low
+        // `current` cannot drag the average down and mask a genuine drop.
+        // Require at least 30 minutes of recorded history — 2 data points
+        // spanning 5 minutes produce a meaningless "24h average" and can
+        // trigger false exits.
         if let Some((oldest_time, _)) = token_history.front() {
             if now.signed_duration_since(*oldest_time).num_minutes() < 30 {
                 return false;
             }
         }
         if let Some(current) = token_history.back().map(|(_, v)| *v) {
-            let total: Decimal = token_history.iter().map(|(_, v)| *v).sum();
-            let avg = total / Decimal::from(token_history.len());
-            if avg > Decimal::ZERO {
-                let drop_pct = (avg - current) / avg * Decimal::from(100);
-                return drop_pct >= threshold_percent;
+            let n = token_history.len().saturating_sub(1);
+            if n > 0 {
+                let total: Decimal = token_history.iter().take(n).map(|(_, v)| *v).sum();
+                let avg = total / Decimal::from(n);
+                if avg > Decimal::ZERO {
+                    let drop_pct = (avg - current) / avg * Decimal::from(100);
+                    return drop_pct >= threshold_percent;
+                }
             }
         }
 

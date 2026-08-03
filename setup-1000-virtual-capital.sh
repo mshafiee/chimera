@@ -41,9 +41,10 @@ log_section() {
 }
 
 # Configuration
+ADMIN_TOKEN="${ADMIN_TOKEN:-}"
 VIRTUAL_CAPITAL_USD=1000
 SOL_PRICE_USD=150  # Approximate SOL price (will be updated from RPC)
-VIRTUAL_CAPITAL_SOL=$((VIRTUAL_CAPITAL_USD / SOL_PRICE_USD))
+VIRTUAL_CAPITAL_SOL=$(echo "scale=2; $VIRTUAL_CAPITAL_USD / $SOL_PRICE_USD" | bc)
 ENV_FILE="docker/env.mainnet-paper.local"
 
 # Dependency validation
@@ -103,7 +104,7 @@ check_required_files() {
 log_section "🚀 Chimera $1000 Virtual Capital Setup"
 
 log_info "This will configure Chimera for paper trading with:"
-echo "  • Virtual Capital: $${VIRTUAL_CAPITAL_USD} USD"
+echo "  • Virtual Capital: \$${VIRTUAL_CAPITAL_USD} USD"
 echo "  • Equivalent SOL: ~${VIRTUAL_CAPITAL_SOL} SOL (based on \$$SOL_PRICE_USD/SOL)"
 echo "  • Trading Mode: Paper Trading (no real funds at risk)"
 echo "  • Network: Mainnet (real market data)"
@@ -183,16 +184,23 @@ fi
 log_section "Step 3: Configure Virtual Capital Settings"
 
 # Update environment file with capital settings
-log_info "Configuring environment variables for $${VIRTUAL_CAPITAL_USD} capital..."
+log_info "Configuring environment variables for \$${VIRTUAL_CAPITAL_USD} capital..."
 
-# Ensure paper trading mode is enabled
-if ! grep -q "PAPER_TRADE_MODE=true" "$ENV_FILE"; then
+# Ensure paper trading mode is enabled (replace existing values, do not duplicate)
+if grep -qE '^[[:space:]]*PAPER_TRADE_MODE=' "$ENV_FILE"; then
+    sed -i.bak -E "s/^([[:space:]]*)PAPER_TRADE_MODE=.*/\1PAPER_TRADE_MODE=true/" "$ENV_FILE"
+    log_success "Enabled paper trading mode"
+else
     echo "PAPER_TRADE_MODE=true" >> "$ENV_FILE"
     log_success "Enabled paper trading mode"
 fi
 
-# Add capital configuration
-if ! grep -q "VIRTUAL_CAPITAL_USD" "$ENV_FILE"; then
+# Add or replace capital configuration
+if grep -qE '^[[:space:]]*VIRTUAL_CAPITAL_USD=' "$ENV_FILE"; then
+    sed -i.bak -E "s/^([[:space:]]*)VIRTUAL_CAPITAL_USD=.*/\1VIRTUAL_CAPITAL_USD=$VIRTUAL_CAPITAL_USD/" "$ENV_FILE"
+    sed -i.bak -E "s/^([[:space:]]*)VIRTUAL_CAPITAL_SOL=.*/\1VIRTUAL_CAPITAL_SOL=$VIRTUAL_CAPITAL_SOL/" "$ENV_FILE"
+    log_success "Updated virtual capital configuration"
+else
     cat >> "$ENV_FILE" << EOF
 
 # Virtual Capital Configuration
@@ -201,8 +209,9 @@ VIRTUAL_CAPITAL_SOL=$VIRTUAL_CAPITAL_SOL
 EOF
     log_success "Added virtual capital configuration"
 fi
+rm -f "$ENV_FILE.bak"
 
-log_success "Environment configured for $${VIRTUAL_CAPITAL_USD} virtual capital"
+log_success "Environment configured for \$${VIRTUAL_CAPITAL_USD} virtual capital"
 
 # Configuration update helper
 validate_and_update_config() {
@@ -219,11 +228,11 @@ validate_and_update_config() {
             log_error "Configuration update cancelled"
             exit 1
         fi
-        return 1
+        return 0
     fi
 
     # Update with precise pattern matching
-    sed -i.bak "s/^[[:space:]]*${field_name}:[[:space:]]*.*/${field_name}: ${new_value}/" "$config_file"
+    sed -i.bak "s/^\([[:space:]]*\)${field_name}:[[:space:]]*.*/\1${field_name}: ${new_value}/" "$config_file"
     log_success "Updated ${field_name}: ${new_value}"
 }
 
@@ -253,10 +262,10 @@ if [ -f "operator/config.yaml" ]; then
     validate_and_update_config "base_size_sol" "$BASE_SIZE_SOL"
     
     log_success "Updated position sizing:"
-    echo "  • Total Capital: ${VIRTUAL_CAPITAL_SOL} SOL (~$${VIRTUAL_CAPITAL_USD})"
-    echo "  • Max Position: ${MAX_POSITION_SOL} SOL (~$$(echo "scale=0; $MAX_POSITION_SOL * $SOL_PRICE_USD" | bc))"
-    echo "  • Min Position: ${MIN_POSITION_SOL} SOL (~$$(echo "scale=0; $MIN_POSITION_SOL * $SOL_PRICE_USD" | bc))"
-    echo "  • Base Size: ${BASE_SIZE_SOL} SOL (~$$(echo "scale=0; $BASE_SIZE_SOL * $SOL_PRICE_USD" | bc))"
+    echo "  • Total Capital: ${VIRTUAL_CAPITAL_SOL} SOL (~\$${VIRTUAL_CAPITAL_USD})"
+    echo "  • Max Position: ${MAX_POSITION_SOL} SOL (~\$$(echo "scale=0; $MAX_POSITION_SOL * $SOL_PRICE_USD" | bc))"
+    echo "  • Min Position: ${MIN_POSITION_SOL} SOL (~\$$(echo "scale=0; $MIN_POSITION_SOL * $SOL_PRICE_USD" | bc))"
+    echo "  • Base Size: ${BASE_SIZE_SOL} SOL (~\$$(echo "scale=0; $BASE_SIZE_SOL * $SOL_PRICE_USD" | bc))"
 fi
 
 # Adjust circuit breaker for virtual capital
@@ -264,7 +273,7 @@ log_info "Adjusting circuit breaker for virtual capital..."
 MAX_LOSS_24H=$(echo "scale=0; $VIRTUAL_CAPITAL_USD * 0.05" | bc)  # 5% max daily loss
 if [ -f "operator/config.yaml" ]; then
     validate_and_update_config "max_loss_24h_usd" "$MAX_LOSS_24H"
-    log_success "Set max daily loss: $${MAX_LOSS_24H} (5% of capital)"
+    log_success "Set max daily loss: \$${MAX_LOSS_24H} (5% of capital)"
 fi
 
 # Step 5: Initialize fresh database
@@ -301,6 +310,10 @@ log_section "Step 6: Start Services"
 
 log_info "Building Docker images (if needed)..."
 ./docker/docker-compose.sh build mainnet-paper 2>&1 | grep -E "(Building|Successfully|ERROR)" || true
+if [ ${PIPESTATUS[0]} -ne 0 ]; then
+    log_error "Docker build failed"
+    exit 1
+fi
 
 log_info "Starting Chimera services..."
 if ./docker/docker-compose.sh start mainnet-paper; then
@@ -315,16 +328,16 @@ log_section "Step 7: Verify Services"
 
 log_info "Waiting for services to be ready..."
 for i in {1..30}; do
-    if curl -s http://localhost:8080/api/v1/health > /dev/null 2>&1; then
+    if curl -sf --max-time 5 http://localhost:8080/api/v1/health > /dev/null 2>&1; then
         log_success "Operator is healthy and ready"
         break
     fi
     if [ $i -eq 30 ]; then
-        log_warning "Operator health check timeout"
-    else
-        echo -n "."
-        sleep 2
+        log_error "Operator did not become healthy within 60 seconds"
+        exit 1
     fi
+    echo -n "."
+    sleep 2
 done
 
 echo ""
@@ -342,9 +355,9 @@ log_warning "This may take 5-10 minutes to analyze wallet performance..."
 
 read -p "Press Enter to start Scout discovery, or Ctrl+C to skip..." 
 
-if docker exec chimera-scout python main.py \
+if (cd "$(dirname "$0")" && docker exec chimera-scout python main.py \
     --output /app/data/roster_new.db \
-    --verbose 2>&1 | tee /tmp/scout-discovery.log; then
+    --verbose > /tmp/scout-discovery.log 2>&1); then
     log_success "Scout discovery completed"
     
     # Show results
@@ -355,9 +368,9 @@ if docker exec chimera-scout python main.py \
     
     # Merge roster
     log_info "Merging discovered wallets into operator..."
-    if curl -s -X POST http://localhost:8080/api/v1/roster/merge \
+    if curl -sf -X POST http://localhost:8080/api/v1/roster/merge \
         -H "Content-Type: application/json" \
-        -H "Authorization: Bearer dev-admin-key" \
+        -H "Authorization: Bearer ${ADMIN_TOKEN:-}" \
         -d '{}' > /dev/null 2>&1; then
         log_success "Wallet roster merged successfully"
     else
@@ -371,13 +384,13 @@ fi
 # Final Summary
 log_section "🎉 Setup Complete!"
 
-log_success "Chimera is now running with $${VIRTUAL_CAPITAL_USD} virtual capital!"
+log_success "Chimera is now running with \$${VIRTUAL_CAPITAL_USD} virtual capital!"
 echo ""
 log_info "Virtual Capital Configuration:"
-echo "  • Total Capital: $${VIRTUAL_CAPITAL_USD} USD (~${VIRTUAL_CAPITAL_SOL} SOL)"
-echo "  • Max Position Size: ~$$(echo "scale=0; $MAX_POSITION_SOL * $SOL_PRICE_USD" | bc) USD"
-echo "  • Min Position Size: ~$$(echo "scale=0; $MIN_POSITION_SOL * $SOL_PRICE_USD" | bc) USD"
-echo "  • Daily Loss Limit: $${MAX_LOSS_24H} (5%)"
+echo "  • Total Capital: \$${VIRTUAL_CAPITAL_USD} USD (~${VIRTUAL_CAPITAL_SOL} SOL)"
+echo "  • Max Position Size: ~\$$(echo "scale=0; $MAX_POSITION_SOL * $SOL_PRICE_USD" | bc) USD"
+echo "  • Min Position Size: ~\$$(echo "scale=0; $MIN_POSITION_SOL * $SOL_PRICE_USD" | bc) USD"
+echo "  • Daily Loss Limit: \$${MAX_LOSS_24H} (5%)"
 echo ""
 
 log_info "Service URLs:"

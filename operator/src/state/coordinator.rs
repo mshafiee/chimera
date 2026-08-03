@@ -16,6 +16,7 @@ use tracing::{debug, error, info, warn};
 pub struct StateCoordinator {
     registry: Arc<StateRegistry>,
     db: Arc<dyn Database>,
+    #[allow(dead_code)] // Retained for future async write-through to the database
     write_queue: Arc<AsyncWriteQueue>,
     sync_interval: Duration,
     last_sync: Arc<std::sync::Mutex<Instant>>,

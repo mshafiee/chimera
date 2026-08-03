@@ -25,6 +25,10 @@ log_error() {
     echo -e "${RED}[✗]${NC} $1"
 }
 
+log_warning() {
+    echo -e "${YELLOW}[!]${NC} $1"
+}
+
 log_section() {
     echo ""
     echo -e "${BLUE}========================================${NC}"
@@ -36,7 +40,11 @@ log_section() {
 log_section "Wallet Authentication Setup"
 
 log_info "Admin wallet from config.yaml:"
-ADMIN_WALLET=$(grep -A 2 "admin_wallets:" config/config.yaml | grep "address" | head -1 | cut -d'"' -f4)
+ADMIN_WALLET=$(grep -A 2 "admin_wallets:" config/config.yaml | grep "address" | head -1 | cut -d'"' -f2)
+if [ -z "$ADMIN_WALLET" ]; then
+    log_error "Could not extract admin wallet from config/config.yaml"
+    exit 1
+fi
 echo "  $ADMIN_WALLET"
 echo ""
 
@@ -50,12 +58,12 @@ echo ""
 
 log_section "Message Format"
 
-MESSAGE="Chimera Dashboard Authentication\nWallet: $ADMIN_WALLET\nTimestamp: $(date +%s)"
+MESSAGE=$(printf 'Chimera Dashboard Authentication\nWallet: %s\nTimestamp: %s' "$ADMIN_WALLET" "$(date +%s)")
 echo "Required message format:"
 echo "  'Chimera Dashboard Authentication'"
 echo "  Must include wallet address"
 echo ""
-echo "Example message:"
+echo "Example message (note: real newlines; must be signed and submitted within 5 minutes):"
 echo "  $MESSAGE"
 echo ""
 
@@ -69,8 +77,8 @@ if command -v solana &> /dev/null; then
     echo "  # 1. Set your keypair:"
     echo "     solana config set --keypair /path/to/your-keypair.json"
     echo ""
-    echo "  # 2. Create authentication message:"
-    echo "     MESSAGE=\"Chimera Dashboard Authentication\\nWallet: $ADMIN_WALLET\\nTimestamp: \$(date +%s)\""
+    echo "  # 2. Create authentication message (real newlines):"
+    echo "     MESSAGE=\"\$(printf 'Chimera Dashboard Authentication\\nWallet: $ADMIN_WALLET\\nTimestamp: \$(date +%s)')\""
     echo ""
     echo "  # 3. Sign the message:"
     echo "     SIGNATURE=\$(echo -e \"\$MESSAGE\" | solana message sign)"
@@ -78,10 +86,11 @@ if command -v solana &> /dev/null; then
     echo "  # 4. Encode signature to base64:"
     echo "     SIG_B64=\$(echo \"\$SIGNATURE\" | base64)"
     echo ""
-    echo "  # 5. POST to auth endpoint:"
+    echo "  # 5. Build the JSON body with jq and POST to auth endpoint:"
+    echo "     AUTH_JSON=\$(jq -n --arg w \"$ADMIN_WALLET\" --arg m \"\$MESSAGE\" --arg s \"\$SIG_B64\" '{wallet_address:\$w,message:\$m,signature:\$s}')"
     echo "     curl -X POST $API_URL/api/v1/auth/wallet \\"
     echo "       -H 'Content-Type: application/json' \\"
-    echo "       -d '{\"wallet_address\":\"$ADMIN_WALLET\",\"message\":\"\$MESSAGE\",\"signature\":\"\$SIG_B64\"}'"
+    echo "       -d \"\$AUTH_JSON\""
     echo ""
 else
     log_warning "Solana CLI not found"

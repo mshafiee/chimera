@@ -20,6 +20,7 @@ Usage:
 
 import json
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -151,28 +152,30 @@ class PredictionLogger:
                     schema_sql = f.read()
 
                 conn = self._get_connection()
-                cursor = conn.cursor()
+                try:
+                    cursor = conn.cursor()
 
-                from .db import translate_ddl
-                # Execute schema - split by semicolon and filter out comments
-                for statement in schema_sql.split(';'):
-                    statement = statement.strip()
-                    if statement:
-                        # Remove inline comments but keep SQL statements
-                        lines = []
-                        for line in statement.split('\n'):
-                            # Skip full-line comments but keep SQL lines
-                            stripped = line.strip()
-                            if stripped and not stripped.startswith('--'):
-                                lines.append(line)
-                        cleaned = '\n'.join(lines).strip()
-                        if cleaned:
-                            # Translate SQLite DDL (AUTOINCREMENT, etc.) to
-                            # PostgreSQL when running on the postgres backend.
-                            self._exec(cursor, translate_ddl(cleaned))
+                    from .db import translate_ddl
+                    # Execute schema - split by semicolon and filter out comments
+                    for statement in schema_sql.split(';'):
+                        statement = statement.strip()
+                        if statement:
+                            # Remove inline comments but keep SQL statements
+                            lines = []
+                            for line in statement.split('\n'):
+                                # Skip full-line comments but keep SQL lines
+                                stripped = line.strip()
+                                if stripped and not stripped.startswith('--'):
+                                    lines.append(line)
+                            cleaned = '\n'.join(lines).strip()
+                            if cleaned:
+                                # Translate SQLite DDL (AUTOINCREMENT, etc.) to
+                                # PostgreSQL when running on the postgres backend.
+                                self._exec(cursor, translate_ddl(cleaned))
 
-                conn.commit()
-                conn.close()
+                    conn.commit()
+                finally:
+                    conn.close()
                 logger.info("ML predictions schema verified/created")
             else:
                 # The operator's PostgreSQL migration creates this table at
@@ -630,16 +633,21 @@ class PredictionLogger:
                 conn.close()
 
 
-# Global instance
-_global_logger = None
+# Global instances (keyed by resolved db_path so different callers with
+# different paths don't silently share one logger)
+_global_loggers = {}
+_global_loggers_lock = threading.Lock()
 
 
 def get_prediction_logger(db_path: Optional[str] = None) -> PredictionLogger:
-    """Get or create global prediction logger instance."""
-    global _global_logger
-    if _global_logger is None:
-        _global_logger = PredictionLogger(db_path)
-    return _global_logger
+    """Get or create a prediction logger instance (cached per db_path)."""
+    if db_path is None:
+        db_path = "data/chimera.db"
+    resolved = str(Path(db_path).resolve())
+    with _global_loggers_lock:
+        if resolved not in _global_loggers:
+            _global_loggers[resolved] = PredictionLogger(db_path)
+        return _global_loggers[resolved]
 
 
 def log_prediction(*args, **kwargs) -> Optional[int]:

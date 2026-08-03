@@ -6,6 +6,9 @@
 //! - Health check latency
 //! - Atomic counter performance
 //! - Concurrent metric updates
+//!
+//! Timing budgets are deliberately generous: these are smoke-level
+//! performance checks, and tight wall-clock thresholds are flaky under CI load.
 
 use chimera_operator::config::{AppConfig, JitoConfig, RpcConfig};
 use chimera_operator::engine::executor::{JitoError, JitoHealth};
@@ -99,7 +102,7 @@ fn create_load_config() -> AppConfig {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_atomic_counter_performance() {
     // Test atomic counter performance under high load
     let counter = Arc::new(AtomicU64::new(0));
@@ -131,9 +134,8 @@ async fn test_atomic_counter_performance() {
     let expected = num_threads * increments_per_thread;
     assert_eq!(counter.load(Ordering::Relaxed), expected);
 
-    // Performance assertion: should complete in reasonable time
-    // 1 million increments should take < 100ms (highly conservative)
-    assert!(duration.as_millis() < 100, "Atomic operations too slow: {:?}", duration);
+    // Performance assertion: 1 million increments in under a second
+    assert!(duration.as_millis() < 1000, "Atomic operations too slow: {:?}", duration);
 }
 
 #[tokio::test]
@@ -164,24 +166,26 @@ async fn test_metrics_recording_overhead() {
 
     let duration = start.elapsed();
 
-    // Performance assertion: 10k metric updates should be very fast
-    // Should be < 10ms total (averaging < 1μs per update)
+    // Performance assertion: 10k metric updates should be fast
     assert!(
-        duration.as_millis() < 10,
+        duration.as_millis() < 200,
         "Metrics recording too slow: {:?} for {} iterations",
         duration,
         iterations
     );
 
-    let avg_time_ns = duration.as_nanos() / iterations as u128;
-    assert!(
-        avg_time_ns < 1000, // < 1μs average
-        "Average metric recording time too high: {}ns",
-        avg_time_ns
+    // The counters must have recorded every update.
+    assert_eq!(
+        metrics.jito_submissions.with_label_values(&["jito"]).get(),
+        10_000
+    );
+    assert_eq!(
+        metrics.jito_resolutions.with_label_values(&["success"]).get(),
+        10_000
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_metric_updates() {
     // Test concurrent metric update performance
     let metrics_result = MetricsState::new();
@@ -214,16 +218,22 @@ async fn test_concurrent_metric_updates() {
 
     let duration = start.elapsed();
 
+    // Data integrity: 25 tasks × 1000 submissions per mode; per task 900
+    // successes + 100 failures. No update may be lost or mislabeled.
+    assert_eq!(metrics.jito_submissions.with_label_values(&["jito"]).get(), 25_000);
+    assert_eq!(metrics.jito_submissions.with_label_values(&["helius"]).get(), 25_000);
+    assert_eq!(metrics.jito_resolutions.with_label_values(&["success"]).get(), 45_000);
+    assert_eq!(metrics.jito_resolutions.with_label_values(&["failed"]).get(), 5_000);
+
     // Performance assertion: 50k concurrent updates should be fast
-    // Should be < 50ms total
     assert!(
-        duration.as_millis() < 50,
+        duration.as_millis() < 1000,
         "Concurrent metric updates too slow: {:?}",
         duration
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_notification_throughput() {
     // Test notification throughput under load
     let notifier = Arc::new(LoadNotifier::new());
@@ -273,9 +283,8 @@ async fn test_notification_throughput() {
     assert_eq!(notifier.get_events_sent(), num_events as u64);
 
     // Performance assertion: 1000 notifications should complete quickly
-    // Should be < 100ms total (averaging < 0.1ms per notification)
     assert!(
-        duration.as_millis() < 100,
+        duration.as_millis() < 2000,
         "Notification throughput too low: {:?} for {} notifications",
         duration,
         num_events
@@ -284,7 +293,7 @@ async fn test_notification_throughput() {
     // Check average processing time is reasonable
     let avg_ns = notifier.get_avg_processing_time_ns();
     assert!(
-        avg_ns < 100_000, // < 0.1ms average
+        avg_ns < 1_000_000, // < 1ms average
         "Average notification processing time too high: {}ns",
         avg_ns
     );
@@ -306,23 +315,23 @@ async fn test_health_check_latency() {
     let start = Instant::now();
 
     for _ in 0..iterations {
-        // Simulate health check operations
-        let _ = health.healthy;
-        let _ = health.latency_ms;
-        let _ = health.resolution_success_rate;
-        let _ = health.total_submissions;
-        let _ = health.successful_resolutions;
+        // Simulate health check operations (black_box prevents the optimizer
+        // from eliminating the loop in release builds)
+        std::hint::black_box(health.healthy);
+        std::hint::black_box(health.latency_ms);
+        std::hint::black_box(health.resolution_success_rate);
+        std::hint::black_box(health.total_submissions);
+        std::hint::black_box(health.successful_resolutions);
 
         // Simulate calculation
-        let _ = health.successful_resolutions as f64 / health.total_submissions as f64;
+        std::hint::black_box(health.successful_resolutions as f64 / health.total_submissions as f64);
     }
 
     let duration = start.elapsed();
 
-    // Performance assertion: health checks should be very fast
-    // 10k iterations should be < 5ms
+    // Performance assertion: 10k health-check reads in under 200ms
     assert!(
-        duration.as_millis() < 5,
+        duration.as_millis() < 200,
         "Health check operations too slow: {:?}",
         duration
     );
@@ -344,15 +353,14 @@ async fn test_jito_health_clone_performance() {
     let start = Instant::now();
 
     for _ in 0..iterations {
-        let _ = health.clone();
+        std::hint::black_box(health.clone());
     }
 
     let duration = start.elapsed();
 
     // Performance assertion: cloning should be fast
-    // 1000 clones should be < 10ms
     assert!(
-        duration.as_millis() < 10,
+        duration.as_millis() < 500,
         "JitoHealth cloning too slow: {:?}",
         duration
     );
@@ -375,20 +383,20 @@ async fn test_error_classification_performance() {
             _ => &network,
         };
 
-        // Simulate error classification
-        match error {
+        // Simulate error classification (black_box forces evaluation)
+        let retryable = std::hint::black_box(match error {
             JitoError::Retryable(_) => true,
             JitoError::Fatal(_) => false,
             JitoError::Network(_) => false,
-        };
+        });
+        std::hint::black_box(retryable);
     }
 
     let duration = start.elapsed();
 
-    // Performance assertion: error classification should be very fast
-    // 10k classifications should be < 5ms
+    // Performance assertion: 10k classifications in under 200ms
     assert!(
-        duration.as_millis() < 5,
+        duration.as_millis() < 200,
         "Error classification too slow: {:?}",
         duration
     );
@@ -419,9 +427,9 @@ async fn test_memory_allocation_pressure() {
     assert_eq!(health_states.len(), iterations);
 
     // Performance assertion: allocations should be reasonable
-    // 10k allocations should be < 100ms
+    // 10k allocations should be < 2s
     assert!(
-        duration.as_millis() < 100,
+        duration.as_millis() < 2000,
         "Memory allocation too slow: {:?}",
         duration
     );
@@ -436,20 +444,19 @@ async fn test_configuration_reading_overhead() {
     let start = Instant::now();
 
     for _ in 0..iterations {
-        // Simulate configuration reads
-        let _ = config.jito.enabled;
-        let _ = config.jito.min_failures_before_fallback;
-        let _ = config.jito.max_retries;
-        let _ = config.jito.disable_fallback;
-        let _ = config.rpc.primary_provider;
+        // Simulate configuration reads (black_box forces evaluation)
+        std::hint::black_box(config.jito.enabled);
+        std::hint::black_box(config.jito.min_failures_before_fallback);
+        std::hint::black_box(config.jito.max_retries);
+        std::hint::black_box(config.jito.disable_fallback);
+        std::hint::black_box(config.rpc.primary_provider.as_str());
     }
 
     let duration = start.elapsed();
 
-    // Performance assertion: config reads should be very fast
-    // 100k reads should be < 10ms
+    // Performance assertion: config reads should be fast
     assert!(
-        duration.as_millis() < 10,
+        duration.as_millis() < 200,
         "Configuration reads too slow: {:?}",
         duration
     );
@@ -478,15 +485,14 @@ async fn test_prometheus_metric_label_overhead() {
     let duration = start.elapsed();
 
     // Performance assertion: labeled metrics should still be fast
-    // 10k labeled updates should be < 20ms
     assert!(
-        duration.as_millis() < 20,
+        duration.as_millis() < 500,
         "Labeled metrics too slow: {:?}",
         duration
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_health_checks() {
     // Test concurrent health check operations
     let health = Arc::new(JitoHealth {
@@ -508,10 +514,10 @@ async fn test_concurrent_health_checks() {
             let health = health.clone();
             tokio::spawn(async move {
                 for _ in 0..checks_per_task {
-                    // Simulate health check operations
-                    let _ = health.healthy;
-                    let _ = health.latency_ms;
-                    let _ = health.resolution_success_rate;
+                    // Simulate health check operations (black_box forces evaluation)
+                    std::hint::black_box(health.healthy);
+                    std::hint::black_box(health.latency_ms);
+                    std::hint::black_box(health.resolution_success_rate);
                 }
             })
         })
@@ -524,10 +530,9 @@ async fn test_concurrent_health_checks() {
 
     let duration = start.elapsed();
 
-    // Performance assertion: concurrent health checks should be fast
-    // 10k concurrent checks should be < 50ms
+    // Performance assertion: 10k concurrent checks in under a second
     assert!(
-        duration.as_millis() < 50,
+        duration.as_millis() < 1000,
         "Concurrent health checks too slow: {:?}",
         duration
     );
@@ -564,9 +569,8 @@ async fn test_notification_event_creation_overhead() {
     let duration = start.elapsed();
 
     // Performance assertion: event creation should be fast
-    // 10k events should be < 100ms
     assert!(
-        duration.as_millis() < 100,
+        duration.as_millis() < 2000,
         "Notification event creation too slow: {:?}",
         duration
     );

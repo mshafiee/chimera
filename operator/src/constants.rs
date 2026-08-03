@@ -55,11 +55,60 @@ pub mod verified_majors {
 
 
 // Legacy constants for backward compatibility
-/// @deprecated Use `mints::SOL` instead
+#[deprecated = "Use mints::SOL instead"]
 pub const SOL_MINT: &str = mints::SOL;
-/// @deprecated Use `mints::USDC` instead
+#[deprecated = "Use mints::USDC instead"]
 pub const USDC_MINT: &str = mints::USDC;
-/// @deprecated Use `mints::USDT` instead
+#[deprecated = "Use mints::USDT instead"]
 pub const USDT_MINT: &str = mints::USDT;
-/// @deprecated Use `programs::JUPITER` instead
+#[deprecated = "Use programs::JUPITER instead"]
 pub const JUPITER_PROGRAM_ID: &str = programs::JUPITER;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    /// Validate that every mint/program/verified-major address parses as a
+    /// base58 Solana `Pubkey` (checks 32-byte length and base58 validity) so a
+    /// typo in any constant fails the test suite instead of silently producing
+    /// incorrect transactions/routes at runtime.
+    #[test]
+    fn all_address_constants_are_valid_pubkeys() {
+        let mut addresses: Vec<(&str, &str)> = Vec::new();
+        addresses.push(("mints::SOL", mints::SOL));
+        addresses.push(("mints::USDC", mints::USDC));
+        addresses.push(("mints::USDT", mints::USDT));
+        addresses.push(("programs::JUPITER", programs::JUPITER));
+        addresses.push(("programs::TOKEN", programs::TOKEN));
+        addresses.push(("programs::TOKEN_2022", programs::TOKEN_2022));
+        for addr in verified_majors::ALL {
+            addresses.push(("verified_majors", addr));
+        }
+
+        for (name, addr) in addresses {
+            let pk = solana_sdk::pubkey::Pubkey::from_str(addr)
+                .unwrap_or_else(|e| panic!("{} = {:?} is not a valid Pubkey: {}", name, addr, e));
+            // Base58 pubkey length varies with leading zero bytes (32-44 chars).
+            let len = pk.to_string().len();
+            assert!(
+                (32..=44).contains(&len),
+                "{} = {:?} must encode to 32-44 base58 chars, got {}",
+                name,
+                addr,
+                len
+            );
+        }
+    }
+
+    /// The verified-majors allowlist bypasses the Liq/FDV heuristic in
+    /// `slow_check`; every entry must at minimum be a well-formed Pubkey
+    /// (manual review gate: deep multi-pool liquidity + revoked authorities).
+    #[test]
+    fn verified_majors_entries_are_valid_and_unique() {
+        let all = verified_majors::ALL;
+        assert!(!all.is_empty());
+        let unique: std::collections::HashSet<&&str> = all.iter().collect();
+        assert_eq!(unique.len(), all.len(), "verified_majors must not contain duplicates");
+    }
+}

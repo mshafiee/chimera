@@ -26,7 +26,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, rate(chimera_signal_quality_score_bucket[5m]))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(chimera_signal_quality_score_bucket[5m])))",
           "refId": "A"
         }
       ]
@@ -42,7 +42,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(chimera_signal_quality_score_bucket[5m]))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(chimera_signal_quality_score_bucket[5m])))",
           "refId": "A"
         }
       ]
@@ -95,8 +95,7 @@
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            {"type": "value", "options": {"0": {"text": "UNHEALTHY", "color": "red"}}, "value": "0"},
-            {"type": "value", "options": {"1": {"text": "HEALTHY", "color": "green"}}, "value": "1"}
+            {"type": "value", "options": {"0": {"text": "UNHEALTHY", "color": "red"}, "1": {"text": "HEALTHY", "color": "green"}}}
           ]
         }
       }
@@ -112,8 +111,9 @@
       },
       "targets": [
         {
-          "expr": "rate(chimera_signal_quality_score_bucket[5m])",
+          "expr": "sum by (le) (rate(chimera_signal_quality_score_bucket[5m]))",
           "legendFormat": "{{le}}",
+          "format": "heatmap",
           "refId": "A"
         }
       ]
@@ -130,7 +130,7 @@
       "targets": [
         {
           "format": "table",
-          "rawSql": "SELECT wallet_address, token_address, signal_type, consensus_score, signal_count, created_at FROM signal_aggregation ORDER BY created_at DESC LIMIT 30",
+          "rawSql": "SELECT wallet_address, token_address, direction, is_consensus, consensus_wallet_count, created_at FROM signal_aggregation WHERE $__timeFilter(created_at) ORDER BY created_at DESC LIMIT 30",
           "refId": "A"
         }
       ],
@@ -143,9 +143,9 @@
             "renameByName": {
               "wallet_address": "Wallet",
               "token_address": "Token",
-              "signal_type": "Signal Type",
-              "consensus_score": "Consensus Score",
-              "signal_count": "Signal Count",
+              "direction": "Signal Type",
+              "is_consensus": "Consensus",
+              "consensus_wallet_count": "Signal Count",
               "created_at": "Time"
             }
           }

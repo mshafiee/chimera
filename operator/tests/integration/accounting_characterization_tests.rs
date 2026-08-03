@@ -27,7 +27,7 @@ fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
     crate::common::pg_pool(db)
 }
 
-async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
+async fn create_test_db() -> (Arc<dyn Database>, crate::common::TestDbGuard) {
     crate::common::create_test_pg_db().await
 }
 
@@ -119,6 +119,13 @@ async fn position_row(
     (state, realized, realized_net, remaining)
 }
 
+// NOTE on `remaining` (entry_amount_sol): the partial-close path MUTATES
+// `entry_amount_sol` to the remaining exposure (close_position_full sets it to
+// `entry_amount - exited_amount`). Despite the column's name, it is NOT the
+// immutable original entry size after any partial close — the tests below pin
+// this contract so a schema change to a dedicated "remaining exposure" column
+// must update these assertions too.
+
 // ─── 1. Multi-tier partial + final close accumulates realized PnL ─────────────
 
 #[tokio::test]
@@ -167,6 +174,11 @@ async fn test_tiered_close_accumulates_realized_pnl() {
     );
 
     // Tier 2 (final): close remaining at $0.003 (ratio = 3.0 → gross = 0.5 × 2.0 = 1.0 SOL).
+    // NOTE: exit_fraction = Decimal::ONE means a 100% close of the REMAINING
+    // exposure (0.5 SOL after the tier-1 mutation above) — not 1.0 SOL. The
+    // tier-1 assertion `remaining == 0.5` above is what makes this dependency
+    // explicit; if entry_amount_sol ever keeps the original 1.0, the gross
+    // here would become 2.0 and this test fails loudly.
     insert_trade(&db, "uuid-tier-exit2", W, T, "SELL", "0.5").await;
     db.close_position_full(
         "uuid-tier-exit2",
@@ -333,8 +345,11 @@ async fn test_exit_costs_come_from_sell_trade_row() {
 }
 
 // ─── 5. Atomic admission: concurrent same-token opens leave one ACTIVE position ─
+// Multi-threaded runtime: the race is only genuinely stressed when the five
+// tasks can run on parallel workers (a current_thread runtime would serialize
+// them at their first await, hiding scheduling-dependent regressions).
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_same_token_open_leaves_one_position() {
     let (db, _tmp) = create_test_db().await;
     let pool = pg_pool(&db);

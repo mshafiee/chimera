@@ -65,7 +65,7 @@
       },
       "targets": [
         {
-          "expr": "rate(go_gc_duration_seconds{job=\"chimera-operator\"}[5m])",
+          "expr": "rate(go_gc_duration_seconds_sum{job=\"chimera-operator\"}[5m])",
           "legendFormat": "GC Duration/sec",
           "refId": "A"
         }
@@ -115,8 +115,8 @@
       },
       "targets": [
         {
-          "expr": "100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
-          "legendFormat": "CPU Usage %",
+          "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+          "legendFormat": "{{instance}} CPU %",
           "refId": "A"
         }
       ],

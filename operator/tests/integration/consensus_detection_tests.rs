@@ -2,21 +2,23 @@
 //!
 //! Tests that multiple wallets buying the same token within 5 minutes
 //! triggers consensus detection and improves signal quality.
+//!
+//! The aggregator is in-memory (`db` is unused), but construction requires a
+//! Database handle — each test uses an isolated database so no migrations
+//! race on a shared schema.
 
-use chimera_operator::db_abstraction::{create_database, DatabaseConfig};
+use chimera_operator::db_abstraction::Database;
 use chimera_operator::monitoring::SignalAggregator;
 use rust_decimal::Decimal;
 use std::str::FromStr;
-use tempfile::TempDir;
+use std::sync::Arc;
+
+#[path = "../common/mod.rs"]
+mod common;
 
 #[tokio::test]
 async fn test_consensus_detection_two_wallets() {
-    // Setup test database
-    let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
-    let db = create_database(&config).await.unwrap();
-    db.run_migrations().await.unwrap();
-
+    let (db, _guard) = common::create_test_db().await;
     let aggregator = SignalAggregator::new(db);
 
     // Test token address
@@ -48,6 +50,8 @@ async fn test_consensus_detection_two_wallets() {
         )
         .await;
 
+    // Intermediate result pinned: consensus on the SECOND signal with the
+    // aggregated amounts of both wallets.
     assert!(result2.is_some(), "Second signal should trigger consensus");
     let consensus = result2.unwrap();
     assert_eq!(consensus.wallet_count, 2);
@@ -63,11 +67,7 @@ async fn test_consensus_detection_two_wallets() {
 
 #[tokio::test]
 async fn test_consensus_detection_three_wallets() {
-    let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
-    let db = create_database(&config).await.unwrap();
-    db.run_migrations().await.unwrap();
-
+    let (db, _guard) = common::create_test_db().await;
     let aggregator = SignalAggregator::new(db);
     let token_address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
@@ -110,11 +110,12 @@ async fn test_consensus_detection_three_wallets() {
 
 #[tokio::test]
 async fn test_consensus_expires_after_5_minutes() {
-    let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
-    let db = create_database(&config).await.unwrap();
-    db.run_migrations().await.unwrap();
-
+    // WHITE-BOX TEST: the aggregator records timestamps as tokio::time::Instant
+    // and prunes expired signals inline on the next add_signal() — there is no
+    // background cleanup loop. This test relies on tokio's virtual clock
+    // (pause/advance); if the aggregator ever switches to a wall-clock source,
+    // this test must be rewritten.
+    let (db, _guard) = common::create_test_db().await;
     let aggregator = SignalAggregator::new(db);
     let token_address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
@@ -132,7 +133,7 @@ async fn test_consensus_expires_after_5_minutes() {
     tokio::time::pause();
     tokio::time::advance(std::time::Duration::from_secs(360)).await;
 
-    // Second wallet buys — the cleanup loop removes Wallet1 (> 5 min old)
+    // Second wallet buys — the next add_signal() prunes Wallet1 (> 5 min old)
     let result = aggregator
         .add_signal(
             "Wallet2",
@@ -148,11 +149,7 @@ async fn test_consensus_expires_after_5_minutes() {
 
 #[tokio::test]
 async fn test_no_consensus_for_sell_signals() {
-    let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
-    let db = create_database(&config).await.unwrap();
-    db.run_migrations().await.unwrap();
-
+    let (db, _guard) = common::create_test_db().await;
     let aggregator = SignalAggregator::new(db);
     let token_address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
@@ -183,11 +180,7 @@ async fn test_no_consensus_for_sell_signals() {
 
 #[tokio::test]
 async fn test_consensus_different_tokens() {
-    let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
-    let db = create_database(&config).await.unwrap();
-    db.run_migrations().await.unwrap();
-
+    let (db, _guard) = common::create_test_db().await;
     let aggregator = SignalAggregator::new(db);
     let token1 = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"; // USDC
     let token2 = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"; // USDT

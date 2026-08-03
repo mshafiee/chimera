@@ -19,7 +19,6 @@ import asyncio
 import logging
 import os
 import time
-from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Optional, Callable, Any
@@ -97,16 +96,11 @@ class APIHealthMonitor:
         self.max_consecutive_failures = int(os.getenv("SCOUT_MAX_CONSECUTIVE_FAILURES", "5"))
 
         # Rate limiting
-        self.request_queue: deque = deque()
         self.last_request_time: Dict[str, float] = {}
-        self.min_request_interval_ms = int(os.getenv("SCOUT_MIN_REQUEST_INTERVAL_MS", "100"))
 
         # Cache for graceful degradation
         self.cache: Dict[str, tuple[Any, datetime]] = {}
         self.cache_ttl_seconds = int(os.getenv("SCOUT_CACHE_TTL_SECONDS", "300"))
-
-        # Background health check task
-        self._health_check_task: Optional[asyncio.Task] = None
 
     def add_endpoint(self, endpoint: APIEndpoint) -> None:
         """
@@ -231,10 +225,11 @@ class APIHealthMonitor:
         if self.offline_mode:
             return None
 
-        # Filter to enabled endpoints
+        # Filter to enabled, healthy endpoints (DOWN endpoints are excluded
+        # so the docstring contract "None if no healthy endpoints" holds)
         enabled_endpoints = [
             (name, ep) for name, ep in self.endpoints.items()
-            if ep.enabled
+            if ep.enabled and self.get_status(name) != APIStatus.DOWN
         ]
 
         if not enabled_endpoints:
@@ -268,10 +263,11 @@ class APIHealthMonitor:
 
     def _trigger_failover(self) -> None:
         """Trigger failover to a backup endpoint."""
+        previous_primary = self.current_primary
         best_endpoint = self.get_best_endpoint()
 
-        if best_endpoint and best_endpoint != self.current_primary:
-            logger.warning(f"Failover triggered: {self.current_primary} -> {best_endpoint}")
+        if best_endpoint is not None:
+            logger.warning(f"Failover triggered: {previous_primary} -> {best_endpoint}")
             self.current_primary = best_endpoint
         else:
             logger.error("No healthy endpoints available, entering offline mode")
@@ -370,9 +366,15 @@ class APIHealthMonitor:
                 latency_ms = (time.time() - start_time) * 1000
                 self.record_request(endpoint_name, True, latency_ms)
 
-                # Cache result
+                # Cache result (prune expired entries so the cache is bounded)
                 if cache_key and result is not None:
                     self.cache[cache_key] = (result, datetime.utcnow())
+                    if len(self.cache) > 1000:
+                        now = datetime.utcnow()
+                        self.cache = {
+                            k: v for k, v in self.cache.items()
+                            if (now - v[1]).total_seconds() < self.cache_ttl_seconds
+                        }
 
                 return result
 
@@ -381,11 +383,12 @@ class APIHealthMonitor:
                 self.record_request(endpoint_name, False, latency_ms, str(e))
 
                 if attempt < max_attempts - 1:
-                    # Try next endpoint
+                    # Try next endpoint (never retry with None)
                     endpoint_name = self.get_best_endpoint()
-                    if endpoint_name != self.current_primary:
-                        logger.info(f"Retrying with endpoint {endpoint_name}")
-                        continue
+                    if endpoint_name is None:
+                        break
+                    logger.info(f"Retrying with endpoint {endpoint_name}")
+                    continue
 
         # All attempts failed
         logger.error(f"All API attempts failed for {cache_key}")
@@ -403,10 +406,11 @@ class APIHealthMonitor:
         min_interval = 1000.0 / endpoint.rate_limit_rps  # Convert RPS to ms
         time_since_last = (now - last_time) * 1000  # Convert to ms
 
+        # Reserve the slot BEFORE sleeping so concurrent callers get distinct
+        # times and the per-endpoint RPS limit is actually enforced.
+        self.last_request_time[endpoint_name] = now
         if time_since_last < min_interval:
             await asyncio.sleep((min_interval - time_since_last) / 1000)
-
-        self.last_request_time[endpoint_name] = time.time()
 
     def get_metrics_summary(self) -> Dict[str, Any]:
         """

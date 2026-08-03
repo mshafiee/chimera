@@ -2,6 +2,7 @@
 mod tests {
     use chimera_operator::config::{MonitoringConfig, TieredPollingConfig};
     use rust_decimal::Decimal;
+    use std::str::FromStr;
 
     #[test]
     fn test_tiered_polling_config_defaults() {
@@ -84,6 +85,90 @@ mod tests {
     }
 
     #[test]
+    fn test_tiered_polling_enabled_without_config_falls_back_to_defaults() {
+        // tiered_polling: None → the production code falls back to the default
+        // intervals/thresholds instead of panicking or disabling tiering.
+        let monitoring_config = MonitoringConfig {
+            tiered_polling_enabled: true,
+            tiered_polling: None,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(85)), "ACTIVE"),
+            5,
+            "None config must fall back to default high interval"
+        );
+        assert_eq!(
+            monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(70)), "ACTIVE"),
+            8
+        );
+        assert_eq!(
+            monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(50)), "ACTIVE"),
+            30
+        );
+    }
+
+    #[test]
+    fn test_threshold_lower_boundaries() {
+        let monitoring_config = MonitoringConfig {
+            tiered_polling_enabled: true,
+            tiered_polling: Some(TieredPollingConfig::default()),
+            ..Default::default()
+        };
+
+        // Just below the high threshold (>= 80) → regular (8).
+        assert_eq!(
+            monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(79)), "ACTIVE"),
+            8
+        );
+        // Just below the regular threshold (>= 60) → emerging (30).
+        assert_eq!(
+            monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(59)), "ACTIVE"),
+            30
+        );
+        // Fractional WQS rounds to nearest integer BEFORE the comparison:
+        // 79.5 → 80 → high (5).
+        assert_eq!(
+            monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from_str("79.5").unwrap()), "ACTIVE"),
+            5
+        );
+        // 79.49 → 79 → regular (8).
+        assert_eq!(
+            monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from_str("79.49").unwrap()), "ACTIVE"),
+            8
+        );
+    }
+
+    #[test]
+    fn test_unknown_wallet_statuses_fall_through_to_wqs() {
+        let monitoring_config = MonitoringConfig {
+            tiered_polling_enabled: true,
+            tiered_polling: Some(TieredPollingConfig::default()),
+            ..Default::default()
+        };
+
+        // Only the exact "CANDIDATE" status is special-cased; every other
+        // string (including case variants and empty) uses WQS tiering.
+        assert_eq!(
+            monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(85)), "candidate"),
+            5
+        );
+        assert_eq!(
+            monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(85)), "Candidate"),
+            5
+        );
+        assert_eq!(
+            monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(85)), ""),
+            5
+        );
+        assert_eq!(
+            monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(85)), "ACTIVE "),
+            5
+        );
+    }
+
+    #[test]
     fn test_tiered_polling_with_custom_intervals() {
         let custom_config = TieredPollingConfig {
             high_conviction_interval_secs: 3,
@@ -114,6 +199,20 @@ mod tests {
         // Below custom regular threshold
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(65)), "ACTIVE"),
+            60
+        );
+
+        // Exact custom boundary values: >= is inclusive at both thresholds.
+        assert_eq!(
+            monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(90)), "ACTIVE"),
+            3
+        );
+        assert_eq!(
+            monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(70)), "ACTIVE"),
+            10
+        );
+        assert_eq!(
+            monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(69)), "ACTIVE"),
             60
         );
     }

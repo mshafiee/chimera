@@ -24,6 +24,12 @@ if [[ ! "$ROLE" =~ ^(admin|operator|readonly)$ ]]; then
     exit 1
 fi
 
+# Validate wallet address format (Solana base58, 32-44 chars)
+if [[ ! "$WALLET_ADDRESS" =~ ^[1-9A-HJ-NP-Za-km-z]{32,44}$ ]]; then
+    echo "Error: Invalid wallet address: $WALLET_ADDRESS"
+    exit 1
+fi
+
 # Check if database exists
 if [ ! -f "data/chimera.db" ]; then
     echo "Error: Database not found at data/chimera.db"
@@ -36,14 +42,17 @@ echo "  Address: $WALLET_ADDRESS"
 echo "  Role: $ROLE"
 echo ""
 
-# Use Python to insert (works in both host and container)
-python3 << PYTHON_SCRIPT
+# Use Python to insert (works in both host and container).
+# The address is passed via environment (quoted heredoc) so no shell or
+# Python interpretation of the input can occur.
+if WALLET_ADDRESS="$WALLET_ADDRESS" ROLE="$ROLE" python3 << 'PYTHON_SCRIPT'
 import sqlite3
 import sys
+import os
 
 db_path = 'data/chimera.db'
-wallet_address = '$WALLET_ADDRESS'
-role = '$ROLE'
+wallet_address = os.environ['WALLET_ADDRESS']
+role = os.environ['ROLE']
 
 try:
     conn = sqlite3.connect(db_path)
@@ -64,10 +73,13 @@ try:
             )
         """)
     
-    # Insert or replace wallet
+    # Upsert wallet, preserving existing metadata (added_at, notes)
     cursor.execute("""
-        INSERT OR REPLACE INTO admin_wallets (wallet_address, role, added_by, added_at)
+        INSERT INTO admin_wallets (wallet_address, role, added_by, added_at)
         VALUES (?, ?, 'SCRIPT', CURRENT_TIMESTAMP)
+        ON CONFLICT(wallet_address) DO UPDATE SET
+            role = excluded.role,
+            added_by = 'SCRIPT'
     """, (wallet_address, role))
     
     conn.commit()
@@ -91,8 +103,7 @@ except Exception as e:
     print(f"Error: {e}")
     sys.exit(1)
 PYTHON_SCRIPT
-
-if [ $? -eq 0 ]; then
+then
     echo ""
     echo "✓ Admin wallet added successfully!"
     echo ""
@@ -103,9 +114,3 @@ else
     echo "✗ Failed to add admin wallet"
     exit 1
 fi
-
-
-
-
-
-

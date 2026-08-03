@@ -16,6 +16,29 @@ use solana_sdk::{
     transaction::VersionedTransaction,
 };
 
+/// Error refreshing a V0 message's blockhash.
+///
+/// Typed so callers can branch on the variant instead of string-matching:
+/// passing a legacy message here is an API-contract violation, not a runtime
+/// condition the caller can recover from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshBlockhashError {
+    /// A legacy message was passed to the V0-only refresh path.
+    LegacyMessageNotSupported,
+}
+
+impl std::fmt::Display for RefreshBlockhashError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LegacyMessageNotSupported => {
+                write!(f, "Cannot refresh a legacy message via the V0 path")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RefreshBlockhashError {}
+
 /// Refresh a V0 message's `recent_blockhash` to `new_blockhash` by cloning the
 /// message and swapping the single public field.
 ///
@@ -26,19 +49,20 @@ use solana_sdk::{
 ///
 /// Returns an error for legacy messages (legacy messages are refreshed inline
 /// at their call sites by setting `recent_blockhash` directly).
+///
+/// NOTE: this is O(message size) per refresh (the message, including
+/// `account_keys`, `instructions` and `address_table_lookups`, is cloned).
 pub fn refresh_v0_blockhash(
     versioned_tx: &VersionedTransaction,
     new_blockhash: Hash,
-) -> Result<VersionedMessage, String> {
+) -> Result<VersionedMessage, RefreshBlockhashError> {
     match &versioned_tx.message {
         VersionedMessage::V0(v0_msg) => {
             let mut refreshed = v0_msg.clone();
             refreshed.recent_blockhash = new_blockhash;
             Ok(VersionedMessage::V0(refreshed))
         }
-        VersionedMessage::Legacy(_) => {
-            Err("Cannot refresh a legacy message via the V0 path".to_string())
-        }
+        VersionedMessage::Legacy(_) => Err(RefreshBlockhashError::LegacyMessageNotSupported),
     }
 }
 
@@ -71,12 +95,28 @@ mod tests {
         match refreshed {
             VersionedMessage::V0(msg) => {
                 assert_eq!(msg.recent_blockhash, blockhash_b);
-                // Everything else preserved.
+                // Everything else preserved — including the compiled
+                // instructions and ALT lookups, so a field-swap bug anywhere
+                // in the refresh is caught, not just header/account_keys.
                 assert_eq!(msg.header, tx.message.header().clone());
                 assert_eq!(
                     msg.account_keys,
                     match &tx.message {
                         VersionedMessage::V0(m) => m.account_keys.clone(),
+                        _ => unreachable!(),
+                    }
+                );
+                assert_eq!(
+                    msg.instructions,
+                    match &tx.message {
+                        VersionedMessage::V0(m) => m.instructions.clone(),
+                        _ => unreachable!(),
+                    }
+                );
+                assert_eq!(
+                    msg.address_table_lookups,
+                    match &tx.message {
+                        VersionedMessage::V0(m) => m.address_table_lookups.clone(),
                         _ => unreachable!(),
                     }
                 );

@@ -10,6 +10,7 @@
 //! The `runner_*` tests exercise the real [`run_reconciliation`] runner against an
 //! isolated PostgreSQL database using a stub on-chain checker.
 
+#[path = "../common/mod.rs"]
 mod common;
 
 use async_trait::async_trait;
@@ -85,6 +86,10 @@ fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
 /// Age `opened_at` past the entry-finalization grace window so a missing entry becomes
 /// actionable. Binds a `DateTime<Utc>` (never an RFC3339 string — `opened_at` is
 /// `TIMESTAMPTZ`).
+///
+/// NOTE: this only affects the ENTRY check (which is `opened_at`-based). The
+/// EXITING exit check is unconditional — it runs for every EXITING position
+/// regardless of age — so this helper cannot be used to pin exit staleness.
 async fn age_opened_at(db: &Arc<dyn Database>, uuid: &str, seconds_ago: i64) {
     let pool = pg_pool(db);
     let old = chrono::Utc::now() - chrono::Duration::seconds(seconds_ago);
@@ -114,12 +119,22 @@ async fn runner_logs_confirmed_entry_for_active_position() {
     assert_eq!(result.discrepancies, 0);
     assert_eq!(result.auto_resolved, 0);
 
-    // A log row was inserted recording the confirmed entry.
+    // A log row was inserted recording the confirmed entry (discrepancy NONE).
+    let pool = pg_pool(&db);
+    let (disc,): (String,) = sqlx::query_as(
+        "SELECT discrepancy FROM reconciliation_log WHERE trade_uuid = $1",
+    )
+    .bind("uuid-active")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(disc, "NONE", "confirmed entry must log a NONE discrepancy row");
+
     let status = db.get_reconciliation_status(100).await.unwrap();
-    assert!(status.checked_count >= 1, "checked_count should reflect the run");
+    assert_eq!(status.checked_count, 1, "the run inspected exactly one position");
 
     // The checked counter advanced.
-    assert!(metrics.reconciliation_checked.get() >= 1);
+    assert_eq!(metrics.reconciliation_checked.get(), 1);
 }
 
 #[tokio::test]
@@ -184,9 +199,6 @@ async fn runner_auto_resolves_confirmed_exit() {
     })
     .await
     .unwrap();
-
-    // Age the position past the confirmation grace window so the exit is checked.
-    age_opened_at(&db, uuid, 120).await;
 
     let checker = StubChecker {
         found: vec![
@@ -288,23 +300,27 @@ mod tests {
     /// Plant a controlled `last_updated` on a position. The `positions_updated_at`
     /// BEFORE-UPDATE trigger force-resets `last_updated = CURRENT_TIMESTAMP` on every
     /// UPDATE, so it must be disabled around the timestamp write (then re-enabled).
+    /// Runs inside a transaction: if the UPDATE panics, the rollback re-enables the
+    /// trigger instead of leaving the test database with it permanently disabled.
     async fn set_last_updated(db: &Arc<dyn Database>, uuid: &str, seconds_ago: i64) {
         let pool = pg_pool(db);
+        let mut tx = pool.begin().await.unwrap();
         sqlx::query("ALTER TABLE positions DISABLE TRIGGER positions_updated_at")
-            .execute(&pool)
+            .execute(&mut *tx)
             .await
             .unwrap();
         let ts = chrono::Utc::now() - chrono::Duration::seconds(seconds_ago);
         sqlx::query("UPDATE positions SET last_updated = $1 WHERE trade_uuid = $2")
             .bind(ts)
             .bind(uuid)
-            .execute(&pool)
+            .execute(&mut *tx)
             .await
             .unwrap();
         sqlx::query("ALTER TABLE positions ENABLE TRIGGER positions_updated_at")
-            .execute(&pool)
+            .execute(&mut *tx)
             .await
             .unwrap();
+        tx.commit().await.unwrap();
     }
 
     // 1. On-chain entry discrepancy detection (signature-based).

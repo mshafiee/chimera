@@ -177,24 +177,28 @@ class AdvancedRiskFeatures:
                 current_duration += 1
                 max_duration = max(max_duration, current_duration)
 
-                # Track depth
-                depth = (peak - value) / (abs(peak) + 1e-8)
+                # Track depth (guard against a zero/near-zero peak so tiny
+                # starting values don't explode the percentage)
+                denom = abs(peak) if abs(peak) > 1e-8 else 0.0
+                depth = (peak - value) / denom if denom else 0.0
                 max_depth = max(max_depth, depth)
 
         features['max_drawdown_duration_trades'] = int(max_duration)
         features['max_drawdown_depth'] = float(max_depth)
 
-        # Average drawdown duration
+        # Average drawdown duration (per-episode running peak, reset on each
+        # new high so episodes are tracked independently)
         drawdowns = []
         in_drawdown = False
         dd_start = 0
+        episode_peak = cumulative[0]
 
         for i, value in enumerate(cumulative):
-            if value > peak:
+            if value > episode_peak:
                 if in_drawdown:
                     drawdowns.append(i - dd_start)
                     in_drawdown = False
-                peak = value
+                episode_peak = value
             elif not in_drawdown:
                 in_drawdown = True
                 dd_start = i
@@ -243,7 +247,8 @@ class AdvancedRiskFeatures:
             if best_gain > 0:
                 features['tail_ratio'] = worst_loss / best_gain
             else:
-                features['tail_ratio'] = float('inf') if worst_loss > 0 else 0.0
+                # Finite sentinel (100.0) keeps JSON output valid
+                features['tail_ratio'] = 100.0 if worst_loss > 0 else 0.0
 
             # Skewness and kurtosis
             if SCIPY_AVAILABLE:
@@ -271,10 +276,12 @@ class AdvancedRiskFeatures:
         if len(pnl_array) < 2:
             return features
 
-        returns = np.diff(pnl_array)
-
-        # Total return
-        total_return = pnl_array[-1] - pnl_array[0]
+        # Build an equity curve and compute percentage returns from it so the
+        # risk-adjusted ratios are dimensionally meaningful.
+        equity = np.cumsum(pnl_array)
+        prev = np.where(equity[:-1] != 0, equity[:-1], 1.0)
+        returns = np.diff(equity) / prev
+        total_return = (equity[-1] - equity[0]) / equity[0] if equity[0] != 0 else 0.0
 
         # Volatility (standard deviation)
         volatility = np.std(returns)
@@ -289,25 +296,25 @@ class AdvancedRiskFeatures:
         else:
             features['sharpe_ratio'] = 0.0
 
-        # Sortino Ratio
+        # Sortino Ratio (bounded finite sentinel keeps JSON output valid)
         if downside_deviation > 0:
             features['sortino_ratio'] = total_return / downside_deviation
         else:
-            features['sortino_ratio'] = float('inf') if total_return > 0 else 0.0
+            features['sortino_ratio'] = 100.0 if total_return > 0 else 0.0
 
         # Calmar Ratio (return / max drawdown)
         max_drawdown = self._calculate_max_drawdown(pnl_array)
         if max_drawdown != 0:
             features['calmar_ratio'] = total_return / abs(max_drawdown)
         else:
-            features['calmar_ratio'] = float('inf') if total_return > 0 else 0.0
+            features['calmar_ratio'] = 100.0 if total_return > 0 else 0.0
 
         # Sterling Ratio (return / average drawdown)
         avg_drawdown = self._calculate_avg_drawdown(pnl_array)
         if avg_drawdown != 0:
             features['sterling_ratio'] = total_return / avg_drawdown
         else:
-            features['sterling_ratio'] = float('inf') if total_return > 0 else 0.0
+            features['sterling_ratio'] = 100.0 if total_return > 0 else 0.0
 
         return features
 
@@ -361,8 +368,9 @@ class AdvancedRiskFeatures:
         for value in cumulative:
             if value > peak:
                 peak = value
-            # Percentage drop from peak
-            drop = (peak - value) / (abs(peak) + 1e-8) * 100
+            # Percentage drop from peak (guard against a zero/near-zero peak)
+            denom = abs(peak) if abs(peak) > 1e-8 else 0.0
+            drop = (peak - value) / denom * 100 if denom else 0.0
             ulcer_values.append(drop ** 2)
 
         if ulcer_values:
@@ -384,7 +392,8 @@ class AdvancedRiskFeatures:
         for value in cumulative:
             if value > peak:
                 peak = value
-            dd = (peak - value) / (abs(peak) + 1e-8)
+            denom = abs(peak) if abs(peak) > 1e-8 else 0.0
+            dd = (peak - value) / denom if denom else 0.0
             max_dd = max(max_dd, dd)
 
         return max_dd
@@ -401,7 +410,8 @@ class AdvancedRiskFeatures:
         for value in cumulative:
             if value > peak:
                 peak = value
-            dd = abs((peak - value) / (abs(peak) + 1e-8))
+            denom = abs(peak) if abs(peak) > 1e-8 else 0.0
+            dd = abs((peak - value) / denom) if denom else 0.0
             drawdowns.append(dd)
 
         return np.mean(drawdowns) if drawdowns else 0.0

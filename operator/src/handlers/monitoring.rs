@@ -13,7 +13,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::Json,
 };
-use rust_decimal::prelude::*;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -52,9 +51,15 @@ pub async fn helius_webhook_handler(
     // Process each event in the array
     for event in payload {
         // Rate limit webhook processing (non-blocking check)
-        // Note: Full rate limiting is handled by the rate limiter, but we skip the blocking acquire
-        // to avoid Send bound issues. The rate limiter will still track usage.
-        let _ = state.webhook_rate_limiter.current_rate();
+        // Reject events when the limiter is at capacity instead of only
+        // tracking usage (the blocking acquire is skipped to avoid Send issues).
+        if !state.webhook_rate_limiter.try_acquire() {
+            tracing::warn!(
+                signature = %event.signature,
+                "Webhook rate limit exceeded, skipping event"
+            );
+            continue;
+        }
 
         // Dedup: skip if this signature was already processed within the last 5 minutes.
         // Multiple orphaned webhooks deliver the same transaction, causing redundant
@@ -163,21 +168,19 @@ pub async fn helius_webhook_handler(
         let tracked_wallet_ref = tracked_wallet.as_deref();
         let parsed = parse_helius_webhook(&event, tracked_wallet_ref);
         if let Ok(Some(swap)) = parsed {
-            let wallet_address = if let Some(ref wallet) = tracked_wallet {
-                wallet.clone()
-            } else {
-                // Fallback: try to extract from account_data (legacy behavior)
-                event
-                    .account_data
-                    .iter()
-                    .find_map(|acc| {
-                        if acc.account != event.signature {
-                            Some(acc.account.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_default()
+            // Only process events that matched an ACTIVE tracked wallet. Guessing
+            // a wallet from account_data would create garbage rows in the
+            // wallets/speculative-activity tables from unauthenticated webhook data.
+            let wallet_address = match tracked_wallet_ref {
+                Some(wallet) => wallet.to_string(),
+                None => {
+                    tracing::warn!(
+                        signature = %event.signature,
+                        transaction_type = %event.transaction_type,
+                        "Webhook event has no tracked wallet (no ACTIVE wallet matched user_account)"
+                    );
+                    continue;
+                }
             };
 
             if !wallet_address.is_empty() {
@@ -193,45 +196,53 @@ pub async fn helius_webhook_handler(
                 // Record speculative activity for inactivity tracking
                 crate::monitoring::record_speculative_activity(state.db.clone(), &wallet_address, &swap.token_out).await;
                 
-                // Check if wallet exists in database
-                let wallet_opt = state.db.get_wallet(&wallet_address).await;
+                // Check if wallet exists in database. A DB error must not be
+                // treated as "wallet not found" — that would make the upsert
+                // below silently overwrite a real wallet's metrics.
+                let wallet = match state.db.get_wallet(&wallet_address).await {
+                    Ok(Some(w)) => w,
+                    Ok(None) => {
+                        // Auto-add wallet when detected making a trade
+                        tracing::info!(
+                            wallet = %wallet_address,
+                            "New wallet detected, adding to database"
+                        );
 
-                // If wallet doesn't exist, automatically add it as CANDIDATE
-                let wallet = if let Ok(Some(w)) = wallet_opt {
-                    w
-                } else {
-                    // Auto-add wallet when detected making a trade
-                    tracing::info!(
-                        wallet = %wallet_address,
-                        "New wallet detected, adding to database"
-                    );
+                        // Add wallet with minimal info (will be analyzed by Scout later)
+                        let _ = state
+                            .db
+                            .upsert_wallet(
+                                &wallet_address,
+                                None,                 // wqs_score - will be calculated by Scout
+                                None,                 // roi_7d
+                                None,                 // roi_30d
+                                Some(1),              // trade_count_30d - at least 1 trade detected
+                                None,                 // win_rate
+                                None,                 // max_drawdown_30d
+                                Some(swap.amount_in), // avg_trade_size_sol
+                                Some("Auto-added from webhook detection"), // notes
+                            )
+                            .await;
 
-                    // Add wallet with minimal info (will be analyzed by Scout later)
-                    let _ = state
-                        .db
-                        .upsert_wallet(
-                            &wallet_address,
-                            None,                 // wqs_score - will be calculated by Scout
-                            None,                 // roi_7d
-                            None,                 // roi_30d
-                            Some(1),              // trade_count_30d - at least 1 trade detected
-                            None,                 // win_rate
-                            None,                 // max_drawdown_30d
-                            Some(swap.amount_in), // avg_trade_size_sol
-                            Some("Auto-added from webhook detection"), // notes
-                        )
-                        .await;
-
-                    // Fetch the newly added wallet
-                    match state.db.get_wallet(&wallet_address).await {
-                        Ok(Some(w)) => w,
-                        _ => {
-                            tracing::warn!(
-                                wallet = %wallet_address,
-                                "Failed to retrieve newly added wallet"
-                            );
-                            continue; // Skip this event, but continue processing others
+                        // Fetch the newly added wallet
+                        match state.db.get_wallet(&wallet_address).await {
+                            Ok(Some(w)) => w,
+                            _ => {
+                                tracing::warn!(
+                                    wallet = %wallet_address,
+                                    "Failed to retrieve newly added wallet"
+                                );
+                                continue; // Skip this event, but continue processing others
+                            }
                         }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            wallet = %wallet_address,
+                            error = %e,
+                            "Failed to query wallet, skipping event"
+                        );
+                        continue;
                     }
                 };
 
@@ -354,7 +365,10 @@ pub async fn helius_webhook_handler(
                     // to compute entry_price. Without this, entry_price=0 and position insert
                     // fails with "Entry price must be positive".
                     if let Some(ref tp) = state.token_parser {
-                        if let Some(decimals) = tp.get_token_decimals(signal.token_address()).await {
+                        if let Some(decimals) = tp
+                            .get_token_decimals(signal.token_address().unwrap_or(""))
+                            .await
+                        {
                             signal.token_decimals = Some(decimals);
                         }
                     }
@@ -367,7 +381,7 @@ pub async fn helius_webhook_handler(
                         .insert_trade(&InsertTrade {
                             trade_uuid: signal.trade_uuid.clone(),
                             wallet_address: signal.payload.wallet_address.clone(),
-                            token_address: signal.token_address().to_string(),
+                            token_address: signal.token_address().unwrap_or("").to_string(),
                             token_symbol: Some(signal.payload.token.clone()),
                             strategy: signal.payload.strategy.to_string(),
                             side: signal.payload.action.to_string(),
@@ -467,25 +481,17 @@ pub async fn helius_webhook_handler(
                     );
                 }
             } else {
-                if tracked_wallet.is_none() {
-                    tracing::warn!(
-                        signature = %event.signature,
-                        transaction_type = %event.transaction_type,
-                        "Webhook event has no tracked wallet (no ACTIVE wallet matched user_account)"
-                    );
-                } else {
-                    tracing::debug!(
-                        signature = %event.signature,
-                        "Webhook swap skipped: could not extract wallet address from account_data"
-                    );
-                }
+                tracing::debug!(
+                    signature = %event.signature,
+                    "Webhook swap skipped: wallet address is empty"
+                );
             }
         } else {
             // Log if we had a tracked wallet but still failed to parse
-            if tracked_wallet.is_some() {
+            if let Some(ref wallet) = tracked_wallet {
                 tracing::debug!(
                     signature = %event.signature,
-                    tracked_wallet = %tracked_wallet.unwrap(),
+                    tracked_wallet = %wallet,
                     "Webhook event parsed to no swap (Ok(None)) despite tracked wallet"
                 );
             }
@@ -521,9 +527,22 @@ pub async fn helius_webhook_handler(
 }
 
 /// Get monitoring status
+/// Requires: readonly+ role (matches get_wallet_monitoring_states)
 pub async fn get_monitoring_status(
     State(state): State<Arc<MonitoringState>>,
+    axum::Extension(auth): axum::Extension<AuthExtension>,
 ) -> Json<MonitoringStatus> {
+    if !auth.0.role.has_permission(Role::Readonly) {
+        tracing::warn!("Unauthorized attempt to access monitoring status");
+        return Json(MonitoringStatus {
+            enabled: false,
+            webhook_rate: 0.0,
+            rpc_rate: 0.0,
+            webhook_credits: 0,
+            rpc_credits: 0,
+            active_wallets: 0,
+        });
+    }
     let webhook_rate = state.webhook_rate_limiter.current_rate();
     let rpc_rate = state.rpc_rate_limiter.current_rate();
     let webhook_credits = state.webhook_rate_limiter.credit_usage();
@@ -543,7 +562,7 @@ pub async fn get_monitoring_status(
         active_wallets: {
             // Query active wallets count from database
             match state.db.get_all_wallet_monitoring().await {
-                Ok(records) => records.iter().filter(|r| r.monitoring_enabled > 0).count(),
+                Ok(records) => records.iter().filter(|r| r.monitoring_enabled).count(),
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to query active wallets count, returning 0");
                     0
@@ -595,6 +614,23 @@ pub async fn enable_wallet_monitoring(
             "Wallet is not ACTIVE, cannot enable monitoring"
         );
         return StatusCode::BAD_REQUEST;
+    }
+
+    // Short-circuit if monitoring is already enabled: calling enable twice must
+    // not register a second (orphaned) Helius webhook.
+    if let Ok(Some(existing)) = state.db.get_wallet_monitoring(&wallet_address).await {
+        if existing.monitoring_enabled {
+            if let Some(webhook_id) = &existing.helius_webhook_id {
+                if !webhook_id.is_empty() {
+                    tracing::info!(
+                        wallet = %wallet_address,
+                        webhook_id = %webhook_id,
+                        "Wallet monitoring already enabled, reusing existing webhook"
+                    );
+                    return StatusCode::OK;
+                }
+            }
+        }
     }
 
     // Get webhook URL from config
@@ -691,16 +727,18 @@ pub async fn disable_wallet_monitoring(
         }
     };
 
-    // Delete Helius webhook if it exists
+    // Delete Helius webhook if it exists. If deletion fails, the webhook stays
+    // live and keeps delivering events, so report the failure instead of
+    // marking monitoring disabled while events keep being processed.
     if let Some(webhook_id) = &monitoring.helius_webhook_id {
         if let Err(e) = state.helius_client.delete_webhook(webhook_id).await {
-            tracing::warn!(
+            tracing::error!(
                 wallet = %wallet_address,
                 webhook_id = %webhook_id,
                 error = %e,
-                "Failed to delete Helius webhook (continuing with database update)"
+                "Failed to delete Helius webhook, monitoring remains enabled"
             );
-            // Continue with database update even if webhook deletion fails
+            return StatusCode::INTERNAL_SERVER_ERROR;
         } else {
             tracing::info!(
                 wallet = %wallet_address,
@@ -793,7 +831,7 @@ pub async fn get_wallet_monitoring_states(
             };
 
             // Determine status based on monitoring_enabled and webhook_health_status
-            let status = if wm.monitoring_enabled == 0 {
+            let status = if !wm.monitoring_enabled {
                 "inactive".to_string()
             } else if wm.webhook_health_status.as_deref() == Some("error")
                 || wm.webhook_health_status.as_deref() == Some("unhealthy")

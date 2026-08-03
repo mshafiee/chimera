@@ -22,6 +22,7 @@ pub struct HeliusClient {
     /// Shared metadata cache (from TokenMetadataFetcher)
     metadata_cache: Arc<RwLock<HashMap<String, crate::token::TokenMetadata>>>,
     /// Cache TTL in seconds (default: 24 hours)
+    #[allow(dead_code)] // Retained for future cache-pruning logic
     cache_ttl: u64,
     /// Performance metrics: cache hits (metadata with age available)
     cache_hits: Arc<std::sync::atomic::AtomicU64>,

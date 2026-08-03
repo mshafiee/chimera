@@ -39,6 +39,7 @@ pub enum TradeStatus {
     /// Failed transaction queued for retry
     Retry,
     /// Max retries exhausted, requires manual intervention
+    #[serde(rename = "DEAD_LETTER")]
     DeadLetter,
 }
 
@@ -58,6 +59,7 @@ impl TradeStatus {
                 | (Exiting, Closed)
                 // Retry flow
                 | (Failed, Retry)
+                | (Failed, DeadLetter) // Retry budget exhausted
                 | (Retry, Executing)
                 | (Retry, DeadLetter)
                 // Recovery flows
@@ -170,7 +172,7 @@ impl Trade {
             id: None,
             trade_uuid: signal.trade_uuid.clone(),
             wallet_address: signal.payload.wallet_address.clone(),
-            token_address: signal.token_address().to_string(),
+            token_address: signal.token_address().unwrap_or("").to_string(),
             token_symbol: Some(signal.payload.token.clone()),
             strategy: signal.payload.strategy,
             side: signal.payload.action,
@@ -205,16 +207,36 @@ impl Trade {
     }
 
     /// Mark as failed with error message
-    pub fn mark_failed(&mut self, error: String) {
+    ///
+    /// Validates the transition first: reviving a terminal trade (Closed or
+    /// DeadLetter) into Failed would corrupt lifecycle invariants.
+    pub fn mark_failed(&mut self, error: String) -> Result<(), String> {
+        if !self.status.can_transition_to(TradeStatus::Failed) {
+            return Err(format!(
+                "Invalid state transition: {} -> FAILED",
+                self.status
+            ));
+        }
         self.error_message = Some(error);
         self.status = TradeStatus::Failed;
         self.updated_at = Utc::now();
+        Ok(())
     }
 
     /// Increment retry count and transition to Retry status
+    ///
+    /// Enforces the retry budget: once `max_retries_exceeded(MAX_RETRY_ATTEMPTS)`
+    /// the trade moves directly to the terminal DeadLetter state instead of
+    /// retrying forever.
     pub fn queue_retry(&mut self) -> Result<(), String> {
         if self.status != TradeStatus::Failed {
             return Err("Can only retry from Failed state".to_string());
+        }
+        if self.max_retries_exceeded(MAX_RETRY_ATTEMPTS) {
+            self.error_message = Some("Max retry attempts exceeded".to_string());
+            self.status = TradeStatus::DeadLetter;
+            self.updated_at = Utc::now();
+            return Ok(());
         }
         self.retry_count += 1;
         self.status = TradeStatus::Retry;
@@ -234,6 +256,8 @@ pub const MAX_RETRY_ATTEMPTS: u32 = 3;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::SignalPayload;
+    use std::str::FromStr;
 
     // ==========================================================================
     // VALID STATE TRANSITIONS (PDD Section 4.5)
@@ -297,6 +321,96 @@ mod tests {
             TradeStatus::Failed.can_transition_to(TradeStatus::Retry),
             "FAILED -> RETRY should be valid (auto-retry)"
         );
+    }
+
+    // ==========================================================================
+    // RETRY BUDGET (real method behavior — not inline re-implementations)
+    // ==========================================================================
+
+    #[test]
+    fn test_mark_failed_validates_transition() {
+        let mut trade = Trade::from_signal(&Signal::new(
+            SignalPayload {
+                strategy: crate::models::Strategy::Shield,
+                token: "BONK".to_string(),
+                token_address: None,
+                action: crate::models::Action::Buy,
+                amount_sol: rust_decimal::Decimal::from_str("0.5").unwrap(),
+                wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+                trade_uuid: None,
+                exit_fraction: None,
+            },
+            0,
+            None,
+        ));
+        // A trade can only be marked failed from an executing/retry state —
+        // PENDING->FAILED is not a legal transition in the state machine.
+        trade.status = TradeStatus::Executing;
+        assert!(trade.mark_failed("boom".to_string()).is_ok());
+        assert_eq!(trade.status, TradeStatus::Failed);
+        // Terminal trades must not be revived into Failed
+        trade.status = TradeStatus::Closed;
+        assert!(trade.mark_failed("revive".to_string()).is_err());
+    }
+
+    #[test]
+    fn test_queue_retry_enforces_budget() {
+        let mut trade = Trade::from_signal(&Signal::new(
+            SignalPayload {
+                strategy: crate::models::Strategy::Shield,
+                token: "BONK".to_string(),
+                token_address: None,
+                action: crate::models::Action::Buy,
+                amount_sol: rust_decimal::Decimal::from_str("0.5").unwrap(),
+                wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+                trade_uuid: None,
+                exit_fraction: None,
+            },
+            0,
+            None,
+        ));
+        trade.status = TradeStatus::Executing;
+        trade.mark_failed("boom".to_string()).unwrap();
+
+        // Not yet at the budget: queue_retry moves to Retry
+        trade.queue_retry().unwrap();
+        assert_eq!(trade.status, TradeStatus::Retry);
+        assert_eq!(trade.retry_count, 1);
+
+        // Back to Failed, then exhaust the budget → DeadLetter directly
+        trade.status = TradeStatus::Failed;
+        trade.queue_retry().unwrap();
+        trade.status = TradeStatus::Failed;
+        trade.queue_retry().unwrap();
+        trade.status = TradeStatus::Failed;
+        assert!(trade.max_retries_exceeded(MAX_RETRY_ATTEMPTS));
+
+        // Budget exhausted: queue_retry terminates in DeadLetter, not Retry
+        trade.queue_retry().unwrap();
+        assert_eq!(trade.status, TradeStatus::DeadLetter);
+        assert_eq!(
+            trade.error_message.as_deref(),
+            Some("Max retry attempts exceeded")
+        );
+    }
+
+    #[test]
+    fn test_queue_retry_requires_failed_state() {
+        let mut trade = Trade::from_signal(&Signal::new(
+            SignalPayload {
+                strategy: crate::models::Strategy::Shield,
+                token: "BONK".to_string(),
+                token_address: None,
+                action: crate::models::Action::Buy,
+                amount_sol: rust_decimal::Decimal::from_str("0.5").unwrap(),
+                wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+                trade_uuid: None,
+                exit_fraction: None,
+            },
+            0,
+            None,
+        ));
+        assert!(trade.queue_retry().is_err());
     }
 
     #[test]

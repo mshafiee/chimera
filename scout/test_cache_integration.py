@@ -10,7 +10,6 @@ This script tests the cache integration in the Helius client to ensure:
 """
 
 import sys
-import os
 from pathlib import Path
 
 # Add Scout directory to path
@@ -36,6 +35,8 @@ def test_cache_imports():
         return True
     except Exception as e:
         print(f"✗ Cache import failed: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
@@ -45,7 +46,7 @@ def test_helius_client_import():
 
     try:
         from core.helius_client import HeliusClient, CACHE_AVAILABLE
-        print(f"✓ Helius client imported successfully")
+        print("✓ Helius client imported successfully")
         print(f"✓ Cache available: {CACHE_AVAILABLE}")
 
         # Create a client instance (with no API key for testing)
@@ -95,7 +96,6 @@ def test_cache_integration():
 
     try:
         from core.advanced_cache import get_cache, CacheCategory
-        import time
 
         cache = get_cache()
 
@@ -109,16 +109,9 @@ def test_cache_integration():
                  category=CacheCategory.WALLET_METRICS)
         print("✓ Validation result cached successfully")
 
-        # Debug: Check cache contents
-        print(f"Debug: Cache has {len(cache._l1_cache)} entries")
-        for key, entry in cache._l1_cache.items():
-            is_expired = entry.is_expired()
-            ttl_remaining = int((entry.created_at + entry.ttl_seconds) - time.time())
-            print(f"Debug: Entry '{key}' -> Value: {entry.value}, Expired: {is_expired}, TTL: {ttl_remaining}s")
-
         cached_validation = cache.get("wallet_validation", wallet_address, "3:7",
                                      category=CacheCategory.WALLET_METRICS)
-        assert cached_validation == True, f"Validation cache retrieval failed: {cached_validation}"
+        assert cached_validation is True, f"Validation cache retrieval failed: {cached_validation}"
         print("✓ Cached validation retrieved successfully")
 
         # Test with simple data

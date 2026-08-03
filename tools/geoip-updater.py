@@ -17,8 +17,7 @@ import requests
 import hashlib
 import tempfile
 import shutil
-import gzip
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Configure logging
@@ -37,6 +36,7 @@ DATABASES = {
     "GeoLite2-Country": "GeoLite2-Country.mmdb",
     "GeoLite2-ASN": "GeoLite2-ASN.mmdb"
 }
+MAX_DB_AGE_DAYS = 7
 
 # Verify license key
 if not MAXMIND_LICENSE_KEY:
@@ -45,24 +45,39 @@ if not MAXMIND_LICENSE_KEY:
     sys.exit(1)
 
 
+def _should_update(final_path: str) -> bool:
+    """Return True when the live database is missing or older than MAX_DB_AGE_DAYS."""
+    if not os.path.exists(final_path):
+        return True
+    age_days = (datetime.now(timezone.utc).timestamp() - os.path.getmtime(final_path)) / 86400
+    return age_days >= MAX_DB_AGE_DAYS
+
+
 def download_database(db_name: str, edition_id: str) -> tuple[bool, str]:
-    """Download a MaxMind database and verify checksum"""
+    """Download a MaxMind database and verify its checksum before replacing
+    the live copy. The final swap is atomic (os.replace on the same filesystem).
+    """
+    temp_path = None
     try:
-        # Download URL
-        download_url = f"{DOWNLOAD_BASE_URL}?edition_id={edition_id}&suffix=tar.gz"
+        # MaxMind authenticates via the license_key query parameter
+        download_url = f"{DOWNLOAD_BASE_URL}?edition_id={edition_id}&suffix=tar.gz&license_key={MAXMIND_LICENSE_KEY}"
 
         logger.info(f"Downloading {db_name} database from MaxMind...")
 
-        # Download with authentication
-        response = requests.get(
-            download_url,
-            auth=("sid", MAXMIND_LICENSE_KEY),
-            stream=True,
-            timeout=300  # 5 minute timeout
-        )
-
+        response = requests.get(download_url, stream=True, timeout=300)
         if response.status_code != 200:
             logger.error(f"Failed to download {db_name}: HTTP {response.status_code}")
+            return False, ""
+
+        # Fetch the .sha256 sidecar and verify the archive digest
+        sha_url = f"{DOWNLOAD_BASE_URL}?edition_id={edition_id}&suffix=tar.gz.sha256&license_key={MAXMIND_LICENSE_KEY}"
+        sha_response = requests.get(sha_url, timeout=60)
+        if sha_response.status_code != 200:
+            logger.error(f"Failed to fetch checksum sidecar for {db_name}: HTTP {sha_response.status_code}")
+            return False, ""
+        expected_sha = sha_response.text.strip().split()[0].lower()
+        if not expected_sha:
+            logger.error(f"Empty checksum sidecar for {db_name}")
             return False, ""
 
         # Save to temporary file
@@ -71,40 +86,65 @@ def download_database(db_name: str, edition_id: str) -> tuple[bool, str]:
                 temp_file.write(chunk)
             temp_path = temp_file.name
 
-        # Extract .mmdb file from tar.gz
-        logger.info(f"Extracting {db_name} database...")
+        # Verify the downloaded archive checksum
+        actual_sha = hashlib.sha256(open(temp_path, 'rb').read()).hexdigest()
+        if actual_sha != expected_sha:
+            logger.error(f"Checksum mismatch for {db_name}: expected {expected_sha}, got {actual_sha}")
+            return False, ""
+
+        # Extract to a temporary name inside GEOIP_DB_DIR (same filesystem so
+        # the final os.replace is atomic)
+        os.makedirs(GEOIP_DB_DIR, exist_ok=True)
+        final_path = os.path.join(GEOIP_DB_DIR, DATABASES[db_name])
+        tmp_final = final_path + ".tmp"
+        if os.path.exists(tmp_final):
+            os.unlink(tmp_final)
 
         import tarfile
+        extracted_dir = None
         with tarfile.open(temp_path, "r:gz") as tar:
             for member in tar.getmembers():
                 if member.name.endswith(".mmdb"):
-                    # Extract to temporary location
-                    tar.extract(member, path=tempfile.gettempdir())
-                    extracted_path = os.path.join(tempfile.gettempdir(), member.name)
+                    # Defense-in-depth: reject unsafe archive member names
+                    member_path = os.path.normpath(member.name)
+                    if member_path.startswith("..") or os.path.isabs(member_path):
+                        logger.error(f"Unsafe archive member name: {member.name}")
+                        return False, ""
+                    extracted_dir = os.path.join(GEOIP_DB_DIR, member_path.split(os.sep)[0])
+                    tar.extract(member, path=GEOIP_DB_DIR)
+                    os.replace(os.path.join(GEOIP_DB_DIR, member_path), tmp_final)
+                    break
 
-                    # Move to final location
-                    final_path = os.path.join(GEOIP_DB_DIR, DATABASES[db_name])
+        if not os.path.exists(tmp_final):
+            logger.error(f"No .mmdb file found in archive for {db_name}")
+            return False, ""
 
-                    # Create backup of existing database
-                    if os.path.exists(final_path):
-                        backup_path = f"{final_path}.backup"
-                        shutil.copy2(final_path, backup_path)
-                        logger.info(f"Created backup: {backup_path}")
+        # Verify integrity BEFORE replacing the live file
+        if not verify_database_integrity(tmp_final):
+            logger.error(f"{db_name} verification failed; keeping the existing database")
+            return False, ""
 
-                    # Move new database to final location
-                    shutil.move(extracted_path, final_path)
+        # Create backup of the live database, then swap atomically
+        if os.path.exists(final_path):
+            backup_path = f"{final_path}.backup"
+            shutil.copy2(final_path, backup_path)
+            logger.info(f"Created backup: {backup_path}")
 
-                    logger.info(f"Updated {db_name} database successfully")
-                    return True, final_path
+        os.replace(tmp_final, final_path)
 
-        # Clean up temporary file
-        os.unlink(temp_path)
-
-        return False, ""
+        logger.info(f"Updated {db_name} database successfully")
+        return True, final_path
 
     except Exception as e:
         logger.error(f"Error downloading {db_name}: {e}")
         return False, ""
+    finally:
+        # Always remove the downloaded archive
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+        # Remove any leftover extraction directory
+        if extracted_dir and os.path.isdir(extracted_dir) and os.path.basename(extracted_dir) != os.path.basename(final_path):
+            shutil.rmtree(extracted_dir, ignore_errors=True)
 
 
 def verify_database_integrity(db_path: str) -> bool:
@@ -133,8 +173,10 @@ def verify_database_integrity(db_path: str) -> bool:
                     reader.country("8.8.8.8")
                 elif "ASN" in db_path:
                     reader.asn("8.8.8.8")
-            except:
-                pass  # Lookup might fail, but file structure is valid
+            except geoip2.errors.AddressNotFoundError:
+                pass  # No record for 8.8.8.8; file structure is valid
+            except Exception as lookup_err:
+                logger.error(f"Test lookup failed: {lookup_err}")
 
             reader.close()
 
@@ -166,6 +208,13 @@ def update_databases(force: bool = False) -> dict:
 
     for db_name, filename in DATABASES.items():
         try:
+            final_path = os.path.join(GEOIP_DB_DIR, filename)
+
+            # Respect the recency check unless --force was given
+            if not force and not _should_update(final_path):
+                logger.info(f"Skipping {db_name}: database is recent (use --force to override)")
+                continue
+
             logger.info(f"Updating {db_name}...")
 
             edition_id = f"{db_name}-CSV" if "CSV" in filename else db_name
@@ -173,18 +222,12 @@ def update_databases(force: bool = False) -> dict:
             success, path = download_database(db_name, edition_id)
 
             if success and path:
-                # Verify database integrity
-                if verify_database_integrity(path):
-                    results["databases_updated"].append({
-                        "name": db_name,
-                        "path": path,
-                        "size": os.path.getsize(path)
-                    })
-                    logger.info(f"✓ {db_name} updated successfully")
-                else:
-                    results["databases_failed"].append(db_name)
-                    results["errors"].append(f"{db_name}: Database verification failed")
-                    logger.error(f"✗ {db_name} verification failed")
+                results["databases_updated"].append({
+                    "name": db_name,
+                    "path": path,
+                    "size": os.path.getsize(path)
+                })
+                logger.info(f"✓ {db_name} updated successfully")
             else:
                 results["databases_failed"].append(db_name)
                 results["errors"].append(f"{db_name}: Download failed")

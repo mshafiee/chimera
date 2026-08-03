@@ -44,9 +44,13 @@ apiClient.interceptors.request.use((config) => {
   }
 
   // Check if token is expired and we're not already trying to refresh
-  if (authState.isTokenExpired() && !config.url?.includes('/auth/refresh')) {
-    // If we have a refresh token, we'll handle it in the response interceptor
-    // For now, just add the current token
+  if (authState.user?.token && authState.isTokenExpired() && !config.url?.includes('/auth/refresh')) {
+    // Without a refresh token there is no way to recover the session,
+    // so reject the request instead of sending an expired token.
+    if (!authState.refreshToken) {
+      authState.logout()
+      return Promise.reject(new Error('Session expired'))
+    }
   }
 
   if (authState.user?.token) {
@@ -75,23 +79,21 @@ apiClient.interceptors.response.use(
         return Promise.reject(error)
       }
 
-      // If it's the login endpoint that failed, just reject (don't refresh)
+      // If it's another auth endpoint (e.g. failed wallet login), just reject —
+      // a login failure is unrelated to the current session and must not wipe it.
       if (isAuthEndpoint) {
-        authState.logout()
         return Promise.reject(error)
       }
 
       // For other endpoints, try to refresh the token
-      // Try refreshing with the current JWT token if available
-      if (authState.user?.token && !isRefreshing) {
+      if (authState.refreshToken && !isRefreshing) {
         isRefreshing = true
         originalRequest._retry = true
 
         try {
-          // Attempt to refresh the token using the current JWT
-          const currentToken = authState.user?.token || ''
+          // Attempt to refresh the token using the stored refresh token
           const response = await axios.post(`${API_BASE}/auth/refresh`, {
-            token: currentToken,
+            token: authState.refreshToken,
           })
 
           const { access_token, refresh_token: newRefreshToken, expires_in } = response.data
@@ -102,6 +104,9 @@ apiClient.interceptors.response.use(
           // Update the header for the original request
           originalRequest.headers.Authorization = `Bearer ${access_token}`
 
+          // Reset the flag BEFORE draining the queue so 401s arriving during the
+          // drain start their own refresh cycle instead of hanging in the queue.
+          isRefreshing = false
           processQueue(null, access_token)
           return apiClient(originalRequest)
         } catch (refreshError) {
@@ -112,12 +117,13 @@ apiClient.interceptors.response.use(
         } finally {
           isRefreshing = false
         }
-      } else if (authState.user?.token && isRefreshing) {
+      } else if (isRefreshing) {
         // If we're already refreshing, add this request to the queue
         return new Promise((resolve, reject) => {
           failedQueue.push({ resolve, reject })
         })
           .then((token) => {
+            originalRequest._retry = true
             originalRequest.headers.Authorization = `Bearer ${token}`
             return apiClient(originalRequest)
           })

@@ -488,7 +488,10 @@ impl SelectionService {
         }
 
         let wqs = wallet.wqs_score.and_then(|d| d.to_f64());
-        let size_sol = Some(req.source_amount_sol.min(self.config.max_position_sol));
+        // Apply exit_fraction so a partial exit is recorded at the size that
+        // will actually be sold, not the full source amount.
+        let exit_fraction = req.exit_fraction.unwrap_or(Decimal::ONE);
+        let size_sol = Some((req.source_amount_sol * exit_fraction).min(self.config.max_position_sol));
         tracing::debug!(
             ingress = ?req.ingress,
             decision = "SELL",
@@ -719,9 +722,8 @@ impl SelectionService {
         }
 
         // ── 4. Token fast_check ─────────────────────────────────────────────
-        let mut fast_check_liquidity: Option<Decimal> = None;
-        let mut fast_check_errored = false;
-        match self
+        let fast_check_errored = false;
+        let fast_check_liquidity: Option<Decimal> = match self
             .token_parser
             .fast_check(&req.token_address, strategy)
             .await
@@ -743,21 +745,33 @@ impl SelectionService {
                 );
                 return BuyDecision::rejected(req, &self.config_hash, "TOKEN_UNSAFE", reason);
             }
-            Ok(result) => {
-                fast_check_liquidity = result.liquidity_usd;
-            }
+            Ok(result) => result.liquidity_usd,
             Err(e) => {
-                // fast-check failure proceeds to the slow path downstream;
-                // record but do not reject here. The flag is propagated in the
-                // decision so the caller can set Signal::force_slow_path.
-                fast_check_errored = true;
-                tracing::debug!(
+                // Fail-closed: a token whose safety check errored (RPC/network
+                // failure) is NOT admitted. The webhook path previously relied
+                // on the caller setting `force_slow_path`, but the Helius
+                // ingress never honored that flag — a token could reach
+                // execution with zero token-safety verification. Rejecting here
+                // enforces slow-path-equivalent safety uniformly.
+                let reason = format!("Token fast-check errored — rejected (fail-closed): {}", e);
+                tracing::warn!(
+                    ingress = ?req.ingress,
+                    decision = "BUY",
                     token = %req.token_address,
+                    wallet = %req.wallet_address,
+                    rejection_code = "TOKEN_FAST_CHECK_ERRORED",
+                    reason = %reason,
                     error = %e,
-                    "Token fast-check errored; proceeding to slow path"
+                    "selection: BUY rejected by gate"
+                );
+                return BuyDecision::rejected(
+                    req,
+                    &self.config_hash,
+                    "TOKEN_FAST_CHECK_ERRORED",
+                    reason,
                 );
             }
-        }
+        };
 
         // ── 5. Token-age enforcement ────────────────────────────────────────
         let token_age_hours = if let Some(ref helius) = self.helius_client {
@@ -898,36 +912,19 @@ impl SelectionService {
             None
         };
 
-        // ── 7. Consensus detection ──────────────────────────────────────────
+        // ── 7. Consensus detection (read-only peek) ────────────────────────
+        // The signal itself is recorded into the aggregator window only AFTER
+        // the decision is admitted (step 12) — signals rejected on quality,
+        // sizing, or heat must not inflate consensus_wallet_count or fabricate
+        // consensus for subsequent signals.
         let mut consensus_wallet_count: Option<usize> = None;
         let is_consensus = if let Some(ref aggregator) = self.signal_aggregator {
-            if let Some(consensus) = aggregator
-                .add_signal(
-                    &req.wallet_address,
-                    &req.token_address,
-                    "BUY",
-                    req.source_amount_sol,
-                )
-                .await
-            {
-                consensus_wallet_count = Some(consensus.wallet_count);
-                true
-            } else {
-                consensus_wallet_count = Some(1);
-                false
-            }
+            let count = aggregator.peek_consensus_wallet_count(&req.token_address).await;
+            consensus_wallet_count = Some(count.max(1));
+            count >= 2
         } else {
             false
         };
-
-        // Persist to signal_aggregation so the stop-loss manager can detect
-        // consensus on open positions regardless of ingress path.
-        if let Err(e) = self.persist_signal_aggregation(req, is_consensus).await {
-            tracing::warn!(
-                error = %e,
-                "Failed to record signal aggregation — consensus detection may be degraded"
-            );
-        }
 
         // ── 8. Signal-quality score ─────────────────────────────────────────
         let quality = SignalQuality::calculate(
@@ -997,7 +994,22 @@ impl SelectionService {
                     None
                 },
             };
-            let size = sizer.calculate_size(factors).await;
+            let size = match sizer.calculate_size(factors).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let reason = format!("Position sizer failed (DB error — fail-safe reject): {}", e);
+                    tracing::warn!(
+                        ingress = ?req.ingress,
+                        decision = "BUY",
+                        token = %req.token_address,
+                        wallet = %req.wallet_address,
+                        rejection_code = "POSITION_SIZER_ERROR",
+                        error = %e,
+                        "selection: BUY rejected by gate"
+                    );
+                    return BuyDecision::rejected(req, &self.config_hash, "POSITION_SIZER_ERROR", reason);
+                }
+            };
             if size.is_zero() {
                 let reason = "Position sizer returned zero (strategy_max below min_size_sol)"
                     .to_string();
@@ -1026,8 +1038,8 @@ impl SelectionService {
             // No sizer configured — fall back to the source amount clamped to
             // the configured capital ceiling. This should not happen in
             // production; logged loudly.
-            tracing::warn!("PositionSizer unavailable; using source amount (unclamped sizer)");
-            req.source_amount_sol
+            tracing::warn!("PositionSizer unavailable; using source amount clamped to max_position_sol");
+            req.source_amount_sol.min(self.config.max_position_sol)
         };
 
         // ── 11. Portfolio heat + strategy-allocation heat admission ─────────
@@ -1088,14 +1100,72 @@ impl SelectionService {
                         }
                         Ok(true) => {}
                         Err(e) => {
-                            tracing::warn!(error = %e, "Strategy heat check failed, allowing trade")
+                            let reason = format!(
+                                "Strategy allocation check failed — rejecting signal (fail-safe): {}",
+                                e
+                            );
+                            tracing::warn!(
+                                ingress = ?req.ingress,
+                                decision = "BUY",
+                                token = %req.token_address,
+                                wallet = %req.wallet_address,
+                                rejection_code = "STRATEGY_HEAT_ERROR",
+                                reason = %reason,
+                                error = %e,
+                                "selection: BUY rejected by gate"
+                            );
+                            return BuyDecision::rejected(
+                                req,
+                                &self.config_hash,
+                                "STRATEGY_HEAT_ERROR",
+                                reason,
+                            );
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "Portfolio heat check failed, allowing trade")
+                    let reason = format!(
+                        "Portfolio heat check failed — rejecting signal (fail-safe): {}",
+                        e
+                    );
+                    tracing::warn!(
+                        ingress = ?req.ingress,
+                        decision = "BUY",
+                        token = %req.token_address,
+                        wallet = %req.wallet_address,
+                        rejection_code = "PORTFOLIO_HEAT_ERROR",
+                        reason = %reason,
+                        error = %e,
+                        "selection: BUY rejected by gate"
+                    );
+                    return BuyDecision::rejected(
+                        req,
+                        &self.config_hash,
+                        "PORTFOLIO_HEAT_ERROR",
+                        reason,
+                    );
                 }
             }
+        }
+
+        // ── 12. Record the admitted signal for consensus tracking ───────────
+        // Only admitted signals enter the aggregator window / signal_aggregation
+        // table, so rejected noise cannot drive false consensus downstream.
+        if let Some(ref aggregator) = self.signal_aggregator {
+            let _ = aggregator
+                .add_signal(
+                    &req.wallet_address,
+                    &req.token_address,
+                    "BUY",
+                    req.source_amount_sol,
+                )
+                .await;
+        }
+        if let Err(e) = self.persist_signal_aggregation(req, is_consensus).await {
+            tracing::warn!(
+                error = %e,
+                "Failed to record signal aggregation — consensus detection may be degraded"
+            );
         }
 
         tracing::debug!(
@@ -1151,14 +1221,7 @@ impl SelectionService {
         is_consensus: bool,
     ) -> Result<(), crate::error::AppError> {
         use crate::db_abstraction::DbPool;
-        let pool = match self.db.pool() {
-            DbPool::PostgreSQL(p) => p,
-            _ => {
-                return Err(crate::error::AppError::Internal(
-                    "PostgreSQL backend required".to_string(),
-                ))
-            }
-        };
+        let DbPool::PostgreSQL(pool) = self.db.pool();
         let amount_f64 = req.source_amount_sol.to_f64().unwrap_or(0.0);
         sqlx::query(
             r#"

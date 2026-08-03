@@ -231,17 +231,16 @@ class AggressiveCacheManager:
     def _get_from_l3(self, key: str) -> Optional[Any]:
         """Get value from L3 disk cache."""
         try:
-            conn = sqlite3.connect(self._l3_cache_path)
-            conn.execute("PRAGMA synchronous = OFF")
-            conn.execute("PRAGMA journal_mode = MEMORY")
+            with sqlite3.connect(self._l3_cache_path) as conn:
+                conn.execute("PRAGMA synchronous = OFF")
+                conn.execute("PRAGMA journal_mode = MEMORY")
 
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT value FROM cache WHERE key = ? AND expires_at > ?",
-                (key, time.time())
-            )
-            row = cursor.fetchone()
-            conn.close()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT value FROM cache WHERE key = ? AND expires_at > ?",
+                    (key, time.time())
+                )
+                row = cursor.fetchone()
 
             if row:
                 return json.loads(row[0])
@@ -258,18 +257,17 @@ class AggressiveCacheManager:
             # Initialize L3 cache if needed
             self._initialize_l3_cache()
 
-            conn = sqlite3.connect(self._l3_cache_path)
-            conn.execute("PRAGMA synchronous = OFF")
-            conn.execute("PRAGMA journal_mode = MEMORY")
+            with sqlite3.connect(self._l3_cache_path) as conn:
+                conn.execute("PRAGMA synchronous = OFF")
+                conn.execute("PRAGMA journal_mode = MEMORY")
 
-            cursor = conn.cursor()
-            cursor.execute(
-                """INSERT OR REPLACE INTO cache (key, value, expires_at)
-                   VALUES (?, ?, ?)""",
-                (key, json.dumps(value), time.time() + ttl)
-            )
-            conn.commit()
-            conn.close()
+                cursor = conn.cursor()
+                cursor.execute(
+                    """INSERT OR REPLACE INTO cache (key, value, expires_at)
+                       VALUES (?, ?, ?)""",
+                    (key, json.dumps(value), time.time() + ttl)
+                )
+                conn.commit()
 
         except Exception as e:
             logger.error(f"[AggressiveCacheManager] L3 set failed: {e}")
@@ -277,18 +275,17 @@ class AggressiveCacheManager:
     def _initialize_l3_cache(self) -> None:
         """Initialize L3 cache database."""
         try:
-            conn = sqlite3.connect(self._l3_cache_path)
-            cursor = conn.cursor()
-            cursor.execute(
-                """CREATE TABLE IF NOT EXISTS cache (
-                    key TEXT PRIMARY KEY,
-                    value TEXT,
-                    expires_at REAL
-                )"""
-            )
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_expires ON cache(expires_at)")
-            conn.commit()
-            conn.close()
+            with sqlite3.connect(self._l3_cache_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """CREATE TABLE IF NOT EXISTS cache (
+                        key TEXT PRIMARY KEY,
+                        value TEXT,
+                        expires_at REAL
+                    )"""
+                )
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_expires ON cache(expires_at)")
+                conn.commit()
         except Exception as e:
             logger.error(f"[AggressiveCacheManager] L3 initialization failed: {e}")
 
@@ -301,25 +298,35 @@ class AggressiveCacheManager:
 
         # Invalidate in L3
         try:
-            conn = sqlite3.connect(self._l3_cache_path)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM cache WHERE key = ?", (key,))
-            conn.commit()
-            conn.close()
+            with sqlite3.connect(self._l3_cache_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM cache WHERE key = ?", (key,))
+                conn.commit()
         except Exception as e:
             logger.error(f"[AggressiveCacheManager] L3 invalidation failed: {e}")
 
     def invalidate_pattern(self, pattern: str) -> None:
-        """Invalidate cache entries matching a pattern."""
-        # Simple pattern matching (startswith)
-        keys_to_delete = []
-
-        for key in list(self._l1_cache.keys()):
-            if key.startswith(pattern):
-                keys_to_delete.append(key)
+        """Invalidate cache entries matching a pattern (all levels)."""
+        # Match against BOTH L1 and L2 (L3 follows below)
+        keys_to_delete = [
+            key for key in list(self._l1_cache.keys()) + list(self._l2_cache.keys())
+            if key.startswith(pattern)
+        ]
 
         for key in keys_to_delete:
             self.invalidate(key)
+
+        # Also invalidate matching keys in L3
+        try:
+            conn = sqlite3.connect(self._l3_cache_path)
+            try:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM cache WHERE key LIKE ?", (pattern + '%',))
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.error(f"[AggressiveCacheManager] L3 pattern invalidation failed: {e}")
 
     def clear_all(self) -> None:
         """Clear all cache levels."""
@@ -327,11 +334,10 @@ class AggressiveCacheManager:
         self._l2_cache.clear()
 
         try:
-            conn = sqlite3.connect(self._l3_cache_path)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM cache")
-            conn.commit()
-            conn.close()
+            with sqlite3.connect(self._l3_cache_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM cache")
+                conn.commit()
         except Exception as e:
             logger.error(f"[AggressiveCacheManager] L3 clear failed: {e}")
 
@@ -483,6 +489,9 @@ class QueryOptimizer:
         self._query_cache: Dict[str, Tuple[Any, float]] = {}
         self._query_ttl = int(os.getenv("SCOUT_QUERY_CACHE_TTL", "300"))
 
+        # Aggregate query timing for pipeline metrics
+        self._total_query_time_ms = 0.0
+
         logger.info("[QueryOptimizer] Initialized with query optimization")
 
     async def get_connection(self) -> sqlite3.Connection:
@@ -530,12 +539,21 @@ class QueryOptimizer:
             cursor.execute(query, params)
             result = cursor.fetchall()
 
-            (time.time() - start_time) * 1000
+            # Aggregate query timing into the pipeline metrics so
+            # database_query_time_ms is actually reported
+            query_time_ms = (time.time() - start_time) * 1000
+            self._total_query_time_ms += query_time_ms
 
-            # Cache result
+            # Cache result (prune expired entries so the cache stays bounded)
             if use_cache and result:
                 cache_key = self._generate_query_cache_key(query, params)
                 self._query_cache[cache_key] = (result, time.time())
+                if len(self._query_cache) > 10000:
+                    now = time.time()
+                    self._query_cache = {
+                        k: v for k, v in self._query_cache.items()
+                        if now - v[1] < self._query_ttl
+                    }
 
             return result
 
@@ -564,6 +582,10 @@ class QueryOptimizer:
     def clear_query_cache(self) -> None:
         """Clear query cache."""
         self._query_cache.clear()
+
+    def get_total_query_time_ms(self) -> float:
+        """Return total time spent executing queries (ms)."""
+        return self._total_query_time_ms
 
 
 class ParallelRanker:
@@ -629,13 +651,15 @@ class ParallelRanker:
             for i in range(0, len(wallets), self._batch_size)
         ]
 
-        # Process batches in parallel
-        tasks = []
-        for batch in batches:
-            task = self._rank_batch(batch, scores)
-            tasks.append(task)
-
-        batch_results = await asyncio.gather(*tasks)
+        # _rank_batch is CPU-bound and has no awaits — run it on the executor
+        # (bounded by _max_workers) so sorting doesn't block the event loop
+        loop = asyncio.get_running_loop()
+        batch_results = await asyncio.gather(
+            *(
+                loop.run_in_executor(None, self._rank_batch, batch, scores)
+                for batch in batches[:self._max_workers * 4]
+            )
+        )
 
         # Merge results and find top N
         all_ranked = []
@@ -646,7 +670,7 @@ class ParallelRanker:
         all_ranked.sort(key=lambda x: x[1], reverse=True)
         return all_ranked[:top_n]
 
-    async def _rank_batch(
+    def _rank_batch(
         self,
         batch: List[str],
         scores: Dict[str, float]
@@ -867,7 +891,7 @@ class DiscoveryPipeline:
             "incremental_wallets_processed": self._metrics.incremental_wallets_processed,
             "cache_stats": self._cache.get_stats(),
             "average_processing_time_ms": self._metrics.average_processing_time_ms,
-            "database_query_time_ms": self._metrics.database_query_time_ms,
+            "database_query_time_ms": self._query_optimizer.get_total_query_time_ms(),
         }
 
     def clear_cache(self) -> None:
@@ -918,5 +942,4 @@ def get_discovery_pipeline(helius_client=None) -> DiscoveryPipeline:
         # Update existing instance with client if available
         _pipeline_instance._helius_client = helius_client
         logger.info("[DiscoveryPipeline] Updated existing instance with Helius client")
-    return _pipeline_instance
     return _pipeline_instance

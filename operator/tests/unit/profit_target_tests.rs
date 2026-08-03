@@ -9,28 +9,38 @@
 //! - No double-exit when position is already being exited
 
 use chimera_operator::config::ProfitManagementConfig;
-use chimera_operator::db_abstraction::{create_database, DatabaseConfig};
+use chimera_operator::db_abstraction::Database;
 use chimera_operator::engine::profit_targets::{ProfitTargetAction, ProfitTargetManager};
 use chimera_operator::price_cache::{PriceCache, PriceSource};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 use std::sync::Arc;
-use tempfile::TempDir;
+
+#[path = "../common/mod.rs"]
+mod common;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-async fn create_test_db() -> (Arc<dyn chimera_operator::db_abstraction::Database>, TempDir) {
-    let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
-    let db = create_database(&config).await.unwrap();
-    db.run_migrations().await.unwrap();
-    (db, temp_dir)
+/// Each test gets its own isolated database (dropped on teardown).
+async fn create_test_db() -> (Arc<dyn Database>, common::TestDbGuard) {
+    common::create_test_pg_db().await
 }
 
 fn default_config() -> Arc<ProfitManagementConfig> {
+    // Actual defaults (config.rs): targets=[25,50,100,200]%,
+    // tiered_exit_percent=33.0, trailing_activation=50.0,
+    // trailing_stop_distance=15.0, max_stop_loss_distance=-5.0, time_exit=24h.
     Arc::new(ProfitManagementConfig::default())
-    // Defaults: targets=[25,50,100,200]%, tiered_exit=25%, trailing_activation=50%,
-    //           trailing_distance=20%, hard_stop=15.0, time_exit=24h
+}
+
+/// A config that forces vol_scale = 1.0 (no cold-start ramp), so the
+/// documented target/stop arithmetic holds EXACTLY (the default
+/// target_vol_scale_threshold scales targets by ~0.9833 on the first tick).
+fn config_no_vol_ramp() -> Arc<ProfitManagementConfig> {
+    Arc::new(ProfitManagementConfig {
+        target_vol_scale_threshold: Decimal::ZERO,
+        ..ProfitManagementConfig::default()
+    })
 }
 
 #[allow(dead_code)]
@@ -46,23 +56,13 @@ fn config_with_trailing(activation: &str, distance: &str) -> Arc<ProfitManagemen
 
 #[tokio::test]
 async fn test_peak_tracking_after_crash_and_recovery() {
-    // BUG DOCUMENT: Trailing stop price NEVER ratchets up after initial activation.
+    // F4 regression guard: the trailing stop must ratchet up on new highs
+    // (is_new_peak is captured before peak_price is overwritten).
     //
-    // Root cause (profit_targets.rs ~L216):
-    //   The "update trailing stop on new high" condition checks
-    //   `state.current_price > state.peak_price` AFTER peak_price was already updated
-    //   to equal current_price earlier in the same function call → condition is ALWAYS FALSE.
-    //
-    // Financial impact: gains above the activation-price level are UNPROTECTED.
-    //   A position that rises 100% and then falls 30% will NOT exit, even though
-    //   a correctly ratcheting trailing stop (20% from peak) should have fired.
-    //
-    // Sequence documented:
-    //   entry $1.00 → activate at $1.20 (stop locks at $0.96) → peak $2.00 (stop stays $0.96)
-    //   → crash to $1.40 → should exit ($1.40 < correct stop $1.60) but DOES NOT exit
-    //   → only exits when dropping below initial lock ($0.96)
-    //
-    // When this bug is fixed: the final assertion must change to FullExit at $1.40.
+    // Sequence:
+    //   entry $1.00 → activate at $1.20 (stop ≈ $0.96) → peak $2.00 (stop ratchets to ≈ $1.60)
+    //   → crash to $1.40 → FullExit ($1.40 < ratcheted stop)
+    //   → drop to $0.94 → FullExit (below the activation-time lock)
 
     let (db, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new().unwrap());
@@ -203,15 +203,18 @@ async fn test_time_based_exit_not_triggered_with_insufficient_profit() {
         PriceSource::Jupiter, Some(9),
     );
 
-    // Use default config (time_exit_hours=24). We can't fast-forward SystemTime in this test,
-    // so we register the position and check immediately — it should NOT exit yet.
+    // Price at +8%: profit <= 10% → the "low-profit/losing" band, which exits
+    // after losing_time_exit_hours_shield (default 4h) — NOT time_exit_hours.
+    // Backdate the entry time by 25h so the time-based exit actually fires.
     let mgr = ProfitTargetManager::new(db, default_config(), price_cache.clone());
+    let entry_time =
+        std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 3600);
     mgr.register_position(
         "uuid-time",
         Decimal::from_str("1.00").unwrap(),
         Decimal::from_str("2.0").unwrap(),
         TOKEN,
-        std::time::SystemTime::now(),
+        entry_time,
     )
     .await;
 
@@ -224,8 +227,8 @@ async fn test_time_based_exit_not_triggered_with_insufficient_profit() {
     let action = mgr.check_targets("uuid-time", TOKEN, "SHIELD").await;
 
     assert!(
-        !matches!(action, ProfitTargetAction::FullExit),
-        "Should NOT exit via time-based rule immediately after registration (elapsed < 24h)"
+        matches!(action, ProfitTargetAction::FullExit),
+        "Position at +8% held >25h must exit via the low-profit time band (4h default)"
     );
 }
 
@@ -245,7 +248,10 @@ async fn test_price_just_below_first_target_no_exit() {
         Decimal::from_str("1.00").unwrap(),
         PriceSource::Jupiter, Some(9),
     );
-    let mgr = ProfitTargetManager::new(db, default_config(), price_cache.clone());
+    // target_vol_scale_threshold = 0 forces vol_scale = 1.0, so the first
+    // target is exactly 25% (without it, the cold-start ramp scales the
+    // target to ≈24.58% and +24.9% would already fire).
+    let mgr = ProfitTargetManager::new(db, config_no_vol_ramp(), price_cache.clone());
     mgr.register_position(
         "uuid-below",
         Decimal::from_str("1.00").unwrap(),
@@ -335,11 +341,14 @@ async fn test_trailing_stop_distance_from_peak() {
     const TOKEN_A: &str = "token_trail_a";
     const TOKEN_B: &str = "token_trail_b";
 
-    // Empty targets: no tiered exits, trailing stop activates at 50% profit
+    // Empty targets: no tiered exits, trailing stop activates at 50% profit.
+    // target_vol_scale_threshold = 0 keeps the stop EXACTLY $1.60 × 0.80 = $1.28
+    // (the cold-start ramp would otherwise make it ≈$1.2853).
     let cfg = Arc::new(ProfitManagementConfig {
         targets: vec![],
         trailing_stop_activation: Decimal::from_str("50.0").unwrap(),
         trailing_stop_distance: Decimal::from_str("20.0").unwrap(),
+        target_vol_scale_threshold: Decimal::ZERO,
         ..ProfitManagementConfig::default()
     });
 

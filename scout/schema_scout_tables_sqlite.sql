@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS exit_recommendations (
     confidence_score REAL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     executed_at TIMESTAMP,
-    executed INTEGER DEFAULT 0,
+    executed INTEGER NOT NULL DEFAULT 0 CHECK(executed IN (0, 1)),
     FOREIGN KEY (trade_uuid) REFERENCES trades(trade_uuid) ON DELETE CASCADE,
     FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
 );
@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     wallet_address TEXT,
     trade_uuid TEXT,
     metadata_json TEXT,
-    acknowledged INTEGER DEFAULT 0,
+    acknowledged INTEGER NOT NULL DEFAULT 0 CHECK(acknowledged IN (0, 1)),
     acknowledged_at TIMESTAMP,
     acknowledged_by TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -159,7 +159,7 @@ CREATE TABLE IF NOT EXISTS growth_alerts (
     previous_balance_sol TEXT,
     percentage_change TEXT,
     threshold_value TEXT,
-    acknowledged INTEGER DEFAULT 0,
+    acknowledged INTEGER NOT NULL DEFAULT 0 CHECK(acknowledged IN (0, 1)),
     acknowledged_at TIMESTAMP,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
@@ -229,10 +229,10 @@ CREATE TABLE IF NOT EXISTS roi_metrics (
     sortino_ratio TEXT,
     max_drawdown_percent TEXT,
     calculated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
+    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE,
+    UNIQUE (wallet_address, timeframe)
 );
 
-CREATE INDEX IF NOT EXISTS idx_roi_metrics_wallet ON roi_metrics (wallet_address, timeframe);
 CREATE INDEX IF NOT EXISTS idx_roi_metrics_timeframe ON roi_metrics (timeframe, calculated_at DESC);
 
 -- =============================================================================
@@ -249,8 +249,8 @@ CREATE TABLE IF NOT EXISTS multi_timeframe_discovery_stats (
     signal_count INTEGER,
     avg_signal_strength TEXT,
     discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
+    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE,
+    UNIQUE (wallet_address, discovery_timeframe)
 );
 
-CREATE INDEX IF NOT EXISTS idx_multi_timeframe_discovery_wallet ON multi_timeframe_discovery_stats (wallet_address, discovery_timeframe);
 CREATE INDEX IF NOT EXISTS idx_multi_timeframe_discovery_wqs ON multi_timeframe_discovery_stats (wqs_score DESC);

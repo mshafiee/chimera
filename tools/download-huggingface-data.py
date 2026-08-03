@@ -7,7 +7,7 @@ Hugging Face has free Solana trading datasets that can be downloaded directly.
 import requests
 import json
 import csv
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
 def download_huggingface_solana_data():
@@ -18,8 +18,7 @@ def download_huggingface_solana_data():
 
     # Hugging Face dataset URLs
     datasets = {
-        "solana_pairs_history": "https://huggingface.co/datasets/horenresearch/solana-pairs-history/resolve/main/solana_pairs_history.csv",
-        "solana_trading": "https://huggingface.co/datasets/horenresearch/solana-pairs-history"
+        "solana_pairs_history": "https://huggingface.co/datasets/horenresearch/solana-pairs-history/resolve/main/solana_pairs_history.csv"
     }
 
     try:
@@ -49,23 +48,32 @@ def download_huggingface_solana_data():
             for row in reader:
                 row_count += 1
                 try:
-                    # Extract relevant fields and convert to our format
-                    timestamp = row.get('timestamp', row.get('time', row.get('date', datetime.now().isoformat())))
+                    # Normalize timestamp: skip blanks, convert numeric epochs,
+                    # only append Z to date-only strings
+                    raw_ts = row.get('timestamp') or row.get('time') or row.get('date') or ''
+                    if 'T' in raw_ts:
+                        timestamp = raw_ts
+                    elif raw_ts.isdigit():
+                        timestamp = datetime.fromtimestamp(int(raw_ts), tz=timezone.utc).isoformat()
+                    elif raw_ts:
+                        timestamp = raw_ts.replace(' ', 'T') + 'Z'
+                    else:
+                        timestamp = datetime.now(timezone.utc).isoformat()
 
-                    # Clean up timestamp format
-                    if 'T' not in timestamp:
-                        timestamp += 'T00:00:00Z'
+                    # Treat blank cells as missing (csv.DictReader yields '')
+                    amount = float(row.get('amount') or row.get('quantity') or row.get('volume') or 0.1)
+                    price = float(row.get('price') or row.get('usd_price') or 1.0)
 
                     signal = {
                         "timestamp": timestamp,
-                        "wallet_address": row.get('wallet', row.get('trader', row.get('address', 'unknown'))),
-                        "token_address": row.get('token_mint', row.get('token', row.get('mint', 'So11111111111111111111111111111111111111112'))),
-                        "action": "buy" if float(row.get('amount', row.get('quantity', 1))) > 0 else "sell",
-                        "amount_sol": abs(float(row.get('amount', row.get('quantity', row.get('volume', 0.1))))),
-                        "strategy": "shield" if float(row.get('amount', 1)) < 1.0 else "spear",
+                        "wallet_address": row.get('wallet') or row.get('trader') or row.get('address') or 'unknown',
+                        "token_address": row.get('token_mint') or row.get('token') or row.get('mint') or 'So11111111111111111111111111111111111111112',
+                        "action": "buy" if amount > 0 else "sell",
+                        "amount_sol": abs(amount),
+                        "strategy": "shield" if abs(amount) < 1.0 else "spear",
                         "source": "huggingface_solana_pairs",
-                        "price_usd": float(row.get('price', row.get('usd_price', 1.0))),
-                        "market": row.get('market', row.get('dex', 'unknown'))
+                        "price_usd": price,
+                        "market": row.get('market') or row.get('dex') or 'unknown'
                     }
 
                     signals.append(signal)
@@ -80,9 +88,6 @@ def download_huggingface_solana_data():
         print(f"✅ Converted {len(signals)} signals from Hugging Face dataset")
         print(f"📊 Processed {row_count} rows from CSV")
 
-        # Clean up temp file
-        Path(temp_file).unlink(missing_ok=True)
-
         return signals
 
     except requests.exceptions.RequestException as e:
@@ -92,6 +97,12 @@ def download_huggingface_solana_data():
     except Exception as e:
         print(f"❌ Error processing Hugging Face dataset: {e}")
         return None
+    finally:
+        # Always remove the temp file, even on error paths
+        try:
+            Path(temp_file).unlink(missing_ok=True)
+        except Exception:
+            pass
 
 def save_signals(signals, output_path="evaluation/signals/historical_signals.jsonl"):
     """Save signals to JSONL file."""

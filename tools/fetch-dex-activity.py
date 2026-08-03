@@ -8,9 +8,8 @@ import requests
 import json
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import random
 
 HELIUS_API_KEY = os.environ.get("HELIUS_API_KEY")
 if not HELIUS_API_KEY:
@@ -24,15 +23,9 @@ DEX_PROGRAMS = {
     "Orca": "9WQdx6qLMjSxL7Yszwh1mM1CA8VjTzYmQbWqYZVk3Sz5"
 }
 
-# Popular trading pairs (well-known tokens)
-POPULAR_TOKENS = {
-    "SOL": "So11111111111111111111111111111111111111112",
-    "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-    "USDT": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
-    "RAY": "4k3Dyjzvzp8eMVoUXKq5nNFzLsWH5XSbMgTu1hSqBwGg",
-    "JUP": "JUPyiwrYwFq2aXtLguiPtoGQuLiqBOMkGeVxLvDj8jqj",
-    "BONK": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
-}
+SOL_MINT = "So11111111111111111111111111111111111111112"
+LAMPORTS_PER_SOL = 1_000_000_000
+
 
 def get_biggest_transactions(limit=50):
     """Get recent big transactions from Helius."""
@@ -56,8 +49,13 @@ def get_biggest_transactions(limit=50):
         print(f"❌ Error fetching big transactions: {e}")
         return []
 
+
 def parse_transaction_activity(tx_data):
-    """Parse transaction to extract trading signal."""
+    """Parse transaction to extract trading signal.
+
+    Only transactions that touch a known DEX program are considered; the
+    action, token and amount are derived from actual balance deltas.
+    """
 
     if not tx_data or "result" not in tx_data:
         return None
@@ -67,48 +65,102 @@ def parse_transaction_activity(tx_data):
     if not tx or not tx.get("meta") or not tx.get("transaction"):
         return None
 
+    # Skip failed transactions
+    if tx.get("meta", {}).get("err"):
+        return None
+
+    if not tx.get("blockTime"):
+        return None
+
+    # Only consider transactions that actually touch a DEX program
+    accounts = tx["transaction"]["message"].get("accountKeys", [])
+    account_pubkeys = {a["pubkey"] if isinstance(a, dict) else a for a in accounts}
+    dex_name = None
+    for name, program in DEX_PROGRAMS.items():
+        if program in account_pubkeys:
+            dex_name = name
+            break
+    if not dex_name:
+        return None
+
     # Extract basic info
-    timestamp = datetime.fromtimestamp(tx.get("blockTime", time.time())).isoformat() + "Z"
+    timestamp = datetime.fromtimestamp(tx.get("blockTime", time.time()), tz=timezone.utc).isoformat()
 
     # Get the first account as the wallet/trader
-    accounts = tx["transaction"]["message"].get("accountKeys", [])
     if not accounts:
         return None
 
-    wallet_address = accounts[0]
+    wallet_address = accounts[0]["pubkey"] if isinstance(accounts[0], dict) else accounts[0]
 
-    # Determine if it's a swap/DEX transaction
-    # Check for token balance changes indicating a trade
-    pre_balances = tx["meta"].get("preTokenBalances", [])
-    post_balances = tx["meta"].get("postTokenBalances", [])
+    # Determine if it's a swap/DEX transaction from the token balance deltas
+    meta = tx.get("meta") or {}
+    pre_balances = meta.get("preTokenBalances") or []
+    post_balances = meta.get("postTokenBalances") or []
+    pre_lamports = meta.get("preBalances") or []
+    post_lamports = meta.get("postBalances") or []
 
-    # If token balances changed significantly, it's likely a trade
-    if len(post_balances) > len(pre_balances):
-        action = "buy"
-    elif len(post_balances) < len(pre_balances):
-        action = "sell"
-    else:
-        action = random.choice(["buy", "sell"])
+    # Find the wallet's account index for the SOL delta
+    wallet_index = None
+    for idx, key in enumerate(accounts):
+        pubkey = key["pubkey"] if isinstance(key, dict) else key
+        if pubkey == wallet_address:
+            wallet_index = idx
+            break
 
-    # Random but realistic amount
-    amount_sol = round(random.uniform(0.1, 3.0), 4)
+    # Find the traded token via balance deltas for this wallet
+    pre_by_mint = {b.get("mint"): (b.get("uiTokenAmount") or {}).get("uiAmount")
+                   for b in pre_balances if b.get("owner") == wallet_address}
+    post_by_mint = {b.get("mint"): (b.get("uiTokenAmount") or {}).get("uiAmount")
+                    for b in post_balances if b.get("owner") == wallet_address}
+
+    token_address = None
+    token_amount = None
+    for mint in post_by_mint:
+        if mint == SOL_MINT:
+            continue
+        pre_amount = pre_by_mint.get(mint)
+        post_amount = post_by_mint.get(mint)
+        if pre_amount is None or post_amount is None:
+            continue
+        delta = post_amount - pre_amount
+        if abs(delta) > 1e-12:
+            token_address = mint
+            token_amount = abs(delta)
+            break
+
+    if not token_address:
+        return None
+
+    # SOL delta determines direction and amount in SOL
+    amount_sol = None
+    sol_spent = None
+    if wallet_index is not None and wallet_index < len(pre_lamports) and wallet_index < len(post_lamports):
+        sol_delta = (pre_lamports[wallet_index] - post_lamports[wallet_index]) / LAMPORTS_PER_SOL
+        if abs(sol_delta) > 1e-9:
+            amount_sol = abs(sol_delta)
+            sol_spent = sol_delta > 0
+
+    if amount_sol is None:
+        amount_sol = token_amount or 0.0
+        sol_spent = True
+
+    action = "buy" if sol_spent else "sell"
 
     # Strategy based on amount
     strategy = "spear" if amount_sol > 1.0 else "shield"
-
-    # Pick a popular token
-    token_address = random.choice(list(POPULAR_TOKENS.values()))
 
     return {
         "timestamp": timestamp,
         "wallet_address": wallet_address,
         "token_address": token_address,
         "action": action,
-        "amount_sol": abs(amount_sol),
+        "amount_sol": round(amount_sol, 6),
         "strategy": strategy,
         "signature": tx.get("signature", ""),
-        "slot": tx.get("slot", 0)
+        "slot": tx.get("slot", 0),
+        "dex": dex_name
     }
+
 
 def collect_real_dex_activity(days_back=10, target_signals=1500):
     """Collect real DEX trading activity."""
@@ -117,8 +169,12 @@ def collect_real_dex_activity(days_back=10, target_signals=1500):
     print("=" * 50)
 
     signals = []
+    seen_signatures = set()
     attempts = 0
-    max_attempts = 20  # Limit API calls
+    # Each attempt yields at most `limit` signals; allow enough attempts to
+    # actually reach the target
+    max_attempts = max(20, (target_signals // 50) * 2)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
 
     print(f"🎯 Target: {target_signals} signals")
     print(f"📅 Time range: Last {days_back} days")
@@ -144,11 +200,17 @@ def collect_real_dex_activity(days_back=10, target_signals=1500):
                 if "signature" not in tx:
                     continue
 
+                signature = tx["signature"]
+                # Never process the same transaction twice
+                if signature in seen_signatures:
+                    continue
+                seen_signatures.add(signature)
+
                 payload = {
                     "jsonrpc": "2.0",
                     "id": f"tx-{len(signals)}",
                     "method": "getTransaction",
-                    "params": [tx["signature"], "json"]
+                    "params": [signature, "json", {"maxSupportedTransactionVersion": 0}]
                 }
 
                 response = requests.post(BASE_URL, json=payload, timeout=15)
@@ -156,6 +218,14 @@ def collect_real_dex_activity(days_back=10, target_signals=1500):
 
                 signal = parse_transaction_activity(tx_data)
                 if signal:
+                    # Honor the requested time window
+                    try:
+                        sig_time = datetime.fromisoformat(signal["timestamp"])
+                    except ValueError:
+                        sig_time = datetime.now(timezone.utc)
+                    if sig_time < cutoff:
+                        continue
+
                     signals.append(signal)
                     print(f"    ✅ Signal {len(signals)}: {signal['timestamp'][:19]} | {signal['action']:4} | {signal['strategy']:6}")
 
@@ -178,12 +248,18 @@ def collect_real_dex_activity(days_back=10, target_signals=1500):
     print(f"\n📊 Collection Summary:")
     print(f"   Total signals collected: {len(signals)}")
     print(f"   API attempts made: {attempts}")
-    print(f"   Success rate: {len(signals)/target_signals*100:.1f}%")
+    if target_signals > 0:
+        print(f"   Success rate: {len(signals)/target_signals*100:.1f}%")
 
     return signals
 
+
 def save_signals(signals, output_path):
     """Save signals to JSONL file."""
+
+    if not signals:
+        print("❌ No signals to save")
+        return False
 
     # Sort chronologically
     signals.sort(key=lambda x: x["timestamp"])
@@ -214,6 +290,7 @@ def save_signals(signals, output_path):
         print(f"  {i+1}. {signal['timestamp'][:19]} | {signal['action']:4} | {signal['strategy']:6} | "
               f"{signal['amount_sol']:6.4f} SOL | {signal['token_address'][:8]}... | "
               f"Sig: {signal['signature'][:8]}...")
+
 
 def main():
     print("🎯 Enhanced Real Historical Data Collection")
@@ -260,6 +337,7 @@ def main():
     print(f"📁 Location: {output_path}")
 
     return 0
+
 
 if __name__ == "__main__":
     exit(main())

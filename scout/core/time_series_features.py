@@ -90,38 +90,39 @@ class TimeSeriesFeatures:
             )
             return self._empty_features()
 
-        # Sort by timestamp and extract PnL series
-        sorted_history = sorted(
-            performance_history,
-            key=lambda x: str(x.get('timestamp', ''))
-        )
-
-        pnl_series = np.array([
-            float(x.get('pnl_sol', x.get('pnl', 0.0)))
-            for x in sorted_history
-        ])
-
-        roi_series = np.array([
-            float(x.get('roi', 0.0))
-            for x in sorted_history
-        ])
-
-        timestamps = [
-            x.get('timestamp') if isinstance(x.get('timestamp'), datetime)
-            else datetime.fromisoformat(str(x.get('timestamp', datetime.utcnow().isoformat())))
-            for x in sorted_history
-        ]
+        # Validate the feature set up front so unknown values fail loudly
+        # instead of silently returning an empty "successful" extraction
+        valid_feature_sets = {"all", "momentum", "trend", "cycles", "volatility"}
+        if feature_set not in valid_feature_sets:
+            raise ValueError(f"Unsupported feature_set: {feature_set}")
 
         features = {}
 
         try:
+            # Sort by timestamp and extract PnL series (inside the try so
+            # malformed values degrade gracefully instead of crashing callers)
+            sorted_history = sorted(
+                performance_history,
+                key=lambda x: str(x.get('timestamp', ''))
+            )
+
+            pnl_series = np.array([
+                float(x.get('pnl_sol', x.get('pnl', 0.0)))
+                for x in sorted_history
+            ])
+
+            roi_series = np.array([
+                float(x.get('roi', 0.0))
+                for x in sorted_history
+            ])
+
             # Momentum indicators
             if feature_set in ["all", "momentum"]:
-                features.update(self._extract_momentum_features(pnl_series, roi_series))
+                features.update(self._extract_momentum_features(roi_series))
 
             # Trend features
             if feature_set in ["all", "trend"]:
-                features.update(self._extract_trend_features(pnl_series, timestamps))
+                features.update(self._extract_trend_features(pnl_series))
 
             # Autocorrelation features
             if feature_set in ["all", "trend"]:
@@ -157,7 +158,6 @@ class TimeSeriesFeatures:
 
     def _extract_momentum_features(
         self,
-        pnl_series: np.ndarray,
         roi_series: np.ndarray
     ) -> Dict[str, float]:
         """Extract momentum indicators (RSI, MACD, Bollinger Bands)."""
@@ -201,8 +201,7 @@ class TimeSeriesFeatures:
 
     def _extract_trend_features(
         self,
-        pnl_series: np.ndarray,
-        timestamps: List[datetime]
+        pnl_series: np.ndarray
     ) -> Dict[str, float]:
         """Extract trend and direction features."""
         features = {}
@@ -263,19 +262,25 @@ class TimeSeriesFeatures:
                     for lag in range(max_lag + 1)
                 ]
 
-            # Autocorrelation at different lags
+            # Autocorrelation at different lags (statsmodels acf returns NaN
+            # for zero-variance series — sanitize before storing)
             for lag in range(1, min(4, len(autocorrs))):
-                features[f'autocorr_lag_{lag}'] = float(autocorrs[lag]) if lag < len(autocorrs) else 0.0
+                val = autocorrs[lag] if lag < len(autocorrs) else 0.0
+                features[f'autocorr_lag_{lag}'] = float(val) if not np.isnan(val) else 0.0
 
             # Persistence indicator (positive autocorrelation at lag 1)
-            features['persistence'] = float(autocorrs[1] > 0) if len(autocorrs) > 1 else 0.0
+            lag1 = autocorrs[1] if len(autocorrs) > 1 else 0.0
+            lag1 = 0.0 if np.isnan(lag1) else lag1
+            features['persistence'] = float(lag1 > 0) if len(autocorrs) > 1 else 0.0
 
             # Mean reversion indicator (negative autocorrelation)
-            features['mean_reverting'] = float(autocorrs[1] < 0) if len(autocorrs) > 1 else 0.0
+            features['mean_reverting'] = float(lag1 < 0) if len(autocorrs) > 1 else 0.0
 
             # Autocorrelation decay
             if len(autocorrs) > 2:
-                decay_rate = (autocorrs[1] - autocorrs[min(3, len(autocorrs)-1)]) / max(1e-8, abs(autocorrs[1]))
+                lag3 = autocorrs[min(3, len(autocorrs) - 1)]
+                lag3 = 0.0 if np.isnan(lag3) else lag3
+                decay_rate = (lag1 - lag3) / max(1e-8, abs(lag1))
                 features['autocorr_decay'] = float(decay_rate)
 
         except Exception as e:
@@ -392,7 +397,9 @@ class TimeSeriesFeatures:
         avg_loss = np.mean(losses[-window:])
 
         if avg_loss == 0:
-            return 100.0
+            # Standard RSI semantics: 100 only when there are gains AND no
+            # losses; a flat series (no gains, no losses) is neutral (50)
+            return 100.0 if avg_gain > 0 else 50.0
 
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))

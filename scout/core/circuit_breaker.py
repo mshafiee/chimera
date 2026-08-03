@@ -55,23 +55,15 @@ class CircuitBreakerConfig:
 
     # Recovery settings
     RESET_TIMEOUT_SECONDS: int = 300    # 5 minutes before attempting reset
-    COOLDOWN_SECONDS: int = 60         # 1 minute cooldown between triggers
-
-    # Daily tracking
-    DAILY_START_TIME: float = field(default_factory=time.time)
 
     # Wallet-specific settings
     MAX_WALLET_FAILURES: int = 5      # Max consecutive failures per wallet
     WALLET_BLACKLIST_DURATION: int = 3600  # 1 hour blacklist
 
-    # Strategy-specific settings
-    SHIELD_REDUCTION_FACTOR: float = 0.5  # Reduce Shield by 50% at WARNING
-    SPEAR_REDUCTION_FACTOR: float = 1.0   # Halt Spear completely at CAUTION
-
     # Capital tracking
     STARTING_CAPITAL: float = field(default_factory=lambda: float(os.getenv("SCOUT_STARTING_CAPITAL", "200.0")))
-    CURRENT_CAPITAL: float = STARTING_CAPITAL
-    PEAK_CAPITAL: float = STARTING_CAPITAL
+    CURRENT_CAPITAL: float = field(default_factory=lambda: float(os.getenv("SCOUT_STARTING_CAPITAL", "200.0")))
+    PEAK_CAPITAL: float = field(default_factory=lambda: float(os.getenv("SCOUT_STARTING_CAPITAL", "200.0")))
 
     # Aggressive mode settings (from user selection)
     AGGRESSIVE_MODE: bool = field(default_factory=lambda: os.getenv("SCOUT_AGGRESSIVE_MODE", "true").lower() == "true")
@@ -236,12 +228,15 @@ class CircuitBreaker:
 
             # Determine current protection level
             if drawdown >= emergency_threshold:
-                self._trigger(ProtectionLevel.EMERGENCY, f"Drawdown {drawdown*100:.1f}% >= {emergency_threshold*100:.1f}%")
+                # Trigger only on level change to avoid per-call churn
+                if self._state.current_level != ProtectionLevel.EMERGENCY:
+                    self._trigger(ProtectionLevel.EMERGENCY, f"Drawdown {drawdown*100:.1f}% >= {emergency_threshold*100:.1f}%")
                 return False, ProtectionLevel.EMERGENCY, "EMERGENCY: All trading halted"
             elif drawdown >= caution_threshold:
                 if self._state.current_level != ProtectionLevel.CAUTION:
                     self._trigger(ProtectionLevel.CAUTION, f"Drawdown {drawdown*100:.1f}% >= {caution_threshold*100:.1f}%")
-                return False, ProtectionLevel.CAUTION, "CAUTION: Spear trading halted"
+                # CAUTION halts only Spear (allocation is 0); Shield keeps trading
+                return True, ProtectionLevel.CAUTION, "CAUTION: Spear trading halted"
             elif drawdown >= warning_threshold:
                 if self._state.current_level != ProtectionLevel.WARNING:
                     self._trigger(ProtectionLevel.WARNING, f"Drawdown {drawdown*100:.1f}% >= {warning_threshold*100:.1f}%")
@@ -250,7 +245,10 @@ class CircuitBreaker:
                 # Check if we can reset from previous level
                 if self._state.current_level != ProtectionLevel.NORMAL:
                     self._attempt_reset()
-                return True, ProtectionLevel.NORMAL, "Normal operation"
+                if self._state.current_level == ProtectionLevel.NORMAL:
+                    return True, ProtectionLevel.NORMAL, "Normal operation"
+                # Reset timeout not yet elapsed: report the ACTUAL level
+                return True, self._state.current_level, f"{self._state.current_level.name}: recovery pending"
 
     def _trigger(self, level: ProtectionLevel, reason: str):
         """Trigger circuit breaker at specified level."""
@@ -258,6 +256,10 @@ class CircuitBreaker:
         self._state.triggered_at = time.time()
         self._state.last_state_change = time.time()
         self._state.trigger_count += 1
+
+        # Wire the circuit state: trading-halting levels open the circuit
+        if level in (ProtectionLevel.CAUTION, ProtectionLevel.EMERGENCY):
+            self._state.current_state = CircuitState.OPEN
 
         # Record event
         event = CircuitBreakerEvent(
@@ -398,20 +400,23 @@ class CircuitBreaker:
             self._state.daily_trades += 1
             if success:
                 self._state.daily_success += 1
+                # Reset the per-wallet consecutive-failure counter on success
+                # so only genuinely consecutive failures count toward a blacklist
+                if wallet_address and hasattr(self, '_wallet_failures'):
+                    self._wallet_failures[wallet_address] = 0
             else:
                 self._state.daily_failures += 1
 
                 # Check if wallet should be blacklisted
                 if wallet_address:
                     # Track consecutive failures per wallet
-                    key = f"failures_{wallet_address}"
                     if not hasattr(self, '_wallet_failures'):
                         self._wallet_failures = {}
-                    self._wallet_failures[key] = self._wallet_failures.get(key, 0) + 1
+                    self._wallet_failures[wallet_address] = self._wallet_failures.get(wallet_address, 0) + 1
 
-                    if self._wallet_failures[key] >= self._config.MAX_WALLET_FAILURES:
-                        self.blacklist_wallet(wallet_address, f"{self._wallet_failures[key]} consecutive failures")
-                        self._wallet_failures[key] = 0
+                    if self._wallet_failures[wallet_address] >= self._config.MAX_WALLET_FAILURES:
+                        self.blacklist_wallet(wallet_address, f"{self._wallet_failures[wallet_address]} consecutive failures")
+                        self._wallet_failures[wallet_address] = 0
 
     def get_current_allocation(self) -> Tuple[float, float]:
         """Get current Shield/Spear allocation."""

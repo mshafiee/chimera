@@ -24,33 +24,36 @@ echo ""
 # Health check
 echo -e "${BLUE}[Health Check]${NC}"
 echo -n "Vector Service: "
-if curl -sf "${VECTOR_URL}/health" > /dev/null 2>&1; then
+if curl -sf --max-time 5 "${VECTOR_URL}/health" > /dev/null 2>&1; then
     echo -e "${GREEN}✓ Healthy${NC}"
 else
     echo -e "${RED}✗ Unhealthy${NC}"
     exit 1
 fi
 
+# Fetch the metrics payload once so all sections read the same snapshot
+METRICS=$(curl -sf --max-time 5 "${VECTOR_URL}/metrics" 2>/dev/null || true)
+
 echo ""
 echo -e "${BLUE}[Throughput Metrics]${NC}"
 echo "Events processed per second:"
-curl -sf "${VECTOR_URL}/metrics" 2>/dev/null | grep "vector_processed_events_total" | tail -5 || echo "  No metrics available"
+printf '%s\n' "$METRICS" | grep "vector_processed_events_total" | tail -5 || echo "  No metrics available"
 
 echo ""
 echo -e "${BLUE}[Buffer Usage]${NC}"
 echo "Buffer utilization by component:"
-curl -sf "${VECTOR_URL}/metrics" 2>/dev/null | grep "vector_buffer_byte_size" | grep -v "#" || echo "  No buffer metrics available"
+printf '%s\n' "$METRICS" | grep "vector_buffer_byte_size" | grep -v "#" || echo "  No buffer metrics available"
 
 echo ""
 echo -e "${BLUE}[Error Rates]${NC}"
-echo "Errors in the last minute:"
-curl -sf "${VECTOR_URL}/metrics" 2>/dev/null | grep "vector_errors_total" | grep -v "#" || echo "  No error metrics available"
+echo "Total errors since start:"
+printf '%s\n' "$METRICS" | grep "vector_errors_total" | grep -v "#" || echo "  No error metrics available"
 
 echo ""
 echo -e "${BLUE}[Resource Usage]${NC}"
-if docker ps | grep -q "chimera-vector"; then
+if docker ps -q --filter "name=^/chimera-vector$" | grep -q .; then
     echo "Container Status:"
-    docker stats chimera-vector --no-stream --format "  CPU: {{.CPUPerc}}\n  Memory: {{.MemUsage}}\n  Network: {{.NetIO}}}"
+    docker stats chimera-vector --no-stream --format $'  CPU: {{.CPUPerc}}\n  Memory: {{.MemUsage}}\n  Network: {{.NetIO}}'
 else
     echo -e "${YELLOW}⚠ Vector container not running${NC}"
 fi
@@ -58,7 +61,7 @@ fi
 echo ""
 echo -e "${BLUE}[Pipeline Status]${NC}"
 echo "Active components:"
-curl -sf "${VECTOR_URL}/metrics" 2>/dev/null | grep "vector_component" | grep -v "#" | head -10 || echo "  No component metrics available"
+printf '%s\n' "$METRICS" | grep "vector_component" | grep -v "#" | head -10 || echo "  No component metrics available"
 
 echo ""
 echo -e "${BLUE}[Log Output Status]${NC}"
@@ -75,12 +78,12 @@ fi
 echo ""
 echo -e "${BLUE}[Top Sources]${NC}"
 echo "Highest volume log sources:"
-curl -sf "${VECTOR_URL}/metrics" 2>/dev/null | grep "vector_events_in_total" | sort -t: -k2 -rn | head -5 || echo "  No source metrics available"
+printf '%s\n' "$METRICS" | grep "vector_events_in_total" | grep -v "#" | sort -k2 -rn | head -5 || echo "  No source metrics available"
 
 echo ""
 echo -e "${BLUE}[Top Sinks]${NC}"
 echo "Highest output destinations:"
-curl -sf "${VECTOR_URL}/metrics" 2>/dev/null | grep "vector_events_out_total" | sort -t: -k2 -rn | head -5 || echo "  No sink metrics available"
+printf '%s\n' "$METRICS" | grep "vector_events_out_total" | grep -v "#" | sort -k2 -rn | head -5 || echo "  No sink metrics available"
 
 echo ""
 echo -e "${BLUE}=========================================="

@@ -9,30 +9,31 @@
 //! - Low-WQS wallet gets performance penalty
 
 use chimera_operator::config::PositionSizingConfig;
-use chimera_operator::db_abstraction::{create_database, Database, DatabaseConfig, DbPool};
+use chimera_operator::db_abstraction::{Database, DbPool};
 use chimera_operator::engine::position_sizer::{PositionSizer, SizingFactors};
 use rust_decimal::Decimal;
 use sqlx::Pool;
 use sqlx::Postgres;
 use std::str::FromStr;
 use std::sync::Arc;
-use tempfile::TempDir;
+
+#[path = "../common/mod.rs"]
+mod common;
 
 fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
-    match db.pool() {
-        DbPool::PostgreSQL(pool) => pool,
-        _ => panic!("test requires PostgreSQL backend"),
-    }
+    // DbPool is PostgreSQL-only (single variant): irrefutable destructure, no
+    // fallback panic arm (which would be unreachable).
+    let DbPool::PostgreSQL(pool) = db.pool();
+    pool
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
-    let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
-    let db = create_database(&config).await.unwrap();
-    db.run_migrations().await.unwrap();
-    (db, temp_dir)
+/// Each test gets its own isolated database (dropped on teardown), so fixed
+/// trade UUIDs never collide across runs and dropping the positions table in
+/// one test cannot affect its siblings.
+async fn create_test_db() -> (Arc<dyn Database>, common::TestDbGuard) {
+    common::create_test_pg_db().await
 }
 
 fn default_sizing_config() -> Arc<PositionSizingConfig> {
@@ -215,8 +216,8 @@ async fn test_new_token_age_penalty_halves_size() {
     let mut old_token = neutral_factors();
     old_token.token_age_hours = Some(48.0); // established: > 24h
 
-    let size_new = sizer.calculate_size(new_token).await;
-    let size_old = sizer.calculate_size(old_token).await;
+    let size_new = sizer.calculate_size(new_token).await.unwrap();
+    let size_old = sizer.calculate_size(old_token).await.unwrap();
 
     assert!(
         size_new < size_old,
@@ -226,10 +227,12 @@ async fn test_new_token_age_penalty_halves_size() {
     );
 
     let ratio = size_new / size_old;
-    // With hybrid sizing, ratio should be ~0.833 (not 0.5) because penalties are averaged
+    // With hybrid sizing the age penalty (0.5) is averaged over the five
+    // penalty factors (age, slippage, volatility, performance, quality):
+    // (0.5 + 1 + 1 + 1 + 1) / 5 = 0.9x — not the 0.5x of pure multiplication.
     assert!(
-        (ratio - Decimal::from_str("0.83").unwrap()).abs() < Decimal::from_str("0.05").unwrap(),
-        "New token penalty should be ≈0.83x with hybrid sizing (not 0.5x), got {}x",
+        (ratio - Decimal::from_str("0.9").unwrap()).abs() < Decimal::from_str("0.01").unwrap(),
+        "New token penalty should be ≈0.9x with hybrid sizing (not 0.5x), got {}x",
         ratio
     );
 }
@@ -254,8 +257,8 @@ async fn test_consensus_multiplier_increases_size() {
     let mut non_consensus = neutral_factors();
     non_consensus.is_consensus = false;
 
-    let size_with = sizer.calculate_size(consensus).await;
-    let size_without = sizer.calculate_size(non_consensus).await;
+    let size_with = sizer.calculate_size(consensus).await.unwrap();
+    let size_without = sizer.calculate_size(non_consensus).await.unwrap();
 
     assert!(
         size_with > size_without,
@@ -293,7 +296,7 @@ async fn test_position_size_capped_at_max() {
         wqs_capped_max_size: None,
     };
 
-    let size = sizer.calculate_size(factors).await;
+    let size = sizer.calculate_size(factors).await.unwrap();
     let max = Decimal::from_str("6.0").unwrap();
 
     assert!(
@@ -332,7 +335,7 @@ async fn test_position_size_floor_at_minimum() {
         wqs_capped_max_size: None,
     };
 
-    let size = sizer.calculate_size(factors).await;
+    let size = sizer.calculate_size(factors).await.unwrap();
     let min = Decimal::from_str("0.5").unwrap();
 
     assert!(
@@ -349,14 +352,15 @@ async fn test_high_wqs_multiplier_applied() {
     // WQS scales position size continuously via wqs_factor = WQS/100.
     // WQS=85 vs WQS=50: ratio should be ≈ 85/50 = 1.7 (no discrete cliff at 80).
     //
-    // Use a large base_size so the WQS factor pushes both values above min_size_sol
-    // (with 0 closed trades, confidence=0.05: 10.0 * 0.85 * 0.05 = 0.425 vs 0.25).
+    // Use a SMALL base_size so both sizes stay under the fallback capital cap
+    // (total_capital × ~5.75% = 0.575 SOL here) — with a large base, both
+    // sides would be pinned to the cap and the WQS ratio would vanish.
     let (db, _tmp) = create_test_db().await;
     let _pool = pg_pool(&db);
     let sizer = PositionSizer::new(
         db,
         Arc::new(chimera_operator::config::PositionSizingConfig {
-            base_size_sol: Decimal::from_str("10.0").unwrap(),
+            base_size_sol: Decimal::from_str("1.0").unwrap(),
             min_size_sol: Decimal::from_str("0.01").unwrap(),
             ..chimera_operator::config::PositionSizingConfig::default()
         }),
@@ -368,8 +372,8 @@ async fn test_high_wqs_multiplier_applied() {
     let mut base_wqs = neutral_factors();
     base_wqs.wallet_wqs = 50.0;
 
-    let size_high = sizer.calculate_size(high_wqs).await;
-    let size_base = sizer.calculate_size(base_wqs).await;
+    let size_high = sizer.calculate_size(high_wqs).await.unwrap();
+    let size_base = sizer.calculate_size(base_wqs).await.unwrap();
 
     assert!(
         size_high > size_base,
@@ -428,7 +432,7 @@ async fn test_hybrid_sizing_eliminated_multiplier_drift() {
         wqs_capped_max_size: None, // 1.0x (neutral regime)
     };
 
-    let size = sizer.calculate_size(factors).await;
+    let size = sizer.calculate_size(factors).await.unwrap();
     let base = Decimal::from_str("10.0").unwrap();
 
     // With hybrid sizing, the result should be closer to 0.8x of base, not 0.21x
@@ -502,7 +506,7 @@ async fn test_kelly_caps_work_with_hybrid_sizing() {
         wqs_capped_max_size: None,
     };
 
-    let size = sizer.calculate_size(factors).await;
+    let size = sizer.calculate_size(factors).await.unwrap();
 
     // With Kelly enabled and 20 trades, size should be calculated using Kelly Criterion
     // and capped at full Kelly. The maximum should not exceed a reasonable fraction

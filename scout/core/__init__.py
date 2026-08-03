@@ -23,6 +23,7 @@ from .analyzer import WalletAnalyzer
 from .backtester import BacktestSimulator
 from .roster_writer_db import WalletRecord, write_wallets_to_db
 from .birdeye_client import BirdeyeClient
+from .helius_client import HeliusClient
 from .liquidity import LiquidityProvider
 from .models import (
     LiquidityData,
@@ -40,21 +41,37 @@ from .wqs import WalletMetrics, calculate_wqs, classify_wallet
 # Alias submodules as well (core.<x> <-> scout.core.<x>)
 _this_pkg = __name__  # "core" or "scout.core"
 _other_pkg = "scout.core" if _this_pkg == "core" else "core"
-for _sub in [
-    "analyzer",
-    "backtester",
-    "birdeye_client",
-    "roster_writer_db",
-    "helius_client",
-    "liquidity",
-    "models",
-    "validator",
-    "wqs",
-]:
+
+
+def _alias_submodule(_sub: str) -> None:
     _a = f"{_this_pkg}.{_sub}"
     _b = f"{_other_pkg}.{_sub}"
     if _a in _sys.modules:
         _sys.modules.setdefault(_b, _sys.modules[_a])
+
+
+for _sub in [
+    "analyzer",
+    "backtester",
+    "birdeye_client",
+    "helius_client",
+    "liquidity",
+    "models",
+    "roster_writer_db",
+    "validator",
+    "wqs",
+]:
+    _alias_submodule(_sub)
+
+# Mirror every other submodule loaded during this import (db, utils,
+# advanced_cache, caching, helius_credit_tracker, ...) so whichever name
+# is used first becomes the single canonical module.
+for _mod_name in list(_sys.modules):
+    if _mod_name.startswith(_this_pkg + "."):
+        _sys.modules.setdefault(
+            _other_pkg + _mod_name[len(_this_pkg):],
+            _sys.modules[_mod_name],
+        )
 
 __all__ = [
     # Analyzer
@@ -85,4 +102,6 @@ __all__ = [
     "classify_wallet",
     # Historical Liquidity (optional)
     "BirdeyeClient",
+    # Helius (imported so the submodule alias is guaranteed)
+    "HeliusClient",
 ]

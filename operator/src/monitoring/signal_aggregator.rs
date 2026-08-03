@@ -130,6 +130,15 @@ impl SignalAggregator {
     /// Return true if 2+ distinct wallets have BUY signals for this token in the last 5 minutes.
     /// Reads from the in-memory cache — no DB query needed.
     pub async fn is_consensus_token(&self, token_address: &str) -> bool {
+        self.peek_consensus_wallet_count(token_address).await >= 2
+    }
+
+    /// Read-only consensus estimate: the number of distinct wallets with BUY
+    /// signals for this token in the last 5 minutes, WITHOUT recording a new
+    /// signal. Lets callers (e.g. the selection pipeline) score a candidate
+    /// signal against the current window and record it only once the decision
+    /// is admitted, so rejected noise never pollutes the consensus window.
+    pub async fn peek_consensus_wallet_count(&self, token_address: &str) -> usize {
         let signals = self.recent_signals.read().await;
         let five_min_ago = Instant::now() - Duration::from_secs(300);
         if let Some(token_signals) = signals.get(token_address) {
@@ -139,9 +148,10 @@ impl SignalAggregator {
                     seen.insert(&s.wallet_address);
                 }
             }
-            return seen.len() >= 2;
+            seen.len()
+        } else {
+            0
         }
-        false
     }
 
     /// Check for divergence (some wallets exiting while others hold)
@@ -237,7 +247,7 @@ impl SignalAggregator {
         }
 
         // Sort by timestamp (most recent first)
-        all_signals.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        all_signals.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
 
         all_signals
     }

@@ -9,7 +9,7 @@ const WARNING_TIME_MS = 5 * 60 * 1000
  * Logs out the user after a period of inactivity.
  */
 export function useActivityTracker(enabled: boolean = true) {
-  const { isAuthenticated, logout, updateActivity, isSessionExpired } = useAuthStore()
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
   const timeoutRef = useRef<NodeJS.Timeout | null>(null)
   const warningTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
@@ -22,13 +22,13 @@ export function useActivityTracker(enabled: boolean = true) {
       clearTimeout(warningTimeoutRef.current)
     }
 
-    // Update activity timestamp
-    updateActivity()
-
-    // Only set timeouts if authenticated and enabled
+    // Only track activity if authenticated and enabled
     if (!isAuthenticated || !enabled) {
       return
     }
+
+    // Update activity timestamp
+    useAuthStore.getState().updateActivity()
 
     // Set warning timeout (5 minutes before session timeout)
     warningTimeoutRef.current = setTimeout(() => {
@@ -37,18 +37,16 @@ export function useActivityTracker(enabled: boolean = true) {
 
     // Set session timeout
     timeoutRef.current = setTimeout(() => {
-      logout()
+      useAuthStore.getState().logout()
       showSessionExpiredMessage()
     }, SESSION_TIMEOUT_MS)
   }
 
   const showSessionWarning = () => {
-    // You could dispatch an event here to show a toast/ modal
-    // For now, we'll use console and browser notification
     console.warn('Session will expire in 5 minutes due to inactivity')
 
     // Optional: Show browser notification if permission granted
-    if (Notification.permission === 'granted') {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
       new Notification('Session Expiring Soon', {
         body: 'Your session will expire in 5 minutes due to inactivity. Move your mouse or type to continue.',
         icon: '/chimera.svg',
@@ -58,7 +56,7 @@ export function useActivityTracker(enabled: boolean = true) {
 
   const showSessionExpiredMessage = () => {
     console.warn('Session expired due to inactivity')
-    if (Notification.permission === 'granted') {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
       new Notification('Session Expired', {
         body: 'Your session has expired due to inactivity. Please log in again.',
         icon: '/chimera.svg',
@@ -112,16 +110,15 @@ export function useActivityTracker(enabled: boolean = true) {
     }
 
     const interval = setInterval(() => {
-      if (isSessionExpired()) {
-        logout()
+      if (useAuthStore.getState().isSessionExpired()) {
+        useAuthStore.getState().logout()
       }
     }, 30000) // Check every 30 seconds
 
     return () => clearInterval(interval)
-  }, [isAuthenticated, enabled, isSessionExpired, logout])
+  }, [isAuthenticated, enabled])
 
   return {
     resetTimeout,
-    isSessionExpired: isSessionExpired(),
   }
 }

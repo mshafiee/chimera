@@ -6,21 +6,16 @@ The Scout runs periodically (via cron) to:
 1. Analyze wallet performance from on-chain data
 2. Calculate Wallet Quality Scores (WQS)
 3. Run backtest validation before promotion
-4. Output updated roster to roster_new.db for Operator merge
+4. Write the updated roster to the configured database (DATABASE_URL)
 
 Usage:
     python main.py                    # Run with default config
-    python main.py --output /path/to/roster_new.db
     python main.py --dry-run          # Analyze without writing
     python main.py --skip-backtest    # Skip backtest validation (faster)
-
-The Scout writes to roster_new.db atomically. The Rust Operator then
-merges this into the main database via SIGHUP or API call.
 """
 
 from __future__ import annotations
 
-from _version import __version__
 
 import argparse
 import json
@@ -38,6 +33,7 @@ import asyncio
 
 if TYPE_CHECKING:
     from core.scout_optimizer import ScoutOptimizer
+    from integrations.high_conviction_integration import HighConvictionIntegration
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / '.env')
@@ -185,9 +181,9 @@ except ImportError:
 
 # Import stop-loss optimization modules
 try:
-    from core.stop_loss_optimizer import StopLossOptimizer
-    from core.position_manager import PositionManager
-    from core.market_regime_detector import MarketRegimeDetector
+    from core.stop_loss_optimizer import StopLossOptimizer  # noqa: F401
+    from core.position_manager import PositionManager  # noqa: F401
+    from core.market_regime_detector import MarketRegimeDetector  # noqa: F401
     STOP_LOSS_OPTIMIZER_AVAILABLE = True
 except ImportError:
     STOP_LOSS_OPTIMIZER_AVAILABLE = False
@@ -240,7 +236,7 @@ except ImportError:
 
 # Import advanced caching for RPC optimization (optional)
 try:
-    from core.advanced_cache import (
+    from core.advanced_cache import (  # noqa: F401
         get_wallet_metrics, set_wallet_metrics,
         get_liquidity_data, set_liquidity_data,
         get_high_wqs_wallet_data, set_high_wqs_wallet_data,
@@ -253,9 +249,9 @@ except ImportError:
 # Import HighConvictionIntegration for WQS-based prioritization
 try:
     from integrations.high_conviction_integration import create_high_conviction_integration
-    HIGH_CONVICTIION_AVAILABLE = True
+    HIGH_CONVICTION_AVAILABLE = True
 except ImportError:
-    HIGH_CONVICTIION_AVAILABLE = False
+    HIGH_CONVICTION_AVAILABLE = False
     create_high_conviction_integration = None
     print("[Scout] Warning: High-conviction integration not available")
 
@@ -357,9 +353,10 @@ def setup_logging() -> None:
         console_formatter = logging.Formatter('[Scout] %(levelname)s: %(message)s')
         console_handler.setFormatter(console_formatter)
 
-        # Add both handlers
-        logger.addHandler(file_handler)
-        logger.addHandler(console_handler)
+        # Add both handlers (skip if already configured, e.g. continuous mode)
+        if not any(isinstance(h, logging.handlers.RotatingFileHandler) for h in logger.handlers):
+            logger.addHandler(file_handler)
+            logger.addHandler(console_handler)
 
         logger.info("File logging configured: %s (level=%s)", log_file, level_name)
     except Exception as e:
@@ -479,7 +476,9 @@ Examples:
     parser.add_argument(
         "--output", "-o",
         default=DEFAULT_OUTPUT_PATH,
-        help=f"Output path for roster_new.db (default: {DEFAULT_OUTPUT_PATH})"
+        help=(f"Database path reference used by the validation reporter "
+              f"(default: {DEFAULT_OUTPUT_PATH}). Roster records themselves are written "
+              f"to the PostgreSQL database configured via DATABASE_URL.")
     )
     
     parser.add_argument(
@@ -523,15 +522,15 @@ Examples:
     parser.add_argument(
         "--min-wqs-active",
         type=float,
-        default=float(os.getenv("SCOUT_MIN_WQS_ACTIVE", "25.0")),
-        help="Minimum WQS score for ACTIVE status (env: SCOUT_MIN_WQS_ACTIVE, default: 25.0)"
+        default=float(os.getenv("SCOUT_MIN_WQS_ACTIVE", str(DEFAULT_MIN_WQS_ACTIVE))),
+        help=f"Minimum WQS score for ACTIVE status (env: SCOUT_MIN_WQS_ACTIVE, default: {DEFAULT_MIN_WQS_ACTIVE})"
     )
     
     parser.add_argument(
         "--min-wqs-candidate",
         type=float,
-        default=float(os.getenv("SCOUT_MIN_WQS_CANDIDATE", "10.0")),
-        help="Minimum WQS score for CANDIDATE status (env: SCOUT_MIN_WQS_CANDIDATE, default: 10.0)"
+        default=float(os.getenv("SCOUT_MIN_WQS_CANDIDATE", str(DEFAULT_MIN_WQS_CANDIDATE))),
+        help=f"Minimum WQS score for CANDIDATE status (env: SCOUT_MIN_WQS_CANDIDATE, default: {DEFAULT_MIN_WQS_CANDIDATE})"
     )
     
     parser.add_argument(
@@ -681,7 +680,7 @@ async def analyze_wallets(
     stats["total"] = len(candidates)
 
     # Apply high-conviction prioritization if enabled
-    if high_conviction and HIGH_CONVICTIION_AVAILABLE:
+    if high_conviction and HIGH_CONVICTION_AVAILABLE:
         print("[Scout] Applying high-conviction prioritization...")
         # Get WQS scores for prioritization (use cached metrics if available)
         wqs_scores = {}
@@ -700,7 +699,7 @@ async def analyze_wallets(
     async def process_wallet(wallet_address):
         try:
             # Check high-conviction budget before processing
-            if high_conviction and HIGH_CONVICTIION_AVAILABLE:
+            if high_conviction and HIGH_CONVICTION_AVAILABLE:
                 # For budget checks, we need a preliminary WQS estimate
                 # Use cached metrics or default to medium priority
                 cached_metrics = analyzer._metrics_cache.get(wallet_address)
@@ -726,7 +725,8 @@ async def analyze_wallets(
             # selection gates: BUY decisions only (SELL noise is irrelevant).
             try:
                 from core.db import execute_and_fetchone
-                _row = execute_and_fetchone(
+                _row = await asyncio.to_thread(
+                    execute_and_fetchone,
                     """
                     SELECT COUNT(*) AS total,
                            COUNT(*) FILTER (WHERE admitted) AS admitted
@@ -1003,9 +1003,12 @@ async def analyze_wallets(
                 # redundant calls inside _calculate_composite_decay)
                 composite_decay = None
                 parts = []
-                if wr_decay is not None: parts.append((wr_decay, 0.5))
-                if sz_decay is not None: parts.append((sz_decay, 0.3))
-                if rt_decay is not None: parts.append((rt_decay, 0.2))
+                if wr_decay is not None:
+                    parts.append((wr_decay, 0.5))
+                if sz_decay is not None:
+                    parts.append((sz_decay, 0.3))
+                if rt_decay is not None:
+                    parts.append((rt_decay, 0.2))
                 if parts:
                     total_w = sum(w for _, w in parts)
                     composite_decay = max(0.0, min(1.0, sum(v * w for v, w in parts) / total_w))
@@ -1093,7 +1096,7 @@ async def analyze_wallets(
             if NETWORK_FEATURES_AVAILABLE and NetworkFeatures:
                 try:
                     print(f"[Scout] Computing network features for {wallet_address[:8]}...")
-                    network_extractor = NetworkFeatures()
+                    NetworkFeatures()
                     # For network features, we need the broader context, but we can extract
                     # wallet-level features like token co-holding patterns
                     # Note: Full network analysis requires all wallets, done in post-processing
@@ -1225,7 +1228,7 @@ async def analyze_wallets(
         try:
             results.append(task.result())
         except asyncio.CancelledError:
-            print(f"[Scout] ✗ Wallet task cancelled")
+            print("[Scout] ✗ Wallet task cancelled")
             results.append(None)
         except Exception as e:
             print(f"[Scout] ✗ Wallet task failed: {e}")
@@ -1542,6 +1545,10 @@ async def analyze_wallets(
     # threshold) so WQS-to-PnL feedback captures borderline candidates, not
     # just clean promotions.
     SHADOW_BAND = 5.0
+    # Status must be read from the FINAL WalletRecords: archetype diversification,
+    # post-diversification validation, cluster_and_dedup, and cross-wallet token
+    # correlation all mutate record.status AFTER process_wallet captured res['status'].
+    final_status_by_address = {r.address: r.status for r in records}
     for res in results:
         if not res:
             continue
@@ -1550,7 +1557,7 @@ async def analyze_wallets(
         wqs = res['wqs']
         wqs_confidence = res.get('confidence')
         components_json = components.components_json if components else None
-        status = res.get('status')
+        status = final_status_by_address.get(wallet_addr, res.get('status'))
         if status == "ACTIVE":
             strategy = res.get('strategy', 'SHIELD')
             if components:
@@ -2127,7 +2134,7 @@ async def main_async():
 
         # Initialize High-Conviction Integration for WQS-based prioritization
         high_conviction = None
-        if HIGH_CONVICTIION_AVAILABLE:
+        if HIGH_CONVICTION_AVAILABLE:
             try:
                 # Check if high conviction is enabled via config or env
                 conviction_enabled = False
@@ -2146,7 +2153,7 @@ async def main_async():
                     )
                     print("[Scout] ✓ High-Conviction Integration initialized")
                     print(f"[Scout]   Analysis budget: {total_credits:,} credits")
-                    print(f"[Scout]   High-conviction priority: WQS 70+")
+                    print("[Scout]   High-conviction priority: WQS 70+")
                 else:
                     print("[Scout] High-conviction prioritization disabled")
 
@@ -2416,7 +2423,7 @@ async def main_async():
                 velocity = profit_tracker.get_profit_velocity()
                 eta = profit_tracker.get_eta_to_1000()
 
-                print(f"\n[Scout] === Growth Tracking ===")
+                print("\n[Scout] === Growth Tracking ===")
                 print(f"  Current capital: ${tracker_summary['capital']['current']:.2f}")
                 print(f"  Total profit: ${tracker_summary['capital']['profit']:.2f} "
                       f"({tracker_summary['capital']['profit_pct']:.1f}%)")
@@ -2425,13 +2432,13 @@ async def main_async():
                 if eta.days_remaining < float('inf'):
                     print(f"  ETA to $1,000: {eta.days_remaining:.1f} days (confidence: {eta.confidence:.1%})")
                 else:
-                    print(f"  ETA to $1,000: Unable to calculate (negative velocity)")
+                    print("  ETA to $1,000: Unable to calculate (negative velocity)")
                 print(f"  Win rate: {tracker_summary['performance']['win_rate']:.1%}")
 
                 # Check for optimization triggers
                 optimization_actions = profit_tracker.trigger_optimization_if_needed()
                 if optimization_actions:
-                    print(f"\n[Scout] Optimization Actions:")
+                    print("\n[Scout] Optimization Actions:")
                     for action in optimization_actions:
                         print(f"  [{action.priority.upper()}] {action.action}: {action.description}")
 
@@ -2454,7 +2461,7 @@ async def main_async():
                     print(f"[Scout] Model accuracy: RMSE={vm.rmse:.4f}, "
                           f"direction_accuracy={vm.direction_accuracy:.1%}")
             elif os.getenv("SCOUT_PREDICTION_MATCHING_ENABLED") == "true":
-                print(f"[Scout] Prediction matching: no unmatched predictions found")
+                print("[Scout] Prediction matching: no unmatched predictions found")
         except Exception as e:
             if args.verbose:
                 print(f"[Scout] Prediction matching skipped: {e}")
@@ -2464,7 +2471,7 @@ async def main_async():
         cr = CorrelationReader()
         if cr.table_exists():
             corr_stats = cr.get_correlation_stats()
-            print(f"\n[Scout] === Outcome Summary ===")
+            print("\n[Scout] === Outcome Summary ===")
             print(f"  Wallets with PnL data: {corr_stats.wallets_with_pnl}/{corr_stats.total_wallets}")
             if corr_stats.wallets_with_pnl > 0:
                 print(f"  Mean copy PnL (30d): {corr_stats.mean_pnl_30d_sol:.4f} SOL")
@@ -2494,7 +2501,7 @@ async def main_async():
                     profitable = sum(1 for _, p in pairs if p > 0)
                     profit_rate = profitable / n * 100
                     print(f"  Profitability rate: {profit_rate:.1f}% ({profitable}/{n})")
-                    print(f"  Baseline (random):  50.0%")
+                    print("  Baseline (random):  50.0%")
                     if profit_rate > 50:
                         print(f"  WQS beats random by {profit_rate - 50:.1f}pp")
                 else:
@@ -2582,9 +2589,7 @@ async def main_async():
     if args.dry_run:
         print("\n[Scout] Dry run mode - not writing to database")
     else:
-        output_path = Path(args.output)
-
-        print(f"\n[Scout] Writing {len(records)} wallets to database...")
+        print(f"\n[Scout] Writing {len(records)} wallets to database (DATABASE_URL)...")
 
         try:
             success_count = write_wallets_to_db(records)
@@ -2643,7 +2648,7 @@ async def main_async():
         if reval_promoted > 0:
             print(f"[Scout] Re-validation sweep: {reval_promoted} new ACTIVE promotion(s)")
         else:
-            print(f"[Scout] Re-validation sweep: 0 promotions (all candidates still failed validation)")
+            print("[Scout] Re-validation sweep: 0 promotions (all candidates still failed validation)")
     elif _reval_enabled and not args.dry_run and validator is None:
         # Fallback revalidation path: when the full PrePromotionValidator is unavailable
         # (e.g. validator init failed due to missing API keys), do a lightweight
@@ -2668,36 +2673,38 @@ async def main_async():
                     print(f"[Scout] Re-validation skipped for {addr[:8]}: no metrics available")
                     continue
 
-                # Lightweight promotion: recompute WQS with confidence and check thresholds
+                # Lightweight promotion: recompute WQS with confidence and check thresholds.
+                # Reuse the main pipeline's thresholds (args-driven) and score field so the
+                # lightweight path cannot promote under weaker criteria than the main path.
                 from core.wqs import calculate_wqs_with_confidence
                 wqs_result = calculate_wqs_with_confidence(metrics, strategy="SHIELD")
-                _min_active = float(os.getenv("SCOUT_MIN_WQS_ACTIVE", "15.0"))
-                _min_conf = float(os.getenv("SCOUT_MIN_CONFIDENCE_ACTIVE", "0.20"))
-                _min_cand = float(os.getenv("SCOUT_MIN_WQS_CANDIDATE", "10.0"))
+                _min_active = args.min_wqs_active
+                _min_conf = float(os.getenv("SCOUT_MIN_CONFIDENCE_ACTIVE", "0.70"))
+                _min_cand = args.min_wqs_candidate
 
                 if wqs_result.score <= 0 and wqs_result.adjusted_score <= 0:
                     print(f"[Scout]   {addr[:8]} instant-rejected by WQS (sniper/pumpfun/etc.)")
                     continue
 
-                if wqs_result.adjusted_score >= _min_active and wqs_result.confidence >= _min_conf:
+                if wqs_result.score >= _min_active and wqs_result.confidence >= _min_conf:
                     update_wallet_status(addr, "ACTIVE")
                     reval_promoted += 1
-                    print(f"[Scout] ✓ Promoted {addr[:8]} → ACTIVE (lightweight: WQS={wqs_result.adjusted_score:.1f}, conf={wqs_result.confidence:.2f})")
-                elif wqs_result.adjusted_score >= _min_cand:
-                    print(f"[Scout]   {addr[:8]} remains CANDIDATE (WQS={wqs_result.adjusted_score:.1f}, conf={wqs_result.confidence:.2f})")
+                    print(f"[Scout] ✓ Promoted {addr[:8]} → ACTIVE (lightweight: WQS={wqs_result.score:.1f}, conf={wqs_result.confidence:.2f})")
+                elif wqs_result.score >= _min_cand:
+                    print(f"[Scout]   {addr[:8]} remains CANDIDATE (WQS={wqs_result.score:.1f}, conf={wqs_result.confidence:.2f})")
                 else:
-                    print(f"[Scout]   {addr[:8]} below CANDIDATE threshold (WQS={wqs_result.adjusted_score:.1f})")
+                    print(f"[Scout]   {addr[:8]} below CANDIDATE threshold (WQS={wqs_result.score:.1f})")
             except Exception as e:
                 print(f"[Scout] Re-validation error for {addr[:8]}: {e}")
 
         if reval_promoted > 0:
             print(f"[Scout] Re-validation sweep (lightweight): {reval_promoted} new ACTIVE promotion(s)")
         else:
-            print(f"[Scout] Re-validation sweep (lightweight): 0 promotions")
+            print("[Scout] Re-validation sweep (lightweight): 0 promotions")
     elif _reval_enabled and args.dry_run:
-        print(f"\n[Scout] Re-validation sweep: SKIPPED (dry-run mode)")
+        print("\n[Scout] Re-validation sweep: SKIPPED (dry-run mode)")
     elif not _reval_enabled:
-        print(f"\n[Scout] Re-validation sweep: SKIPPED (SCOUT_REVALIDATE_CANDIDATES not enabled)")
+        print("\n[Scout] Re-validation sweep: SKIPPED (SCOUT_REVALIDATE_CANDIDATES not enabled)")
 
     # Summary
     print("\n[Scout] Analysis complete:")
@@ -2778,7 +2785,7 @@ async def main_async():
 
             # Print snapshot
             snapshot = summary.get('snapshot', {})
-            print(f"Credit Usage:")
+            print("Credit Usage:")
             print(f"  Credits Used: {snapshot.get('credits_used', 0):,}")
             print(f"  Credits Remaining: {snapshot.get('credits_remaining', 0):,}")
             print(f"  Usage Percentage: {snapshot.get('usage_percentage', 0):.1f}%")
@@ -2787,12 +2794,12 @@ async def main_async():
             print(f"  Alert Level: {snapshot.get('alert_level', 'unknown').upper()}")
 
             # Print allocations
-            print(f"\nBudget Allocations:")
+            print("\nBudget Allocations:")
             for category, allocation in summary.get('allocations', {}).items():
                 print(f"  {category}: {allocation}")
 
             # Print category performance
-            print(f"\nCategory Performance:")
+            print("\nCategory Performance:")
             for category, perf in summary.get('category_performance', {}).items():
                 print(f"  {category}:")
                 print(f"    Credits Used: {perf.get('credits_used', 0):,}")
@@ -2800,7 +2807,7 @@ async def main_async():
                 print(f"    ROI: {perf.get('roi', 0):.2f}")
 
             # Print forecast
-            print(f"\nForecasts:")
+            print("\nForecasts:")
             forecast = summary.get('forecast', {})
             print(f"  24h Projected: {forecast.get('24h_projected', 0):,} credits")
             print(f"  7d Projected: {forecast.get('7d_projected', 0):,} credits")
@@ -2808,7 +2815,7 @@ async def main_async():
             # Get and display optimization suggestions
             suggestions = budget_manager.suggest_credit_optimization()
             if suggestions:
-                print(f"\nBudget Optimization Suggestions:")
+                print("\nBudget Optimization Suggestions:")
                 for suggestion in suggestions[:5]:  # Show top 5
                     print(f"  [{suggestion.priority.upper()}] {suggestion.action}")
                     print(f"     {suggestion.description}")
@@ -2821,7 +2828,7 @@ async def main_async():
             print(f"[Scout] WARNING: Budget report generation failed: {e}")
 
     # Print high-conviction allocation report if enabled
-    if high_conviction and HIGH_CONVICTIION_AVAILABLE:
+    if high_conviction and HIGH_CONVICTION_AVAILABLE:
         try:
             high_conviction.print_allocation_report()
         except Exception as e:

@@ -6,6 +6,8 @@ set -e
 
 API_URL="http://localhost:8080"
 WEBHOOK_SECRET=$(docker exec chimera-operator printenv CHIMERA_SECURITY__WEBHOOK_SECRET 2>/dev/null || echo "")
+GRAFANA_USER="${GRAFANA_USER:-admin}"
+GRAFANA_PASSWORD="${GRAFANA_PASSWORD:-}"
 
 # Colors
 GREEN='\033[0;32m'
@@ -58,7 +60,7 @@ test_service_health() {
     log_section "Test 1: Service Health Check"
     
     local health
-    health=$(curl -s "${API_URL}/api/v1/health" 2>&1)
+    health=$(curl -s --max-time 5 "${API_URL}/api/v1/health" 2>&1 || true)
     
     if echo "$health" | grep -q '"status".*"healthy"'; then
         log_success "Operator health check passed"
@@ -125,7 +127,7 @@ test_api_endpoints() {
     # Test positions
     log_info "Testing /api/v1/positions..."
     local positions
-    positions=$(curl -s "${API_URL}/api/v1/positions" 2>&1)
+    positions=$(curl -s --max-time 5 "${API_URL}/api/v1/positions" 2>&1 || true)
     if echo "$positions" | grep -q "positions\|\[\]"; then
         log_success "Positions endpoint accessible"
     else
@@ -135,7 +137,7 @@ test_api_endpoints() {
     # Test trades
     log_info "Testing /api/v1/trades..."
     local trades
-    trades=$(curl -s "${API_URL}/api/v1/trades" 2>&1)
+    trades=$(curl -s --max-time 5 "${API_URL}/api/v1/trades" 2>&1 || true)
     if echo "$trades" | grep -q "trades\|\[\]"; then
         log_success "Trades endpoint accessible"
     else
@@ -145,7 +147,7 @@ test_api_endpoints() {
     # Test wallets
     log_info "Testing /api/v1/wallets..."
     local wallets
-    wallets=$(curl -s "${API_URL}/api/v1/wallets" 2>&1)
+    wallets=$(curl -s --max-time 5 "${API_URL}/api/v1/wallets" 2>&1 || true)
     if echo "$wallets" | grep -q "wallets\|\[\]"; then
         log_success "Wallets endpoint accessible"
     else
@@ -155,7 +157,7 @@ test_api_endpoints() {
     # Test config
     log_info "Testing /api/v1/config..."
     local config
-    config=$(curl -s "${API_URL}/api/v1/config" 2>&1)
+    config=$(curl -s --max-time 5 "${API_URL}/api/v1/config" 2>&1 || true)
     if echo "$config" | grep -q "circuit_breakers\|strategy"; then
         log_success "Config endpoint accessible"
         echo "$config" | python3 -m json.tool 2>/dev/null | grep -E '"paper|PAPER|jito_enabled|circuit_breaker"' | head -5
@@ -166,7 +168,7 @@ test_api_endpoints() {
     # Test metrics
     log_info "Testing /api/v1/metrics/performance..."
     local metrics
-    metrics=$(curl -s "${API_URL}/api/v1/metrics/performance" 2>&1)
+    metrics=$(curl -s --max-time 5 "${API_URL}/api/v1/metrics/performance" 2>&1 || true)
     if echo "$metrics" | grep -q "pnl"; then
         log_success "Performance metrics endpoint accessible"
     else
@@ -180,7 +182,7 @@ test_prometheus() {
     
     log_info "Checking Prometheus targets..."
     local targets
-    targets=$(curl -s "http://localhost:9090/api/v1/targets" 2>&1)
+    targets=$(curl -s --max-time 5 "http://localhost:9090/api/v1/targets" 2>&1 || true)
     
     if echo "$targets" | grep -q "chimera-operator"; then
         log_success "Prometheus target found"
@@ -193,8 +195,8 @@ test_prometheus() {
     
     for metric in "${metrics[@]}"; do
         local result
-        result=$(curl -s "http://localhost:9090/api/v1/query?query=${metric}" 2>&1)
-        if echo "$result" | grep -q "result"; then
+        result=$(curl -s --max-time 5 "http://localhost:9090/api/v1/query?query=${metric}" 2>&1 || true)
+        if echo "$result" | grep -q '"result":\[\{'; then
             log_success "Metric ${metric} available"
         else
             log_warning "Metric ${metric} not found"
@@ -208,7 +210,7 @@ test_grafana() {
     
     log_info "Checking Grafana accessibility..."
     local dashboards
-    dashboards=$(curl -s "http://localhost:3002/api/search?query=Chimera" -u admin:admin 2>&1)
+    dashboards=$(curl -s --max-time 5 "http://localhost:3002/api/search?query=Chimera" -u "$GRAFANA_USER:$GRAFANA_PASSWORD" 2>&1 || true)
     
     if echo "$dashboards" | grep -q "Chimera"; then
         log_success "Grafana dashboard found"
@@ -258,7 +260,7 @@ test_rpc_connectivity() {
     
     log_info "Checking RPC latency from health endpoint..."
     local health
-    health=$(curl -s "${API_URL}/api/v1/health" 2>&1)
+    health=$(curl -s --max-time 5 "${API_URL}/api/v1/health" 2>&1 || true)
     
     local rpc_latency
     rpc_latency=$(echo "$health" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('rpc_latency_ms', 'N/A'))" 2>/dev/null || echo "N/A")
@@ -291,36 +293,55 @@ test_load() {
     local timestamp=$(date +%s)
     local payload='{"strategy":"SHIELD","token":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","action":"BUY","amount_sol":0.05,"wallet_address":"7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU","consensus_count":3}'
     
-    local success=0
-    local failed=0
+    # Count trades before the load test so we can assert the webhooks had an effect
+    local trades_before
+    trades_before=$(curl -s --max-time 5 "${API_URL}/api/v1/trades" 2>/dev/null | python3 -c "import sys, json; d=json.load(sys.stdin); print(int(d.get('total') or len(d.get('trades', []))))" 2>/dev/null || echo "0")
     
+    local pids=()
     for i in {1..10}; do
         local ts=$((timestamp + i))
         local sig=$(generate_signature "$ts" "$payload")
         
-        local response
-        response=$(curl -s -w "\n%{http_code}" -X POST "${API_URL}/api/v1/webhook" \
+        curl -s -o "/tmp/paper_load_body_$i" -w "%{http_code}" -X POST "${API_URL}/api/v1/webhook" \
             -H "Content-Type: application/json" \
             -H "X-Signature: $sig" \
             -H "X-Timestamp: $ts" \
-            -d "$payload" 2>&1)
-        
-        local status=$(echo "$response" | tail -1)
-        
+            -d "$payload" > "/tmp/paper_load_status_$i" 2>/dev/null &
+        pids+=($!)
+    done
+    
+    for pid in "${pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+    
+    local success=0
+    local failed=0
+    for i in {1..10}; do
+        local status
+        status=$(cat "/tmp/paper_load_status_$i" 2>/dev/null || echo "000")
         if [ "$status" = "200" ] || [ "$status" = "202" ]; then
-            ((success += 1))
+            success=$((success + 1))
             echo -n "."
         else
-            ((failed += 1))
+            failed=$((failed + 1))
             echo -n "F"
         fi
     done
+    rm -f /tmp/paper_load_body_* /tmp/paper_load_status_*
     
     echo ""
     log_info "Load test results: $success succeeded, $failed failed"
     
     if [ $success -gt 0 ]; then
         log_success "System handled load successfully"
+        # End-to-end assertion: accepted webhooks should have produced trades
+        local trades_after
+        trades_after=$(curl -s --max-time 5 "${API_URL}/api/v1/trades" 2>/dev/null | python3 -c "import sys, json; d=json.load(sys.stdin); print(int(d.get('total') or len(d.get('trades', []))))" 2>/dev/null || echo "0")
+        if [ "$trades_after" -gt "$trades_before" ]; then
+            log_success "Webhook signals produced new trades ($trades_before -> $trades_after)"
+        else
+            log_warning "Accepted webhooks did not produce new trades yet (may need more time)"
+        fi
     else
         log_warning "All requests failed (may be due to signal quality checks)"
     fi
@@ -342,7 +363,11 @@ test_queue_metrics() {
     
     log_info "Active positions: $positions"
     
-    log_success "Metrics are being collected"
+    if [ "$queue_depth" != "N/A" ] && [ "$positions" != "N/A" ]; then
+        log_success "Metrics are being collected"
+    else
+        log_warning "Some metrics unavailable (queue depth: $queue_depth, active positions: $positions)"
+    fi
 }
 
 # Test 10: Web Dashboard
@@ -352,7 +377,7 @@ test_web_dashboard() {
     log_info "Checking web dashboard accessibility..."
     
     local response
-    response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 2>&1)
+    response=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://localhost:3000 2>&1 || true)
     
     if [ "$response" = "200" ]; then
         log_success "Web dashboard is accessible"

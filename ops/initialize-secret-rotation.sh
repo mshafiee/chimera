@@ -11,7 +11,6 @@ set -euo pipefail
 # Chimera directory configuration
 CHIMERA_DIR="${CHIMERA_DIR:-/opt/chimera}"
 DB_PATH="${DB_PATH:-${CHIMERA_DIR}/data/chimera.db}"
-CONFIG_FILE="${CONFIG_FILE:-${CHIMERA_DIR}/operator/.env}"
 
 # Logging functions
 log() {
@@ -44,9 +43,13 @@ check_prerequisites() {
         exit 1
     fi
 
-    # Check if config_audit table exists
+    # Check if config_audit table exists (report real failures, not just
+    # "table missing")
     local table_exists
-    table_exists=$(sqlite3 "$DB_PATH" "SELECT name FROM sqlite_master WHERE type='table' AND name='config_audit';" 2>/dev/null || echo "")
+    if ! table_exists=$(sqlite3 "$DB_PATH" "SELECT name FROM sqlite_master WHERE type='table' AND name='config_audit';" 2>&1); then
+        log_error "Failed to query database: $table_exists"
+        exit 1
+    fi
 
     if [[ -z "$table_exists" ]]; then
         log_error "config_audit table not found in database."
@@ -62,13 +65,20 @@ check_already_initialized() {
     log_info "Checking if rotation tracking is already initialized..."
 
     local count
-    count=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM config_audit WHERE key LIKE 'secret_rotation%';" 2>/dev/null || echo "0")
+    if ! count=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM config_audit WHERE key LIKE 'secret_rotation%';" 2>&1); then
+        log_error "Failed to query config_audit: $count"
+        exit 1
+    fi
 
     if [[ "$count" -gt 0 ]]; then
         log_warn "Rotation tracking appears to be already initialized ($count entries found)."
         log_warn "If you want to reinitialize, please manually review the existing entries first."
-        read -p "Continue anyway? (y/N): " -n 1 -r
-        echo
+        if [[ -t 0 ]]; then
+            read -p "Continue anyway? (y/N): " -n 1 -r || REPLY=n
+            echo
+        else
+            REPLY=n
+        fi
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             log_info "Initialization cancelled."
             exit 0
@@ -80,23 +90,22 @@ check_already_initialized() {
 initialize_rotation_tracking() {
     log_info "Initializing secret rotation tracking for fresh deployment..."
 
-    local timestamp
-    timestamp=$(date -u '+%Y-%m-%d %H:%M:%S')
-
-    # Insert baseline entry to indicate tracking is active
-    sqlite3 "$DB_PATH" "
+    # Insert baseline entry to indicate tracking is active, inside a single
+    # transaction with the existence check so concurrent runs cannot both
+    # insert duplicate baseline rows. old_value is a real SQL NULL.
+    if ! sqlite3 "$DB_PATH" "
+    BEGIN IMMEDIATE;
     INSERT INTO config_audit (key, old_value, new_value, changed_by, change_reason)
-    VALUES (
-        'secret_rotation.initialized',
-        'NULL',
-        'tracking_active',
-        'SYSTEM_INIT',
-        'Secret rotation tracking initialized for fresh deployment'
+    SELECT 'secret_rotation.initialized', NULL, 'tracking_active', 'SYSTEM_INIT',
+           'Secret rotation tracking initialized for fresh deployment'
+    WHERE NOT EXISTS (
+        SELECT 1 FROM config_audit WHERE key = 'secret_rotation.initialized'
     );
-    " || {
+    COMMIT;
+    "; then
         log_error "Failed to insert initialization entry into database."
         exit 1
-    }
+    fi
 
     log_info "Secret rotation tracking initialized successfully."
 }

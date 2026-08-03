@@ -5,27 +5,40 @@
 //
 // This test verifies:
 // 1. Worker pool processes signals concurrently (target: 4x throughput)
-// 2. Latency: p95 < 12s per signal
+// 2. Latency: p95 < 5s per signal
 // 3. Throughput: 100 signals over 60 seconds with parallel execution
 // 4. RPC rate limiting prevents provider throttling
-// 5. Priority ordering under load (EXIT > SHIELD > SPEAR)
 //
 // Expected outcomes with parallel_enabled=true:
-//   - Throughput: ~24 signals/min (vs 6 signals/min sequential)
-//   - p95 latency: < 12s (vs 8-10s per signal but processing in parallel)
-//   - No 503/429 errors from RPC rate limiting
+//   - Throughput: ~100 signals/min (vs 6 signals/min sequential)
+//   - p95 latency: < 5s
+//   - No 503 errors from RPC rate limiting
 
 import http from 'k6/http';
 import { check, sleep, Trend, Counter } from 'k6';
 import crypto from 'k6/crypto';
 
+const WEBHOOK_URL = __ENV.WEBHOOK_URL || 'http://localhost:8080/api/v1/webhook';
+
+// Never fall back to a committed default secret: a missing secret must fail
+// the run instead of silently testing with a known value.
+if (!__ENV.WEBHOOK_SECRET) {
+  throw new Error('WEBHOOK_SECRET must be set (the real webhook signing secret)');
+}
+const SECRET = __ENV.WEBHOOK_SECRET;
+const PARALLEL_ENABLED = __ENV.PARALLEL_ENABLED === 'true';
+
 export const options = {
-  stages: [
-    { duration: '10s', target: 10 },   // Warm up
-    { duration: '30s', target: 50 },   // Ramp to moderate load
-    { duration: '20s', target: 100 },  // Peak load
-    { duration: '10s', target: 0 },    // Cool down
-  ],
+  scenarios: {
+    // Fixed number of iterations (100 signals) spread over 60s — matches the
+    // documented "100 signals over 60 seconds" outcome.
+    load: {
+      executor: 'shared-iterations',
+      vus: 10,
+      iterations: 100,
+      maxDuration: '60s',
+    },
+  },
   thresholds: {
     // Throughput: at least 80 signals should be accepted
     http_req_duration: [
@@ -36,10 +49,6 @@ export const options = {
     'signals_accepted': ['count>80'], // At least 80 of 100 signals accepted
   },
 };
-
-const WEBHOOK_URL = __ENV.WEBHOOK_URL || 'http://localhost:8080/api/v1/webhook';
-const SECRET = __ENV.WEBHOOK_SECRET || 'test-secret-that-is-thirty-two-chars-long!!';
-const PARALLEL_ENABLED = __ENV.PARALLEL_ENABLED || 'true';
 
 // Custom metrics
 const acceptLatency = new Trend('accept_latency_ms');
@@ -85,6 +94,7 @@ export default function () {
   const latency = Date.now() - startTime;
 
   const isAccepted = res.status === 200 || res.status === 202;
+  const isRejected = [400, 401, 403, 429, 503].includes(res.status);
 
   if (isAccepted) {
     acceptLatency.add(latency);
@@ -95,20 +105,40 @@ export default function () {
     'status is 200 or 202': (r) => r.status === 200 || r.status === 202,
     'status is not 503 (not rate limited)': (r) => r.status !== 503,
     'response time < 5000ms': (r) => r.timings.duration < 5000,
-    'response has trade_uuid body': (r) => {
-      if (isAccepted) {
-        try {
-          const body = JSON.parse(r.body);
-          return body.trade_uuid !== undefined && body.status !== undefined;
-        } catch {
-          return false;
-        }
+    'response body parses as JSON': (r) => {
+      try {
+        JSON.parse(r.body);
+        return true;
+      } catch {
+        return false;
       }
-      return true;
+    },
+    'accepted responses carry trade_uuid/status': (r) => {
+      if (!isAccepted) {
+        return true;
+      }
+      try {
+        const body = JSON.parse(r.body);
+        return body.trade_uuid !== undefined && body.status !== undefined;
+      } catch {
+        return false;
+      }
+    },
+    'rejected responses are still valid JSON errors': (r) => {
+      if (!isRejected) {
+        return true;
+      }
+      try {
+        const body = JSON.parse(r.body);
+        return body !== null && typeof body === 'object';
+      } catch {
+        return false;
+      }
     },
   });
 
-  sleep(0.5); // Maintain target rate
+  // Small think time; shared-iterations caps the total at 100 requests
+  sleep(0.5);
 }
 
 export function handleSummary(data) {

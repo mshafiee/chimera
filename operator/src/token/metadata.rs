@@ -26,7 +26,6 @@ use chrono::{DateTime, Utc};
 struct LiquidityEntry {
     liquidity_usd: Decimal,
     fetched_at: DateTime<Utc>,
-    source: String,
 }
 
 impl LiquidityEntry {
@@ -40,7 +39,6 @@ impl LiquidityEntry {
 /// FDV (Fully Dilimited Valuation) cache entry with TTL support
 #[derive(Debug, Clone)]
 struct FdvEntry {
-    market_cap: Decimal,
     fdv: Decimal,
     fetched_at: DateTime<Utc>,
 }
@@ -301,7 +299,6 @@ impl TokenMetadataFetcher {
         let entry = LiquidityEntry {
             liquidity_usd,
             fetched_at: Utc::now(),
-            source: "dexscreener".to_string(),
         };
 
         let mut cache = self.liquidity_cache.write();
@@ -309,9 +306,8 @@ impl TokenMetadataFetcher {
     }
 
     /// Update FDV cache (internal method)
-    async fn update_fdv_cache(&self, token_address: &str, market_cap: Decimal, fdv: Decimal) {
+    async fn update_fdv_cache(&self, token_address: &str, _market_cap: Decimal, fdv: Decimal) {
         let entry = FdvEntry {
-            market_cap,
             fdv,
             fetched_at: Utc::now(),
         };

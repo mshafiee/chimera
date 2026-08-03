@@ -131,8 +131,11 @@ class MLEnsembleDeployer:
 
         # State
         self._last_evaluation = time.time()
-        self._active_methods: Set[MLMethod] = set()
+        # _active_methods is populated by _initialize_methods(); do NOT reset
+        # it here (an empty set would disable the whole pipeline).
         self._disabled_methods: Set[MLMethod] = set()
+        # Last per-wallet predictions, for outcome-based performance updates
+        self._last_predictions: Dict[str, Dict[MLMethod, WalletPrediction]] = {}
 
         logger.info("[MLEnsembleDeployer] Initialized with all ML methods")
 
@@ -230,6 +233,9 @@ class MLEnsembleDeployer:
                     predictions[wallet]
                 )
 
+        # Keep the raw predictions so ground-truth outcomes can be recorded
+        self._last_predictions = predictions
+
         # Update performance tracking
         await self._update_performance_tracking(predictions)
 
@@ -247,13 +253,15 @@ class MLEnsembleDeployer:
         wallet_metrics: Dict[str, Any]
     ) -> Dict[str, WalletPrediction]:
         """Predict wallet quality using a specific ML method."""
-        start_time = time.time()
         predictions = {}
 
         try:
             method_impl = self._methods[method]
 
             for wallet in wallets:
+                # Capture per-wallet start so inference time reflects this
+                # wallet's prediction, not cumulative elapsed time.
+                start_time = time.time()
                 try:
                     # Get prediction from method
                     if hasattr(method_impl, 'predict_wallets'):
@@ -274,11 +282,6 @@ class MLEnsembleDeployer:
 
                             predictions[wallet] = prediction
 
-                    elif method == MLMethod.RULE_BASED:
-                        # Use rule-based filtering
-                        prediction = self._rule_based_prediction(wallet, wallet_metrics)
-                        predictions[wallet] = prediction
-
                 except Exception as e:
                     logger.error(f"[MLEnsembleDeployer] Error predicting {wallet[:8]}... with {method.value}: {e}")
                     continue
@@ -288,43 +291,6 @@ class MLEnsembleDeployer:
             raise
 
         return predictions
-
-    def _rule_based_prediction(
-        self,
-        wallet: str,
-        wallet_metrics: Dict[str, Any]
-    ) -> WalletPrediction:
-        """Generate rule-based prediction for a wallet."""
-        metrics = wallet_metrics.get(wallet, {})
-
-        # Rule-based scoring
-        roi_7d = metrics.get('roi_7d', 0)
-        roi_30d = metrics.get('roi_30d', 0)
-        win_rate = metrics.get('win_rate', 0)
-        trade_count = metrics.get('trade_count_30d', 0)
-        max_drawdown = metrics.get('max_drawdown_30d', 100)
-
-        # Calculate rule-based score
-        score = (
-            (roi_7d * 0.3) +
-            (roi_30d * 0.4) +
-            (win_rate * 0.2) -
-            (max_drawdown * 0.1)
-        )
-
-        # Boost for high trade count
-        if trade_count >= 10:
-            score *= 1.2
-
-        return WalletPrediction(
-            wallet_address=wallet,
-            method=MLMethod.RULE_BASED,
-            predicted_quality=max(0, min(100, score * 10)),
-            predicted_wqs=max(0, min(100, score * 10)),
-            confidence=0.5,
-            inference_time_ms=1.0,
-            metadata={"rule_based": True}
-        )
 
     def _create_ensemble_prediction(
         self,
@@ -363,9 +329,17 @@ class MLEnsembleDeployer:
             final_quality = 50.0
             final_wqs = 50.0
 
+        # Clamp to the documented 0-100 ranges so consensus stays in [0, 1]
+        final_quality = max(0.0, min(100.0, final_quality))
+        final_wqs = max(0.0, min(100.0, final_wqs))
+
         # Calculate consensus score
         quality_values = [p.predicted_quality for p in predictions.values()]
-        consensus = 1.0 - (np.std(quality_values) / 100.0) if len(quality_values) > 1 else 0.0
+        if len(quality_values) > 1:
+            consensus = 1.0 - (np.std(quality_values) / 100.0)
+            consensus = max(0.0, min(1.0, consensus))
+        else:
+            consensus = 0.0
 
         # Calculate confidence
         confidences = [p.confidence for p in predictions.values()]
@@ -400,6 +374,19 @@ class MLEnsembleDeployer:
         """Update performance tracking for all methods."""
         current_time = time.time()
 
+        # Refresh counters from the latest predictions on every call so the
+        # performance state reflects real activity (not just the eval interval)
+        for method, performance in self._performance.items():
+            method_preds = [
+                p for preds in all_predictions.values()
+                for m, p in preds.items() if m == method
+            ]
+            if method_preds:
+                performance.total_predictions += len(method_preds)
+                performance.avg_confidence = sum(p.confidence for p in method_preds) / len(method_preds)
+                performance.avg_inference_time_ms = sum(p.inference_time_ms for p in method_preds) / len(method_preds)
+                performance.last_updated = current_time
+
         # Check if evaluation is needed
         if current_time - self._last_evaluation < self._eval_interval:
             return
@@ -426,8 +413,31 @@ class MLEnsembleDeployer:
         # Perform survival selection
         await self._perform_survival_selection()
 
+    def record_ground_truth(self, wallet: str, was_profitable: bool) -> None:
+        """
+        Record a known-good outcome for a wallet so per-method accuracy and
+        survival selection reflect real outcomes instead of defaults.
+        """
+        for method in self._methods:
+            performance = self._performance[method]
+            prediction = self._last_predictions.get(wallet, {}).get(method)
+            if prediction is None:
+                continue
+            predicted_profitable = prediction.predicted_quality >= 50.0
+            performance.correct_predictions += 1 if predicted_profitable == was_profitable else 0
+            performance.total_predictions += 1
+            performance.accuracy = performance.correct_predictions / max(1, performance.total_predictions)
+            performance.last_updated = time.time()
+
     async def _perform_survival_selection(self) -> None:
         """Perform survival-of-the-fittest selection."""
+        # Re-enable previously disabled methods that are now performing well
+        # (checked in a separate pass so the active-only loop can't skip them)
+        for method in list(self._disabled_methods):
+            performance = self._performance.get(method)
+            if performance and performance.accuracy >= 0.6:
+                self._enable_method(method)
+
         # Check for underperforming methods
         for method, performance in self._performance.items():
             if not performance.is_active:
@@ -460,10 +470,6 @@ class MLEnsembleDeployer:
 
             if should_disable:
                 self._disable_method(method, reason)
-            else:
-                # Re-enable if previously disabled and now performing well
-                if method in self._disabled_methods and performance.accuracy >= 0.6:
-                    self._enable_method(method)
 
     def _disable_method(self, method: MLMethod, reason: str) -> None:
         """Disable an underperforming method."""
@@ -639,7 +645,7 @@ class RuleBasedFilter:
                 score *= 1.2
 
             predictions[wallet] = {
-                'predicted_profitability': max(0, score),
+                'predicted_profitability': min(100, max(0, score)),
                 'predicted_wqs': min(100, max(0, score * 10)),
                 'confidence': 0.5
             }

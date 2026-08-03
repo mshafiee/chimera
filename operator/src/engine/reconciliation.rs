@@ -23,6 +23,31 @@ use crate::metrics::{rpc_errors_metric, rpc_latency_metric, MetricsState};
 /// trigger acquires it before spawning and the spawned task releases it on completion.
 pub static RECONCILIATION_RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// RAII guard that clears [`RECONCILIATION_RUNNING`] on drop.
+///
+/// A bare `store(false)` after an `.await` leaks the flag forever when the
+/// task panics or is aborted, locking out every subsequent manual trigger
+/// until process restart.
+pub struct ReconciliationRunningGuard;
+
+impl ReconciliationRunningGuard {
+    pub fn new() -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        if RECONCILIATION_RUNNING.swap(true, Ordering::SeqCst) {
+            None
+        } else {
+            Some(Self)
+        }
+    }
+}
+
+impl Drop for ReconciliationRunningGuard {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        RECONCILIATION_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Cap on the number of positions a single sweep inspects, bounding RPC cost. A run
 /// processes at most this many positions (most-recent first); a subsequent trigger
 /// picks up the remainder.
@@ -203,11 +228,16 @@ pub async fn run_reconciliation(
     result
 }
 
-/// Load `ACTIVE` + `EXITING` positions (most-recent first), capped at
+/// Load `EXITING` + `ACTIVE` positions (most-recent first), capped at
 /// [`MAX_POSITIONS_PER_RUN`] to bound per-run RPC cost.
+///
+/// EXITING positions are loaded FIRST: they are the only ones eligible for
+/// exit auto-resolution, and ACTIVE-first ordering meant a large ACTIVE set
+/// (which this pass never advances past — checked-but-still-ACTIVE positions
+/// keep their `last_updated`) starved EXITING positions of every run.
 async fn load_reconcilable_positions(db: &dyn Database) -> AppResult<Vec<PositionDetail>> {
-    let mut positions = db.get_positions(Some("ACTIVE")).await?;
-    positions.extend(db.get_positions(Some("EXITING")).await?);
+    let mut positions = db.get_positions(Some("EXITING")).await?;
+    positions.extend(db.get_positions(Some("ACTIVE")).await?);
     positions.truncate(MAX_POSITIONS_PER_RUN);
     Ok(positions)
 }
@@ -236,12 +266,18 @@ async fn reconcile_position(
     result: &mut ReconciliationRunResult,
 ) -> AppResult<()> {
     let mut outcome = Outcome::Ok;
+    // Whether the entry transaction was actually verified on-chain. When false,
+    // the log must NOT claim "FOUND" (either no entry signature exists, or the
+    // check is not yet definitive inside the finalization grace window).
+    let mut entry_verified = false;
 
     // --- Entry transaction check (all active/exiting positions) ---
     let entry_sig = pos.entry_tx_signature.as_str();
     if !entry_sig.is_empty() {
         match checker.check_signature(entry_sig).await {
-            OnChainTxStatus::Found => {}
+            OnChainTxStatus::Found => {
+                entry_verified = true;
+            }
             OnChainTxStatus::NotFound => {
                 // Only a discrepancy once the entry has had time to finalize.
                 if is_past_entry_grace(pos) {
@@ -266,7 +302,12 @@ async fn reconcile_position(
     // NOTE: there is no reliable exit-initiation timestamp (update_position does not
     // touch last_updated), so a NotFound exit is treated as pending rather than flagged
     // — flagging it would produce false discrepancies for every in-flight exit.
-    if pos.state == "EXITING" {
+    // The exit check only runs when the entry check left `outcome == Ok`: an exit
+    // `Found` must never auto-resolve a position whose entry transaction was never
+    // confirmed on-chain, and an exit `NotFound` must not downgrade a genuine entry
+    // discrepancy to Pending.
+    let entry_outcome_ok = matches!(outcome, Outcome::Ok);
+    if pos.state == "EXITING" && entry_outcome_ok {
         if let Some(exit_sig) = pos.exit_tx_signature.as_deref().filter(|s| !s.is_empty()) {
             match checker.check_signature(exit_sig).await {
                 OnChainTxStatus::Found => match auto_resolve_exit(
@@ -279,9 +320,19 @@ async fn reconcile_position(
                 )
                 .await
                 {
-                    Ok(()) => {
+                    Ok(true) => {
                         result.auto_resolved += 1;
                         outcome = Outcome::AutoResolved;
+                    }
+                    Ok(false) => {
+                        // No ACTIVE/EXITING position matched the close — the
+                        // position could not be resolved. Record it instead of
+                        // counting it as auto-resolved.
+                        outcome = Outcome::Discrepancy {
+                            kind: "EXIT_MATCH_NOT_FOUND",
+                            actual: Some("FOUND"),
+                            note: "Exit confirmed on-chain but no ACTIVE/EXITING position matched",
+                        };
                     }
                     Err(e) => {
                         // auto_resolve_exit returns Err only when the CLOSE failed; the
@@ -316,10 +367,13 @@ async fn reconcile_position(
     match outcome {
         Outcome::AutoResolved => { /* auto_resolve_exit already logged the resolved row */ }
         Outcome::Ok => {
+            // Only claim "FOUND" when the entry was actually verified; a
+            // position without a checked entry reports None instead of a
+            // misleading confirmed status.
             db.insert_reconciliation_log(
                 &pos.trade_uuid,
                 &pos.state,
-                Some("FOUND"),
+                if entry_verified { Some("FOUND") } else { None },
                 "NONE",
                 Some(entry_sig),
                 Some("No discrepancy detected"),
@@ -389,10 +443,15 @@ fn is_past_entry_grace(pos: &PositionDetail) -> bool {
 }
 
 /// Confirm an exit on-chain: close the position, then best-effort insert + resolve the
-/// reconciliation log row. Returns `Err` only if the **close** fails (the position
-/// remains `EXITING` and will be re-examined); a logging failure after a successful
-/// close returns `Ok` so the caller never records a spurious `AUTO_RESOLVE_FAILED` for
-/// a position that is in fact already closed.
+/// reconciliation log row. Returns:
+/// - `Ok(true)` — the position was closed (row logged best-effort).
+/// - `Ok(false)` — no ACTIVE/EXITING position matched the close (the exit could
+///   not be resolved; the caller must log the position instead of counting it
+///   as auto-resolved).
+/// - `Err` — only when the **close** fails (the position remains `EXITING` and
+///   will be re-examined); a logging failure after a successful close returns
+///   `Ok(true)` so the caller never records a spurious `AUTO_RESOLVE_FAILED` for
+///   a position that is in fact already closed.
 async fn auto_resolve_exit(
     db: &dyn Database,
     wallet_address: &str,
@@ -400,7 +459,7 @@ async fn auto_resolve_exit(
     trade_uuid: &str,
     exit_sig: &str,
     exit_price: Option<Decimal>,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     let Some(price) = exit_price.filter(|p| !p.is_zero()) else {
         return Err(AppError::Validation(
             "exit_price missing or zero — cannot auto-resolve".to_string(),
@@ -421,7 +480,7 @@ async fn auto_resolve_exit(
         .await?;
 
     if !position_closed {
-        return Ok(());
+        return Ok(false);
     }
 
     // Close succeeded — the position is now CLOSED and won't be re-examined. Record
@@ -440,7 +499,7 @@ async fn auto_resolve_exit(
         Ok(id) => id,
         Err(e) => {
             tracing::warn!(trade_uuid = %trade_uuid, error = %e, "reconciliation: exit closed but log insert failed");
-            return Ok(());
+            return Ok(true);
         }
     };
 
@@ -450,7 +509,7 @@ async fn auto_resolve_exit(
     {
         tracing::warn!(trade_uuid = %trade_uuid, error = %e, "reconciliation: exit closed but resolve failed (left unresolved)");
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Push the run summary to the existing Prometheus reconciliation counters.

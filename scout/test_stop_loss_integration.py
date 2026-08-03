@@ -11,7 +11,6 @@ This script tests the stop-loss optimizer and position manager integration:
 """
 
 import sys
-import os
 from pathlib import Path
 
 # Add Scout directory to path
@@ -57,6 +56,8 @@ def test_stop_loss_optimizer():
         print(f"✓ Volatile market stop: ${volatile_stop.stop_price:.2f}")
 
         # Verify regime adjustments
+        # (larger ATR multiplier => wider (lower) long stop; derive from the optimizer itself)
+        assert optimizer.get_regime_multiplier(MarketRegime.BEAR) < optimizer.get_regime_multiplier(MarketRegime.BULL) < optimizer.get_regime_multiplier(MarketRegime.VOLATILE)
         assert bear_stop.stop_price > bull_stop.stop_price, "Bear stops should be tighter"
         assert volatile_stop.stop_price < bear_stop.stop_price, "Volatile stops should be widest"
 
@@ -73,7 +74,7 @@ def test_position_manager():
     print("\nTesting Position Manager...")
 
     try:
-        from core.position_manager import PositionManager, Position, PositionSide, PositionStatus
+        from core.position_manager import PositionManager, PositionSide, PositionStatus
         from core.stop_loss_optimizer import StopLossOptimizer, StopLossConfig
 
         # Create stop-loss optimizer
@@ -115,8 +116,8 @@ def test_position_manager():
         assert trigger_position.status == PositionStatus.EXITING, "Position should be exiting"
         print(f"✓ Stop-loss triggered at ${trigger_position.current_price:.2f}")
 
-        # Test position close
-        closed_position = position_manager.close_position("test_position_1", 95.0, "Stop-loss exit")
+        # Test position close - close at the price that actually triggered the stop
+        closed_position = position_manager.close_position("test_position_1", trigger_position.current_price, "Stop-loss exit")
         assert closed_position.status == PositionStatus.CLOSED, "Position should be closed"
         print(f"✓ Position closed: PnL ${closed_position.realized_pnl:.2f}")
 
@@ -137,22 +138,19 @@ def test_market_regime_detector():
     print("\nTesting Market Regime Detector...")
 
     try:
-        from core.market_regime_detector import MarketRegimeDetector, MarketRegime
+        from core.market_regime_detector import MarketRegimeDetector
 
         detector = MarketRegimeDetector()
         print("✓ Market Regime Detector created")
 
-        # Test regime detection (with mock data)
-        mock_market_data = {
-            "price_changes": [2.5, 1.8, -0.5, 3.2, 1.1, -1.2, 2.8],
-            "volatility_index": 18.5,
-            "volume_trend": "increasing",
-            "market_sentiment": "bullish"
-        }
+        # Test regime detection with actual price history (bullish drift)
+        prices = [100.0, 102.0, 101.0, 104.0, 103.0, 106.0, 105.0, 108.0]
+        volumes = [1000.0, 1100.0, 1050.0, 1200.0, 1150.0, 1300.0, 1250.0, 1400.0]
 
-        classification = detector.detect_regime(mock_market_data)
-        print(f"✓ Market regime detected: {classification.regime.value}")
-        assert classification.regime in [MarketRegime.BULL, MarketRegime.BEAR, MarketRegime.NEUTRAL, MarketRegime.VOLATILE]
+        classification = detector.detect_regime(sol_price=prices[-1], volume=volumes[-1])
+        print(f"✓ Market regime detected: {classification.regime.value} (confidence {classification.confidence:.2f})")
+        assert classification.regime is not None
+        assert classification.confidence >= 0.0
 
         return True
     except Exception as e:
@@ -171,15 +169,19 @@ def test_config_import():
 
         # Test stop-loss configuration methods
         stop_loss_enabled = ScoutConfig.get_stop_loss_enabled()
+        assert isinstance(stop_loss_enabled, bool), f"stop_loss_enabled should be bool: {stop_loss_enabled}"
         print(f"✓ Stop-loss enabled: {stop_loss_enabled}")
 
         atr_period = ScoutConfig.get_atr_period()
+        assert isinstance(atr_period, int) and atr_period > 0, f"atr_period invalid: {atr_period}"
         print(f"✓ ATR period: {atr_period}")
 
         bull_multiplier = ScoutConfig.get_bull_multiplier()
+        assert isinstance(bull_multiplier, float) and bull_multiplier > 0, f"bull_multiplier invalid: {bull_multiplier}"
         print(f"✓ Bull multiplier: {bull_multiplier}")
 
         min_risk_reward = ScoutConfig.get_min_risk_reward()
+        assert isinstance(min_risk_reward, (int, float)) and min_risk_reward > 0, f"min_risk_reward invalid: {min_risk_reward}"
         print(f"✓ Min risk/reward: {min_risk_reward}")
 
         return True

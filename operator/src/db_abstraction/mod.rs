@@ -128,6 +128,19 @@ pub trait Database: Send + Sync {
         token_address: &str,
     ) -> AppResult<Option<Position>>;
 
+    /// Get the most recent unresolved (PENDING/QUEUED/EXECUTING/PENDING_CONFIRMATION)
+    /// trade for a (wallet, token) pair, if any.
+    ///
+    /// An unconfirmed BUY never inserts a position row, so duplicate admission
+    /// must also reject when an unresolved trade already exists for the same
+    /// wallet/token — otherwise a second concurrent BUY passes the
+    /// position-based pre-check and submits another on-chain order.
+    async fn get_unresolved_trade_by_wallet_token(
+        &self,
+        wallet_address: &str,
+        token_address: &str,
+    ) -> AppResult<Option<String>>;
+
     /// Close position
     async fn close_position(
         &self,
@@ -324,11 +337,15 @@ pub trait Database: Send + Sync {
     /// Get count of consecutive losses
     async fn get_consecutive_losses(&self) -> AppResult<u32>;
 
-    /// Get max drawdown percent from peak
+    /// Get drawdown percentages from peak.
+    ///
+    /// Returns `(current_drawdown_percent, max_drawdown_percent)`: the
+    /// drawdown at the current point in time, and the historical worst
+    /// peak-to-trough drawdown over the closed-trade series.
     async fn get_max_drawdown_percent(
         &self,
         total_capital_sol: rust_decimal::Decimal,
-    ) -> AppResult<rust_decimal::Decimal>;
+    ) -> AppResult<(rust_decimal::Decimal, rust_decimal::Decimal)>;
 
     // ========================================================================
     // POSITIONS - ADVANCED OPERATIONS
@@ -638,7 +655,8 @@ pub trait Database: Send + Sync {
         wallet_address_filter: Option<&str>,
     ) -> AppResult<i64>;
 
-    /// Update trade costs (idempotent - adds to existing values)
+    /// Update trade costs — ACCUMULATES onto existing values. Retrying a call
+    /// adds the same costs again (not idempotent).
     async fn update_trade_costs(
         &self,
         trade_uuid: &str,
@@ -680,6 +698,12 @@ pub trait Database: Send + Sync {
         offset: i32,
     ) -> AppResult<Vec<DeadLetterItem>>;
 
+    /// Get a single dead letter queue item by trade UUID
+    async fn get_dead_letter_entry(
+        &self,
+        trade_uuid: &str,
+    ) -> AppResult<Option<DeadLetterItem>>;
+
     /// Count dead letter queue items
     async fn count_dead_letter_entries(&self) -> AppResult<i64>;
 
@@ -703,6 +727,13 @@ pub trait Database: Send + Sync {
         &self,
         limit: i32,
         offset: i32,
+    ) -> AppResult<Vec<ConfigAuditItem>>;
+
+    /// Get config audit entries filtered by key prefix (newest first)
+    async fn get_config_audit_entries_by_key_prefix(
+        &self,
+        prefix: &str,
+        limit: i32,
     ) -> AppResult<Vec<ConfigAuditItem>>;
 
     /// Count config audit entries
@@ -770,7 +801,7 @@ pub trait Database: Send + Sync {
         PoolStats {
             active_connections: pool.size() - pool.num_idle(),
             idle_connections: pool.num_idle(),
-            max_connections: pool.size(),
+            max_connections: pool.max_connections(),
             utilization_percent: pool.utilization() * 100.0,
         }
     }
@@ -800,35 +831,33 @@ pub trait Database: Send + Sync {
         position_state: Option<&str>,
     ) -> AppResult<()>;
 
-    /// Default implementation for atomic trade insertion (non-transactional fallback)
+    /// Default implementation for atomic trade insertion.
     ///
-    /// Backends can override this with proper transaction support.
+    /// A genuine transaction cannot be expressed through this trait generically,
+    /// so backends must override this with real transaction support (as
+    /// `PostgresBackend` does). The non-transactional fallback is not used:
+    /// pretending two independent writes succeeded would leave orphaned rows.
     async fn insert_trade_and_create_position_default(
         &self,
-        trade: &InsertTrade,
-        position: &InsertPosition,
+        _trade: &InsertTrade,
+        _position: &InsertPosition,
     ) -> AppResult<i64> {
-        // Fallback: execute as separate operations
-        let trade_id = timed_query("insert_trade_and_create_position_insert_trade", self.insert_trade(trade)).await?;
-
-        // Create position with the trade_id
-        let position = position.clone();
-        // Note: InsertPosition would need a trade_id field for proper foreign key
-        timed_query("insert_trade_and_create_position_insert_position", self.insert_position(&position)).await?;
-
-        Ok(trade_id)
+        Err(AppError::Internal(
+            "insert_trade_and_create_position requires a transactional backend override".to_string(),
+        ))
     }
 
-    /// Default implementation for atomic status update (non-transactional fallback)
+    /// Default implementation for atomic status update.
     ///
-    /// Backends can override this with proper transaction support.
+    /// Updates the trade status and forwards the position-state change to
+    /// `update_position_state`. Backends should override this with a genuine
+    /// transaction (as `PostgresBackend` does).
     async fn update_trade_status_and_position_default(
         &self,
         trade_uuid: &str,
         trade_status: &str,
         position_state: Option<&str>,
     ) -> AppResult<()> {
-        // Update trade status
         let update = UpdateTradeStatus {
             trade_uuid: trade_uuid.to_string(),
             status: trade_status.to_string(),
@@ -839,10 +868,8 @@ pub trait Database: Send + Sync {
 
         timed_query("update_trade_status_and_position_update_trade", self.update_trade_status(&update)).await?;
 
-        // Update position state if provided
         if let Some(state) = position_state {
-            // Would need to implement update_position_state method
-            tracing::debug!("Position state update requested: {}", state);
+            self.update_position_state(trade_uuid, state).await?;
         }
 
         Ok(())
@@ -886,6 +913,7 @@ pub struct Trade {
     pub slippage_cost_sol: rust_decimal::Decimal,
     pub total_cost_sol: rust_decimal::Decimal,
     pub net_pnl_sol: Option<rust_decimal::Decimal>,
+    pub pnl_data_valid: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -1004,7 +1032,13 @@ impl DatabaseMode {
             .as_str()
         {
             "postgres" | "postgresql" | "postgres-only" => DatabaseMode::PostgreSQLOnly,
-            _ => DatabaseMode::PostgreSQLOnly,
+            other => {
+                tracing::warn!(
+                    mode = other,
+                    "Unknown CHIMERA_DB_MODE value — defaulting to PostgreSQL"
+                );
+                DatabaseMode::PostgreSQLOnly
+            }
         }
     }
 }
@@ -1019,19 +1053,11 @@ pub async fn create_database(config: &DatabaseConfig) -> AppResult<Arc<dyn Datab
 // HELPERS — TEXT ↔ Decimal for financial values
 // ========================================================================
 
-/// Parse a TEXT (Decimal string) column value to Decimal
-pub fn text_to_dec(s: &str) -> rust_decimal::Decimal {
-    rust_decimal::Decimal::from_str(s).unwrap_or_else(|_| {
-        if !s.is_empty() {
-            tracing::warn!(raw_value = %s, "Failed to parse TEXT column as Decimal — using 0");
-        }
-        rust_decimal::Decimal::ZERO
-    })
-}
-
-/// Parse a TEXT column value as Decimal, returning an error on failure instead of silently defaulting to 0.
-/// Use in critical paths (price, PnL, amount reads) where corruption must be surfaced.
-pub fn text_to_dec_res(s: &str) -> AppResult<rust_decimal::Decimal> {
+/// Parse a TEXT (Decimal string) column value to Decimal, returning an error
+/// on failure instead of silently defaulting to zero. Use in all critical
+/// paths (price, PnL, amount reads) so corrupted values surface rather than
+/// flowing into PnL, position sizing, or risk calculations as a zero.
+pub fn text_to_dec(s: &str) -> AppResult<rust_decimal::Decimal> {
     rust_decimal::Decimal::from_str(s)
         .map_err(|e| AppError::Internal(format!("Failed to parse Decimal from '{}': {}", s, e)))
 }

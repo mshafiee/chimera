@@ -5,6 +5,7 @@ datasources:
     type: prometheus
     access: proxy
     url: http://prometheus:9090
+    uid: PBFA97CFB590B2093
     isDefault: true
     editable: true
     jsonData:
@@ -17,6 +18,7 @@ datasources:
     url: postgres:5432
     database: chimera
     user: chimera
+    uid: P4F7F8D3768E4C7A1
     secureJsonData:
       password: ${POSTGRES_PASSWORD:-chimera}
     jsonData:

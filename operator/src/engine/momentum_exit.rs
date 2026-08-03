@@ -1,14 +1,15 @@
 //! Momentum-Based Early Exit Detection
 //!
 //! Detects negative momentum indicators and triggers early exit:
-//! - Price drops 8%+ from entry within 5 minutes (base; widens for high-volatility tokens and older positions)
+//! - Price drops 5%+ from entry within 8 minutes (8%+ after — widened for
+//!   high-volatility tokens and older positions)
 //! - Volume drops >65% from 24h average
 //! - RSI < 35 and declining
 //!
 //! # Coverage note
 //! There is a known gap between wick_protection_secs (default 10s) and RSI readiness
-//! (requires ~12 samples at 30s intervals = ~6 minutes of price data after entry).
-//! During seconds 10-360 after entry, neither the wick grace period nor RSI momentum
+//! (requires 16 price samples at 30s intervals = ~8 minutes of price data after entry).
+//! During seconds 10-480 after entry, neither the wick grace period nor RSI momentum
 //! exit is active. The hard stop-loss at -25% (bypassing wick protection) and the
 //! primary stop-loss threshold provide coverage throughout this gap. RSI is a
 //! secondary, not primary, defense.
@@ -18,7 +19,7 @@ use crate::engine::volume_cache::VolumeCache;
 use crate::price_cache::PriceCache;
 use rust_decimal::prelude::*;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// Momentum exit action
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,7 +134,20 @@ impl MomentumExit {
             return MomentumExitAction::Exit;
         }
 
-        // Check 1: Price drops 8% from entry within 5 minutes (base threshold)
+        // Guard: corrupt price data — skip the momentum check rather than
+        // converting a zero/negative cache value into a 100%+ drop that forces
+        // an exit (the opposite of the intent behind the entry_price guard).
+        if current_price <= Decimal::ZERO {
+            tracing::warn!(
+                trade_uuid = %trade_uuid,
+                token_address = token_address,
+                current_price = ?current_price,
+                "CORRUPT_PRICE: current_price is zero/negative — skipping momentum check"
+            );
+            return MomentumExitAction::None;
+        }
+
+        // Check 1: Price drops 5% from entry within 8 minutes (base threshold)
         let price_drop_percent = if !entry_price.is_zero() {
             let diff = entry_price - current_price;
             let ratio = diff / entry_price;
@@ -141,21 +155,38 @@ impl MomentumExit {
         } else {
             Decimal::ZERO
         };
-        let elapsed = entry_time.elapsed().unwrap_or_default();
+        // Clock-skew guard: `entry_time.elapsed()` errors when the entry
+        // timestamp is in the future. A zero elapsed time would silently
+        // suppress the price-drop/volume/RSI checks until the clock catches
+        // up — surface it instead so momentum protection cannot be silently
+        // disabled.
+        let elapsed = match entry_time.elapsed() {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!(
+                    trade_uuid = %trade_uuid,
+                    token_address = token_address,
+                    error = ?e,
+                    "CLOCK_SKEW: entry_time is in the future — momentum checks suppressed"
+                );
+                Duration::ZERO
+            }
+        };
         let elapsed_minutes = elapsed.as_secs() / 60;
 
         // Respect the same wick-protection grace period as stop_loss.rs.
         // A sharp single-candle wick immediately after entry should not trigger a momentum
-        // exit when stop_loss.rs would ignore it. Volume and RSI checks are ungated because
-        // they reflect genuine structural breakdown rather than a transient wick.
+        // exit when stop_loss.rs would ignore it. Volume and RSI checks are likewise
+        // gated behind wick protection — during the first wick_protection_secs after entry,
+        // they are unreliable indicators of structural breakdown.
         let in_wick_window = elapsed.as_secs() < self.wick_protection_secs;
 
         if !in_wick_window {
-            // RSI requires 12 samples at 30-second intervals (~6 min). Before RSI is
+            // RSI requires 16 samples at 30-second intervals (~8 min). Before RSI is
             // available, use a tighter base so new positions get equivalent protection.
-            // Once RSI is active (≥6 min), widen to 8% to avoid false exits on normal
+            // Once RSI is active (≥8 min), widen to 8% to avoid false exits on normal
             // Solana intraday noise (30%+ daily vol).
-            let base_drop_threshold = if elapsed_minutes < 6 {
+            let base_drop_threshold = if elapsed_minutes < 8 {
                 Decimal::from(5)
             } else {
                 Decimal::from(8)
@@ -348,8 +379,11 @@ impl MomentumExit {
             }
         }
 
-        if prices.len() < 12 {
-            // Need at least 12 data points spanning ~6 minutes for current and previous 14-period RSI
+        if prices.len() < 16 {
+            // A 14-period Wilder RSI needs 15 changes (=16 prices) to produce
+            // both a previous and current RSI value; at 30s sampling this is
+            // ~8 minutes. The tighter 5% price-drop threshold applies until
+            // then (see check_momentum).
             return None;
         }
 
@@ -450,10 +484,31 @@ fn compute_rsi_from_prices(prices: &[f64]) -> Option<(f64, f64)> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
-    fn test_momentum_exit_price_drop() {
-        // This would be tested with actual database and price cache in integration tests
-        // Test case: Price drops 6% within 3 minutes -> should exit
+    fn test_compute_rsi_monotonic_rise_is_100() {
+        // Newest-first prices that rise from 1.0 (oldest) to 1.29 (newest):
+        // every change is a gain → RSI = 100.
+        let prices: Vec<f64> = (0..30).rev().map(|i| 1.0 + i as f64 * 0.01).collect();
+        let (current, previous) = compute_rsi_from_prices(&prices).expect("rsi from 30 samples");
+        assert_eq!(current, 100.0);
+        assert_eq!(previous, 100.0);
+    }
+
+    #[test]
+    fn test_compute_rsi_monotonic_fall_is_0() {
+        // Newest-first prices that fall from 1.29 (oldest) to 1.0 (newest):
+        // every change is a loss → RSI = 0.
+        let prices: Vec<f64> = (0..30).map(|i| 1.0 + i as f64 * 0.01).collect();
+        let (current, previous) = compute_rsi_from_prices(&prices).expect("rsi from 30 samples");
+        assert_eq!(current, 0.0);
+        assert_eq!(previous, 0.0);
+    }
+
+    #[test]
+    fn test_compute_rsi_requires_16_samples() {
+        assert!(compute_rsi_from_prices(&[1.0; 15]).is_none());
+        assert!(compute_rsi_from_prices(&[1.0; 16]).is_some());
     }
 }

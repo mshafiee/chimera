@@ -25,7 +25,7 @@ from typing import Dict, List, Optional, Any, Set, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 import threading
-from collections import defaultdict, deque
+from collections import deque
 
 logger = logging.getLogger(__name__)
 
@@ -87,15 +87,6 @@ class BatcherConfig:
     """Configuration for dependency-aware batching."""
     MAX_BATCH_SIZE: int = 50  # Max requests per batch
     MAX_BATCH_CREDITS: int = 10000  # Max credits per batch
-    MAX_PARALLEL_BATCHES: int = 10  # Max parallel batches
-    MIN_CREDITS_FOR_BATCH: int = 100  # Minimum credits to form a batch
-
-    # Dependency resolution settings
-    MAX_DEPENDENCY_DEPTH: int = 5  # Max dependency chain depth
-    DEPENDENCY_TIMEOUT_SECONDS: int = 300  # 5 minutes
-
-    # State persistence
-    STATE_FILE: str = "dependency_batcher_state.json"
 
 
 class DependencyAwareBatcher:
@@ -123,10 +114,6 @@ class DependencyAwareBatcher:
         # Request queue
         self._request_queue: deque = deque()
 
-        # Dependency graph
-        self._dependencies: Dict[str, Set[str]] = defaultdict(set)  # id -> dependents
-        self._reverse_dependencies: Dict[str, Set[str]] = defaultdict(set)  # id -> dependencies
-
         # Completed requests
         self._completed: Set[str] = set()
 
@@ -138,7 +125,6 @@ class DependencyAwareBatcher:
             'requests_processed': 0,
             'batches_created': 0,
             'parallel_batches': 0,
-            'credits_saved': 0,  # Through batching optimization
         }
 
         logger.info("DependencyAwareBatcher initialized")
@@ -153,14 +139,9 @@ class DependencyAwareBatcher:
         with self._lock:
             self._request_queue.append(request)
 
-            # Build dependency graph
-            for dep_id in request.depends_on:
-                self._dependencies[dep_id].add(request.request_id)
-                self._reverse_dependencies[request.request_id].add(dep_id)
-
             logger.debug(
-                f"Added request {request.request_id} ({request.category}) "
-                f"with {len(request.depends_on)} dependencies"
+                "Added request %s (%s) with %d dependencies",
+                request.request_id, request.category, len(request.depends_on),
             )
 
     def batch_requests(self, requests: List[APIRequest]) -> List[RequestBatch]:
@@ -196,68 +177,58 @@ class DependencyAwareBatcher:
                       all(d in self._completed for d in r.depends_on)]
         dependent = [r for r in requests if r not in independent]
 
-        # Batch independent requests together
         batches = []
         total_credits = 0
         total_time = 0
 
-        # Create independent batch
+        # Batch independent requests together (respecting size/credit limits)
         if independent:
-            batch = self._create_batch(independent, can_parallelize=True)
-            batches.append(batch)
-            total_credits += batch.total_credits
-            total_time += batch.estimated_time_ms
+            independent_sorted = sorted(independent, key=lambda r: r.priority.value)
+            ind_batches, ind_credits, ind_time = self._chunk_batches(independent_sorted, can_parallelize=True)
+            batches.extend(ind_batches)
+            total_credits += ind_credits
+            total_time += ind_time
 
-        # Chain dependent requests
+        # Chain dependent requests in dependency waves (true topological
+        # ordering): a request becomes ready when its dependencies are in
+        # `self._completed` OR were scheduled in an earlier wave of this plan.
         if dependent:
-            # Sort by priority
-            dependent_sorted = sorted(dependent, key=lambda r: r.priority.value)
+            request_map = {r.request_id: r for r in requests}
+            ready: Set[str] = set(self._completed)
+            scheduled: Set[str] = set()
+            remaining = list(dependent)
 
-            # Create sequential batches for dependency chains
-            current_batch = []
-            current_credits = 0
+            while remaining:
+                wave = [
+                    r for r in remaining
+                    if all(d in ready for d in r.depends_on)
+                ]
+                if not wave:
+                    # No progress: dependencies that will never be satisfied.
+                    # Distinguish true cycles from missing request IDs.
+                    for r in remaining:
+                        missing = [d for d in r.depends_on if d not in ready]
+                        if any(d in request_map for d in missing):
+                            logger.warning(f"Dependency cycle involving request {r.request_id}: {missing}")
+                        else:
+                            logger.warning(f"Dependency {missing} not found for request {r.request_id}")
+                    break
 
-            for req in dependent_sorted:
-                # Check if dependencies are satisfied
-                deps_satisfied = all(d in self._completed for d in req.depends_on)
+                wave_sorted = sorted(wave, key=lambda r: r.priority.value)
+                wave_can_parallelize = all(
+                    all(d in self._completed for d in r.depends_on) for r in wave
+                )
+                wave_batches, wave_credits, wave_time = self._chunk_batches(
+                    wave_sorted, can_parallelize=wave_can_parallelize
+                )
+                batches.extend(wave_batches)
+                total_credits += wave_credits
+                total_time += wave_time
 
-                if not deps_satisfied:
-                    # Flush current batch if any
-                    if current_batch:
-                        batch = self._create_batch(current_batch, can_parallelize=False)
-                        batches.append(batch)
-                        total_credits += batch.total_credits
-                        total_time += batch.estimated_time_ms
-                        current_batch = []
-                        current_credits = 0
-
-                    # Check if we need to add placeholder for dependency
-                    for dep_id in req.depends_on:
-                        if dep_id not in self._completed and dep_id not in [r.request_id for r in current_batch]:
-                            # This dependency doesn't exist in our request list
-                            logger.warning(f"Dependency {dep_id} not found for request {req.request_id}")
-                    continue
-
-                # Add to current batch
-                current_batch.append(req)
-                current_credits += req.credit_cost
-
-                # Check batch limits
-                if (len(current_batch) >= self._config.MAX_BATCH_SIZE or
-                    current_credits >= self._config.MAX_BATCH_CREDITS):
-                    batch = self._create_batch(current_batch, can_parallelize=False)
-                    batches.append(batch)
-                    total_credits += batch.total_credits
-                    total_time += batch.estimated_time_ms
-                    current_batch = []
-                    current_credits = 0
-
-            # Flush remaining
-            if current_batch:
-                batch = self._create_batch(current_batch, can_parallelize=False)
-                batches.append(batch)
-                total_credits += batch.total_credits
-                total_time += batch.estimated_time_ms
+                for req in wave:
+                    ready.add(req.request_id)
+                    scheduled.add(req.request_id)
+                remaining = [r for r in remaining if r.request_id not in scheduled]
 
         # Calculate parallel potential
         independent_ratio = len(independent) / max(1, len(requests))
@@ -269,6 +240,42 @@ class DependencyAwareBatcher:
             estimated_time_ms=total_time,
             parallel_potential=parallel_potential,
         )
+
+    def _chunk_batches(
+        self, requests: List[APIRequest], can_parallelize: bool
+    ) -> tuple:
+        """Split requests into batches respecting MAX_BATCH_SIZE/MAX_BATCH_CREDITS.
+
+        Returns (batches, total_credits, total_time).
+        """
+        batches = []
+        total_credits = 0
+        total_time = 0
+        current: List[APIRequest] = []
+        current_credits = 0
+
+        def _flush() -> None:
+            nonlocal current, current_credits, total_credits, total_time
+            if not current:
+                return
+            batch = self._create_batch(current, can_parallelize=can_parallelize)
+            batches.append(batch)
+            total_credits += batch.total_credits
+            total_time += batch.estimated_time_ms
+            if can_parallelize:
+                self._stats['parallel_batches'] += 1
+            current = []
+            current_credits = 0
+
+        for req in requests:
+            current.append(req)
+            current_credits += req.credit_cost
+            if (len(current) >= self._config.MAX_BATCH_SIZE or
+                    current_credits >= self._config.MAX_BATCH_CREDITS):
+                _flush()
+        _flush()
+
+        return batches, total_credits, total_time
 
     def _create_batch(self, requests: List[APIRequest], can_parallelize: bool) -> RequestBatch:
         """Create a batch from requests."""
@@ -283,7 +290,9 @@ class DependencyAwareBatcher:
             requests=requests,
             total_credits=total_credits,
             can_parallelize=can_parallelize,
-            dependencies_resolved=not any(r.depends_on for r in requests),
+            dependencies_resolved=all(
+                all(d in self._completed for d in r.depends_on) for r in requests
+            ),
             estimated_time_ms=estimated_time,
         )
 
@@ -415,7 +424,14 @@ class DependencyAwareBatcher:
 
                 if deps_satisfied and req.request_id not in self._in_flight:
                     ready.append(req)
-                    self._request_queue.remove(req)  # Remove from queue
+
+            # Identity-safe removal: rebuild the queue without ready requests
+            # (deque.remove uses value equality, which could drop an earlier
+            # duplicate of an identical request)
+            ready_ids = {r.request_id for r in ready}
+            self._request_queue = deque(
+                r for r in self._request_queue if r.request_id not in ready_ids
+            )
 
             return ready
 
@@ -426,7 +442,6 @@ class DependencyAwareBatcher:
                 'requests_processed': self._stats['requests_processed'],
                 'batches_created': self._stats['batches_created'],
                 'parallel_batches': self._stats['parallel_batches'],
-                'credits_saved': self._stats['credits_saved'],
                 'queue_size': len(self._request_queue),
                 'completed': len(self._completed),
                 'in_flight': len(self._in_flight),
@@ -439,7 +454,6 @@ class DependencyAwareBatcher:
                 'requests_processed': 0,
                 'batches_created': 0,
                 'parallel_batches': 0,
-                'credits_saved': 0,
             }
             logger.info("Statistics reset")
 

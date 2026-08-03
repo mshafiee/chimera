@@ -114,7 +114,7 @@
       },
       "targets": [
         {
-          "expr": "chimera_geoip_cache_hits / chimera_geoip_lookups_total",
+          "expr": "rate(chimera_geoip_cache_hits[5m]) / rate(chimera_geoip_lookups_total[5m])",
           "refId": "A"
         }
       ],
@@ -224,8 +224,8 @@
             ]
           },
           "mappings": [
-            {"type": "value", "options": {"0": {"text": "NO", "color": "red"}}, "value": "0"},
-            {"type": "value", "options": {"1": {"text": "YES", "color": "green"}}, "value": "1"}
+            {"type": "value", "options": {"false": {"text": "NO", "color": "red"}}},
+            {"type": "value", "options": {"true": {"text": "YES", "color": "green"}}}
           ]
         }
       }
@@ -242,7 +242,7 @@
       "targets": [
         {
           "format": "table",
-          "rawSql": "SELECT * FROM config_audit ORDER BY created_at DESC LIMIT 20",
+          "rawSql": "SELECT id, key, old_value, new_value, changed_by, changed_at FROM config_audit ORDER BY changed_at DESC LIMIT 20",
           "refId": "A"
         }
       ],
@@ -254,10 +254,10 @@
             "indexByName": {},
             "renameByName": {
               "id": "ID",
-              "changed_by": "Changed By",
-              "config_key": "Config Key",
+              "key": "Config Key",
               "old_value": "Old Value",
               "new_value": "New Value",
+              "changed_by": "Changed By",
               "changed_at": "Changed At"
             }
           }

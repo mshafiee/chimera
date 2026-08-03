@@ -144,7 +144,9 @@ class TTLDefaults:
     @classmethod
     def get_ttl(cls, category: CacheCategory) -> int:
         """Get default TTL for a category."""
-        return getattr(cls, category.value, 300)  # Default 5 minutes
+        # Attribute names are UPPERCASE (WALLET_METRICS, ...) while
+        # category.value is the lowercase string — look up by .name.
+        return getattr(cls, category.name, 300)  # Default 5 minutes
 
 
 class AdvancedCache:
@@ -216,30 +218,32 @@ class AdvancedCache:
             os.makedirs(os.path.dirname(self._sqlite_path), exist_ok=True)
 
             conn = sqlite3.connect(self._sqlite_path)
-            cursor = conn.cursor()
+            try:
+                cursor = conn.cursor()
 
-            # Create cache table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS cache_entries (
-                    key TEXT PRIMARY KEY,
-                    value BLOB,
-                    category TEXT,
-                    created_at REAL,
-                    accessed_at REAL,
-                    hit_count INTEGER,
-                    size_bytes INTEGER,
-                    ttl_seconds INTEGER
-                )
-            """)
+                # Create cache table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS cache_entries (
+                        key TEXT PRIMARY KEY,
+                        value BLOB,
+                        category TEXT,
+                        created_at REAL,
+                        accessed_at REAL,
+                        hit_count INTEGER,
+                        size_bytes INTEGER,
+                        ttl_seconds INTEGER
+                    )
+                """)
 
-            # Create index for faster lookups
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_category
-                ON cache_entries(category, created_at)
-            """)
+                # Create index for faster lookups
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_category
+                    ON cache_entries(category, created_at)
+                """)
 
-            conn.commit()
-            conn.close()
+                conn.commit()
+            finally:
+                conn.close()
 
             logger.debug(f"SQLite L3 cache initialized at {self._sqlite_path}")
         except Exception as e:
@@ -295,6 +299,43 @@ class AdvancedCache:
             logger.error(f"Failed to deserialize cache value: {e}")
             return None
 
+    def _set_l1(self, key: str, value: Any, category: CacheCategory, wqs_score: Optional[float] = None):
+        """Set value in L1 cache (serialized with the L1 lock so all L1
+        mutations — including evictions — are serialized)."""
+        with self._l1_lock:
+            ttl = self._get_ttl(category, wqs_score)
+            serialized = self._serialize_value(value)
+            size_bytes = len(serialized)
+
+            # Check if we need to evict entries
+            if size_bytes > self._l1_max_memory:
+                logger.warning(f"Cache entry too large for L1: {size_bytes:,} bytes")
+                return
+
+            current_usage = self._get_l1_memory_usage()
+            if current_usage + size_bytes > self._l1_max_memory:
+                self._evict_l1_entries(size_bytes)
+
+            # Create cache entry
+            entry = CacheEntry(
+                key=key,
+                value=value,
+                category=category,
+                created_at=time.time(),
+                accessed_at=time.time(),
+                hit_count=0,
+                size_bytes=size_bytes,
+                level=CacheLevel.L1_MEMORY,
+                ttl_seconds=ttl
+            )
+
+            self._l1_cache[key] = entry
+
+            # Update statistics
+            with self._stats_lock:
+                self._stats.total_entries = len(self._l1_cache)
+                self._stats.l1_size_bytes = self._get_l1_memory_usage()
+
     def _evict_l1_entries(self, required_bytes: int) -> bool:
         """
         Evict L1 entries to free up memory.
@@ -307,32 +348,33 @@ class AdvancedCache:
         Returns:
             True if successful, False if not enough memory
         """
-        if not self._l1_cache:
-            return False
+        with self._l1_lock:
+            if not self._l1_cache:
+                return False
 
-        freed_bytes = 0
-        entries_to_evict = []
+            freed_bytes = 0
+            entries_to_evict = []
 
-        # Sort entries by last access time (oldest first)
-        sorted_entries = sorted(
-            self._l1_cache.values(),
-            key=lambda e: e.accessed_at
-        )
+            # Sort entries by last access time (oldest first)
+            sorted_entries = sorted(
+                self._l1_cache.values(),
+                key=lambda e: e.accessed_at
+            )
 
-        for entry in sorted_entries:
-            if freed_bytes >= required_bytes:
-                break
+            for entry in sorted_entries:
+                if freed_bytes >= required_bytes:
+                    break
 
-            entries_to_evict.append(entry.key)
-            freed_bytes += entry.size_bytes
+                entries_to_evict.append(entry.key)
+                freed_bytes += entry.size_bytes
 
-        # Evict selected entries
-        for key in entries_to_evict:
-            del self._l1_cache[key]
+            # Evict selected entries
+            for key in entries_to_evict:
+                del self._l1_cache[key]
 
-        logger.debug(f"Evicted {len(entries_to_evict)} L1 entries, freed {freed_bytes:,} bytes")
+            logger.debug(f"Evicted {len(entries_to_evict)} L1 entries, freed {freed_bytes:,} bytes")
 
-        return freed_bytes >= required_bytes
+            return freed_bytes >= required_bytes
 
     def _get_l1_memory_usage(self) -> int:
         """Calculate current L1 cache memory usage."""
@@ -428,9 +470,15 @@ class AdvancedCache:
                 if cached_data:
                     value = self._deserialize_value(cached_data)
 
+                    if value is None:
+                        # Corrupt/partial payload: treat as a miss and drop it
+                        self._redis_client.delete(key)
+                        with self._stats_lock:
+                            self._stats.total_misses += 1
+                        return default
+
                     # Promote to L1 cache
-                    if value is not None:
-                        self._set_l1(key, value, category, wqs_score)
+                    self._set_l1(key, value, category, wqs_score)
 
                     with self._stats_lock:
                         self._stats.total_hits += 1
@@ -442,27 +490,35 @@ class AdvancedCache:
         # Try L3 (SQLite) cache
         try:
             conn = sqlite3.connect(self._sqlite_path)
-            cursor = conn.cursor()
+            try:
+                cursor = conn.cursor()
 
-            cursor.execute("""
-                SELECT value, created_at, ttl_seconds, hit_count
-                FROM cache_entries
-                WHERE key = ? AND (created_at + ttl_seconds) > ?
-            """, (key, now))
+                cursor.execute("""
+                    SELECT value, created_at, ttl_seconds, hit_count
+                    FROM cache_entries
+                    WHERE key = ? AND (created_at + ttl_seconds) > ?
+                """, (key, now))
 
-            row = cursor.fetchone()
-            conn.close()
+                row = cursor.fetchone()
+            finally:
+                conn.close()
 
             if row:
                 value_data, created_at, ttl, hit_count = row
                 value = self._deserialize_value(value_data)
 
-                # Promote to L1 cache
-                if value is not None:
-                    self._set_l1(key, value, category, wqs_score)
+                if value is None:
+                    # Corrupt BLOB: treat as a miss and drop the bad row
+                    self.invalidate(prefix, identifier, *args)
+                    with self._stats_lock:
+                        self._stats.total_misses += 1
+                    return default
 
-                    # Update hit count in SQLite
-                    self._update_l3_hit_count(key, hit_count + 1)
+                # Promote to L1 cache
+                self._set_l1(key, value, category, wqs_score)
+
+                # Update hit count in SQLite
+                self._update_l3_hit_count(key, hit_count + 1)
 
                 with self._stats_lock:
                     self._stats.total_hits += 1
@@ -516,16 +572,18 @@ class AdvancedCache:
         """Update hit count in SQLite cache."""
         try:
             conn = sqlite3.connect(self._sqlite_path)
-            cursor = conn.cursor()
+            try:
+                cursor = conn.cursor()
 
-            cursor.execute("""
-                UPDATE cache_entries
-                SET hit_count = ?, accessed_at = ?
-                WHERE key = ?
-            """, (hit_count, time.time(), key))
+                cursor.execute("""
+                    UPDATE cache_entries
+                    SET hit_count = ?, accessed_at = ?
+                    WHERE key = ?
+                """, (hit_count, time.time(), key))
 
-            conn.commit()
-            conn.close()
+                conn.commit()
+            finally:
+                conn.close()
         except Exception as e:
             logger.debug(f"Failed to update L3 hit count: {e}")
 
@@ -557,25 +615,30 @@ class AdvancedCache:
             try:
                 ttl = self._get_ttl(category, wqs_score)
                 self._redis_client.set(key, serialized.decode('utf-8'), ttl_seconds=ttl)
+                # Track the key per category so invalidate_category can
+                # actually remove it from L2
+                self._redis_client.redis_client.sadd(f"cat:{category.value}", key)
             except Exception as e:
                 logger.debug(f"Redis cache set failed: {e}")
 
         # Store in L3 (SQLite)
         try:
             conn = sqlite3.connect(self._sqlite_path)
-            cursor = conn.cursor()
+            try:
+                cursor = conn.cursor()
 
-            ttl = self._get_ttl(category, wqs_score)
-            now = time.time()
+                ttl = self._get_ttl(category, wqs_score)
+                now = time.time()
 
-            cursor.execute("""
-                INSERT OR REPLACE INTO cache_entries
-                (key, value, category, created_at, accessed_at, hit_count, size_bytes, ttl_seconds)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (key, serialized, category.value, now, now, 0, len(serialized), ttl))
+                cursor.execute("""
+                    INSERT OR REPLACE INTO cache_entries
+                    (key, value, category, created_at, accessed_at, hit_count, size_bytes, ttl_seconds)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (key, serialized, category.value, now, now, 0, len(serialized), ttl))
 
-            conn.commit()
-            conn.close()
+                conn.commit()
+            finally:
+                conn.close()
 
             # Update statistics
             with self._stats_lock:
@@ -609,10 +672,12 @@ class AdvancedCache:
         # Remove from L3
         try:
             conn = sqlite3.connect(self._sqlite_path)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM cache_entries WHERE key = ?", (key,))
-            conn.commit()
-            conn.close()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM cache_entries WHERE key = ?", (key,))
+                conn.commit()
+            finally:
+                conn.close()
         except Exception as e:
             logger.debug(f"SQLite cache invalidate failed: {e}")
 
@@ -632,22 +697,26 @@ class AdvancedCache:
             for key in keys_to_remove:
                 del self._l1_cache[key]
 
-        # Remove from L2
+        # Remove from L2 (delete every key tracked for this category)
         if self._redis_available:
             try:
-                # Redis pattern matching is slow, but we can try
-                # This is a simplified version - production should use proper key patterns
-                pass  # Skip for now due to complexity
+                redis_conn = self._redis_client.redis_client
+                members = redis_conn.smembers(f"cat:{category.value}")
+                if members:
+                    redis_conn.delete(*members)
+                redis_conn.delete(f"cat:{category.value}")
             except Exception as e:
                 logger.debug(f"Redis category invalidate failed: {e}")
 
         # Remove from L3
         try:
             conn = sqlite3.connect(self._sqlite_path)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM cache_entries WHERE category = ?", (category.value,))
-            conn.commit()
-            conn.close()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM cache_entries WHERE category = ?", (category.value,))
+                conn.commit()
+            finally:
+                conn.close()
         except Exception as e:
             logger.debug(f"SQLite category invalidate failed: {e}")
 
@@ -669,16 +738,18 @@ class AdvancedCache:
         # Cleanup L3
         try:
             conn = sqlite3.connect(self._sqlite_path)
-            cursor = conn.cursor()
+            try:
+                cursor = conn.cursor()
 
-            cursor.execute("""
-                DELETE FROM cache_entries
-                WHERE (created_at + ttl_seconds) < ?
-            """, (now,))
+                cursor.execute("""
+                    DELETE FROM cache_entries
+                    WHERE (created_at + ttl_seconds) < ?
+                """, (now,))
 
-            deleted_count = cursor.rowcount
-            conn.commit()
-            conn.close()
+                deleted_count = cursor.rowcount
+                conn.commit()
+            finally:
+                conn.close()
 
             logger.debug(f"Cleaned up {deleted_count} expired L3 entries")
         except Exception as e:
@@ -802,7 +873,7 @@ def get_wallet_metrics(address: str) -> Optional[Dict]:
 def set_wallet_metrics(address: str, metrics: Dict):
     """Set cached wallet metrics."""
     cache = get_cache()
-    cache.set("wallet", address, "metrics", metrics, category=CacheCategory.WALLET_METRICS)
+    cache.set("wallet", address, metrics, "metrics", category=CacheCategory.WALLET_METRICS)
 
 
 def get_token_metadata(token_address: str) -> Optional[Dict]:
@@ -814,7 +885,7 @@ def get_token_metadata(token_address: str) -> Optional[Dict]:
 def set_token_metadata(token_address: str, metadata: Dict):
     """Set cached token metadata."""
     cache = get_cache()
-    cache.set("token", token_address, "metadata", metadata, category=CacheCategory.TOKEN_METADATA)
+    cache.set("token", token_address, metadata, "metadata", category=CacheCategory.TOKEN_METADATA)
 
 
 def get_token_creation_time(token_address: str) -> Optional[float]:
@@ -826,7 +897,7 @@ def get_token_creation_time(token_address: str) -> Optional[float]:
 def set_token_creation_time(token_address: str, creation_time: float):
     """Set cached token creation time."""
     cache = get_cache()
-    cache.set("token", token_address, "creation", creation_time, category=CacheCategory.TOKEN_CREATION)
+    cache.set("token", token_address, creation_time, "creation", category=CacheCategory.TOKEN_CREATION)
 
 
 def get_liquidity_data(token_address: str) -> Optional[Dict]:
@@ -870,7 +941,7 @@ def set_high_wqs_wallet_data(address: str, data: Dict, wqs_score: float):
         wqs_score: WQS score for TTL calculation (>= 70 gets 4x TTL)
     """
     cache = get_cache()
-    cache.set("wallet", address, "high_wqs", data,
+    cache.set("wallet", address, data, "high_wqs",
               category=CacheCategory.HIGH_WQS_WALLET_DATA,
               wqs_score=wqs_score)
 
@@ -901,7 +972,7 @@ def set_analysis_results(run_id: str, results: Dict):
         results: Analysis results to cache
     """
     cache = get_cache()
-    cache.set("analysis", run_id, "results", results,
+    cache.set("analysis", run_id, results, "results",
               category=CacheCategory.ANALYSIS_RESULTS)
 
 
@@ -929,7 +1000,7 @@ def set_discovery_results(discovery_id: str, results: Dict):
         results: Discovery results to cache
     """
     cache = get_cache()
-    cache.set("discovery", discovery_id, "results", results,
+    cache.set("discovery", discovery_id, results, "results",
               category=CacheCategory.DISCOVERY_RESULTS)
 
 
@@ -957,7 +1028,7 @@ def set_backtest_results(wallet_address: str, results: Dict):
         results: Backtest results to cache
     """
     cache = get_cache()
-    cache.set("backtest", wallet_address, "results", results,
+    cache.set("backtest", wallet_address, results, "results",
               category=CacheCategory.BACKTEST_RESULTS)
 
 

@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 # Try to import scipy for statistical tests
 try:
+    import scipy  # noqa: F401
     SCIPY_AVAILABLE = True
 except ImportError:
     SCIPY_AVAILABLE = False
@@ -62,9 +63,9 @@ class ModelMetrics:
     model_type: str
     total_predictions: int
     accurate_predictions: int  # Within threshold
-    mae: float  # Mean Absolute Error
-    rmse: float  # Root Mean Squared Error
-    mape: float  # Mean Absolute Percentage Error
+    mae: Optional[float]  # Mean Absolute Error (None = no labeled data)
+    rmse: Optional[float]  # Root Mean Squared Error
+    mape: Optional[float]  # Mean Absolute Percentage Error
     avg_confidence: float
     avg_inference_time_ms: float
     last_updated: str
@@ -205,9 +206,13 @@ class ModelMonitor:
                     self.feature_distributions[name] = deque(maxlen=self.window_size * 10)
                 self.feature_distributions[name].append(float(value))
 
-        # Update Prometheus metrics
+        # Update Prometheus metrics. Predictions without ground truth are
+        # labeled 'unlabeled' — never counted as incorrect.
         if PROMETHEUS_AVAILABLE:
-            status = "correct" if actual_pnl is not None and abs(predicted_pnl - actual_pnl) <= self.accuracy_threshold else "incorrect"
+            if actual_pnl is not None:
+                status = "correct" if abs(predicted_pnl - actual_pnl) <= self.accuracy_threshold else "incorrect"
+            else:
+                status = "unlabeled"
             self.prediction_counter.labels(model_type=model_type, status=status).inc()
             self.latency_histogram.labels(model_type=model_type).observe(inference_time_ms)
             if actual_pnl is not None:
@@ -248,10 +253,12 @@ class ModelMonitor:
             if PROMETHEUS_AVAILABLE:
                 self.accuracy_gauge.labels(model_type=model_type).set(accuracy)
         else:
-            mae = 0.0
-            rmse = 0.0
-            mape = 0.0
-            accuracy = 0.0
+            # No labeled data: report None, not fabricated zeros (a 0 MAE
+            # would falsely look perfect)
+            mae = None
+            rmse = None
+            mape = None
+            accuracy = None
 
         # Average confidence and latency
         avg_confidence = np.mean([p.confidence for p in model_preds])
@@ -261,9 +268,9 @@ class ModelMonitor:
             model_type=model_type,
             total_predictions=total,
             accurate_predictions=int(len(with_actual) * accuracy) if with_actual else 0,
-            mae=float(mae),
-            rmse=float(rmse),
-            mape=float(mape),
+            mae=mae,
+            rmse=rmse,
+            mape=mape,
             avg_confidence=float(avg_confidence),
             avg_inference_time_ms=float(avg_latency),
             last_updated=datetime.utcnow().isoformat()
@@ -383,7 +390,14 @@ class ModelMonitor:
                 baseline_mae = self.baseline_performance.get(model, {}).get('mae', 0)
                 current_mae = metrics.mae
 
-                if baseline_mae > 0:
+                if current_mae is None:
+                    # No labeled data for this model yet — nothing to compare
+                    result['model_scores'][model] = {
+                        'degradation': 0.0,
+                        'current_mae': None,
+                        'baseline_mae': baseline_mae,
+                    }
+                elif baseline_mae > 0:
                     degradation = (current_mae - baseline_mae) / baseline_mae
                     result['model_scores'][model] = {
                         'degradation': float(degradation),
@@ -395,11 +409,22 @@ class ModelMonitor:
                         result['drifted_models'].append(model)
                         result['drift_detected'] = True
                 else:
-                    result['model_scores'][model] = {
-                        'degradation': 0.0,
-                        'current_mae': current_mae,
-                        'baseline_mae': baseline_mae,
-                    }
+                    # Perfect baseline: any positive current MAE is infinite
+                    # degradation and must flag drift, not 0.0
+                    if current_mae > 0:
+                        result['model_scores'][model] = {
+                            'degradation': float('inf'),
+                            'current_mae': current_mae,
+                            'baseline_mae': baseline_mae,
+                        }
+                        result['drifted_models'].append(model)
+                        result['drift_detected'] = True
+                    else:
+                        result['model_scores'][model] = {
+                            'degradation': 0.0,
+                            'current_mae': current_mae,
+                            'baseline_mae': baseline_mae,
+                        }
             else:
                 result['model_scores'][model] = {
                     'degradation': 0.0,
@@ -430,23 +455,22 @@ class ModelMonitor:
             logger.warning("No predictions available for baseline establishment")
             return
 
-        # Calculate feature baselines
+        # Calculate feature baselines (single pass per feature — the
+        # previous nested loop was O(P²·F))
         feature_stats = {}
-        for pred in source_preds:
-            for name, value in pred.features.items():
-                if isinstance(value, (int, float)):
-                    if name not in feature_stats:
-                        values = []
-                        for p in source_preds:
-                            if name in p.features and isinstance(p.features[name], (int, float)):
-                                values.append(float(p.features[name]))
-                        if values:
-                            feature_stats[name] = {
-                                'mean': float(np.mean(values)),
-                                'std': float(np.std(values)),
-                                'min': float(np.min(values)),
-                                'max': float(np.max(values)),
-                            }
+        for name in {name for p in source_preds for name in p.features if isinstance(p.features[name], (int, float))}:
+            values = [
+                float(p.features[name])
+                for p in source_preds
+                if name in p.features and isinstance(p.features[name], (int, float))
+            ]
+            if values:
+                feature_stats[name] = {
+                    'mean': float(np.mean(values)),
+                    'std': float(np.std(values)),
+                    'min': float(np.min(values)),
+                    'max': float(np.max(values)),
+                }
 
         self.baseline_feature_stats = feature_stats
 
@@ -465,6 +489,9 @@ class ModelMonitor:
         self.baseline_performance = performance_baseline
 
         logger.info(f"Baseline established with {len(source_preds)} predictions")
+
+        # Persist the baseline so it survives restarts
+        self._save_state()
 
     def get_metrics_summary(self) -> Dict[str, Any]:
         """Get summary of all model metrics."""

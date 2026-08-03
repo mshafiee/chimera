@@ -48,8 +48,12 @@ export function Layout() {
       {/* Mobile Menu Overlay */}
       {isMobileMenuOpen && (
         <div
+          role="presentation"
           className="fixed inset-0 z-40 bg-black/50 md:hidden"
           onClick={closeMobileMenu}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') closeMobileMenu()
+          }}
         />
       )}
 

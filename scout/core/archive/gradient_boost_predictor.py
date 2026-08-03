@@ -115,6 +115,8 @@ class GradientBoostPredictor:
 
         # Latency tracking
         self.inference_times_ms = []
+        # Set by _prune_model_for_latency: caps trees used at inference time
+        self._pruned_iterations: Optional[int] = None
         self.latency_violations = 0
 
         # Configuration
@@ -265,12 +267,19 @@ class GradientBoostPredictor:
         # XGBoost prediction
         if XGBOOST_AVAILABLE and isinstance(model, xgb.Booster):
             dmatrix = xgb.DMatrix(features_array, feature_names=self.feature_names)
-            prediction = model.predict(dmatrix)
+            if self._pruned_iterations is not None:
+                # iteration_range caps the number of trees actually used
+                prediction = model.predict(dmatrix, iteration_range=(0, self._pruned_iterations))
+            else:
+                prediction = model.predict(dmatrix)
             return float(prediction[0])
 
         # LightGBM prediction
         if LIGHTGBM_AVAILABLE and hasattr(model, 'predict'):
-            prediction = model.predict(features_array)
+            if self._pruned_iterations is not None:
+                prediction = model.predict(features_array, num_iteration=self._pruned_iterations)
+            else:
+                prediction = model.predict(features_array)
             return float(prediction[0])
 
         # Fallback for sklearn-like API
@@ -361,7 +370,10 @@ class GradientBoostPredictor:
             # Create explainer based on model type
             if XGBOOST_AVAILABLE and isinstance(model, xgb.Booster):
                 explainer = shap.TreeExplainer(model)
+            elif LIGHTGBM_AVAILABLE and isinstance(model, lgb.Booster):
+                explainer = shap.TreeExplainer(model)
             elif LIGHTGBM_AVAILABLE and hasattr(model, 'booster_'):
+                # sklearn-style LGBM* wrappers
                 explainer = shap.TreeExplainer(model)
             else:
                 return {'error': 'unsupported_model_type'}
@@ -405,11 +417,17 @@ class GradientBoostPredictor:
         predicted_pnl = roi_30d * 0.1 * win_rate
         confidence = 0.5  # Low confidence for fallback
 
+        # Keep the same response contract as a successful prediction
         return {
             'predicted_pnl_sol': float(predicted_pnl),
             'confidence': float(confidence),
             'prediction_timestamp': datetime.utcnow().isoformat(),
             'model_type': 'fallback',
+            'training_samples': self.training_samples,
+            'last_trained': self.last_trained,
+            'inference_time_ms': 0.0,
+            'latency_budget_ms': self.latency_budget_ms,
+            'latency_ok': True,
             'warning': 'No trained model available, using heuristic fallback',
         }
 
@@ -637,7 +655,8 @@ class GradientBoostPredictor:
                 elif feature_name == 'trajectory_stable':
                     value = 1.0 if record.get('trajectory') == 'STABLE' else 0.0
                 elif feature_name.startswith('is_'):
-                    value = 1.0 if record.get(feature_name[3:].upper()) else 0.0
+                    # Read the same is_* key used at inference time
+                    value = 1.0 if record.get(feature_name) else 0.0
 
                 if value is None:
                     value = 0.0  # Impute missing values
@@ -808,9 +827,20 @@ class GradientBoostPredictor:
         if not self.enable_pruning:
             return
 
-        # Measure current latency
+        # Benchmark a few predictions if no latency data exists yet (pruning
+        # runs at the end of training, before any live prediction).
         if not self.inference_times_ms:
-            return
+            try:
+                model = self._select_model()
+                if model is not None and self.feature_names:
+                    sample_features = np.zeros((1, len(self.feature_names)))
+                    for _ in range(5):
+                        start = time.perf_counter()
+                        self._predict_with_model(model, sample_features)
+                        self._track_latency((time.perf_counter() - start) * 1000)
+            except Exception as e:
+                logger.warning(f"Latency benchmark failed: {e}")
+                return
 
         avg_latency = np.mean(self.inference_times_ms[-10:])  # Last 10 predictions
 
@@ -819,18 +849,18 @@ class GradientBoostPredictor:
 
         logger.info(f"Pruning model to meet latency budget: {avg_latency:.2f}ms -> {self.latency_budget_ms}ms")
 
-        # Pruning strategy: reduce number of trees
-        # This is a simplified approach - production would use more sophisticated pruning
-
+        # Pruning strategy: reduce the number of trees actually used at
+        # inference time (capped via iteration_range / num_iteration).
         try:
             if self.best_model_type == 'xgboost' and self.xgboost_model is not None:
-                # XGBoost: can prune trees directly
-                # For now, just log - actual pruning would require more complex logic
-                logger.info("XGBoost pruning enabled (simplified)")
+                total_rounds = getattr(self.xgboost_model, 'best_iteration', None) or self.config.get('n_estimators', 100)
+                self._pruned_iterations = max(1, int(total_rounds * 0.6))
+                logger.info(f"XGBoost pruned to {self._pruned_iterations} iterations")
 
             elif self.best_model_type == 'lightgbm' and self.lightgbm_model is not None:
-                # LightGBM: can prune trees
-                logger.info("LightGBM pruning enabled (simplified)")
+                total_rounds = getattr(self.lightgbm_model, 'best_iteration', None) or self.config.get('n_estimators', 100)
+                self._pruned_iterations = max(1, int(total_rounds * 0.6))
+                logger.info(f"LightGBM pruned to {self._pruned_iterations} iterations")
 
         except Exception as e:
             logger.warning(f"Model pruning failed: {e}")

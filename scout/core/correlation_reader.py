@@ -17,10 +17,13 @@ existence checks. SQLite and local-path branches were decommissioned (2026-07).
 """
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from .db import Connection, execute_query
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -80,7 +83,9 @@ class CorrelationReader:
                     None,
                 )
                 return cursor.fetchone() is not None
-        except Exception:
+        except Exception as e:
+            # Log so a live outage isn't misreported as "table missing"
+            logger.warning("Failed to check wqs_pnl_correlation existence: %s", e)
             return False
 
     def get_all_records(
@@ -90,46 +95,29 @@ class CorrelationReader:
     ) -> List[WqsCorrelationRecord]:
         try:
             with Connection(self.db_path) as conn:
+                # Single SELECT list; the WHERE clause is built conditionally
+                # so the 12 columns can never drift between branches.
+                base_query = """SELECT wallet_address,
+                                  wqs_score_at_promotion,
+                                  actual_copy_pnl_7d_sol,
+                                  actual_copy_pnl_30d_sol,
+                                  actual_copy_pnl_all_sol,
+                                  copy_trade_count_7d,
+                                  copy_trade_count_30d,
+                                  copy_trade_count_all,
+                                  strategy,
+                                  wqs_components_json,
+                                  promoted_at,
+                                  last_updated_at
+                           FROM wqs_pnl_correlation
+                           WHERE copy_trade_count_all >= %s"""
+                params: List = [min_trades]
                 if strategy:
-                    cursor = execute_query(
-                        conn,
-                        """SELECT wallet_address,
-                                  wqs_score_at_promotion,
-                                  actual_copy_pnl_7d_sol,
-                                  actual_copy_pnl_30d_sol,
-                                  actual_copy_pnl_all_sol,
-                                  copy_trade_count_7d,
-                                  copy_trade_count_30d,
-                                  copy_trade_count_all,
-                                  strategy,
-                                  wqs_components_json,
-                                  promoted_at,
-                                  last_updated_at
-                           FROM wqs_pnl_correlation
-                           WHERE strategy = %s AND copy_trade_count_all >= %s
-                           ORDER BY promoted_at DESC""",
-                        (strategy, min_trades),
-                    )
-                else:
-                    cursor = execute_query(
-                        conn,
-                        """SELECT wallet_address,
-                                  wqs_score_at_promotion,
-                                  actual_copy_pnl_7d_sol,
-                                  actual_copy_pnl_30d_sol,
-                                  actual_copy_pnl_all_sol,
-                                  copy_trade_count_7d,
-                                  copy_trade_count_30d,
-                                  copy_trade_count_all,
-                                  strategy,
-                                  wqs_components_json,
-                                  promoted_at,
-                                  last_updated_at
-                           FROM wqs_pnl_correlation
-                           WHERE copy_trade_count_all >= %s
-                           ORDER BY promoted_at DESC""",
-                        (min_trades,),
-                    )
+                    base_query += " AND strategy = %s"
+                    params.append(strategy)
+                base_query += " ORDER BY promoted_at DESC"
+
+                cursor = execute_query(conn, base_query, tuple(params))
                 rows = cursor.fetchall()
                 records = []
                 for row in rows:
@@ -148,7 +136,8 @@ class CorrelationReader:
                         last_updated_at=row["last_updated_at"],
                     ))
                 return records
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to load wqs_pnl_correlation records: %s", e)
             return []
 
     def get_correlation_stats(
@@ -166,15 +155,21 @@ class CorrelationReader:
         for r in records:
             s = r.strategy
             if s not in strategy_counts:
-                strategy_counts[s] = {"count": 0, "total_pnl_30d": 0.0, "profitable": 0}
+                strategy_counts[s] = {
+                    "count": 0, "n_with_pnl": 0,
+                    "total_pnl_30d": 0.0, "profitable": 0,
+                }
             strategy_counts[s]["count"] += 1
             if r.actual_copy_pnl_30d_sol is not None:
+                strategy_counts[s]["n_with_pnl"] += 1
                 strategy_counts[s]["total_pnl_30d"] += r.actual_copy_pnl_30d_sol
                 if r.actual_copy_pnl_30d_sol > 0:
                     strategy_counts[s]["profitable"] += 1
 
         for s in strategy_counts:
-            c = strategy_counts[s]["count"]
+            # Divide only by the wallets that actually have 30d PnL so NULL
+            # values are not silently counted as zero-pnl
+            c = strategy_counts[s]["n_with_pnl"]
             strategy_counts[s]["mean_pnl_30d"] = strategy_counts[s]["total_pnl_30d"] / c if c else 0.0
             strategy_counts[s]["profit_rate"] = strategy_counts[s]["profitable"] / c if c else 0.0
 
@@ -202,8 +197,7 @@ class CorrelationReader:
         if len(records) < min_samples:
             return []
 
-        components: Dict[str, List[float]] = {}
-        pnls: List[float] = []
+        components: Dict[str, List[tuple]] = {}  # comp -> [(value, pnl), ...]
 
         for r in records:
             if r.actual_copy_pnl_30d_sol is None or r.wqs_components_json is None:
@@ -213,16 +207,20 @@ class CorrelationReader:
                 if isinstance(comp_data, dict):
                     for key, val in comp_data.items():
                         if isinstance(val, (int, float)):
-                            components.setdefault(key, []).append(float(val))
-                    pnls.append(r.actual_copy_pnl_30d_sol)
+                            # Pair each component value with THIS wallet's PnL
+                            # so records missing a component never misalign
+                            components.setdefault(key, []).append(
+                                (float(val), r.actual_copy_pnl_30d_sol)
+                            )
             except (json.JSONDecodeError, ValueError):
                 continue
 
         results = []
-        for comp_name, comp_vals in components.items():
-            if len(comp_vals) < min_samples:
+        for comp_name, pairs in components.items():
+            if len(pairs) < min_samples:
                 continue
-            paired_pnls = pnls[:len(comp_vals)]
+            comp_vals = [p[0] for p in pairs]
+            paired_pnls = [p[1] for p in pairs]
             corr = self._pearson_correlation(comp_vals, paired_pnls)
             results.append({"component": comp_name, "correlation": corr, "samples": len(comp_vals)})
 

@@ -383,7 +383,12 @@ class SimpleEnsembleModel:
         # Calculate risk-adjusted metrics
         sharpe_predicted = (expected_return_pct / 100) / max(risk_score, 0.1) if risk_score > 0 else 0
         max_loss_predicted = -risk_score * 20  # Max 20% loss
-        probability_of_profit = confidence if expected_return_pct > 0 else 1.0 - confidence
+        if expected_return_pct > 0:
+            probability_of_profit = confidence
+        else:
+            # A losing/zero-return prediction must NOT get a high probability
+            # of profit just because confidence is low — cap it
+            probability_of_profit = min(confidence, 0.2)
 
         return ProfitabilityPrediction(
             expected_return_pct=expected_return_pct,
@@ -413,9 +418,6 @@ class ProfitabilityPredictor:
         """Initialize the predictor."""
         self.model = SimpleEnsembleModel()
 
-        # Feature cache for performance
-        self._feature_cache = {}
-
         logger.info("Profitability Predictor initialized")
 
     def extract_features(self, wallet_metrics: Dict[str, Any]) -> ProfitabilityFeatures:
@@ -437,11 +439,18 @@ class ProfitabilityPredictor:
             sortino_ratio=wallet_metrics.get('sortino_ratio'),
             trade_count_30d=wallet_metrics.get('trade_count_30d'),
             avg_trade_size_sol=wallet_metrics.get('avg_trade_size_sol'),
+            avg_hold_time_hours=wallet_metrics.get('avg_hold_time_hours'),
+            entry_delay_seconds=wallet_metrics.get('entry_delay_seconds'),
             uses_mev_protection=wallet_metrics.get('uses_mev_protection', False),
             uses_limit_orders=wallet_metrics.get('uses_limit_orders', False),
             dex_diversity_score=wallet_metrics.get('dex_diversity_score'),
+            max_position_size_sol=wallet_metrics.get('max_position_size_sol'),
+            volatility_30d=wallet_metrics.get('volatility_30d'),
             parse_rate=wallet_metrics.get('parse_rate'),
+            bag_holder_score=wallet_metrics.get('bag_holder_score'),
             insider_probability=wallet_metrics.get('insider_probability'),
+            avg_liquidity_usd=wallet_metrics.get('avg_liquidity_usd'),
+            slippage_tolerance=wallet_metrics.get('slippage_tolerance'),
             # Calculate derived features
             roi_7d_to_30d_ratio=self._calculate_roi_ratio(wallet_metrics),
             recent_momentum=self._calculate_momentum(wallet_metrics),
@@ -703,26 +712,27 @@ class ProfitabilityPredictor:
             # Base score: expected return * confidence
             score = pred.expected_return_pct * pred.confidence
 
-            # Momentum bonus
-            roi_7d = metrics.get('roi_7d', 0)
-            roi_30d = metrics.get('roi_30d', 0)
+            # Momentum bonus (None-safe: `or 0` so present-but-None metrics
+            # don't raise TypeError in the comparisons)
+            roi_7d = metrics.get('roi_7d') or 0
+            roi_30d = metrics.get('roi_30d') or 0
             if roi_7d > 0 and roi_30d > 0:
                 momentum_ratio = roi_7d / max(roi_30d, 1.0)
                 if momentum_ratio > 0.8:  # Strong recent momentum
                     score *= 1.3
 
             # Early wallet bonus (<30 days history)
-            trade_count_30d = metrics.get('trade_count_30d', 0)
+            trade_count_30d = metrics.get('trade_count_30d') or 0
             if 10 <= trade_count_30d <= 50:  # Early but not brand new
                 score *= 1.2
 
             # Bag holder penalty
-            bag_holder_score = metrics.get('bag_holder_score', 0)
+            bag_holder_score = metrics.get('bag_holder_score') or 0
             if bag_holder_score > 0.3:
                 score *= 0.5  # Heavy penalty
 
             # Insider risk penalty
-            insider_prob = metrics.get('insider_probability', 0)
+            insider_prob = metrics.get('insider_probability') or 0
             if insider_prob > 0.7:
                 score *= 0.3  # Severe penalty
 
@@ -779,9 +789,9 @@ class ProfitabilityPredictor:
         # Sort by conviction (expected_return * confidence)
         position_sizes.sort(key=lambda x: x[2].expected_return_pct * x[2].confidence, reverse=True)
 
-        # Allocate capital with diversification constraint
-        # Maximum 20% per wallet, ensure at least 5 wallets
-        max_per_wallet = max(max_position_usd, total_capital_usd * 0.20)
+        # Allocate capital with diversification constraint.
+        # min() so BOTH the explicit per-wallet cap AND the 20% limit apply.
+        max_per_wallet = min(max_position_usd, total_capital_usd * 0.20)
         min_wallets = max(5, len(high_conviction))
         remaining_capital = total_capital_usd
 
@@ -803,7 +813,8 @@ class ProfitabilityPredictor:
                 remaining_capital -= alloc_amount
 
         logger.info(f"Capital-efficient allocation: ${total_capital_usd:.2f} across {len(allocation)} wallets")
-        logger.info(f"Average position: ${total_capital_usd / len(allocation):.2f}")
+        if allocation:
+            logger.info(f"Average position: ${total_capital_usd / len(allocation):.2f}")
         return allocation
 
 

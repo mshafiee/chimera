@@ -60,7 +60,8 @@ get_date_range() {
             echo "all|$end_date"
             ;;
         *)
-            echo "all|$end_date"
+            echo "Error: invalid period '$period' (expected 1d|7d|30d|90d|all)" >&2
+            exit 1
             ;;
     esac
 }
@@ -296,15 +297,22 @@ main() {
     date_range=$(get_date_range "$PERIOD")
     
     local timestamp
-    timestamp=$(date -u '+%Y%m%d_%H%M%S')
+    timestamp=$(date -u '+%Y%m%d_%H%M%S')-$$
     
+    umask 077
     mkdir -p "$REPORTS_DIR"
+    chmod 700 "$REPORTS_DIR"
     
     log "Generating compliance reports (period: $PERIOD, format: $FORMAT, type: $REPORT_TYPE)"
     
     local report_files=()
     
     # Generate reports based on type
+    if [[ "$REPORT_TYPE" != "pnl" && "$REPORT_TYPE" != "full" ]]; then
+        echo "Error: invalid --type '$REPORT_TYPE' (expected pnl|full)" >&2
+        exit 1
+    fi
+
     if [[ "$REPORT_TYPE" == "pnl" ]]; then
         # Daily PnL summary only
         generate_pnl_summary "${REPORTS_DIR}/pnl_summary_${PERIOD}_${timestamp}.csv" "$date_range"
@@ -383,6 +391,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --format=*)
             FORMAT="${1#*=}"
+            if [[ "$FORMAT" != "csv" ]]; then
+                echo "Error: format '$FORMAT' is not supported (only csv is implemented)" >&2
+                exit 1
+            fi
             shift
             ;;
         --type=*)

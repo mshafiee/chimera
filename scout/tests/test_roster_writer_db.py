@@ -1,13 +1,10 @@
 """Tests for roster_writer_db module - direct database writes."""
 
 import pytest
-import tempfile
-import os
-from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import patch
 
 # Import the module to test
-from scout.core.roster_writer_db import (
+from core.roster_writer_db import (
     WalletRecord,
     write_wallet_to_db,
     write_wallets_to_db,
@@ -46,120 +43,120 @@ def sample_wallet():
 class TestWriteWalletToDB:
     """Test write_wallet_to_db function."""
 
-    @patch("scout.core.roster_writer_db.Connection")
-    @patch("scout.core.roster_writer_db.execute_query")
-    @patch("scout.core.roster_writer_db.execute_update")
-    def test_write_wallet_success(self, mock_exec_update, mock_exec_query, mock_connection_class, sample_wallet):
+    @patch("core.roster_writer_db.execute_update")
+    def test_write_wallet_success(self, mock_exec_update, sample_wallet):
         """Test successful wallet write."""
-        # Mock connection and cursor
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_cursor.rowcount = 1
-        
-        # Configure the context manager
-        mock_connection_class.return_value.__enter__.return_value = mock_conn
-        mock_connection_class.return_value.__exit__.return_value = None
-        
-        # Mock execute functions
         mock_exec_update.return_value = 1
-        
-        result = write_wallet_to_db(sample_wallet)
-        
-        assert result is True
-        mock_exec_update.assert_called_once()
 
-    @patch("scout.core.roster_writer_db.Connection")
-    def test_write_wallet_database_error(self, mock_connection_class, sample_wallet):
-        """Test wallet write with database error."""
-        # Mock connection to raise exception
-        mock_connection_class.return_value.__enter__.side_effect = Exception("Database error")
-        
         result = write_wallet_to_db(sample_wallet)
-        
+
+        assert result is True
+        assert mock_exec_update.call_count >= 1
+        # First call must be the wallet upsert with the wallet's own data
+        insert_query, insert_params = mock_exec_update.call_args_list[0][0]
+        assert "INSERT INTO wallets" in insert_query
+        assert insert_params[0] == sample_wallet.address
+        assert insert_params[1] == "ACTIVE"
+        assert insert_params[2] == 85.5
+
+    @patch("core.roster_writer_db.execute_update")
+    def test_write_wallet_database_error(self, mock_exec_update, sample_wallet):
+        """Test wallet write with database error."""
+        mock_exec_update.side_effect = Exception("Database error")
+
+        result = write_wallet_to_db(sample_wallet)
+
         assert result is False
 
 
 class TestWriteWalletsToDB:
     """Test write_wallets_to_db function."""
 
-    @patch("scout.core.roster_writer_db.write_wallet_to_db")
+    @patch("core.roster_writer_db.write_wallet_to_db")
     def test_write_multiple_wallets_success(self, mock_write_wallet, sample_wallet):
         """Test writing multiple wallets successfully."""
         # Mock individual writes to succeed
         mock_write_wallet.return_value = True
-        
+
         wallets = [sample_wallet, sample_wallet, sample_wallet]
         result = write_wallets_to_db(wallets)
-        
+
         assert result == 3
         assert mock_write_wallet.call_count == 3
 
-    @patch("scout.core.roster_writer_db.write_wallet_to_db")
+    @patch("core.roster_writer_db.write_wallet_to_db")
     def test_write_multiple_wallets_partial_failure(self, mock_write_wallet, sample_wallet):
         """Test writing multiple wallets with some failures."""
         # Mock first 2 writes to succeed, last to fail
         mock_write_wallet.side_effect = [True, True, False]
-        
+
         wallets = [sample_wallet, sample_wallet, sample_wallet]
         result = write_wallets_to_db(wallets)
-        
+
         assert result == 2
+
+    @patch("core.roster_writer_db.write_wallet_to_db")
+    def test_write_empty_list(self, mock_write_wallet):
+        """Test writing an empty list returns 0 without calling the writer."""
+        result = write_wallets_to_db([])
+
+        assert result == 0
+        mock_write_wallet.assert_not_called()
 
 
 class TestUpdateWalletStatus:
     """Test update_wallet_status function."""
 
-    @patch("scout.core.roster_writer_db.Connection")
-    @patch("scout.core.roster_writer_db.execute_update")
-    def test_update_status_success(self, mock_exec_update, mock_connection_class):
+    @patch("core.roster_writer_db.execute_update")
+    def test_update_status_success(self, mock_exec_update):
         """Test successful status update."""
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_cursor.rowcount = 1
-        
-        mock_connection_class.return_value.__enter__.return_value = mock_conn
-        mock_connection_class.return_value.__exit__.return_value = None
-        
         mock_exec_update.return_value = 1
-        
+
         result = update_wallet_status(
             "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
             "CANDIDATE"
         )
-        
+
         assert result is True
         mock_exec_update.assert_called_once()
+        query, params = mock_exec_update.call_args[0]
+        assert "UPDATE wallets" in query
+        assert params[0] == "CANDIDATE"
 
-    @patch("scout.core.roster_writer_db.Connection")
-    def test_update_status_database_error(self, mock_connection_class):
+    @patch("core.roster_writer_db.execute_update")
+    def test_update_status_database_error(self, mock_exec_update):
         """Test status update with database error."""
-        mock_connection_class.return_value.__enter__.side_effect = Exception("Database error")
-        
+        mock_exec_update.side_effect = Exception("Database error")
+
         result = update_wallet_status(
             "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
             "CANDIDATE"
         )
-        
+
         assert result is False
 
 
 class TestDeleteWallet:
     """Test delete_wallet function."""
 
-    @patch("scout.core.roster_writer_db.Connection")
-    @patch("scout.core.roster_writer_db.execute_update")
-    def test_delete_wallet_success(self, mock_exec_update, mock_connection_class):
+    @patch("core.roster_writer_db.execute_update")
+    def test_delete_wallet_success(self, mock_exec_update):
         """Test successful wallet deletion."""
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_cursor.rowcount = 1
-        
-        mock_connection_class.return_value.__enter__.return_value = mock_conn
-        mock_connection_class.return_value.__exit__.return_value = None
-        
         mock_exec_update.return_value = 1
-        
+
         result = delete_wallet("7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU")
-        
+
         assert result is True
         mock_exec_update.assert_called_once()
+        query, params = mock_exec_update.call_args[0]
+        assert "DELETE FROM wallets" in query
+        assert params == ("7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",)
+
+    @patch("core.roster_writer_db.execute_update")
+    def test_delete_wallet_zero_rows_still_success(self, mock_exec_update):
+        """Test deleting a nonexistent wallet still returns True (no exception)."""
+        mock_exec_update.return_value = 0
+
+        result = delete_wallet("nonexistent_wallet_address")
+
+        assert result is True

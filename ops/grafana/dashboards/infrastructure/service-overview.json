@@ -34,8 +34,7 @@
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            {"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}}, "value": "0"},
-            {"type": "value", "options": {"1": {"text": "UP", "color": "green"}}, "value": "1"}
+            {"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}
           ],
           "color": {
             "mode": "thresholds"
@@ -78,14 +77,14 @@
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            {"type": "value", "options": {"0": {"text": "TRIPPED", "color": "red"}}, "value": "0"},
-            {"type": "value", "options": {"1": {"text": "ACTIVE", "color": "green"}}, "value": "1"}
+            {"type": "value", "options": {"0": {"text": "TRIPPED", "color": "red"}, "1": {"text": "COOLDOWN", "color": "yellow"}, "2": {"text": "ACTIVE", "color": "green"}}}
           ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {"value": null, "color": "red"},
-              {"value": 1, "color": "green"}
+              {"value": 1, "color": "yellow"},
+              {"value": 2, "color": "green"}
             ]
           }
         }
@@ -170,7 +169,7 @@
       "targets": [
         {
           "format": "table",
-          "rawSql": "SELECT check_name, status, response_time_ms, created_at FROM health_checks ORDER BY created_at DESC LIMIT 20",
+          "rawSql": "SELECT check_name, status, response_time_ms, timestamp FROM health_checks WHERE $__timeFilter(timestamp) ORDER BY timestamp DESC LIMIT 20",
           "refId": "A"
         }
       ],
@@ -184,25 +183,36 @@
               "check_name": "Check Name",
               "status": "Status",
               "response_time_ms": "Response Time (ms)",
-              "created_at": "Time"
+              "timestamp": "Time"
             }
           }
         }
       ],
       "fieldConfig": {
-        "defaults": {
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"value": null, "color": "red"},
-              {"value": 0, "color": "green"}
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "status"},
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {"type": "value", "options": {"HEALTHY": {"text": "PASS", "color": "green"}, "DEGRADED": {"text": "DEGRADED", "color": "yellow"}, "UNHEALTHY": {"text": "FAIL", "color": "red"}, "UNKNOWN": {"text": "UNKNOWN", "color": "orange"}}}
+                ]
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {"value": null, "color": "red"},
+                    {"value": 0, "color": "green"}
+                  ]
+                }
+              }
             ]
-          },
-          "mappings": [
-            {"type": "value", "options": {"0": {"text": "FAIL", "color": "red"}}, "value": "0"},
-            {"type": "value", "options": {"1": {"text": "PASS", "color": "green"}}, "value": "1"}
-          ]
-        }
+          }
+        ]
       }
     }
   ]

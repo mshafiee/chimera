@@ -7,8 +7,7 @@ Collects authentic trading signals from Jupiter, Raydium, Orca, and other major 
 import requests
 import json
 import os
-import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import time
 
@@ -46,36 +45,66 @@ TOKEN_ADDRESSES = {
     "ORCA": "ORCAWkLjN9umeqvePuyhue2UnrkuzaCFYSNEJME3TyGz"
 }
 
+SOL_MINT = "So11111111111111111111111111111111111111112"
+LAMPORTS_PER_SOL = 1_000_000_000
+
+
 def fetch_transactions(wallet_address, from_date, to_date, limit=100):
-    """Fetch real transactions for a wallet using Helius API."""
+    """Fetch real transactions for a wallet using Helius API.
 
-    payload = {
-        "jsonrpc": "2.0",
-        "id": "historical-trades",
-        "method": "getSignaturesForAddress",
-        "params": [
-            wallet_address,
-            {"limit": limit}
-        ]
-    }
+    Paginates with the `before` cursor until the requested date range is
+    covered (or no older signatures remain).
+    """
+    transactions = []
+    before = None
 
-    try:
-        response = requests.post(BASE_URL, json=payload, timeout=30)
-        response.raise_for_status()
-        data = response.json()
+    while True:
+        params = [wallet_address, {"limit": limit}]
+        if before:
+            params[1]["before"] = before
 
-        if "result" in data:
-            return data["result"]
-        else:
-            print(f"⚠️  No transactions found for {wallet_address[:8]}...")
-            return []
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "historical-trades",
+            "method": "getSignaturesForAddress",
+            "params": params
+        }
 
-    except Exception as e:
-        print(f"❌ Error fetching transactions: {e}")
-        return []
+        try:
+            response = requests.post(BASE_URL, json=payload, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            print(f"❌ Error fetching transactions: {e}")
+            break
+
+        result = data.get("result") or []
+        if not result:
+            break
+
+        transactions.extend(result)
+
+        # Stop once we have enough and the oldest batch predates the window
+        oldest = result[-1].get("blockTime")
+        if oldest is not None and datetime.fromtimestamp(oldest, tz=timezone.utc) < from_date:
+            break
+        if len(transactions) >= 1000:
+            break
+
+        before = result[-1].get("signature")
+        if not before:
+            break
+        time.sleep(0.1)
+
+    return transactions
+
 
 def parse_swap_transaction(signature):
-    """Parse a swap transaction to extract trading signal."""
+    """Parse a swap transaction to extract trading signal.
+
+    The token mint and amounts are derived from the actual
+    pre/postTokenBalances deltas instead of fabricated values.
+    """
 
     payload = {
         "jsonrpc": "2.0",
@@ -83,7 +112,8 @@ def parse_swap_transaction(signature):
         "method": "getTransaction",
         "params": [
             signature,
-            "json"
+            "json",
+            {"maxSupportedTransactionVersion": 0}
         ]
     }
 
@@ -96,50 +126,107 @@ def parse_swap_transaction(signature):
             return None
 
         transaction = tx_data["result"]
-
-        # Check if transaction involves DEX programs
-        if "meta" not in transaction or not transaction["meta"]:
+        meta = transaction.get("meta") or {}
+        if not meta:
             return None
 
-        # Extract transfer instructions for swap detection
+        # Check if transaction involves DEX programs
         instructions = transaction["transaction"]["message"]["instructions"]
-
-        # Look for swap patterns (simplified detection)
+        dex_name = None
         for instr in instructions:
-            if "programId" in instr and instr["programId"] in DEX_PROGRAMS.values():
-                # This is a DEX transaction - extract basic info
-                timestamp = datetime.fromtimestamp(transaction["blockTime"] if transaction.get("blockTime") else time.time())
+            pid = instr.get("programId", "")
+            if pid in DEX_PROGRAMS.values():
+                dex_name = [k for k, v in DEX_PROGRAMS.items() if v == pid][0]
+                break
+        if not dex_name:
+            return None
 
-                # Determine action and amount from postTokenBalances
-                pre_balances = transaction["meta"].get("preTokenBalances", [])
-                post_balances = transaction["meta"].get("postTokenBalances", [])
+        account_keys = transaction["transaction"]["message"].get("accountKeys") or []
+        if not account_keys:
+            return None
+        # "json" encoding returns {pubkey, signer, writable} objects
+        wallet_pubkey = account_keys[0]["pubkey"] if isinstance(account_keys[0], dict) else account_keys[0]
 
-                # Simple heuristic: if balance increased, it's a buy
-                action = "buy" if len(post_balances) > len(pre_balances) else "sell"
+        timestamp = datetime.fromtimestamp(transaction.get("blockTime") or time.time(), tz=timezone.utc)
 
-                # Extract token address and amount (simplified)
-                token_address = list(TOKEN_ADDRESSES.values())[random.randint(0, 2)]  # SOL, USDC, or USDT
-                amount_sol = round(random.uniform(0.1, 5.0), 4)
+        pre_balances = meta.get("preTokenBalances") or []
+        post_balances = meta.get("postTokenBalances") or []
+        pre_lamports = meta.get("preBalances") or []
+        post_lamports = meta.get("postBalances") or []
 
-                # Determine strategy based on amount
-                strategy = "spear" if amount_sol > 1.0 else "shield"
+        # Wallet's SOL delta (lamports) -> spent SOL on a buy
+        wallet_index = None
+        for idx, key in enumerate(account_keys):
+            pubkey = key["pubkey"] if isinstance(key, dict) else key
+            if pubkey == wallet_pubkey:
+                wallet_index = idx
+                break
 
-                return {
-                    "timestamp": timestamp.isoformat() + "Z",
-                    "wallet_address": transaction["transaction"]["message"]["accountKeys"][0],
-                    "token_address": token_address,
-                    "action": action,
-                    "amount_sol": abs(amount_sol),
-                    "strategy": strategy,
-                    "signature": signature,
-                    "dex": [k for k, v in DEX_PROGRAMS.items() if v == instr["programId"]][0] if "programId" in instr else "Unknown"
-                }
+        amount_sol = None
+        if wallet_index is not None and wallet_index < len(pre_lamports) and wallet_index < len(post_lamports):
+            sol_delta = (pre_lamports[wallet_index] - post_lamports[wallet_index]) / LAMPORTS_PER_SOL
+            if abs(sol_delta) > 1e-9:
+                amount_sol = abs(sol_delta)
 
-        return None
+        # Find the traded token: the non-SOL mint whose balance changed for
+        # this wallet between pre and post snapshots
+        token_address = None
+        token_amount = None
+        pre_by_mint = {b.get("mint"): b.get("uiTokenAmount", {}).get("uiAmount")
+                       for b in pre_balances if b.get("owner") == wallet_pubkey}
+        post_by_mint = {b.get("mint"): b.get("uiTokenAmount", {}).get("uiAmount")
+                        for b in post_balances if b.get("owner") == wallet_pubkey}
+
+        for mint in post_by_mint:
+            if mint == SOL_MINT:
+                continue
+            pre_amount = pre_by_mint.get(mint)
+            post_amount = post_by_mint.get(mint)
+            if pre_amount is None or post_amount is None:
+                continue
+            delta = post_amount - pre_amount
+            if abs(delta) > 1e-12:
+                token_address = mint
+                token_amount = abs(delta)
+                break
+
+        if not token_address:
+            # Fall back to the first non-SOL mint in the transaction
+            for b in post_balances:
+                if b.get("mint") and b["mint"] != SOL_MINT:
+                    token_address = b["mint"]
+                    token_amount = (b.get("uiTokenAmount") or {}).get("uiAmount") or 0.0
+                    break
+
+        if token_address is None:
+            return None
+
+        if amount_sol is None:
+            amount_sol = token_amount or 0.0
+
+        # Direction: buying when the wallet spent SOL
+        action = "buy" if (wallet_index is not None and wallet_index < len(pre_lamports)
+                           and wallet_index < len(post_lamports)
+                           and pre_lamports[wallet_index] > post_lamports[wallet_index]) else "sell"
+
+        # Determine strategy based on amount
+        strategy = "spear" if amount_sol > 1.0 else "shield"
+
+        return {
+            "timestamp": timestamp.isoformat(),
+            "wallet_address": wallet_pubkey,
+            "token_address": token_address,
+            "action": action,
+            "amount_sol": round(amount_sol, 6),
+            "strategy": strategy,
+            "signature": signature,
+            "dex": dex_name
+        }
 
     except Exception as e:
         print(f"❌ Error parsing transaction {signature[:8]}...: {e}")
         return None
+
 
 def collect_real_historical_signals(days_back=10, signals_per_day=150):
     """Collect real historical trading signals from Solana DEXs."""
@@ -147,7 +234,7 @@ def collect_real_historical_signals(days_back=10, signals_per_day=150):
     print("🔍 Fetching Real Historical Trading Data from Solana DEXs")
     print("=" * 60)
 
-    to_date = datetime.now()
+    to_date = datetime.now(timezone.utc)
     from_date = to_date - timedelta(days=days_back)
 
     all_signals = []
@@ -165,11 +252,12 @@ def collect_real_historical_signals(days_back=10, signals_per_day=150):
         transactions = fetch_transactions(wallet, from_date, to_date, limit=100)
         total_requests += 1
 
+        wallet_signals = 0
         for tx in transactions:
             if not tx.get("blockTime"):
                 continue
 
-            tx_time = datetime.fromtimestamp(tx["blockTime"])
+            tx_time = datetime.fromtimestamp(tx["blockTime"], tz=timezone.utc)
 
             # Skip if too old or too recent
             if tx_time < from_date or tx_time > to_date:
@@ -180,6 +268,7 @@ def collect_real_historical_signals(days_back=10, signals_per_day=150):
 
             if signal:
                 all_signals.append(signal)
+                wallet_signals += 1
                 print(f"  ✅ Collected: {signal['timestamp'][:19]} | {signal['action']:4} | {signal['strategy']:6}")
 
                 # Rate limiting
@@ -189,7 +278,7 @@ def collect_real_historical_signals(days_back=10, signals_per_day=150):
                 if len(all_signals) >= signals_per_day * days_back:
                     break
 
-        print(f"  📊 Wallet collected: {len([s for s in all_signals if s['wallet_address'] == wallet])} signals")
+        print(f"  📊 Wallet collected: {wallet_signals} signals")
 
         # Rate limiting between wallets
         time.sleep(0.5)
@@ -204,6 +293,7 @@ def collect_real_historical_signals(days_back=10, signals_per_day=150):
     print(f"   Average per day: {len(all_signals) // days_back if days_back > 0 else 0}")
 
     return all_signals
+
 
 def validate_and_save_signals(signals, output_path):
     """Validate and save signals to JSONL file."""
@@ -224,6 +314,10 @@ def validate_and_save_signals(signals, output_path):
             print(f"⚠️  Signal {i+1}: Missing required fields")
 
     print(f"✅ Validation complete: {len(valid_signals)}/{len(signals)} valid")
+
+    if not valid_signals:
+        print("⚠️  No valid signals to save")
+        return
 
     # Calculate statistics
     buys = sum(1 for s in valid_signals if s["action"] == "buy")
@@ -249,6 +343,7 @@ def validate_and_save_signals(signals, output_path):
     for i, signal in enumerate(valid_signals[:3]):
         print(f"  {i+1}. {signal['timestamp'][:19]} | {signal['action']:4} | {signal['strategy']:6} | "
               f"{signal['amount_sol']:6.4f} SOL | {signal['token_address'][:8]}...")
+
 
 def main():
     print("🎯 Real Historical Data Collection for Chimera Evaluation")
@@ -295,6 +390,7 @@ def main():
     print(f"📊 Total signals: {len(signals)}")
 
     return 0
+
 
 if __name__ == "__main__":
     exit(main())

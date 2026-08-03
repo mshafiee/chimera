@@ -6,11 +6,9 @@ making real API calls. This enables benchmark runs without consuming credits.
 """
 
 import json
-import os
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from unittest.mock import AsyncMock, patch
-from datetime import datetime, timedelta
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "helius"
 
@@ -102,27 +100,37 @@ def create_replay_patch(replayer: FixtureReplayer):
             txs = await client.get_wallet_transactions(wallet, days=30, limit=1000)
     """
     
-    async def mock_make_request(self, endpoint: str, params: Dict[str, Any]) -> Optional[Any]:
-        """Mock _make_request that returns fixture data."""
-        
-        # Parse endpoint to determine request type
+    async def mock_make_request(
+        self,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        use_retry: bool = True,
+    ) -> Optional[Any]:
+        """Mock _make_request that returns fixture data (mirrors real signature)."""
+        params = params or {}
+
+        # Parse endpoint to determine request type.
+        # The real client embeds the wallet in the URL path:
+        #   get_wallet_transactions -> f"/addresses/{wallet}/transactions"
         if "/transactions" in endpoint or "wallet" in endpoint.lower():
             wallet = params.get("wallet") or params.get("account")
+            if not wallet and endpoint.startswith("/addresses/"):
+                wallet = endpoint.split("/")[2]
             days = params.get("days", 30)
-            limit = params.get("limit", 1000)
+            limit = params.get("limit", 100)
             transaction_type = params.get("type")
-            
+
             if wallet:
                 return replayer.get_wallet_transactions(
                     wallet, days, limit, transaction_type
                 )
-        
-        # Return empty list for unknown endpoints
-        return []
-    
-    return patch.object(
-        'core.helius_client.HeliusClient',
-        '_make_request',
+
+        # Unknown/unmatched endpoints should not silently succeed: the real
+        # _make_request returns None on failure.
+        return None
+
+    return patch(
+        'core.helius_client.HeliusClient._make_request',
         new=AsyncMock(side_effect=mock_make_request)
     )
 

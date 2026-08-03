@@ -60,6 +60,10 @@ def setup_environment():
         for warning in warnings:
             logger.warning(f"Config warning: {warning}")
 
+    if not is_valid:
+        logger.error("Config validation failed, aborting")
+        return False
+
     # Check if validation is enabled
     if not ScoutConfig.get_validation_enabled():
         logger.warning("Validation is disabled via SCOUT_VALIDATION_ENABLED")
@@ -407,7 +411,6 @@ Examples:
         sys.exit(1)
 
     db_path = args.db_path
-    _ = int(args.time_window.replace('d', '')) if args.time_window != 'all' else 90  # Process time_window but not needed
 
     # Run matching (unless report-only)
     if not args.report_only:
@@ -426,8 +429,7 @@ Examples:
             logger.error(f"Matching failed: {e}")
             import traceback
             traceback.print_exc()
-            if args.match_only:
-                sys.exit(1)
+            sys.exit(1)
 
     # Generate report
     try:

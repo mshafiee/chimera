@@ -6,6 +6,7 @@ wallet activity patterns, reducing redundant API calls to Helius.
 """
 
 import logging
+import threading
 import time
 from typing import List, Dict, Any, Optional
 from .activity_cache import ActivityBasedCache, ActivityLevel, CacheConfig
@@ -29,6 +30,7 @@ class HeliusCachingWrapper:
         self.cache = ActivityBasedCache(cache_config)
         self._wallet_activity: Dict[str, Dict[str, Any]] = {}
         self._last_activity_update: Dict[str, float] = {}
+        self._lock = threading.Lock()
 
         logger.info("HeliusCachingWrapper initialized")
 
@@ -55,10 +57,10 @@ class HeliusCachingWrapper:
         # Try cache
         cached = self.cache.get(cache_key)
         if cached is not None:
-            logger.debug(f"Cache HIT for {wallet_address[:8]}...: {len(cached)} transactions")
+            logger.debug("Cache HIT for %s...: %d transactions", wallet_address[:8], len(cached))
             return cached
 
-        logger.debug(f"Cache MISS for {wallet_address[:8]}...")
+        logger.debug("Cache MISS for %s...", wallet_address[:8])
         return None
 
     def cache_transactions(
@@ -91,6 +93,13 @@ class HeliusCachingWrapper:
 
         # Update wallet activity tracking
         self.cache.update_wallet_activity(wallet_address, tx_count_24h, wqs_score)
+        with self._lock:
+            self._wallet_activity[wallet_address] = {
+                'tx_count_24h': tx_count_24h,
+                'wqs_score': wqs_score,
+                'last_updated': time.time(),
+            }
+            self._last_activity_update[wallet_address] = time.time()
 
         # Generate cache key
         cache_key = f"txs:{wallet_address}:{days}:{limit}"
@@ -99,7 +108,8 @@ class HeliusCachingWrapper:
         success = self.cache.set(cache_key, transactions, wallet=wallet_address)
 
         if success:
-            logger.info(f"Cached {tx_count} transactions for {wallet_address[:8]}... (activity: {tx_count_24h} tx/24h)")
+            logger.info("Cached %d transactions for %s... (activity: %d tx/24h)",
+                        tx_count, wallet_address[:8], tx_count_24h)
 
         return success
 
@@ -132,12 +142,13 @@ class HeliusCachingWrapper:
         count = self.cache.invalidate_wallet(wallet_address)
 
         # Clear activity tracking
-        if wallet_address in self._wallet_activity:
-            del self._wallet_activity[wallet_address]
-        if wallet_address in self._last_activity_update:
-            del self._last_activity_update[wallet_address]
+        with self._lock:
+            if wallet_address in self._wallet_activity:
+                del self._wallet_activity[wallet_address]
+            if wallet_address in self._last_activity_update:
+                del self._last_activity_update[wallet_address]
 
-        logger.debug(f"Invalidated {count} cache entries for {wallet_address[:8]}...")
+        logger.debug("Invalidated %d cache entries for %s...", count, wallet_address[:8])
         return count
 
     def get_cache_stats(self) -> Dict[str, Any]:
@@ -161,18 +172,19 @@ class HeliusCachingWrapper:
 
         # Clean up local activity tracking
         cutoff_time = time.time() - (hours_threshold * 3600)
-        inactive_wallets = [
-            wallet for wallet, last_update in self._last_activity_update.items()
-            if last_update < cutoff_time
-        ]
+        with self._lock:
+            inactive_wallets = [
+                wallet for wallet, last_update in self._last_activity_update.items()
+                if last_update < cutoff_time
+            ]
 
-        for wallet in inactive_wallets:
-            if wallet in self._wallet_activity:
-                del self._wallet_activity[wallet]
-            if wallet in self._last_activity_update:
-                del self._last_activity_update[wallet]
+            for wallet in inactive_wallets:
+                if wallet in self._wallet_activity:
+                    del self._wallet_activity[wallet]
+                if wallet in self._last_activity_update:
+                    del self._last_activity_update[wallet]
 
-        logger.info(f"Cleaned up {count} entries for {len(inactive_wallets)} inactive wallets")
+        logger.info("Cleaned up %d entries for %d inactive wallets", count, len(inactive_wallets))
         return count
 
     def get_wallet_activity_level(self, wallet_address: str) -> ActivityLevel:
@@ -186,22 +198,22 @@ class HeliusCachingWrapper:
             Activity level enum
         """
         # Check if we have activity data
-        if wallet_address not in self._wallet_activity:
+        with self._lock:
+            activity_data = self._wallet_activity.get(wallet_address)
+        if activity_data is None:
             return ActivityLevel.INACTIVE
 
         # Get transaction counts
-        activity_data = self._wallet_activity[wallet_address]
         tx_count_24h = activity_data.get('tx_count_24h', 0)
 
-        # Determine activity level
-        if tx_count_24h > 50:
+        # Determine activity level (>= matches the inclusive ranges used by
+        # ActivityBasedCache)
+        if tx_count_24h >= 50:
             return ActivityLevel.VERY_HIGH
-        elif tx_count_24h > 10:
+        elif tx_count_24h >= 10:
             return ActivityLevel.HIGH
-        elif tx_count_24h > 1:
+        elif tx_count_24h >= 1:
             return ActivityLevel.MEDIUM
-        elif tx_count_24h > 0:
-            return ActivityLevel.LOW
         else:
             return ActivityLevel.INACTIVE
 

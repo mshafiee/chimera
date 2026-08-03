@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { apiClient } from './client'
 
 // Wallet Monitoring State Response
@@ -23,6 +24,9 @@ export function useWalletMonitoringStates() {
     queryKey: ['wallet-monitoring', 'states'],
     queryFn: async ({ signal }) => {
       const response = await apiClient.get<WalletMonitoringStateResponse>('/monitoring/wallets/states', { signal })
+      if (!response.data || !Array.isArray(response.data.wallet_states)) {
+        throw new Error('Invalid wallet monitoring response: missing wallet_states')
+      }
       return response.data
     },
     refetchInterval: 30000, // Poll every 30 seconds
@@ -31,9 +35,7 @@ export function useWalletMonitoringStates() {
     meta: {
       onError: (error: unknown) => {
         console.error('[Wallet Monitoring API] Failed to fetch states:', error)
-        // Wallet monitoring is important - show toast notification
-        // Note: Uncomment when toast is available
-        // toast.error('Failed to load wallet monitoring states. Please try again later.')
+        toast.error('Failed to load wallet monitoring states. Please try again later.')
       },
     },
   })

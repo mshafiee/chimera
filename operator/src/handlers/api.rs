@@ -227,6 +227,22 @@ pub async fn update_wallet(
         ));
     }
 
+    // Validate TTL range and convert with a checked cast — `as i32` would
+    // silently truncate/wrap values above i32::MAX and negatives are invalid.
+    let ttl_hours = match body.ttl_hours {
+        Some(h) if h < 0 => {
+            return Err(AppError::Validation(
+                "TTL hours cannot be negative".to_string(),
+            ));
+        }
+        Some(h) => Some(
+            i32::try_from(h).map_err(|_| {
+                AppError::Validation(format!("TTL hours out of range: {} (max: {})", h, i32::MAX))
+            })?,
+        ),
+        None => None,
+    };
+
     // Check if wallet exists
     let existing = state.db.get_wallet(&address).await?;
     if existing.is_none() {
@@ -239,7 +255,7 @@ pub async fn update_wallet(
         .update_wallet_status_ext(
             &address,
             &body.status,
-            body.ttl_hours.map(|h| h as i32),
+            ttl_hours,
             body.reason.as_deref(),
         )
         .await?;
@@ -294,9 +310,32 @@ pub async fn update_wallet(
             }
         }
 
-        // Check notification rules before sending
-        let config = state.config.read().await;
-        if config.notifications.rules.wallet_promoted {
+        // Check notification rules before sending. Copy the needed values and
+        // drop the read guard so a slow Telegram send (or webhook auto-registration
+        // below) cannot block all config writers/readers for the network I/O.
+        let (notify_wallet_promoted, auto_register_enabled, webhook_url, auth_header) = {
+            let config = state.config.read().await;
+            (
+                config.notifications.rules.wallet_promoted,
+                config
+                    .monitoring
+                    .as_ref()
+                    .and_then(|m| m.webhook_lifecycle.as_ref())
+                    .map(|wl| wl.auto_register_enabled)
+                    .unwrap_or(true),
+                config
+                    .monitoring
+                    .as_ref()
+                    .and_then(|m| m.helius_webhook_url.clone())
+                    .unwrap_or_default(),
+                config
+                    .monitoring
+                    .as_ref()
+                    .and_then(|m| m.resolved_helius_auth_header()),
+            )
+        };
+
+        if notify_wallet_promoted {
             state
                 .notifier
                 .notify(NotificationEvent::WalletPromoted {
@@ -307,25 +346,10 @@ pub async fn update_wallet(
         }
 
         // Trigger automatic webhook registration for promoted wallet
-        if config
-            .monitoring
-            .as_ref()
-            .and_then(|m| m.webhook_lifecycle.as_ref())
-            .map(|wl| wl.auto_register_enabled)
-            .unwrap_or(true)
-        {
+        if auto_register_enabled {
             let db_clone = state.db.clone();
             let helius_client = state.helius_client.clone();
             let rate_limiter = state.webhook_rate_limiter.clone();
-            let webhook_url = config
-                .monitoring
-                .as_ref()
-                .and_then(|m| m.helius_webhook_url.clone())
-                .unwrap_or_default();
-            let auth_header = config
-                .monitoring
-                .as_ref()
-                .and_then(|m| m.resolved_helius_auth_header());
 
             let address_clone = address.clone();
 
@@ -825,6 +849,7 @@ pub async fn get_config(
                 .profit_management
                 .max_stop_loss_distance
                 .to_f64()
+                .map(|v| v.abs()) // stored as negative %; expose positive for round-tripping
                 .unwrap_or(0.0),
             time_exit_hours: config.profit_management.time_exit_hours,
         },
@@ -914,13 +939,16 @@ pub async fn update_config(
     // before issuing async DB writes. This prevents holding the RwLock across `.await`
     // points which would block all config readers for the duration of every DB call.
     //
-    // audit_entries: Vec<(key, old_value, new_value)>
-    let mut audit_entries: Vec<(String, Option<String>, String)> = Vec::new();
-
-    {
+    // The mutations run inside a closure so EVERY error path (validation failures
+    // before the final `validate()`) restores the snapshot — a rejected request
+    // must never leave earlier fields partially applied in shared memory.
+    let audit_entries = {
         let mut config = state.config.write().await;
-        // FIX 4: Snapshot config before mutations so we can restore on validate() failure
         let config_snapshot = config.clone();
+
+        let apply_result: Result<Vec<(String, Option<String>, String)>, AppError> = (|| {
+            // audit_entries: Vec<(key, old_value, new_value)>
+            let mut audit_entries: Vec<(String, Option<String>, String)> = Vec::new();
 
         // Update circuit breakers if provided
         if let Some(cb) = body.circuit_breakers {
@@ -1523,23 +1551,47 @@ pub async fn update_config(
             }
         }
 
-        // FIX 4: Validate the mutated config before committing; restore snapshot on failure
+        // FIX 4: Validate the mutated config before committing
         if let Err(e) = config.validate() {
-            tracing::warn!(error = %e, "Config update rejected by validate(); restoring previous config");
-            *config = config_snapshot;
+            tracing::warn!(error = %e, "Config update rejected by validate()");
             return Err(AppError::Validation(format!(
                 "Config validation failed: {}",
                 e
             )));
         }
-    } // end of config write lock scope — lock is released here
 
-    // Now issue all audit log DB writes outside the write lock.
+        Ok(audit_entries)
+        })();
+
+        match apply_result {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Config update rejected; restoring previous config snapshot"
+                );
+                *config = config_snapshot;
+                return Err(e);
+            }
+        }
+    }; // end of config write lock scope — lock is released here
+
+    // Now issue all audit log DB writes outside the write lock. The in-memory
+    // config is already committed at this point, so a failing audit write must
+    // not roll the request back into an inconsistent "config changed but
+    // reported as failed" state — log and continue instead.
     for (key, old_val, new_val) in audit_entries {
-        state
+        if let Err(e) = state
             .db
             .log_config_change(&key, old_val.as_deref(), &new_val, &auth.0.identifier, None)
-            .await?;
+            .await
+        {
+            tracing::warn!(
+                error = %e,
+                key = %key,
+                "Failed to write config audit entry (config already applied)"
+            );
+        }
     }
 
     // Return updated config
@@ -1570,8 +1622,13 @@ pub async fn reset_circuit_breaker(
     let previous_state = status_before.state.to_string();
 
     // Clear the kill-switch state in the dedicated table so a restart after reset
-    // does not re-trip automatically.
-    let _ = state.db.set_kill_switch_state("INACTIVE", None).await;
+    // does not re-trip automatically. Failure must surface — otherwise the stale
+    // ACTIVE row would re-trip the breaker after the next restart.
+    state
+        .db
+        .set_kill_switch_state("INACTIVE", None)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to persist kill-switch reset: {}", e)))?;
 
     state.circuit_breaker.reset(&auth.0.identifier).await?;
 
@@ -1718,8 +1775,10 @@ pub async fn list_trades(
     State(state): State<Arc<ApiState>>,
     Query(params): Query<TradesQuery>,
 ) -> Result<Json<TradesResponse>, AppError> {
-    let limit = params.limit.unwrap_or(100).min(1000);
-    let offset = params.offset.unwrap_or(0);
+    // Clamp so a negative limit (-1 = "no limit" downstream) or offset can
+    // never bypass pagination and dump the whole trades table.
+    let limit = params.limit.unwrap_or(100).clamp(1, 1000);
+    let offset = params.offset.unwrap_or(0).max(0);
 
     let trades = state
         .db
@@ -1776,22 +1835,28 @@ pub async fn export_trades(
         .await?;
 
     let format = params.format.as_deref().unwrap_or("csv").to_lowercase();
-    let date_from = params.from.as_deref().unwrap_or("all");
-    let date_to = params.to.as_deref().unwrap_or("now");
+    // Sanitize user-supplied dates before they go into the Content-Disposition
+    // header — CR/LF or quote injection would produce an invalid header (and
+    // axum's `(HeaderName, &str)` path panics on invalid values).
+    let date_from = sanitize_filename_component(params.from.as_deref().unwrap_or("all"));
+    let date_to = sanitize_filename_component(params.to.as_deref().unwrap_or("now"));
 
     match format.as_str() {
         "pdf" => {
             let pdf_content = trades_to_pdf(&trades)?;
-            let filename = format!("chimera_trades_{}_{}.pdf", date_from, date_to);
+            let disposition = header::HeaderValue::from_str(&format!(
+                "attachment; filename=\"chimera_trades_{}_{}.pdf\"",
+                date_from, date_to
+            ))
+            .map_err(|e| {
+                AppError::Validation(format!("Invalid Content-Disposition header: {}", e))
+            })?;
 
             Ok((
                 StatusCode::OK,
                 [
-                    (header::CONTENT_TYPE, "application/pdf"),
-                    (
-                        header::CONTENT_DISPOSITION,
-                        &format!("attachment; filename=\"{}\"", filename),
-                    ),
+                    (header::CONTENT_TYPE, header::HeaderValue::from_static("application/pdf")),
+                    (header::CONTENT_DISPOSITION, disposition),
                 ],
                 pdf_content,
             )
@@ -1801,16 +1866,19 @@ pub async fn export_trades(
             let json_content = serde_json::to_string(&trades).map_err(|e| {
                 AppError::Internal(format!("Failed to serialize trades to JSON: {}", e))
             })?;
-            let filename = format!("chimera_trades_{}_{}.json", date_from, date_to);
+            let disposition = header::HeaderValue::from_str(&format!(
+                "attachment; filename=\"chimera_trades_{}_{}.json\"",
+                date_from, date_to
+            ))
+            .map_err(|e| {
+                AppError::Validation(format!("Invalid Content-Disposition header: {}", e))
+            })?;
 
             Ok((
                 StatusCode::OK,
                 [
-                    (header::CONTENT_TYPE, "application/json"),
-                    (
-                        header::CONTENT_DISPOSITION,
-                        &format!("attachment; filename=\"{}\"", filename),
-                    ),
+                    (header::CONTENT_TYPE, header::HeaderValue::from_static("application/json")),
+                    (header::CONTENT_DISPOSITION, disposition),
                 ],
                 json_content,
             )
@@ -1819,22 +1887,34 @@ pub async fn export_trades(
         _ => {
             // Default to CSV
             let csv_content = trades_to_csv(&trades);
-            let filename = format!("chimera_trades_{}_{}.csv", date_from, date_to);
+            let disposition = header::HeaderValue::from_str(&format!(
+                "attachment; filename=\"chimera_trades_{}_{}.csv\"",
+                date_from, date_to
+            ))
+            .map_err(|e| {
+                AppError::Validation(format!("Invalid Content-Disposition header: {}", e))
+            })?;
 
             Ok((
                 StatusCode::OK,
                 [
-                    (header::CONTENT_TYPE, "text/csv"),
-                    (
-                        header::CONTENT_DISPOSITION,
-                        &format!("attachment; filename=\"{}\"", filename),
-                    ),
+                    (header::CONTENT_TYPE, header::HeaderValue::from_static("text/csv")),
+                    (header::CONTENT_DISPOSITION, disposition),
                 ],
                 csv_content,
             )
                 .into_response())
         }
     }
+}
+
+/// Strip control characters, quotes and other header-unsafe bytes from a value
+/// that will be interpolated into a Content-Disposition filename.
+fn sanitize_filename_component(input: &str) -> String {
+    input
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | 'T' | 'Z'))
+        .collect()
 }
 
 // =============================================================================
@@ -2511,18 +2591,28 @@ pub async fn list_dead_letter_queue(
 /// - Trade state validation
 pub async fn retry_dead_letter_item(
     State(state): State<Arc<ApiState>>,
+    axum::Extension(auth): axum::Extension<AuthExtension>,
     Path(trade_uuid): Path<String>,
 ) -> Result<Json<RetryResponse>, AppError> {
-    // Get the dead letter item
-    let dlq_items = state
-        .db
-        .get_dead_letter_entries(1, 0)
-        .await?;
+    // Enforce operator+ role — retries can trigger real trade execution.
+    if !auth.0.role.has_permission(Role::Operator) {
+        return Err(AppError::Forbidden(
+            "Requires operator role or higher".to_string(),
+        ));
+    }
 
-    let dlq_item = dlq_items
-        .into_iter()
-        .find(|item| item.trade_uuid.as_ref().map(|u| u == &trade_uuid).unwrap_or(false))
-        .ok_or_else(|| AppError::NotFound(format!("Trade {} not found in dead letter queue", trade_uuid)))?;
+    // Look the item up directly by trade_uuid — scanning the first row of the
+    // queue could never match any other uuid.
+    let dlq_item = state
+        .db
+        .get_dead_letter_entry(&trade_uuid)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "Trade {} not found in dead letter queue",
+                trade_uuid
+            ))
+        })?;
 
     // Check if item can be retried
     if !dlq_item.can_retry {
@@ -3004,13 +3094,15 @@ pub async fn get_reconciliation_history(
         })
         .collect();
 
-    // Calculate success rate and average duration
+    // Calculate success rate over the SAME population as the numerator (the
+    // fetched window) — mixing windowed successes with an all-time denominator
+    // reported absurdly low rates once history exceeds the limit.
     let successful_count = run_responses
         .iter()
         .filter(|r| r.status == "completed")
         .count() as i64;
-    let success_rate = if total > 0 {
-        (successful_count as f64 / total as f64) * 100.0
+    let success_rate = if !run_responses.is_empty() {
+        (successful_count as f64 / run_responses.len() as f64) * 100.0
     } else {
         100.0
     };
@@ -3110,19 +3202,23 @@ pub async fn trigger_reconciliation(
     if let Some(client) = rpc_client {
         // Guard against overlapping runs: a sweep iterates up to hundreds of positions
         // with one RPC call each, so stacking triggers would hammer the RPC provider.
-        use std::sync::atomic::Ordering;
-        if crate::engine::reconciliation::RECONCILIATION_RUNNING.swap(true, Ordering::SeqCst) {
-            return Err(AppError::Duplicate(
-                "A reconciliation run is already in progress".to_string(),
-            ));
-        }
+        // The guard clears the flag on drop, so a panicking/aborted task can never
+        // leave RECONCILIATION_RUNNING stuck at true.
+        let running_guard = match crate::engine::reconciliation::ReconciliationRunningGuard::new() {
+            Some(guard) => guard,
+            None => {
+                return Err(AppError::Duplicate(
+                    "A reconciliation run is already in progress".to_string(),
+                ));
+            }
+        };
         let checker =
             crate::engine::reconciliation::RpcOnChainChecker::new(client);
         tokio::spawn(async move {
             let result =
                 crate::engine::reconciliation::run_reconciliation(db.as_ref(), &checker, &metrics)
                     .await;
-            crate::engine::reconciliation::RECONCILIATION_RUNNING.store(false, Ordering::SeqCst);
+            drop(running_guard);
             tracing::info!(?result, "Reconciliation run finished");
         });
     } else {
@@ -3203,13 +3299,16 @@ pub struct DebugBacktestSmokeResponse {
     pub notes: String,
 }
 
-/// Debug smoke-test: verify the PnL-population fix is live for a wallet.
+/// Clear all monitoring caches.
 ///
-/// POST /api/v1/debug/backtest-smoke
-/// Admin endpoint to clear all monitoring caches
-/// This is useful after parser updates or cache corruption
+/// POST /api/v1/debug/clear-monitoring-caches
+/// Admin endpoint to clear all monitoring caches.
+///
+/// NOTE: cache clearing is not implemented — the token fetcher and liquidity
+/// caches no longer exist in ApiState. Returning a misleading success for a
+/// no-op would hide the fact that nothing was cleared.
 pub async fn clear_monitoring_caches(
-    State(state): State<Arc<ApiState>>,
+    State(_state): State<Arc<ApiState>>,
     axum::Extension(auth): axum::Extension<AuthExtension>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     if !auth.0.role.has_permission(Role::Admin) {
@@ -3218,47 +3317,15 @@ pub async fn clear_monitoring_caches(
         ));
     }
 
-    tracing::info!(user = %auth.0.identifier, "Admin cache clear requested");
-
-    // TODO: Token fetcher and liquidity cache clearing disabled for now
-    // These fields don't exist in ApiState anymore after refactoring
-    let cache_size_before = 0;
-    let cache_size_after = 0;
-    let liquidity_cleared = (0, 0);
-
-    // Log the cache clear to config_audit
-    state.db.log_config_change(
-        "monitoring_cache_clear",
-        Some(&format!("metadata_entries:{}", cache_size_before)),
-        "cleared",
-        &auth.0.identifier,
-        Some(&format!("Cleared {} metadata cache entries (placeholder - token_fetcher removed)", cache_size_before)),
-    ).await?;
-
-    tracing::info!(
-        metadata_before = cache_size_before,
-        metadata_after = cache_size_after,
-        liquidity_before = liquidity_cleared.0,
-        liquidity_after = liquidity_cleared.1,
-        "Monitoring caches cleared"
+    tracing::warn!(
+        user = %auth.0.identifier,
+        "Admin cache clear requested but is not implemented"
     );
 
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "message": "Monitoring caches cleared successfully",
-        "cache_stats": {
-            "metadata_cache": {
-                "entries_before": cache_size_before,
-                "entries_after": cache_size_after,
-                "cleared": cache_size_before > 0
-            },
-            "liquidity_cache": {
-                "entries_before": liquidity_cleared.0,
-                "entries_after": liquidity_cleared.1,
-                "cleared": liquidity_cleared.0 > 0
-            }
-        }
-    })))
+    Err(AppError::ServiceUnavailable(
+        "Monitoring cache clearing is not implemented (caches no longer exist in this build)"
+            .to_string(),
+    ))
 }
 
 /// Requires: protected route bearer auth (inherited from `protected_api_routes`).
@@ -3334,8 +3401,5 @@ pub async fn debug_backtest_smoke(
 fn pg_pool(db: &Arc<dyn Database>) -> AppResult<sqlx::Pool<sqlx::Postgres>> {
     match db.pool() {
         DbPool::PostgreSQL(p) => Ok(p),
-        _ => Err(AppError::Internal(
-            "PostgreSQL backend required for debug endpoint".to_string(),
-        )),
     }
 }

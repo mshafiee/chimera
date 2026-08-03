@@ -35,6 +35,7 @@ except ImportError:
 
 # Try to import sklearn for counterfactuals
 try:
+    import sklearn  # noqa: F401
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
@@ -80,10 +81,6 @@ class ModelExplainer:
         # Feature importance tracking
         self.feature_importance_history = defaultdict(list)
         self.importance_window_size = 100
-
-        # Explanation cache
-        self.explanation_cache = {}
-        self.cache_size = explanation_cache_size
 
         # Initialize SHAP if available
         if SHAP_AVAILABLE:
@@ -142,12 +139,22 @@ class ModelExplainer:
         try:
             import lightgbm as lgb
             _ = lgb  # Mark as used
-            if hasattr(self.model, 'booster_'):
+            if isinstance(self.model, lgb.Booster) or hasattr(self.model, 'booster_'):
                 return "tree"
         except ImportError:
             pass
 
-        # Check for sklearn models
+        # Check for sklearn tree estimators (DecisionTree, RandomForest,
+        # GradientBoosting, HistGradientBoosting) so they get the fast,
+        # exact TreeExplainer instead of falling through to kernel.
+        try:
+            if (hasattr(self.model, 'tree_') or hasattr(self.model, 'estimators_')
+                    or hasattr(self.model, '_Booster')):
+                return "tree"
+        except Exception:
+            pass
+
+        # Check for linear models
         if hasattr(self.model, 'coef_'):
             return "linear"
 
@@ -156,10 +163,15 @@ class ModelExplainer:
 
     def _predict_fn(self, X: np.ndarray) -> np.ndarray:
         """Prediction function for KernelExplainer."""
-        if hasattr(self.model, 'predict'):
+        # Prefer predict_proba so classifier explanations reflect
+        # probabilities (column 1 = positive class) instead of hard labels.
+        if hasattr(self.model, 'predict_proba'):
+            proba = self.model.predict_proba(X)
+            if proba.ndim == 2 and proba.shape[1] > 1:
+                return proba[:, 1]
+            return proba.ravel()
+        elif hasattr(self.model, 'predict'):
             return self.model.predict(X)
-        elif hasattr(self.model, 'predict_proba'):
-            return self.model.predict_proba(X)[:, 1]
         else:
             raise ValueError(f"Model {type(self.model)} has no predict method")
 
@@ -202,11 +214,11 @@ class ModelExplainer:
             if len(shap_values.shape) == 2:
                 shap_values = shap_values[0]
 
-            # Get base value
+            # Get base value (flatten robustly — 0-d arrays and plain lists
+            # would otherwise crash the whole explanation)
             if hasattr(self.explainer, 'expected_value'):
-                base_value = self.explainer.expected_value
-                if isinstance(base_value, np.ndarray):
-                    base_value = base_value[0] if len(base_value) > 0 else base_value
+                base_value = np.asarray(self.explainer.expected_value).reshape(-1)
+                base_value = float(base_value[0]) if len(base_value) > 0 else 0.0
             else:
                 base_value = 0.0
 
@@ -430,14 +442,17 @@ class ModelExplainer:
             )[:max_features * 2]
 
             for i, (feat_name, shap_val) in enumerate(sorted_features[:max_features]):
-                # Determine direction of change
+                # Determine direction of change. The reverse branch must move
+                # the feature against its current push (based on the SHAP sign),
+                # not on the target direction, or the prediction moves the
+                # wrong way.
                 if (target_change > 0 and shap_val > 0) or (target_change < 0 and shap_val < 0):
                     # Same direction - amplify
                     direction = 1 if target_change > 0 else -1
                     magnitude = abs(target_change) / max(abs(shap_val), 0.01)
                 else:
-                    # Opposite direction - reverse
-                    direction = -1 if target_change > 0 else 1
+                    # Opposite direction - reverse: move against the current push
+                    direction = -1 if shap_val > 0 else 1
                     magnitude = abs(target_change) / max(abs(shap_val), 0.01)
 
                 # Get feature stats for reasonable modification
@@ -454,11 +469,18 @@ class ModelExplainer:
                 cf_array = self._prepare_features(cf_features)
                 cf_pred = float(self._predict_fn(cf_array.reshape(1, -1))[0])
 
+                # change_percent relative to a non-zero baseline (guard the
+                # original_value == 0 case so the metric stays meaningful)
+                if abs(original_value) > 1e-8:
+                    change_percent = (suggested_value - original_value) / abs(original_value) * 100
+                else:
+                    change_percent = 100.0 if suggested_value != original_value else 0.0
+
                 counterfactuals.append({
                     'feature': feat_name,
                     'original_value': float(original_value),
                     'suggested_value': float(suggested_value),
-                    'change_percent': float((suggested_value - original_value) / (abs(original_value) + 1e-8) * 100),
+                    'change_percent': float(change_percent),
                     'original_prediction': current_pred,
                     'counterfactual_prediction': cf_pred,
                     'prediction_change': float(cf_pred - current_pred),

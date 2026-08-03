@@ -80,8 +80,7 @@
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            {"type": "value", "options": {"0": {"text": "UNHEALTHY", "color": "red"}}, "value": "0"},
-            {"type": "value", "options": {"1": {"text": "HEALTHY", "color": "green"}}, "value": "1"}
+            {"type": "value", "options": {"0": {"text": "UNHEALTHY", "color": "red"}, "1": {"text": "HEALTHY", "color": "green"}}}
           ]
         }
       }
@@ -98,7 +97,7 @@
       "targets": [
         {
           "format": "table",
-          "rawSql": "SELECT wallet_address, token_address, side, entry_price, current_value_sol, unrealized_pnl_sol, opened_at FROM positions WHERE state IN ('ACTIVE', 'EXITING') AND pnl_data_valid = TRUE ORDER BY opened_at DESC LIMIT 50",
+          "rawSql": "SELECT wallet_address, token_address, strategy, entry_price, entry_amount_sol * current_price / NULLIF(entry_price, 0) AS current_value_sol, unrealized_pnl_sol, opened_at FROM positions WHERE state IN ('ACTIVE', 'EXITING') AND pnl_data_valid = TRUE ORDER BY opened_at DESC LIMIT 50",
           "refId": "A"
         }
       ],
@@ -111,7 +110,7 @@
             "renameByName": {
               "wallet_address": "Wallet",
               "token_address": "Token",
-              "side": "Side",
+              "strategy": "Strategy",
               "entry_price": "Entry Price",
               "current_value_sol": "Current Value (SOL)",
               "unrealized_pnl_sol": "Unrealized PnL (SOL)",
@@ -175,7 +174,7 @@
       "targets": [
         {
           "format": "table",
-          "rawSql": "SELECT t.wallet_address, t.token_symbol, e.target_price, e.target_percentage, e.recommendation_type, e.confidence_score FROM exit_targets e JOIN trades t ON e.trade_uuid = t.trade_uuid WHERE e.executed = false ORDER BY e.created_at DESC LIMIT 20",
+          "rawSql": "SELECT t.wallet_address, t.token_symbol, et.entry_price, et.profit_targets, et.targets_hit, et.peak_profit_percent, et.stop_loss_price, et.trailing_stop_active, et.remaining_fraction, et.last_updated FROM exit_targets et JOIN trades t ON et.trade_uuid = t.trade_uuid WHERE et.remaining_fraction > 0 ORDER BY et.last_updated DESC LIMIT 20",
           "refId": "A"
         }
       ],
@@ -188,10 +187,14 @@
             "renameByName": {
               "wallet_address": "Wallet",
               "token_symbol": "Token",
-              "target_price": "Target Price",
-              "target_percentage": "Target %",
-              "recommendation_type": "Type",
-              "confidence_score": "Confidence"
+              "entry_price": "Entry Price",
+              "profit_targets": "Profit Targets",
+              "targets_hit": "Targets Hit",
+              "peak_profit_percent": "Peak Profit %",
+              "stop_loss_price": "Stop Loss",
+              "trailing_stop_active": "Trailing Stop",
+              "remaining_fraction": "Remaining",
+              "last_updated": "Last Updated"
             }
           }
         }

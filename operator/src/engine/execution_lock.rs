@@ -113,23 +113,30 @@ impl ExecutionLock {
         let timeout = Duration::from_secs(self.config.lock_timeout_seconds);
         let expires_at = now + timeout;
 
-        if let Some(mut existing) = self.locks.get_mut(trade_uuid) {
-            // Lock already held, check if expired
-            if existing.expires_at > now {
-                // Still held by another worker
-                debug!(
-                    trade_uuid = %trade_uuid,
-                    holder = %existing.worker_id,
-                    worker_id = %worker_id,
-                    "Lock already held, skipping acquisition"
-                );
+        // Atomic check-and-insert under a single shard lock: a plain
+        // `get_mut` followed by `insert` has a race window where another
+        // worker can insert the same trade_uuid in between, silently
+        // overwriting its entry and breaking mutual exclusion.
+        let trade_uuid_owned = trade_uuid.to_string();
+        match self.locks.entry(trade_uuid_owned.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(mut occ) => {
+                let existing = occ.get_mut();
+                if existing.expires_at > now {
+                    // Still held by another worker
+                    debug!(
+                        trade_uuid = %trade_uuid,
+                        holder = %existing.worker_id,
+                        worker_id = %worker_id,
+                        "Lock already held, skipping acquisition"
+                    );
 
-                if let Some(ref metrics) = self.metrics {
-                    metrics.increment_lock_acquire_failed();
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.increment_lock_acquire_failed();
+                    }
+
+                    return None;
                 }
 
-                return None;
-            } else {
                 // Expired lock, replace it
                 warn!(
                     trade_uuid = %trade_uuid,
@@ -142,52 +149,65 @@ impl ExecutionLock {
                     metrics.increment_lock_expired_reclaimed();
                 }
 
-                // Replace the expired lock entry
+                // Record the previous holder's actual held duration (not 0).
+                if let Some(ref metrics) = self.metrics {
+                    metrics.increment_lock_acquire_success();
+                    metrics.record_lock_held_duration(now - existing.acquired_at);
+                }
+
                 existing.worker_id = worker_id.to_string();
                 existing.acquired_at = now;
                 existing.expires_at = expires_at;
 
-                let trade_uuid_owned = trade_uuid.to_string();
-
-                if let Some(ref metrics) = self.metrics {
-                    metrics.increment_lock_acquire_success();
-                    metrics.record_lock_held_duration(Duration::from_secs(0));
-                }
-
-                return Some(LockGuard {
+                Some(LockGuard {
                     lock: Arc::new(ActiveLock {
                         trade_uuid: trade_uuid_owned,
                         locks: Arc::clone(&self.locks),
                         acquired_at: now,
+                        worker_id: worker_id.to_string(),
+                        timeout,
                         metrics: self.metrics.clone(),
                     }),
+                })
+            }
+            dashmap::mapref::entry::Entry::Vacant(v) => {
+                v.insert(LockEntry {
+                    worker_id: worker_id.to_string(),
+                    acquired_at: now,
+                    expires_at,
                 });
+
+                if let Some(ref metrics) = self.metrics {
+                    metrics.increment_lock_acquire_success();
+                    // Held duration is recorded on release, not here.
+                }
+
+                Some(LockGuard {
+                    lock: Arc::new(ActiveLock {
+                        trade_uuid: trade_uuid_owned,
+                        locks: Arc::clone(&self.locks),
+                        acquired_at: now,
+                        worker_id: worker_id.to_string(),
+                        timeout,
+                        metrics: self.metrics.clone(),
+                    }),
+                })
             }
         }
+    }
 
-        // No existing lock, create new entry and insert it
-        let entry = LockEntry {
-            worker_id: worker_id.to_string(),
-            acquired_at: now,
-            expires_at,
-        };
-
-        let trade_uuid_owned = trade_uuid.to_string();
-        self.locks.insert(trade_uuid_owned.clone(), entry);
-
-        if let Some(ref metrics) = self.metrics {
-            metrics.increment_lock_acquire_success();
-            metrics.record_lock_held_duration(Duration::from_secs(0)); // Will be updated on release
+    /// Extend the expiry of a still-held lock (heartbeat for long-running
+    /// processing). Returns false when this worker is no longer the holder.
+    pub fn renew(&self, trade_uuid: &str, worker_id: &str) -> bool {
+        let now = Instant::now();
+        let timeout = Duration::from_secs(self.config.lock_timeout_seconds);
+        if let Some(mut entry) = self.locks.get_mut(trade_uuid) {
+            if entry.worker_id == worker_id {
+                entry.expires_at = now + timeout;
+                return true;
+            }
         }
-
-        Some(LockGuard {
-            lock: Arc::new(ActiveLock {
-                trade_uuid: trade_uuid_owned,
-                locks: Arc::clone(&self.locks),
-                acquired_at: now,
-                metrics: self.metrics.clone(),
-            }),
-        })
+        false
     }
 
     /// Force release a lock (for recovery scenarios)
@@ -314,14 +334,15 @@ pub struct LockGuard {
     lock: Arc<dyn LockImpl>,
 }
 
-// LockGuard is Send and Sync because the underlying lock is thread-safe
-unsafe impl Send for LockGuard {}
-unsafe impl Sync for LockGuard {}
-
 impl LockGuard {
     /// Get the trade_uuid for this lock
     pub fn trade_uuid(&self) -> &str {
         self.lock.trade_uuid()
+    }
+
+    /// Heartbeat: extend this lock's expiry while processing continues.
+    pub fn renew(&self) -> bool {
+        self.lock.renew()
     }
 }
 
@@ -338,6 +359,11 @@ trait LockImpl: Send + Sync {
 
     /// Release the lock
     fn release(&self) -> bool;
+
+    /// Extend the lock expiry (no-op for the disabled lock)
+    fn renew(&self) -> bool {
+        false
+    }
 }
 
 /// Active lock implementation that releases on drop
@@ -345,6 +371,8 @@ struct ActiveLock {
     trade_uuid: String,
     locks: Arc<DashMap<String, LockEntry>>,
     acquired_at: Instant,
+    worker_id: String,
+    timeout: Duration,
     metrics: Option<Arc<crate::metrics::ExecutionLockMetrics>>,
 }
 
@@ -356,9 +384,17 @@ impl LockImpl for ActiveLock {
     fn release(&self) -> bool {
         let held_duration = self.acquired_at.elapsed();
 
-        // Remove from map (this is safe even if another thread acquired it in the meantime)
-        // We only remove if we're still the holder, which DashMap handles via remove()
-        if let Some(_entry) = self.locks.remove(&self.trade_uuid) {
+        // Only remove the lock if this guard is still the current holder;
+        // otherwise a stale guard (whose lock expired, was force-released, or
+        // cleaned up and then re-acquired by another worker) would delete the
+        // new holder's lock, allowing a third worker to acquire concurrently.
+        let still_holder = self
+            .locks
+            .get(&self.trade_uuid)
+            .map(|e| e.worker_id == self.worker_id)
+            .unwrap_or(false);
+
+        if still_holder && self.locks.remove(&self.trade_uuid).is_some() {
             trace!(
                 trade_uuid = %self.trade_uuid,
                 held_duration_secs = held_duration.as_secs_f64(),
@@ -373,6 +409,16 @@ impl LockImpl for ActiveLock {
         } else {
             false
         }
+    }
+
+    fn renew(&self) -> bool {
+        if let Some(mut entry) = self.locks.get_mut(&self.trade_uuid) {
+            if entry.worker_id == self.worker_id {
+                entry.expires_at = Instant::now() + self.timeout;
+                return true;
+            }
+        }
+        false
     }
 }
 

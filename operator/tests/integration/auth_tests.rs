@@ -234,8 +234,14 @@ fn test_empty_api_key_returns_none() {
 // =============================================================================
 
 /// Extract token from Authorization header
+///
+/// An empty token is NOT an authenticated request: rejecting it here means any
+/// downstream check that only tests `is_some()` cannot mistake an empty token
+/// for valid auth.
 fn extract_bearer_token(header: &str) -> Option<&str> {
-    header.strip_prefix("Bearer ")
+    header
+        .strip_prefix("Bearer ")
+        .filter(|token| !token.is_empty())
 }
 
 #[test]
@@ -258,8 +264,9 @@ fn test_extract_bearer_token_wrong_prefix() {
 
 #[test]
 fn test_extract_bearer_token_empty() {
+    // "Bearer " with nothing after it must NOT be treated as authenticated.
     let header = "Bearer ";
-    assert_eq!(extract_bearer_token(header), Some(""));
+    assert_eq!(extract_bearer_token(header), None);
 }
 
 // =============================================================================
@@ -347,7 +354,8 @@ struct JwtClaims {
 
 impl JwtClaims {
     fn is_expired(&self) -> bool {
-        self.exp < chrono::Utc::now().timestamp()
+        // RFC 7519: a JWT MUST NOT be accepted on or after its exp time.
+        self.exp <= chrono::Utc::now().timestamp()
     }
 }
 
@@ -371,6 +379,20 @@ fn test_jwt_expired() {
     };
 
     assert!(claims.is_expired());
+}
+
+#[test]
+fn test_jwt_expired_at_exact_boundary() {
+    // exp == now must be treated as expired (RFC 7519: not accepted ON or
+    // after exp). Captured before the check so the boundary is exact.
+    let exp = chrono::Utc::now().timestamp();
+    let claims = JwtClaims {
+        wallet: "7xKXtg...".to_string(),
+        role: Role::Admin,
+        exp,
+    };
+
+    assert!(claims.is_expired(), "exp == now must be expired");
 }
 
 // =============================================================================
@@ -405,53 +427,110 @@ fn test_rate_limit_exceeded() {
 // WALLET SIGNATURE VERIFICATION TESTS
 // =============================================================================
 
-/// Test wallet authentication with valid signature
+// The production wallet-auth handler (handlers/auth.rs) is a private module,
+// so these tests re-implement its verification contract inline: the ed25519
+// signature is verified against the wallet pubkey with solana_sdk (the same
+// crate the production handler uses), the message must contain the expected
+// phrase and the wallet address, and the timestamp drift must be <= 300s.
+// A bogus or tampered signature must be rejected with 401.
+
+use solana_sdk::signature::{Keypair, Signature, Signer};
+use std::str::FromStr;
+
+fn verify_wallet_auth(wallet: &str, message: &str, signature_b64: &str) -> bool {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64, Engine};
+
+    if !message.contains("Chimera Dashboard Authentication") || !message.contains(wallet) {
+        return false;
+    }
+
+    // Timestamp drift window (same 300s the production handler enforces).
+    let timestamp = message
+        .lines()
+        .find(|line| line.starts_with("Timestamp: "))
+        .and_then(|line| line.strip_prefix("Timestamp: "))
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(i64::MIN);
+    let drift = (chrono::Utc::now().timestamp() as i128 - timestamp as i128).unsigned_abs();
+    if drift > 300 {
+        return false;
+    }
+
+    // Decode + verify with real ed25519.
+    let Ok(signature_bytes) = BASE64.decode(signature_b64) else {
+        return false;
+    };
+    let Ok(pubkey) = solana_sdk::pubkey::Pubkey::from_str(wallet) else {
+        return false;
+    };
+    let Ok(signature) = Signature::try_from(signature_bytes.as_slice()) else {
+        return false;
+    };
+    signature.verify(pubkey.as_ref(), message.as_bytes())
+}
+
+fn wallet_auth_handler(body: String) -> (StatusCode, axum::Json<Value>) {
+    let payload: Result<Value, _> = serde_json::from_str(&body);
+    match payload {
+        Ok(p) => {
+            let wallet = p.get("wallet_address").and_then(|w| w.as_str()).unwrap_or("");
+            let message = p.get("message").and_then(|m| m.as_str()).unwrap_or("");
+            let signature = p.get("signature").and_then(|s| s.as_str()).unwrap_or("");
+
+            if wallet.is_empty() || message.is_empty() || signature.is_empty() {
+                (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({"error": "Missing required fields"})),
+                )
+            } else if verify_wallet_auth(wallet, message, signature) {
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "token": "mock-jwt-token",
+                        "role": "admin",
+                        "identifier": wallet
+                    })),
+                )
+            } else {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    axum::Json(json!({"error": "Invalid signature or authentication message"})),
+                )
+            }
+        }
+        Err(_) => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": "Invalid JSON"})),
+        ),
+    }
+}
+
+fn auth_message(wallet: &str) -> String {
+    format!(
+        "Chimera Dashboard Authentication\nWallet: {wallet}\nTimestamp: {}",
+        chrono::Utc::now().timestamp()
+    )
+}
+
+fn sign_message(keypair: &Keypair, message: &str) -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64, Engine};
+    let sig = keypair.sign_message(message.as_bytes());
+    BASE64.encode(sig.as_ref())
+}
+
+/// Test wallet authentication with a REAL ed25519 signature (valid path)
 #[tokio::test]
 async fn test_wallet_auth_valid_signature() {
+    let keypair = Keypair::new();
+    let wallet = keypair.pubkey().to_string();
+
     let app = Router::new().route(
         "/api/v1/auth/wallet",
-        post(|body: String| async move {
-            let payload: Result<Value, _> = serde_json::from_str(&body);
-            match payload {
-                Ok(p) => {
-                    let wallet = p
-                        .get("wallet_address")
-                        .and_then(|w| w.as_str())
-                        .unwrap_or("");
-                    let message = p.get("message").and_then(|m| m.as_str()).unwrap_or("");
-                    let signature = p.get("signature").and_then(|s| s.as_str()).unwrap_or("");
-
-                    // Basic validation
-                    if wallet.is_empty() || message.is_empty() || signature.is_empty() {
-                        (
-                            StatusCode::BAD_REQUEST,
-                            axum::Json(json!({"error": "Missing required fields"})),
-                        )
-                    } else if message.contains("Chimera Dashboard Authentication")
-                        && message.contains(wallet)
-                    {
-                        (
-                            StatusCode::OK,
-                            axum::Json(json!({
-                                "token": "mock-jwt-token",
-                                "role": "admin",
-                                "identifier": wallet
-                            })),
-                        )
-                    } else {
-                        (
-                            StatusCode::UNAUTHORIZED,
-                            axum::Json(json!({"error": "Invalid authentication message"})),
-                        )
-                    }
-                }
-                Err(_) => (
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(json!({"error": "Invalid JSON"})),
-                ),
-            }
-        }),
+        post(|body: String| async move { wallet_auth_handler(body) }),
     );
+
+    let message = auth_message(&wallet);
+    let signature = sign_message(&keypair, &message);
 
     let response = app
         .oneshot(
@@ -461,9 +540,9 @@ async fn test_wallet_auth_valid_signature() {
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     json!({
-                        "wallet_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
-                        "message": "Chimera Dashboard Authentication\nWallet: 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU\nTimestamp: 1234567890",
-                        "signature": "base64signature"
+                        "wallet_address": wallet,
+                        "message": message,
+                        "signature": signature
                     })
                     .to_string(),
                 ))
@@ -479,35 +558,64 @@ async fn test_wallet_auth_valid_signature() {
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["role"], "admin");
+    assert_eq!(json["identifier"], wallet);
     assert!(json.get("token").is_some());
 }
 
-/// Test wallet authentication with invalid message
+/// Test wallet authentication with a TAMPERED signature (must be rejected 401)
+#[tokio::test]
+async fn test_wallet_auth_invalid_signature() {
+    let keypair = Keypair::new();
+    let wallet = keypair.pubkey().to_string();
+
+    let app = Router::new().route(
+        "/api/v1/auth/wallet",
+        post(|body: String| async move { wallet_auth_handler(body) }),
+    );
+
+    let message = auth_message(&wallet);
+    // Sign a DIFFERENT message, then present it as the signature for `message`.
+    let wrong_signature = sign_message(&keypair, "tampered message");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/wallet")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "wallet_address": wallet,
+                        "message": message,
+                        "signature": wrong_signature
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a signature that does not verify against the message must be rejected"
+    );
+}
+
+/// Test wallet authentication with invalid message (must be rejected 401)
 #[tokio::test]
 async fn test_wallet_auth_invalid_message() {
+    let keypair = Keypair::new();
+    let wallet = keypair.pubkey().to_string();
+
     let app = Router::new().route(
         "/api/v1/auth/wallet",
-        post(|body: String| async move {
-            let payload: Result<Value, _> = serde_json::from_str(&body);
-            match payload {
-                Ok(p) => {
-                    let message = p.get("message").and_then(|m| m.as_str()).unwrap_or("");
-                    if message.contains("Chimera Dashboard Authentication") {
-                        (StatusCode::OK, axum::Json(json!({"token": "token"})))
-                    } else {
-                        (
-                            StatusCode::UNAUTHORIZED,
-                            axum::Json(json!({"error": "Invalid authentication message"})),
-                        )
-                    }
-                }
-                _ => (
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(json!({"error": "Invalid JSON"})),
-                ),
-            }
-        }),
+        post(|body: String| async move { wallet_auth_handler(body) }),
     );
+
+    let message = "Invalid message".to_string();
+    let signature = sign_message(&keypair, &message);
 
     let response = app
         .oneshot(
@@ -517,9 +625,9 @@ async fn test_wallet_auth_invalid_message() {
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     json!({
-                        "wallet_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
-                        "message": "Invalid message",
-                        "signature": "base64signature"
+                        "wallet_address": wallet,
+                        "message": message,
+                        "signature": signature
                     })
                     .to_string(),
                 ))
@@ -531,39 +639,25 @@ async fn test_wallet_auth_invalid_message() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
-/// Test wallet authentication with wallet address mismatch
+/// Test wallet authentication with wallet address mismatch (must be rejected 401)
 #[tokio::test]
 async fn test_wallet_auth_address_mismatch() {
+    let keypair = Keypair::new();
+    let other = Keypair::new();
+    let wallet = keypair.pubkey().to_string();
+    let other_wallet = other.pubkey().to_string();
+
     let app = Router::new().route(
         "/api/v1/auth/wallet",
-        post(|body: String| async move {
-            let payload: Result<Value, _> = serde_json::from_str(&body);
-            match payload {
-                Ok(p) => {
-                    let wallet = p
-                        .get("wallet_address")
-                        .and_then(|w| w.as_str())
-                        .unwrap_or("");
-                    let message = p.get("message").and_then(|m| m.as_str()).unwrap_or("");
-
-                    if message.contains("Chimera Dashboard Authentication")
-                        && message.contains(wallet)
-                    {
-                        (StatusCode::OK, axum::Json(json!({"token": "token"})))
-                    } else {
-                        (
-                            StatusCode::UNAUTHORIZED,
-                            axum::Json(json!({"error": "Wallet address mismatch"})),
-                        )
-                    }
-                }
-                _ => (
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(json!({"error": "Invalid JSON"})),
-                ),
-            }
-        }),
+        post(|body: String| async move { wallet_auth_handler(body) }),
     );
+
+    // Message claims a DIFFERENT wallet than the one in wallet_address.
+    let message = format!(
+        "Chimera Dashboard Authentication\nWallet: {other_wallet}\nTimestamp: {}",
+        chrono::Utc::now().timestamp()
+    );
+    let signature = sign_message(&keypair, &message);
 
     let response = app
         .oneshot(
@@ -573,9 +667,9 @@ async fn test_wallet_auth_address_mismatch() {
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     json!({
-                        "wallet_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
-                        "message": "Chimera Dashboard Authentication\nWallet: DifferentWallet111111111111111111111111111",
-                        "signature": "base64signature"
+                        "wallet_address": wallet,
+                        "message": message,
+                        "signature": signature
                     })
                     .to_string(),
                 ))
@@ -587,34 +681,12 @@ async fn test_wallet_auth_address_mismatch() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
-/// Test wallet authentication with missing fields
+/// Test wallet authentication with missing fields (must be rejected 400)
 #[tokio::test]
 async fn test_wallet_auth_missing_fields() {
     let app = Router::new().route(
         "/api/v1/auth/wallet",
-        post(|body: String| async move {
-            let payload: Result<Value, _> = serde_json::from_str(&body);
-            match payload {
-                Ok(p) => {
-                    let has_wallet = p.get("wallet_address").is_some();
-                    let has_message = p.get("message").is_some();
-                    let has_signature = p.get("signature").is_some();
-
-                    if has_wallet && has_message && has_signature {
-                        (StatusCode::OK, axum::Json(json!({"token": "token"})))
-                    } else {
-                        (
-                            StatusCode::BAD_REQUEST,
-                            axum::Json(json!({"error": "Missing required fields"})),
-                        )
-                    }
-                }
-                _ => (
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(json!({"error": "Invalid JSON"})),
-                ),
-            }
-        }),
+        post(|body: String| async move { wallet_auth_handler(body) }),
     );
 
     // Test missing wallet_address
@@ -849,19 +921,32 @@ async fn test_operator_denied_admin_endpoints() {
 async fn test_admin_access_all_endpoints() {
     use axum::routing::{get, post, put};
 
+    // Handlers enforce admin-only access (ignore non-admin tokens) so the
+    // test actually validates the access-control claim.
+    let admin_handler = |req: Request<Body>| async move {
+        let auth_header = req.headers().get("Authorization");
+        match auth_header.and_then(|h| h.to_str().ok()) {
+            Some(header) if header.starts_with("Bearer admin-") => {
+                (StatusCode::OK, axum::Json(json!({"success": true})))
+            }
+            Some(_) => (
+                StatusCode::FORBIDDEN,
+                axum::Json(json!({"error": "Admin access required"})),
+            ),
+            None => (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(json!({"error": "Missing auth"})),
+            ),
+        }
+    };
+
     let app = Router::new()
-        .route(
-            "/api/v1/positions",
-            get(|| async { (StatusCode::OK, "OK") }),
-        )
-        .route(
-            "/api/v1/wallets/test",
-            put(|| async { (StatusCode::OK, "OK") }),
-        )
-        .route("/api/v1/config", put(|| async { (StatusCode::OK, "OK") }))
+        .route("/api/v1/positions", get(admin_handler.clone()))
+        .route("/api/v1/wallets/test", put(admin_handler.clone()))
+        .route("/api/v1/config", put(admin_handler.clone()))
         .route(
             "/api/v1/config/circuit-breaker/reset",
-            post(|| async { (StatusCode::OK, "OK") }),
+            post(admin_handler.clone()),
         );
 
     // Test readonly endpoint
@@ -910,6 +995,7 @@ async fn test_admin_access_all_endpoints() {
 
     // Test admin-only endpoint
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -921,6 +1007,34 @@ async fn test_admin_access_all_endpoints() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+
+    // Negative: no header → 401
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // Negative: non-admin token → 403
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/config")
+                .header("Authorization", "Bearer operator-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 // =============================================================================
@@ -944,17 +1058,29 @@ fn test_base64_signature_decoding() {
 /// Test Solana pubkey format validation
 #[test]
 fn test_solana_pubkey_format() {
-    // Valid Solana address (base58, 32-44 chars)
+    use solana_sdk::pubkey::Pubkey;
+    use std::str::FromStr;
+
+    // Valid Solana address: 32 bytes base58-encoded.
     let valid_address = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
     assert_eq!(valid_address.len(), 44);
+    let decoded = Pubkey::from_str(valid_address).expect("valid address must decode");
+    assert_eq!(decoded.as_ref().len(), 32, "decoded pubkey must be 32 bytes");
 
-    // Invalid: too short
-    let too_short = "7xKXtg";
-    assert!(too_short.len() < 32);
-
-    // Invalid: too long
-    let too_long = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU1234567890";
-    assert!(too_long.len() > 44);
+    // Invalid: contains non-base58 characters (0, O, I, l are not base58), or
+    // decodes to more than 32 bytes (leading 'z' on a 44-char string).
+    for invalid in [
+        "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAs0", // contains '0'
+        "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsO", // contains 'O'
+        "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsI", // contains 'I'
+        "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsl", // contains 'l'
+        "z7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU", // overflows 32 bytes
+    ] {
+        assert!(
+            Pubkey::from_str(invalid).is_err(),
+            "invalid pubkey must be rejected: {invalid}"
+        );
+    }
 }
 
 // =============================================================================

@@ -63,10 +63,10 @@ export function Wallets() {
       return false
     }
     
-    if (wqsMinFilter !== undefined && (wallet.wqs_score === null || wallet.wqs_score < wqsMinFilter)) {
+    if (wqsMinFilter !== undefined && (wallet.wqs_score === null || toNum(wallet.wqs_score) < wqsMinFilter)) {
       return false
     }
-    if (wqsMaxFilter !== undefined && (wallet.wqs_score === null || wallet.wqs_score > wqsMaxFilter)) {
+    if (wqsMaxFilter !== undefined && (wallet.wqs_score === null || toNum(wallet.wqs_score) > wqsMaxFilter)) {
       return false
     }
     
@@ -164,10 +164,10 @@ export function Wallets() {
           [
             wallet.address,
             wallet.status,
-            wallet.wqs_score?.toFixed(2) || '',
+            wallet.wqs_score !== null && wallet.wqs_score !== undefined ? toNum(wallet.wqs_score).toFixed(2) : '',
             wallet.roi_30d !== null && wallet.roi_30d !== undefined ? safeToFixed(wallet.roi_30d, 2) : '',
             wallet.trade_count_30d?.toString() || '',
-            wallet.win_rate ? (wallet.win_rate * 100).toFixed(2) : '',
+            wallet.win_rate !== null && wallet.win_rate !== undefined ? (toNum(wallet.win_rate) * 100).toFixed(2) : '',
             wallet.max_drawdown_30d !== null && wallet.max_drawdown_30d !== undefined ? safeToFixed(wallet.max_drawdown_30d, 2) : '',
             wallet.ttl_expires_at || '',
           ].join(',')
@@ -509,26 +509,26 @@ export function Wallets() {
                       <div className="flex flex-col">
                         <span
                           className={`text-xs sm:text-sm font-semibold ${
-                            (wallet.wqs_score || 0) >= 70
+                            toNum(wallet.wqs_score) >= 70
                               ? 'text-profit'
-                              : (wallet.wqs_score || 0) >= 40
+                              : toNum(wallet.wqs_score) >= 40
                               ? 'text-spear'
                               : 'text-loss'
                           }`}
                         >
-                          {wallet.wqs_score?.toFixed(1) || '-'}
+                          {wallet.wqs_score !== null && wallet.wqs_score !== undefined ? toNum(wallet.wqs_score).toFixed(1) : '-'}
                         </span>
-                        {wallet.wqs_score !== null && (
+                        {wallet.wqs_score !== null && wallet.wqs_score !== undefined && (
                           <div className="h-1.5 bg-background rounded-full overflow-hidden mt-1 w-full sm:max-w-[60px]">
                             <div
                               className={`h-full ${
-                                wallet.wqs_score >= 70
+                                toNum(wallet.wqs_score) >= 70
                                   ? 'bg-profit'
-                                  : wallet.wqs_score >= 40
+                                  : toNum(wallet.wqs_score) >= 40
                                   ? 'bg-spear'
                                   : 'bg-loss'
                               }`}
-                              style={{ width: `${Math.min(wallet.wqs_score, 100)}%` }}
+                              style={{ width: `${Math.min(toNum(wallet.wqs_score), 100)}%` }}
                             />
                           </div>
                         )}
@@ -548,8 +548,8 @@ export function Wallets() {
                     </TableCell>
                     <TableCell mono className="hidden sm:table-cell">{wallet.trade_count_30d || '-'}</TableCell>
                     <TableCell mono className="hidden lg:table-cell">
-                      {wallet.win_rate !== null
-                        ? `${(wallet.win_rate * 100).toFixed(0)}%`
+                      {wallet.win_rate !== null && wallet.win_rate !== undefined
+                        ? `${(toNum(wallet.win_rate) * 100).toFixed(0)}%`
                         : '-'}
                     </TableCell>
                     <TableCell>
@@ -826,8 +826,8 @@ function WalletDetails({ wallet }: { wallet: Wallet }) {
             <div className="flex justify-between items-center">
               <span className="text-text-muted">Win Rate:</span>
               <span className="font-mono-numbers text-xs sm:text-sm">
-                {wallet.win_rate !== null
-                  ? `${(wallet.win_rate * 100).toFixed(1)}%`
+                {wallet.win_rate !== null && wallet.win_rate !== undefined
+                  ? `${(toNum(wallet.win_rate) * 100).toFixed(1)}%`
                   : '-'}
               </span>
             </div>
@@ -876,27 +876,27 @@ function WalletDetails({ wallet }: { wallet: Wallet }) {
             <div className="flex justify-between items-center">
               <span className="text-text-muted">Score:</span>
               <span className={`font-mono-numbers font-semibold text-xs sm:text-sm ${
-                (wallet.wqs_score || 0) >= 70
+                toNum(wallet.wqs_score) >= 70
                   ? 'text-profit'
-                  : (wallet.wqs_score || 0) >= 40
+                  : toNum(wallet.wqs_score) >= 40
                   ? 'text-spear'
                   : 'text-loss'
               }`}>
-                {wallet.wqs_score?.toFixed(1) || '-'}
+                {wallet.wqs_score !== null && wallet.wqs_score !== undefined ? toNum(wallet.wqs_score).toFixed(1) : '-'}
               </span>
             </div>
-            {wallet.wqs_score !== null && (
+            {wallet.wqs_score !== null && wallet.wqs_score !== undefined && (
               <div className="mt-2">
                 <div className="h-1.5 bg-background rounded-full overflow-hidden w-full sm:max-w-[120px]">
                   <div
                     className={`h-full ${
-                      wallet.wqs_score >= 70
+                      toNum(wallet.wqs_score) >= 70
                         ? 'bg-profit'
-                        : wallet.wqs_score >= 40
+                        : toNum(wallet.wqs_score) >= 40
                         ? 'bg-spear'
                         : 'bg-loss'
                     }`}
-                    style={{ width: `${Math.min(wallet.wqs_score, 100)}%` }}
+                    style={{ width: `${Math.min(toNum(wallet.wqs_score), 100)}%` }}
                   />
                 </div>
               </div>

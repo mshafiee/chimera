@@ -55,20 +55,9 @@ check_env_file() {
     local env_file="${project_root}/docker/env.${profile}"
     
     if [ ! -f "$env_file" ]; then
-        echo "Warning: Environment file not found: $env_file"
-        echo "Creating from template..."
-        case $profile in
-            devnet)
-                cp "${project_root}/docker/env.devnet" "$env_file" 2>/dev/null || true
-                ;;
-            mainnet-paper)
-                cp "${project_root}/docker/env.mainnet-paper" "$env_file" 2>/dev/null || true
-                ;;
-            mainnet-prod)
-                cp "${project_root}/docker/env.mainnet-prod" "$env_file" 2>/dev/null || true
-                ;;
-        esac
-        echo "Please edit $env_file with your configuration before starting services."
+        echo "Error: Environment file not found: $env_file"
+        echo "Copy a checked-in env file (docker/env.devnet, docker/env.mainnet-paper, docker/env.mainnet-prod) to $env_file, edit it, then re-run."
+        exit 1
     fi
 }
 
@@ -114,8 +103,13 @@ case "${1:-help}" in
         compose_cmd "$PROFILE" restart
         ;;
     logs)
-        PROFILE=$(get_profile "${2:-$DEFAULT_PROFILE}")
-        shift 2 2>/dev/null || shift
+        if [[ "${2:-}" == -* ]]; then
+            PROFILE=$DEFAULT_PROFILE
+            shift
+        else
+            PROFILE=$(get_profile "${2:-$DEFAULT_PROFILE}")
+            shift 2 2>/dev/null || shift
+        fi
         compose_cmd "$PROFILE" logs "$@"
         ;;
     status)
@@ -124,6 +118,7 @@ case "${1:-help}" in
         ;;
     build)
         PROFILE=$(get_profile "${2:-$DEFAULT_PROFILE}")
+        shift 2 2>/dev/null || shift
         echo "Building Docker images for profile: $PROFILE"
         compose_cmd "$PROFILE" build "$@"
         ;;
@@ -136,12 +131,12 @@ case "${1:-help}" in
     exec)
         PROFILE=$(get_profile "${2:-$DEFAULT_PROFILE}")
         SERVICE=${3:-operator}
-        shift 3
-        if [ $# -eq 0 ]; then
+        if [ $# -lt 4 ]; then
             echo "Error: Command required"
             echo "Usage: $0 exec <profile> <service> <command>"
             exit 1
         fi
+        shift 3
         compose_cmd "$PROFILE" exec "$SERVICE" "$@"
         ;;
     init-db)
@@ -153,6 +148,10 @@ case "${1:-help}" in
         if [ -f "docker/init-db.sh" ]; then
             bash docker/init-db.sh
         else
+            if ! command -v sqlite3 > /dev/null 2>&1; then
+                echo "✗ Error: sqlite3 not found; cannot initialize database"
+                exit 1
+            fi
             mkdir -p data
             if [ -f "database/schema.sql" ]; then
                 sqlite3 data/chimera.db < database/schema.sql

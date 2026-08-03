@@ -43,13 +43,21 @@ export interface MarketConditionsResponse {
   }
 }
 
+const REGIME_ENDPOINT = '/market/regime'
+const CONDITIONS_ENDPOINT = '/market/conditions'
+
 // Fetch Market Regime
 export function useMarketRegime() {
   return useQuery({
     queryKey: ['market', 'regime'],
     queryFn: async ({ signal }) => {
-      const response = await apiClient.get<MarketRegimeResponse>('/market/regime', { signal })
-      return response.data
+      const response = await apiClient.get<MarketRegimeResponse>(REGIME_ENDPOINT, { signal })
+      const data = response.data ?? ({} as MarketRegimeResponse)
+      return {
+        ...data,
+        regime_history: data.regime_history ?? [],
+        performance_by_regime: data.performance_by_regime ?? [],
+      }
     },
     refetchInterval: 60000,
     staleTime: 30000,
@@ -57,7 +65,6 @@ export function useMarketRegime() {
     meta: {
       onError: (error: unknown) => {
         console.error('[Market API] Failed to fetch market regime:', error)
-        // Market regime is optional - console only
       },
     },
   })
@@ -68,8 +75,12 @@ export function useMarketConditions() {
   return useQuery({
     queryKey: ['market', 'conditions'],
     queryFn: async ({ signal }) => {
-      const response = await apiClient.get<MarketConditionsResponse>('/market/conditions', { signal })
-      return response.data
+      const response = await apiClient.get<MarketConditionsResponse>(CONDITIONS_ENDPOINT, { signal })
+      const data = response.data ?? ({} as MarketConditionsResponse)
+      return {
+        ...data,
+        recommended_allocation: data.recommended_allocation ?? { shield_percent: 0, spear_percent: 0 },
+      }
     },
     refetchInterval: 30000,
     staleTime: 15000,
@@ -77,7 +88,6 @@ export function useMarketConditions() {
     meta: {
       onError: (error: unknown) => {
         console.error('[Market API] Failed to fetch market conditions:', error)
-        // Market conditions are optional - console only
       },
     },
   })

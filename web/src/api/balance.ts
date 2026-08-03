@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
-import { usePositions, usePortfolioRisk } from './'
+import { usePositions } from './positions'
+import { usePortfolioRisk } from './risk'
 
 /**
  * Hook for calculating Balance and Net Asset Value (NAV)
@@ -8,23 +9,24 @@ import { usePositions, usePortfolioRisk } from './'
  * NAV: Balance + Total Unrealized PnL from all active positions
  */
 export function useBalanceAndNAV() {
-  const { data: positionsData } = usePositions('ACTIVE')
-  const { data: portfolioRisk } = usePortfolioRisk()
+  const { data: positionsData, isLoading: positionsLoading, isError: positionsError } = usePositions('ACTIVE')
+  const { data: portfolioRisk, isLoading: riskLoading, isError: riskError } = usePortfolioRisk()
 
   return useMemo(() => {
     // Balance from portfolio risk endpoint — actual wallet balance
     // (config capital + realized PnL − active exposure)
-    const balance = portfolioRisk?.wallet_balance_sol ?? portfolioRisk?.total_capital_sol ?? 0
+    const balance = Number(portfolioRisk?.wallet_balance_sol ?? 0)
 
     // Calculate NAV: Balance + Total Unrealized PnL
-    const totalUnrealizedPnL = positionsData?.total_unrealized_pnl_sol ?? 0
+    const totalUnrealizedPnL = Number(positionsData?.total_unrealized_pnl_sol ?? 0)
     const nav = balance + totalUnrealizedPnL
 
     return {
       balance,
       nav,
       totalUnrealizedPnL,
-      isLoading: !portfolioRisk || !positionsData,
+      isLoading: positionsLoading || riskLoading,
+      isError: positionsError || riskError,
     }
-  }, [portfolioRisk, positionsData])
+  }, [portfolioRisk, positionsData, positionsLoading, riskLoading, positionsError, riskError])
 }

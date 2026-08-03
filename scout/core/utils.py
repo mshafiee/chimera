@@ -54,4 +54,8 @@ def parse_utc_timestamp(ts: str) -> datetime:
     dt = datetime.fromisoformat(ts)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        # Normalize aware inputs to UTC so the returned value always has a
+        # zero UTC offset regardless of the input's offset
+        dt = dt.astimezone(timezone.utc)
     return dt

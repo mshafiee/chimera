@@ -15,6 +15,13 @@ EVAL_DIR=${EVAL_DIR:-/evaluation}
 DB_PATH=${EVAL_DB_PATH:-/evaluation/evaluation.db}
 OUTPUT_DIR=${OUTPUT_DIR:-/evaluation/reports}
 
+# Normalize/validate REPORT_TIME to HH:MM before use
+REPORT_TIME=$(date -d "${REPORT_TIME}" +%H:%M 2>/dev/null || date -j -f "%H:%M" "${REPORT_TIME}" +%H:%M 2>/dev/null || echo "${REPORT_TIME}")
+if [[ ! "${REPORT_TIME}" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+    echo "❌ Invalid REPORT_GENERATION_TIME: ${REPORT_TIME} (expected HH:MM)" >&2
+    exit 1
+fi
+
 echo "Configuration:"
 echo "  Report Generation Time: ${REPORT_TIME}"
 echo "  Evaluation Directory: ${EVAL_DIR}"
@@ -24,6 +31,7 @@ echo ""
 
 # Ensure directories exist
 mkdir -p "${EVAL_DIR}"
+mkdir -p "$(dirname "${DB_PATH}")"
 mkdir -p "${OUTPUT_DIR}"
 
 # Ensure database exists and initialize if needed
@@ -70,7 +78,21 @@ EOF
         echo "✅ Minimal database structure created"
     fi
 else
-    echo "✅ Database exists: ${DB_PATH}"
+    # Validate the existing database actually has the expected tables; an
+    # empty/truncated file would otherwise pass the existence check.
+    EXISTING_TABLES=$(sqlite3 "${DB_PATH}" ".tables" 2>/dev/null || true)
+    if [[ -z "${EXISTING_TABLES}" ]]; then
+        echo "Database exists but has no tables; re-initializing..."
+        if [ -f "/app/evaluation_schema.sql" ]; then
+            sqlite3 "${DB_PATH}" < /app/evaluation_schema.sql
+            echo "✅ Database re-initialized successfully"
+        else
+            echo "❌ Error: Schema file not found at /app/evaluation_schema.sql" >&2
+            exit 1
+        fi
+    else
+        echo "✅ Database exists: ${DB_PATH}"
+    fi
 fi
 
 echo ""
@@ -79,16 +101,20 @@ echo "Waiting for scheduled report generation at ${REPORT_TIME}..."
 echo "Press Ctrl+C to stop"
 
 # Main service loop
+LAST_RUN_DATE=""
 while true; do
     # Get current time
     CURRENT_HOUR=$(date +%H)
     CURRENT_MINUTE=$(date +%M)
     CURRENT_TIME="${CURRENT_HOUR}:${CURRENT_MINUTE}"
+    TODAY=$(date +%Y-%m-%d)
 
     echo "Current time: ${CURRENT_TIME} (next report at: ${REPORT_TIME})"
 
-    # Check if it's time to generate report
-    if [ "${CURRENT_TIME}" = "${REPORT_TIME}" ]; then
+    # Check if it's time to generate report; also catch up if the exact
+    # minute was missed (e.g. after a sleep delay or clock jump)
+    if [ "${CURRENT_TIME}" = "${REPORT_TIME}" ] || { [ "${CURRENT_TIME}" \> "${REPORT_TIME}" ] && [ "${LAST_RUN_DATE}" != "${TODAY}" ]; }; then
+        LAST_RUN_DATE=${TODAY}
         echo ""
         echo "==================================="
         echo "Starting Daily Report Generation"
@@ -105,13 +131,15 @@ while true; do
             # Verify output file was created
             LATEST_REPORT=$(ls -t "${OUTPUT_DIR}"/daily-report-*.html 2>/dev/null | head -1)
             if [ -n "${LATEST_REPORT}" ]; then
-                FILE_SIZE=$(stat -f%z "${LATEST_REPORT}" 2>/dev/null || stat -c%s "${LATEST_REPORT}" 2>/dev/null)
+                FILE_SIZE=$(stat -f%z "${LATEST_REPORT}" 2>/dev/null || stat -c%s "${LATEST_REPORT}" 2>/dev/null || wc -c < "${LATEST_REPORT}" 2>/dev/null || true)
                 echo "   Report file: ${LATEST_REPORT}"
                 echo "   Size: ${FILE_SIZE} bytes"
             fi
         else
             echo "❌ Report generation failed"
-            echo "   Check logs above for error details"
+            echo "   Retrying in 5 minutes..."
+            sleep 300
+            continue
         fi
 
         echo "Report generation complete."
@@ -129,7 +157,8 @@ while true; do
         fi
 
         echo "Sleeping for ${SLEEP_SECONDS} seconds until next report..."
-        echo "Next report time: $(date -d "+${SLEEP_SECONDS} seconds" -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -v+${SLEEP_SECONDS}S -u +"%Y-%m-%dT%H:%M:%SZ")"
+        NEXT_EPOCH=$(( $(date +%s) + SLEEP_SECONDS ))
+        echo "Next report time: $(date -u -d "@${NEXT_EPOCH}" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -r "${NEXT_EPOCH}" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "unknown")"
         sleep "${SLEEP_SECONDS}"
     else
         # Sleep for 1 minute and check again

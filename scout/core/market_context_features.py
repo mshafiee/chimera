@@ -54,9 +54,7 @@ class MarketContextFeatures:
 
     def __init__(self):
         """Initialize the market context feature extractor."""
-        self.dex_preferences = defaultdict(int)
-        self.time_preferences = defaultdict(int)
-        self.day_preferences = defaultdict(int)
+        pass
 
     def extract_features(
         self,
@@ -78,32 +76,42 @@ class MarketContextFeatures:
 
         features = {}
 
-        try:
-            # Beta calculation
-            if sol_price_history:
+        # Each extractor is isolated so one failure never discards the
+        # partial results of the others (beta and time already guard
+        # internally).
+        if sol_price_history:
+            try:
                 features.update(self._calculate_beta_features(trades, sol_price_history))
+            except Exception as e:
+                logger.warning(f"Beta feature extraction failed: {e}")
 
-            # Market cap tier preference
+        try:
             features.update(self._extract_market_cap_features(trades))
-
-            # DEX preference
-            features.update(self._extract_dex_features(trades))
-
-            # Time patterns
-            features.update(self._extract_time_features(trades))
-
-            # Volume profile
-            features.update(self._extract_volume_features(trades))
-
-            # Market regime behavior
-            features.update(self._extract_regime_features(trades))
-
-            features['extraction_success'] = True
-            features['trade_count'] = len(trades)
-
         except Exception as e:
-            logger.error(f"Market context feature extraction failed: {e}")
-            return self._empty_features()
+            logger.warning(f"Market cap feature extraction failed: {e}")
+
+        try:
+            features.update(self._extract_dex_features(trades))
+        except Exception as e:
+            logger.warning(f"DEX feature extraction failed: {e}")
+
+        try:
+            features.update(self._extract_time_features(trades))
+        except Exception as e:
+            logger.warning(f"Time feature extraction failed: {e}")
+
+        try:
+            features.update(self._extract_volume_features(trades))
+        except Exception as e:
+            logger.warning(f"Volume feature extraction failed: {e}")
+
+        try:
+            features.update(self._extract_regime_features(trades))
+        except Exception as e:
+            logger.warning(f"Regime feature extraction failed: {e}")
+
+        features['extraction_success'] = True
+        features['trade_count'] = len(trades)
 
         return features
 
@@ -157,12 +165,13 @@ class MarketContextFeatures:
 
                 if closest_time and i > 0:
                     prev_trade = sorted_trades[i - 1]
-                    _pts = prev_trade.get('timestamp')
-                    _pts if isinstance(_pts, datetime) else datetime.fromisoformat(str(_pts or trade_time.isoformat()))
 
-                    # Get SOL return
+                    # Get SOL return (nearest price at or before one hour ago —
+                    # an exact shifted-key lookup would almost always miss)
                     sol_price_now = sol_prices.get(closest_time, 0)
-                    sol_price_prev = sol_prices.get(closest_time - timedelta(hours=1), sol_price_now)
+                    target = closest_time - timedelta(hours=1)
+                    prior_candidates = [t for t in sol_prices if t <= target]
+                    sol_price_prev = sol_prices[max(prior_candidates)] if prior_candidates else sol_price_now
 
                     if sol_price_prev > 0:
                         sol_return = (sol_price_now - sol_price_prev) / sol_price_prev
@@ -226,7 +235,7 @@ class MarketContextFeatures:
                 tier_counts[tier] += 1
                 tier_pnl[tier] += trade.get('pnl_sol', trade.get('pnl', 0.0))
 
-        total_trades = len(tier_counts)
+        total_trades = len(trades)
         if total_trades == 0:
             return features
 
@@ -267,7 +276,7 @@ class MarketContextFeatures:
         dex_pnl = defaultdict(float)
 
         for trade in trades:
-            dex_program = trade.get('dex_program', '')
+            dex_program = trade.get('dex_program') or ''
 
             # Map program ID to DEX name
             dex_name = None

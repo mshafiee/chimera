@@ -6,12 +6,13 @@ use axum::{extract::State, Json};
 use chrono::{Duration, Utc};
 use serde::Serialize;
 use std::sync::Arc;
-use sysinfo::{Networks, System};
+use sysinfo::{Disks, Networks, System};
 
 use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerState};
 use crate::db_abstraction::{ConfigAuditItem, Database};
 use crate::engine::EngineHandle;
 use crate::error::AppError;
+use crate::monitoring::rate_limiter::RateLimiter;
 
 // =============================================================================
 // RESOURCE USAGE
@@ -71,6 +72,8 @@ pub struct OperationsState {
     pub engine: Option<Arc<EngineHandle>>,
     pub circuit_breaker: Arc<CircuitBreaker>,
     pub price_cache: Arc<crate::price_cache::PriceCache>,
+    pub webhook_rate_limiter: Option<Arc<RateLimiter>>,
+    pub rpc_rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 /// Get system resource usage
@@ -79,12 +82,17 @@ pub struct OperationsState {
 pub async fn get_resources(
     State(_state): State<Arc<OperationsState>>,
 ) -> Result<Json<ResourceUsageResponse>, AppError> {
-    let mut sys = System::new_all();
-    sys.refresh_all();
-
-    // Get network data
-    let mut networks = Networks::new_with_refreshed_list();
-    networks.refresh(false); // don't remove not listed interfaces
+    // sysinfo reads /proc and /sys — run it on a blocking thread so the async
+    // handler never stalls the Tokio runtime.
+    let (sys, networks, disks) = tokio::task::spawn_blocking(|| {
+        let mut sys = System::new_all();
+        sys.refresh_all();
+        let networks = Networks::new_with_refreshed_list();
+        let disks = Disks::new_with_refreshed_list();
+        (sys, networks, disks)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("Failed to collect system metrics: {}", e)))?;
 
     // CPU metrics
     let cpu_usage = sys.global_cpu_usage();
@@ -115,9 +123,9 @@ pub async fn get_resources(
         MetricStatus::Critical
     };
 
-    // Disk metrics (using total and available memory as proxy for disk)
-    let total_disk = sys.total_memory();
-    let available_disk = sys.available_memory();
+    // Disk metrics from real filesystem usage
+    let total_disk: u64 = disks.iter().map(|d| d.total_space()).sum();
+    let available_disk: u64 = disks.iter().map(|d| d.available_space()).sum();
     let used_disk = total_disk.saturating_sub(available_disk);
     let disk_percentage = if total_disk > 0 {
         (used_disk as f64 / total_disk as f64) * 100.0
@@ -132,20 +140,27 @@ pub async fn get_resources(
         MetricStatus::Critical
     };
 
-    // Network metrics from sysinfo
+    // Network metrics from sysinfo (excluding loopback interfaces)
     let mut bytes_sent = 0;
     let mut bytes_received = 0;
     let mut packets_sent = 0;
     let mut packets_received = 0;
+    let mut errors_received = 0;
+    let mut errors_transmitted = 0;
 
-    for (_interface_name, data) in &networks {
+    for (interface_name, data) in &networks {
+        if interface_name.starts_with("lo") {
+            continue; // Exclude loopback from external traffic totals
+        }
         bytes_sent += data.total_transmitted();
         bytes_received += data.total_received();
         packets_sent += data.total_packets_transmitted();
         packets_received += data.total_packets_received();
+        errors_received += data.total_errors_on_received();
+        errors_transmitted += data.total_errors_on_transmitted();
     }
 
-    let error_rate = 0.0; // Network error rate would need more detailed monitoring
+    let error_rate = (errors_received + errors_transmitted) as f64;
 
     // Get degradation status from the monitoring system
     let memory_pressure_active = crate::engine::is_memory_pressure_high();
@@ -257,24 +272,27 @@ pub async fn get_secrets(
     let last_rotation = rotation_events.first();
     let last_rotation_at = last_rotation.map(|e| e.timestamp.clone());
 
-    // Calculate next rotation (90 days from last rotation)
-    let next_rotation_at = last_rotation_at.as_ref().map(|timestamp| {
-        let last_dt = timestamp
-            .parse::<chrono::DateTime<Utc>>()
-            .unwrap_or_else(|_| Utc::now());
-        let next_dt = last_dt + Duration::days(90);
-        next_dt.to_rfc3339()
-    });
-
-    // Calculate days until due
-    let days_until_due = next_rotation_at.as_ref().map(|next| {
-        let next_dt = next
-            .parse::<chrono::DateTime<Utc>>()
-            .unwrap_or_else(|_| Utc::now() + Duration::days(90));
-        let now = Utc::now();
-        let duration = next_dt.signed_duration_since(now);
-        duration.num_days()
-    });
+    // Calculate next rotation (90 days from last rotation).
+    // A corrupt timestamp must surface as Unknown rather than being silently
+    // replaced with "now" (which would look like a healthy rotation schedule).
+    let mut next_rotation_at = None;
+    let mut days_until_due = None;
+    if let Some(timestamp) = &last_rotation_at {
+        match timestamp.parse::<chrono::DateTime<Utc>>() {
+            Ok(last_dt) => {
+                let next_dt = last_dt + Duration::days(90);
+                next_rotation_at = Some(next_dt.to_rfc3339());
+                days_until_due = Some(next_dt.signed_duration_since(Utc::now()).num_days());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    timestamp = %timestamp,
+                    "Invalid last rotation timestamp in audit data, reporting Unknown status"
+                );
+            }
+        }
+    }
 
     // Determine status based on days until due and rotation history
     let is_initialized = last_rotation_at.is_some();
@@ -301,15 +319,13 @@ pub async fn get_secrets(
 
 /// Get rotation history from config audit table
 async fn get_rotation_history(db: &Arc<dyn Database>) -> Result<Vec<RotationEvent>, AppError> {
-    let items: Vec<ConfigAuditItem> = db.get_config_audit_entries(10, 0).await?;
+    // Filter by key prefix at the query level so rotation events are never
+    // dropped by unrelated audit entries pushing them out of a small window.
+    let items: Vec<ConfigAuditItem> = db
+        .get_config_audit_entries_by_key_prefix("secret_rotation", 100)
+        .await?;
 
-    // Filter to only secret_rotation entries
-    let rotation_items: Vec<ConfigAuditItem> = items
-        .into_iter()
-        .filter(|item| item.key.starts_with("secret_rotation"))
-        .collect();
-
-    let events: Vec<RotationEvent> = rotation_items
+    let events: Vec<RotationEvent> = items
         .into_iter()
         .map(|item| {
             let status = if item.new_value.contains("success") {
@@ -320,12 +336,39 @@ async fn get_rotation_history(db: &Arc<dyn Database>) -> Result<Vec<RotationEven
                 EventStatus::Partial
             };
 
+            // Parse structured rotation metrics out of new_value when present.
+            // Values are serialized as e.g. "status=success;duration_seconds=12;keys_rotated=3;failed_keys=1"
+            let mut duration_seconds = None;
+            let mut keys_rotated = 1;
+            let mut failed_keys = 0;
+            for field in item.new_value.split(';') {
+                let mut parts = field.splitn(2, '=');
+                if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+                    match key.trim() {
+                        "duration_seconds" => {
+                            duration_seconds = value.trim().parse::<i64>().ok();
+                        }
+                        "keys_rotated" => {
+                            if let Ok(v) = value.trim().parse::<i64>() {
+                                keys_rotated = v;
+                            }
+                        }
+                        "failed_keys" => {
+                            if let Ok(v) = value.trim().parse::<i64>() {
+                                failed_keys = v;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
             RotationEvent {
                 timestamp: item.changed_at,
                 status,
-                duration_seconds: None, // Parse from item.new_value if needed
-                keys_rotated: 1,        // Default value - should be parsed from audit data
-                failed_keys: 0,         // Default value - should be parsed from audit data
+                duration_seconds,
+                keys_rotated,
+                failed_keys,
             }
         })
         .collect();
@@ -379,55 +422,22 @@ pub enum EndpointStatus {
 ///
 /// GET /api/v1/operations/rate-limit
 pub async fn get_rate_limit_status(
-    State(_state): State<Arc<OperationsState>>,
+    State(state): State<Arc<OperationsState>>,
 ) -> Result<Json<RateLimitStatusResponse>, AppError> {
-    // Define endpoints with their rate limits (from configuration)
-    let endpoints_config = vec![
-        ("/api/v1/webhook", 100), // 100 req/s
-        ("/api/v1/trades", 50),   // 50 req/s
-        ("/api/v1/positions", 50),
-        ("/api/v1/wallets", 30),
-        ("/api/v1/config", 10),
-        ("/api/v1/metrics", 50),
-    ];
-
     let now = Utc::now();
     let reset_at = now + Duration::seconds(60);
     let reset_at_str = reset_at.to_rfc3339();
 
-    // For each endpoint, calculate current utilization
-    // In a real implementation, this would query Prometheus metrics or rate limiter state
-    let endpoints: Vec<RateLimitEndpoint> = endpoints_config
-        .into_iter()
-        .map(|(endpoint, limit)| {
-            let current_rate = (limit as f64 * 0.3) as u64; // Simulate 30% utilization
-            let remaining = (limit as i64).saturating_sub(current_rate as i64) as u64;
-            let utilization_percent = if limit > 0 {
-                (current_rate as f64 / limit as f64) * 100.0
-            } else {
-                0.0
-            };
-
-            let status = if utilization_percent < 70.0 {
-                EndpointStatus::Ok
-            } else if utilization_percent < 90.0 {
-                EndpointStatus::Warning
-            } else {
-                EndpointStatus::Throttled
-            };
-
-            RateLimitEndpoint {
-                endpoint: endpoint.to_string(),
-                current_rate,
-                limit,
-                window_seconds: 1, // 1 second window
-                remaining,
-                reset_at: reset_at_str.clone(),
-                utilization_percent,
-                status,
-            }
-        })
-        .collect();
+    // Report genuine limiter state for the rate limiters we can measure.
+    // Endpoints without an attached limiter are intentionally omitted rather
+    // than reported with fabricated utilization.
+    let mut endpoints: Vec<RateLimitEndpoint> = Vec::new();
+    if let Some(limiter) = &state.webhook_rate_limiter {
+        endpoints.push(build_rate_limit_endpoint("/api/v1/webhook", limiter, &reset_at_str));
+    }
+    if let Some(limiter) = &state.rpc_rate_limiter {
+        endpoints.push(build_rate_limit_endpoint("/api/v1/rpc", limiter, &reset_at_str));
+    }
 
     // Determine overall status
     let overall_status = if endpoints
@@ -450,6 +460,42 @@ pub async fn get_rate_limit_status(
     };
 
     Ok(Json(response))
+}
+
+/// Build an endpoint status entry from real rate limiter state
+fn build_rate_limit_endpoint(
+    endpoint: &str,
+    limiter: &Arc<RateLimiter>,
+    reset_at: &str,
+) -> RateLimitEndpoint {
+    let metrics = limiter.get_metrics();
+    let current_rate = metrics.current_credits as u64;
+    let limit = metrics.max_credits as u64;
+    let remaining = limit.saturating_sub(current_rate);
+    let utilization_percent = if limit > 0 {
+        (current_rate as f64 / limit as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let status = if utilization_percent < 70.0 {
+        EndpointStatus::Ok
+    } else if utilization_percent < 90.0 {
+        EndpointStatus::Warning
+    } else {
+        EndpointStatus::Throttled
+    };
+
+    RateLimitEndpoint {
+        endpoint: endpoint.to_string(),
+        current_rate,
+        limit,
+        window_seconds: 1, // 1 second window (matches RateLimiter construction)
+        remaining,
+        reset_at: reset_at.to_string(),
+        utilization_percent,
+        status,
+    }
 }
 
 // =============================================================================

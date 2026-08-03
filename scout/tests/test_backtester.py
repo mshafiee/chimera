@@ -2,9 +2,9 @@
 
 from datetime import datetime, timedelta
 from decimal import Decimal as _D
-from scout.core.backtester import BacktestSimulator, BacktestConfig
-from scout.core.liquidity import LiquidityProvider, LiquidityData
-from scout.core.models import HistoricalTrade, TradeAction
+from core.backtester import BacktestSimulator, BacktestConfig
+from core.liquidity import LiquidityProvider, LiquidityData
+from core.models import HistoricalTrade, TradeAction
 
 
 class MockLiquidityProvider(LiquidityProvider):
@@ -55,6 +55,10 @@ class MockLiquidityProvider(LiquidityProvider):
     
     def get_sol_price_usd(self) -> float:
         """Return mock SOL price."""
+        return self.sol_price_usd
+
+    def get_sol_price_usd_sync(self) -> float:
+        """The simulator reads the sync wrapper; return the same mock price."""
         return self.sol_price_usd
 
 
@@ -224,6 +228,7 @@ def test_historical_liquidity_validation():
     config = BacktestConfig(
         min_liquidity_shield_usd=10000.0,
         min_liquidity_spear_usd=5000.0,
+        enforce_current_liquidity=False,  # keep the test offline; historical gate is under test
     )
     simulator = BacktestSimulator(mock_liquidity, config)
     
@@ -264,14 +269,35 @@ def test_historical_liquidity_validation():
         sol_price=150.0,
     )
     
-    # Trade with sufficient historical liquidity should pass (even if current liquidity is low)
-    # Note: The simulator checks current liquidity, but we can verify it uses historical data if available
-    # In this case, token1 had high liquidity historically, so it should pass
-    
+    # Trade with sufficient historical liquidity should pass
+    assert not sim_trade1.rejected, "Trade with sufficient historical liquidity should pass"
+    assert sim_trade1.liquidity_sufficient
+
     # Trade without sufficient historical liquidity should be rejected
     assert sim_trade2.rejected, "Trade with insufficient historical liquidity should be rejected"
     assert "liquidity" in rejection2.lower() or "Insufficient" in rejection2, \
         "Rejection should mention liquidity"
+
+    # A trade WITHOUT liquidity_at_trade_usd must consult the provider's
+    # historical map (exercising the lookup path, not the attached field)
+    trade_via_map = HistoricalTrade(
+        token_address="token1",
+        token_symbol="TOKEN1",
+        action=TradeAction.BUY,
+        amount_sol=0.5,
+        price_at_trade=0.001,
+        timestamp=datetime.utcnow() - timedelta(days=30),
+        tx_signature="tx3",
+        liquidity_at_trade_usd=None,  # forces the historical lookup
+    )
+    sim_trade_map, _ = simulator._simulate_trade(
+        trade_via_map,
+        min_liquidity=config.min_liquidity_shield_usd,
+        sol_price=150.0,
+    )
+    # token1 had $20k historical liquidity 30 days ago (per historical_liquidity_map)
+    assert not sim_trade_map.rejected, "Historical map lookup should provide sufficient liquidity"
+    assert sim_trade_map.liquidity_sufficient
     
     # Test full wallet simulation with historical trades
     trades = [trade_with_historical_liq, trade_without_historical_liq]
@@ -394,18 +420,30 @@ def test_backtester_second_sell_on_zero_position_returns_zero_pnl():
 
     now = datetime.utcnow()
     trades = [
-        _make_buy_trade("token_double_sell", "DS", 1.0, 1.0, now - timedelta(hours=3), "buy1"),
-        _make_sell_trade("token_double_sell", "DS", 1.0, 1.5, now - timedelta(hours=2), "sell1", pnl_sol=0.5),
-        _make_sell_trade("token_double_sell", "DS", 1.0, 1.5, now - timedelta(hours=1), "sell2", pnl_sol=0.3),
+        HistoricalTrade(token_address="token_double_sell", token_symbol="DS", action=TradeAction.BUY,
+                        amount_sol=1.0, price_at_trade=1.0, timestamp=now - timedelta(hours=3),
+                        tx_signature="buy1", token_amount=_D("1.0"), price_sol=_D("1.0")),
+        HistoricalTrade(token_address="token_double_sell", token_symbol="DS", action=TradeAction.SELL,
+                        amount_sol=1.0, price_at_trade=1.5, timestamp=now - timedelta(hours=2),
+                        tx_signature="sell1", pnl_sol=_D("0.5"),
+                        token_amount=_D("1.0"), price_sol=_D("1.5")),
+        HistoricalTrade(token_address="token_double_sell", token_symbol="DS", action=TradeAction.SELL,
+                        amount_sol=1.0, price_at_trade=1.5, timestamp=now - timedelta(hours=1),
+                        tx_signature="sell2", pnl_sol=_D("0.3"),
+                        token_amount=_D("1.0"), price_sol=_D("1.5")),
     ]
 
     result = simulator.simulate_wallet("wallet_double_sell", trades, strategy="SHIELD")
 
-    # The second SELL should be zero PnL (no position remaining)
-    assert result.simulated_pnl_sol >= 0, (
-        f"Double-sell must not produce negative aggregate simulated PnL: {result.simulated_pnl_sol}"
-    )
     assert result.total_trades == 3, "All 3 trades should be processed"
+    # The second SELL has no remaining position: it must yield zero per-trade PnL
+    sell_trades = [st for st in result.trades
+                   if st.original_trade.tx_signature == "sell2"]
+    assert sell_trades, "The second SELL must appear in the simulated trades"
+    second_sell = sell_trades[0]
+    assert second_sell.simulated_pnl_sol == 0, (
+        f"Phantom sell must return zero PnL, got {second_sell.simulated_pnl_sol}"
+    )
 
 
 def test_backtester_mooned_token_inflates_backtest_when_no_historical_liquidity():
@@ -445,6 +483,8 @@ def test_backtester_mooned_token_inflates_backtest_when_no_historical_liquidity(
         tx_signature="buy_moon",
         liquidity_at_trade_usd=None,  # No historical liquidity attached
         pnl_sol=None,
+        token_amount=_D("0.01"),
+        price_sol=_D("0.0001"),
     )
     sell = HistoricalTrade(
         token_address="token_mooned",
@@ -456,23 +496,19 @@ def test_backtester_mooned_token_inflates_backtest_when_no_historical_liquidity(
         tx_signature="sell_moon",
         liquidity_at_trade_usd=None,
         pnl_sol=50.0,  # Huge profit from moon
+        token_amount=_D("0.01"),  # 1 SOL at $100/token -> 0.01 tokens
+        price_sol=_D("100.0"),
     )
 
     result = simulator.simulate_wallet("wallet_moon", [trade, sell], strategy="SHIELD")
 
-    # DOCUMENTS THE SURVIVORSHIP BIAS BUG:
-    # The backtester likely passes this (using current $5M as historical proxy).
-    # The correct behavior would be to reject (historical was $500 < $5k threshold)
-    # or to flag it as low_confidence.
-    #
-    # This test documents the current behavior rather than asserting the "fixed" behavior.
-    if result.passed:
-        # Bug confirmed: mooned-token liquidity inflated the backtest result
-        assert result.simulated_pnl_sol >= 0, "Simulated PnL should be non-negative when trade passes"
-        # At minimum, no assertion error should fire — the bug is documented by the test passing
-    else:
-        # Correct behavior: trade was rejected due to insufficient historical liquidity
-        assert "liquidity" in (result.failure_reason or "").lower() or result.rejected_trades > 0
+    # The mooned-token scenario must NOT inflate the backtest into a pass:
+    # with no historical liquidity the trade is rejected (or the wallet fails),
+    # so the wallet must not be reported as profitable.
+    assert not result.passed, (
+        "Mooned-token wallet must not pass the backtest (survivorship bias guard)"
+    )
+    assert result.failure_reason is not None
 
 
 def test_backtester_slippage_underestimate_large_trade_small_pool():
@@ -488,7 +524,7 @@ def test_backtester_slippage_underestimate_large_trade_small_pool():
         min_trades_required=1,
         min_liquidity_shield_usd=5_000.0,
         min_liquidity_spear_usd=2_500.0,
-        max_slippage_percent=1.0,  # Very tight: will reject if model is accurate
+        max_slippage_percent=0.05,  # 5% realistic threshold
     )
     mock_liquidity = MockLiquidityProvider(
         liquidity_map={"token_small_pool": 6_000.0},
@@ -513,20 +549,13 @@ def test_backtester_slippage_underestimate_large_trade_small_pool():
         sol_price=150.0,
     )
 
-    if not sim_trade.rejected:
-        # Document estimated slippage vs real expected range
-        estimated_pct = float(sim_trade.estimated_slippage_percent)
-        # Square-root model: sqrt(trade_usd / pool_usd) = sqrt(1500/6000) = sqrt(0.25) = 0.5 = 50%
-        # But the model may be capped or use a different formula
-        assert estimated_pct >= 0.0, f"Slippage must be non-negative: {estimated_pct}"
-        # Document: if estimated < 5%, model significantly underestimates real slippage
-        # for this trade size / pool size ratio (25% impact on pool depth)
-        if estimated_pct < 5.0:
-            # This assertion passes and documents the known underestimate
-            pass  # Known underestimate documented — adjust model if improving slippage accuracy
-    else:
-        # Trade correctly rejected (slippage too high or liquidity too low)
-        assert "slippage" in (rejection or "").lower() or "liquidity" in (rejection or "").lower()
+    # A 10 SOL ($1500) trade against a $6k pool has ~25-33% pool impact, far
+    # above the 5% cap, so the trade must be rejected for excessive slippage.
+    assert sim_trade.rejected, (
+        f"Trade must be rejected for excessive slippage. "
+        f"Estimated: {float(sim_trade.estimated_slippage_percent) * 100:.1f}%"
+    )
+    assert "slippage" in (rejection or "").lower(), f"Rejection must mention slippage: {rejection}"
 
 
 # ─── P5: Prove backtester computes positive PnL for known profitable trades ───
@@ -560,7 +589,7 @@ def test_backtester_simulated_pnl_positive_for_known_profitable_trades():
             price_at_trade=Decimal("100.0"),
             timestamp=base_time + timedelta(days=2 * k),
             tx_signature=f"buy_profit_{k}",
-            token_amount=Decimal("1000"),
+            token_amount=_ROUND_TRIP_TOKEN_QTY,
         ))
         trades.append(HistoricalTrade(
             token_address=token,
@@ -570,7 +599,7 @@ def test_backtester_simulated_pnl_positive_for_known_profitable_trades():
             price_at_trade=Decimal("130.0"),
             timestamp=base_time + timedelta(days=2 * k, hours=4),
             tx_signature=f"sell_profit_{k}",
-            token_amount=Decimal("1000"),
+            token_amount=_ROUND_TRIP_TOKEN_QTY,
             pnl_sol=Decimal("0.59"),
         ))
 
@@ -622,7 +651,7 @@ def test_backtester_simulated_pnl_negative_for_known_losing_trades():
             price_at_trade=Decimal("100.0"),
             timestamp=base_time + timedelta(days=2 * k),
             tx_signature=f"buy_loss_{k}",
-            token_amount=Decimal("1000"),
+            token_amount=_ROUND_TRIP_TOKEN_QTY,
         ))
         trades.append(HistoricalTrade(
             token_address=token,
@@ -632,7 +661,7 @@ def test_backtester_simulated_pnl_negative_for_known_losing_trades():
             price_at_trade=Decimal("75.0"),
             timestamp=base_time + timedelta(days=2 * k, hours=4),
             tx_signature=f"sell_loss_{k}",
-            token_amount=Decimal("1000"),
+            token_amount=_ROUND_TRIP_TOKEN_QTY,
             pnl_sol=Decimal("-0.51"),
         ))
 

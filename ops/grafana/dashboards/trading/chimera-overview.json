@@ -29,14 +29,14 @@
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            {"type": "value", "options": {"0": {"text": "TRIPPED", "color": "red"}}, "value": "0"},
-            {"type": "value", "options": {"1": {"text": "ACTIVE", "color": "green"}}, "value": "1"}
+            {"type": "value", "options": {"0": {"text": "TRIPPED", "color": "red"}, "1": {"text": "COOLDOWN", "color": "yellow"}, "2": {"text": "ACTIVE", "color": "green"}}}
           ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {"value": null, "color": "red"},
-              {"value": 1, "color": "green"}
+              {"value": 1, "color": "yellow"},
+              {"value": 2, "color": "green"}
             ]
           }
         }
@@ -117,8 +117,7 @@
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            {"type": "value", "options": {"0": {"text": "UNHEALTHY", "color": "red"}}, "value": "0"},
-            {"type": "value", "options": {"1": {"text": "HEALTHY", "color": "green"}}, "value": "1"}
+            {"type": "value", "options": {"0": {"text": "UNHEALTHY", "color": "red"}, "1": {"text": "HEALTHY", "color": "green"}}}
           ]
         }
       }
@@ -252,34 +251,6 @@
         "defaults": {
           "unit": "short"
         }
-      },
-      "alert": {
-        "conditions": [
-          {
-            "evaluator": {
-              "params": [800],
-              "type": "gt"
-            },
-            "operator": {
-              "type": "and"
-            },
-            "query": {
-              "params": ["A", "5m", "now"]
-            },
-            "reducer": {
-              "params": [],
-              "type": "last"
-            },
-            "type": "query"
-          }
-        ],
-        "executionErrorState": "alerting",
-        "for": "5m",
-        "frequency": "10s",
-        "handler": 1,
-        "name": "Queue Backpressure",
-        "noDataState": "no_data",
-        "notifications": []
       }
     },
     {
@@ -305,9 +276,7 @@
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            {"type": "value", "options": {"0": {"text": "TRIPPED", "color": "red"}}, "value": "0"},
-            {"type": "value", "options": {"1": {"text": "COOLDOWN", "color": "yellow"}}, "value": "1"},
-            {"type": "value", "options": {"2": {"text": "ACTIVE", "color": "green"}}, "value": "2"}
+            {"type": "value", "options": {"0": {"text": "TRIPPED", "color": "red"}, "1": {"text": "COOLDOWN", "color": "yellow"}, "2": {"text": "ACTIVE", "color": "green"}}}
           ],
           "thresholds": {
             "mode": "absolute",

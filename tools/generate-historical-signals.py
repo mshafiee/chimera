@@ -6,13 +6,13 @@ Creates realistic trading patterns for Solana copy trading platform.
 
 import json
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Configuration
 DAYS = 10
 SIGNALS_PER_DAY = 150  # ~15 signals per hour over 10 hours
-START_DATE = datetime.now() - timedelta(days=DAYS)
+START_DATE = datetime.now(timezone.utc) - timedelta(days=DAYS)
 
 # Realistic Solana token addresses (well-known tokens)
 KNOWN_TOKENS = [
@@ -79,8 +79,9 @@ def generate_realistic_signals():
                     k=1
                 )[0]
 
+                # timestamp is tz-aware UTC; isoformat() already appends +00:00
                 signal = {
-                    "timestamp": timestamp.isoformat() + "Z",
+                    "timestamp": timestamp.isoformat().replace("+00:00", "Z"),
                     "wallet_address": random.choice(WALLET_ADDRESSES),
                     "token_address": token_address,
                     "action": action,
@@ -102,7 +103,7 @@ def generate_realistic_signals():
 
 def validate_signals(signals):
     """Validate signal format and content."""
-    required_fields = ["timestamp", "wallet_address", "token_address", "action", "amount_sol", "strategy"]
+    required_fields = ["timestamp", "wallet_address", "token_address", "action", "amount_sol", "strategy", "price_usd"]
 
     for i, signal in enumerate(signals):
         # Check required fields
@@ -126,6 +127,18 @@ def validate_signals(signals):
 
         if signal["strategy"] not in STRATEGIES:
             print(f"❌ Signal {i}: Invalid strategy '{signal['strategy']}'")
+            return False
+
+        if not isinstance(signal["price_usd"], (int, float)):
+            print(f"❌ Signal {i}: Invalid price_usd type")
+            return False
+
+        if not isinstance(signal["wallet_address"], str) or not signal["wallet_address"]:
+            print(f"❌ Signal {i}: Invalid wallet_address")
+            return False
+
+        if not isinstance(signal["token_address"], str) or not signal["token_address"]:
+            print(f"❌ Signal {i}: Invalid token_address")
             return False
 
     print(f"✅ All {len(signals)} signals validated successfully")

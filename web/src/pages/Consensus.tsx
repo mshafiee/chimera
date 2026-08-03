@@ -1,7 +1,7 @@
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card'
 import { Badge } from '../components/ui/Badge'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
-import { useConsensus, useWalletClustering, useSignalAggregation } from '../api'
+import { useConsensus, useWalletClustering, useConsensusSignalAggregation } from '../api'
 import { ConsensusOverview } from '../components/consensus/ConsensusOverview'
 import { WalletClustersVisualization } from '../components/consensus/WalletClustersVisualization'
 import { SignalAggregationView } from '../components/consensus/SignalAggregationView'
@@ -10,7 +10,7 @@ import { safeToFixed } from '../lib/format'
 export function Consensus() {
   const { data: consensusData, isLoading: consensusLoading } = useConsensus()
   const { data: clusteringData, isLoading: clusteringLoading } = useWalletClustering()
-  const { data: aggregationData, isLoading: aggregationLoading } = useSignalAggregation()
+  const { data: aggregationData, isLoading: aggregationLoading } = useConsensusSignalAggregation()
 
   return (
     <div className="space-y-6">

@@ -6,13 +6,11 @@ from ACTIVE promotion.
 """
 
 import pytest
-from decimal import Decimal
-from datetime import datetime
 
 from core.helius_client import HeliusClient
 from core.analyzer import WalletAnalyzer
 from core.wqs import WalletMetrics
-from core.validator import PrePromotionValidator, ValidationStatus
+from core.validator import PrePromotionValidator, PromotionCriteria, ValidationStatus
 
 
 class TestKnownBotRouters:
@@ -28,148 +26,45 @@ class TestKnownBotRouters:
 
     def test_known_bot_routers_addresses_valid(self):
         """Test that any addresses in KNOWN_BOT_ROUTERS are valid."""
-        KNOWN_BOT_ROUTERS = HeliusClient.KNOWN_BOT_ROUTERS
-        for address in KNOWN_BOT_ROUTERS:
+        for address in HeliusClient.KNOWN_BOT_ROUTERS:
             # Should be valid Solana addresses (44 chars, base58-like)
             assert len(address) == 44 or len(address) == 43
             assert address.isalnum()
 
 
 @pytest.mark.asyncio
-class TestBotSwapRatioTracking:
-    """Test bot swap ratio tracking in analyzer."""
-
-    async def test_bot_swap_detection(self, analyzer):
-        """Test detection of bot-routed swaps."""
-        # Create a swap with bot router
-        swap_with_bot = {
-            "type": "SWAP",
-            "tokenIn": "SOL",
-            "tokenOut": "TOKEN",
-            "tokenAmountIn": Decimal('100'),
-            "tokenAmountOut": Decimal('1000'),
-            "from": "wallet1",
-            "to": list(KNOWN_BOT_ROUTERS)[0] if KNOWN_BOT_ROUTERS else "bot_router",
-            "timestamp": datetime.now(),
-            "signature": "sig1",
-            "tokenAddress": "TOKEN"
-        }
-        
-        # Create a normal swap
-        swap_normal = {
-            "type": "SWAP",
-            "tokenIn": "SOL",
-            "tokenOut": "TOKEN",
-            "tokenAmountIn": Decimal('100'),
-            "tokenAmountOut": Decimal('1000'),
-            "from": "wallet1",
-            "to": "normal_router",
-            "timestamp": datetime.now(),
-            "signature": "sig2",
-            "tokenAddress": "TOKEN"
-        }
-        
-        # Count bot swaps
-        bot_swaps = 0
-        total_swaps = 2
-        
-        if KNOWN_BOT_ROUTERS:
-            for swap in [swap_with_bot, swap_normal]:
-                if swap["to"] in KNOWN_BOT_ROUTERS:
-                    bot_swaps += 1
-            
-            assert bot_swaps == 1
-            bot_ratio = bot_swaps / total_swaps
-            assert bot_ratio == 0.5
-
-    async def test_bot_swap_ratio_calculation(self, analyzer):
-        """Test calculation of bot swap ratio."""
-        total_swaps = 20
-        bot_swaps = 12
-        
-        bot_ratio = bot_swaps / total_swaps
-        assert bot_ratio == 0.6
-
-    async def test_bot_swap_ratio_threshold(self, analyzer):
-        """Test bot swap ratio threshold for bot user detection."""
-        # >=50% of >=10 swaps = bot user
-        bot_ratio = 0.5
-        total_swaps = 10
-        
-        is_bot_user = (total_swaps >= 10) and (bot_ratio >= 0.5)
-        assert is_bot_user is True
-
-    async def test_bot_swap_ratio_below_threshold(self, analyzer):
-        """Test bot swap ratio below threshold."""
-        bot_ratio = 0.4
-        total_swaps = 10
-        
-        is_bot_user = (total_swaps >= 10) and (bot_ratio >= 0.5)
-        assert is_bot_user is False
-
-    async def test_bot_swap_ratio_insufficient_swaps(self, analyzer):
-        """Test bot swap ratio with insufficient swaps."""
-        bot_ratio = 0.6
-        total_swaps = 9  # Below threshold
-        
-        is_bot_user = (total_swaps >= 10) and (bot_ratio >= 0.5)
-        assert is_bot_user is False
-
-    async def test_bot_swap_ratio_high_swap_count(self, analyzer):
-        """Test bot swap ratio with high swap count."""
-        bot_ratio = 0.3
-        total_swaps = 100
-        
-        is_bot_user = (total_swaps >= 10) and (bot_ratio >= 0.5)
-        assert is_bot_user is False
-
-
-@pytest.mark.asyncio
 class TestIsTgBotUserField:
     """Test is_tg_bot_user field in WalletMetrics."""
 
+    def _metrics(self, is_bot=None):
+        kwargs = dict(
+            address="test_wallet",
+            trade_count_30d=10,
+            win_rate=0.5,
+        )
+        if is_bot is not None:
+            kwargs["is_tg_bot_user"] = is_bot
+        return WalletMetrics(**kwargs)
+
     async def test_is_tg_bot_user_field_exists(self):
         """Test that WalletMetrics has is_tg_bot_user field."""
-        metrics = WalletMetrics(
-            wallet_address="test_wallet",
-            total_trades=10,
-            winning_trades=5,
-            losing_trades=5,
-            is_tg_bot_user=False
-        )
+        metrics = self._metrics(is_bot=False)
         assert hasattr(metrics, 'is_tg_bot_user')
         assert metrics.is_tg_bot_user is False
 
     async def test_is_tg_bot_user_default(self):
         """Test default value of is_tg_bot_user."""
-        metrics = WalletMetrics(
-            wallet_address="test_wallet",
-            total_trades=10,
-            winning_trades=5,
-            losing_trades=5
-        )
+        metrics = self._metrics()
         assert metrics.is_tg_bot_user is False
 
     async def test_is_tg_bot_user_true(self):
         """Test is_tg_bot_user set to True."""
-        metrics = WalletMetrics(
-            wallet_address="test_wallet",
-            total_trades=10,
-            winning_trades=5,
-            losing_trades=5,
-            is_tg_bot_user=True
-        )
+        metrics = self._metrics(is_bot=True)
         assert metrics.is_tg_bot_user is True
 
     async def test_is_tg_bot_user_false(self):
         """Test is_tg_bot_user set to False."""
-        metrics = WalletMetrics(
-            wallet_address="test_wallet",
-            total_trades=10,
-            winning_trades=5,
-            losing_trades=5,
-            is_tg_bot_user=False
-        )
+        metrics = self._metrics(is_bot=False)
         assert metrics.is_tg_bot_user is False
 
 
@@ -177,22 +72,19 @@ class TestIsTgBotUserField:
 class TestBotUserBlockingInValidator:
     """Test blocking of bot users from ACTIVE promotion."""
 
+    def _metrics(self, is_bot=True, avg_hold_hours=24.0):
+        return WalletMetrics(
+            address="bot_wallet" if is_bot else "normal_wallet",
+            trade_count_30d=20,
+            win_rate=0.5,
+            avg_hold_time_hours=avg_hold_hours,
+            is_tg_bot_user=is_bot,
+        )
+
     async def test_validate_archetype_blocks_bot_user(self, validator):
         """Test that validate_archetype_for_promotion blocks bot users."""
-        # Create metrics for a bot user
-        bot_metrics = WalletMetrics(
-            wallet_address="bot_wallet",
-            total_trades=20,
-            winning_trades=10,
-            losing_trades=10,
-            avg_roi=Decimal('0.15'),
-            win_rate=0.5,
-            avg_hold_time_hours=24.0,
-            is_tg_bot_user=True
-        )
-        
-        result = validator.validate_archetype_for_promotion("bot_wallet", bot_metrics)
-        
+        result = validator.validate_archetype_for_promotion("bot_wallet", self._metrics(is_bot=True))
+
         assert result.passed is False
         assert result.status == ValidationStatus.FAILED_WQS
         assert "Telegram bot user" in result.reason
@@ -200,79 +92,36 @@ class TestBotUserBlockingInValidator:
 
     async def test_validate_archetype_allows_normal_user(self, validator):
         """Test that validate_archetype_for_promotion allows normal users."""
-        # Create metrics for a normal user
-        normal_metrics = WalletMetrics(
-            wallet_address="normal_wallet",
-            total_trades=20,
-            winning_trades=10,
-            losing_trades=10,
-            avg_roi=Decimal('0.15'),
-            win_rate=0.5,
-            avg_hold_time_hours=24.0,
-            is_tg_bot_user=False
-        )
-        
-        result = validator.validate_archetype_for_promotion("normal_wallet", normal_metrics)
-        
-        # Should pass if other criteria are met
+        result = validator.validate_archetype_for_promotion("normal_wallet", self._metrics(is_bot=False))
+
         assert result.passed is True
 
     async def test_bot_user_check_before_low_churn(self, validator):
         """Test that bot user check happens before low churn check."""
-        # Create metrics for a bot user that would pass low churn
-        bot_metrics = WalletMetrics(
-            wallet_address="bot_wallet",
-            total_trades=20,
-            winning_trades=10,
-            losing_trades=10,
-            avg_roi=Decimal('0.15'),
-            win_rate=0.5,
-            avg_hold_time_hours=48.0,  # Would pass low churn
-            is_tg_bot_user=True
+        # Would pass low churn, but is a bot user
+        result = validator.validate_archetype_for_promotion(
+            "bot_wallet", self._metrics(is_bot=True, avg_hold_hours=48.0)
         )
-        
-        result = validator.validate_archetype_for_promotion("bot_wallet", bot_metrics)
-        
-        # Should fail due to bot user, not low churn
+
         assert result.passed is False
         assert "Telegram bot user" in result.reason
         assert "low-churn" not in result.reason.lower()
 
     async def test_bot_user_with_disabled_enforcement(self, validator):
         """Test bot user check when enforcement is disabled."""
-        # Create validator with enforcement disabled
+        # Disable low-churn enforcement
         validator.criteria.enforce_low_churn = False
-        
-        # Create metrics for a bot user
-        bot_metrics = WalletMetrics(
-            wallet_address="bot_wallet",
-            total_trades=20,
-            winning_trades=10,
-            losing_trades=10,
-            avg_roi=Decimal('0.15'),
-            win_rate=0.5,
-            avg_hold_time_hours=24.0,
-            is_tg_bot_user=True
-        )
-        
-        result = validator.validate_archetype_for_promotion("bot_wallet", bot_metrics)
-        
+
+        result = validator.validate_archetype_for_promotion("bot_wallet", self._metrics(is_bot=True))
+
         # Should still fail due to bot user check
         # (bot user check is independent of low_churn enforcement)
         assert result.passed is False
 
     async def test_bot_user_error_message(self, validator):
         """Test that bot user error message is clear."""
-        bot_metrics = WalletMetrics(
-            wallet_address="bot_wallet",
-            total_trades=20,
-            winning_trades=10,
-            losing_trades=10,
-            is_tg_bot_user=True
-        )
-        
-        result = validator.validate_archetype_for_promotion("bot_wallet", bot_metrics)
-        
+        result = validator.validate_archetype_for_promotion("bot_wallet", self._metrics(is_bot=True))
+
         # Error message should be informative
         assert "bot router" in result.reason.lower()
         assert "≥50%" in result.reason or "50%" in result.reason
@@ -280,53 +129,25 @@ class TestBotUserBlockingInValidator:
 
     async def test_bot_user_status_details(self, validator):
         """Test that bot user status has proper details."""
-        bot_metrics = WalletMetrics(
-            wallet_address="bot_wallet",
-            total_trades=20,
-            winning_trades=10,
-            losing_trades=10,
-            is_tg_bot_user=True
-        )
-        
-        result = validator.validate_archetype_for_promotion("bot_wallet", bot_metrics)
-        
+        result = validator.validate_archetype_for_promotion("bot_wallet", self._metrics(is_bot=True))
+
         assert result.wallet_address == "bot_wallet"
         assert result.status == ValidationStatus.FAILED_WQS
         assert result.recommended_status == "CANDIDATE"
 
     async def test_normal_user_passes_bot_check(self, validator):
         """Test that normal users pass the bot user check."""
-        normal_metrics = WalletMetrics(
-            wallet_address="normal_wallet",
-            total_trades=20,
-            winning_trades=10,
-            losing_trades=10,
-            avg_roi=Decimal('0.15'),
-            win_rate=0.5,
-            avg_hold_time_hours=48.0,
-            is_tg_bot_user=False
-        )
-        
-        result = validator.validate_archetype_for_promotion("normal_wallet", normal_metrics)
-        
-        # Should pass (assuming other criteria are met)
-        assert result.passed is True or "bot" not in result.reason.lower()
+        result = validator.validate_archetype_for_promotion("normal_wallet", self._metrics(is_bot=False))
+
+        assert result.passed is True
+        assert "bot" not in result.reason.lower()
 
     async def test_bot_user_blocking_prevents_promotion(self, validator):
         """Test that bot user blocking prevents ACTIVE promotion."""
-        bot_metrics = WalletMetrics(
-            wallet_address="bot_wallet",
-            total_trades=20,
-            winning_trades=10,
-            losing_trades=10,
-            avg_roi=Decimal('0.15'),
-            win_rate=0.5,
-            avg_hold_time_hours=48.0,
-            is_tg_bot_user=True
+        result = validator.validate_archetype_for_promotion(
+            "bot_wallet", self._metrics(is_bot=True, avg_hold_hours=48.0)
         )
-        
-        result = validator.validate_archetype_for_promotion("bot_wallet", bot_metrics)
-        
+
         # Should recommend CANDIDATE, not ACTIVE
         assert result.recommended_status == "CANDIDATE"
         assert result.recommended_status != "ACTIVE"
@@ -334,16 +155,14 @@ class TestBotUserBlockingInValidator:
 
 @pytest.fixture
 def validator():
-    """Create a Validator instance for testing."""
-    from core.validator import LowChurnCriteria
-    
-    criteria = LowChurnCriteria(
+    """Create a PrePromotionValidator instance for testing."""
+    criteria = PromotionCriteria(
         enforce_low_churn=True,
         min_avg_hold_time_hours=24.0,
         forbidden_archetypes=set(["SNIPER", "SCALPER"])
     )
-    
-    return Validator(criteria)
+
+    return PrePromotionValidator(promotion_criteria=criteria)
 
 
 @pytest.fixture

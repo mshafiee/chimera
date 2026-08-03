@@ -5,9 +5,12 @@ Checks whether an ACTIVE wallet's recent performance has declined enough
 to warrant demotion to CANDIDATE status.
 """
 
-from datetime import datetime
+import logging
+from datetime import datetime, timedelta
 
 from .utils import utcnow
+
+logger = logging.getLogger(__name__)
 
 
 def check_performance_degradation(metrics) -> bool:
@@ -28,11 +31,14 @@ def check_performance_degradation(metrics) -> bool:
                 now = utcnow()
                 if last_trade_dt.tzinfo is None:
                     now = now.replace(tzinfo=None)
-                days_since = (now - last_trade_dt).days
-                if days_since > 7:
+                else:
+                    last_trade_dt = last_trade_dt.replace(tzinfo=None) if now.tzinfo is None else last_trade_dt
+                # Compare full durations, not whole-day truncation, so a trade
+                # 7 days and 23 hours old is treated as "more than 7 days ago".
+                if (now - last_trade_dt) > timedelta(days=7):
                     return True
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                logger.warning("Degradation check: bad last_trade_at value %r: %s", last_trade, e)
 
         if seven_d_roi < -15.0:
             return True

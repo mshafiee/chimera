@@ -96,7 +96,7 @@ use chimera_operator::middleware::{self, bearer_auth, AuthState, Role};
 use chimera_operator::monitoring::{rate_limiter, HeliusClient, MonitoringState, SignalAggregator};
 use chimera_operator::notifications::{self, NotificationEvent};
 use chimera_operator::price_cache::PriceCache;
-use chimera_operator::handlers::profitability::{fetch_outcomes, count_missing_outcomes, count_invalid_pnl, CachedVerdict};
+use chimera_operator::handlers::{fetch_outcomes, count_missing_outcomes, count_invalid_pnl, CachedVerdict};
 use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
 use chimera_operator::vault;
 use chimera_operator::{Action, Signal, SignalPayload, Strategy};
@@ -325,11 +325,14 @@ async fn main() -> anyhow::Result<()> {
     // Load API keys and JWT secret early for WebSocket state initialization
     let mut api_keys_map = std::collections::HashMap::new();
     for key_config in &config.security.api_keys {
+        // Char-safe prefix: slicing a String by raw byte index can land in the
+        // middle of a multi-byte UTF-8 char and panic on untrusted input.
+        let key_prefix: String = key_config.key.chars().take(8).collect();
         if let Ok(role) = key_config.role.parse::<Role>() {
             api_keys_map.insert(key_config.key.clone(), role);
-            tracing::debug!(key_prefix = %&key_config.key[..key_config.key.len().min(8)], role = %role, "API key configured");
+            tracing::debug!(key_prefix = %key_prefix, role = %role, "API key configured");
         } else {
-            tracing::warn!(key_prefix = %&key_config.key[..key_config.key.len().min(8)], role = %key_config.role, "Invalid role in API key config");
+            tracing::warn!(key_prefix = %key_prefix, role = %key_config.role, "Invalid role in API key config");
         }
     }
 
@@ -799,10 +802,15 @@ async fn main() -> anyhow::Result<()> {
     {
         let pnl_db = db_pool.clone();
         let pnl_pc = price_cache.clone();
-        tokio::spawn(async move {
+        let pnl_token = cancel_token.clone();
+        // Tracked in task_handles + cancellable so in-flight DB writes finish
+        // cleanly on shutdown instead of being aborted mid-write.
+        task_handles.push(tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = pnl_token.cancelled() => break,
+                    _ = interval.tick() => {
                 match pnl_db.get_active_position_tokens().await {
                     Ok(positions) => {
                         for pos in positions {
@@ -888,8 +896,10 @@ async fn main() -> anyhow::Result<()> {
                         tracing::warn!(error = %e, "PnL refresh: failed to fetch active positions")
                     }
                 }
+                    }
+                }
             }
-        });
+        }));
     }
     tracing::info!("PnL refresh task spawned");
 
@@ -972,8 +982,7 @@ async fn main() -> anyhow::Result<()> {
                                 continue;
                             }
 
-                            // Phase 2: Parse payloads and mark successful ones as processed
-                            let mut processed_items: Vec<chimera_operator::db_abstraction::UpdateDlqItemParams> = Vec::new();
+                            // Phase 2: Parse payloads and collect the trades to re-inject
                             let mut status_updates: Vec<chimera_operator::db_abstraction::UpdateTradeStatus> = Vec::new();
 
                             for item in &items {
@@ -994,12 +1003,6 @@ async fn main() -> anyhow::Result<()> {
                                     Ok(payload) => {
                                         let trade_uuid = payload.trade_uuid.clone()
                                             .unwrap_or_else(|| item.trade_uuid.clone());
-                                        processed_items.push(chimera_operator::db_abstraction::UpdateDlqItemParams {
-                                            trade_uuid: trade_uuid.clone(),
-                                            retry_count: new_count,
-                                            can_retry: can_still_retry,
-                                            mark_processed: true,
-                                        });
                                         status_updates.push(chimera_operator::db_abstraction::UpdateTradeStatus {
                                             trade_uuid: trade_uuid.clone(),
                                             status: "QUEUED".to_string(),
@@ -1014,109 +1017,123 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
 
-                            // Phase 3: Batch mark items as processed
-                            if !processed_items.is_empty() {
-                                if let Err(e) = dlq_pool.update_dlq_items_batch(processed_items).await {
-                                    tracing::error!(error = %e, "Failed to batch mark DLQ items as processed");
-                                } else {
-                                    // Phase 4: Re-inject each signal into the engine and set trade to QUEUED.
-                                    // Use an atomic conditional UPDATE (WHERE status = 'DEAD_LETTER')
-                                    // to avoid a TOCTOU race where the trade transitions to
-                                    // ACTIVE between a SELECT and UPDATE.
-                                    let mut updated_count = 0;
-                                    for status_update in &status_updates {
-                                        // Conditionally move DEAD_LETTER → QUEUED
-                                        let result = match dlq_pool.pool() {
-                                            crate::db_abstraction::DbPool::PostgreSQL(ref pool) => {
-                                                sqlx::query(
-                                                    r#"
-                                                    UPDATE trades
-                                                    SET status = 'QUEUED', error_message = NULL
-                                                    WHERE trade_uuid = $1 AND status = 'DEAD_LETTER'
-                                                    "#,
-                                                )
-                                                .bind(&status_update.trade_uuid)
-                                                .execute(pool)
-                                                .await
-                                            }
-                                        };
+                            // Phase 3: Re-inject each signal into the engine and set trade to QUEUED.
+                            // Use an atomic conditional UPDATE (WHERE status = 'DEAD_LETTER')
+                            // to avoid a TOCTOU race where the trade transitions to
+                            // ACTIVE between a SELECT and UPDATE.
+                            // Only items that are successfully queued are marked as processed
+                            // (Phase 4) — marking them before the queue_signal would drop a
+                            // failed item from future retry cycles (processed_at IS NULL is
+                            // the retry filter).
+                            let mut successfully_queued: Vec<chimera_operator::db_abstraction::UpdateDlqItemParams> = Vec::new();
+                            let mut updated_count = 0;
+                            for status_update in &status_updates {
+                                // Conditionally move DEAD_LETTER → QUEUED
+                                let result = match dlq_pool.pool() {
+                                    crate::db_abstraction::DbPool::PostgreSQL(ref pool) => {
+                                        sqlx::query(
+                                            r#"
+                                            UPDATE trades
+                                            SET status = 'QUEUED', error_message = NULL
+                                            WHERE trade_uuid = $1 AND status = 'DEAD_LETTER'
+                                            "#,
+                                        )
+                                        .bind(&status_update.trade_uuid)
+                                        .execute(pool)
+                                        .await
+                                    }
+                                };
 
-                                        match result {
-                                            Ok(res) if res.rows_affected() > 0 => {
-                                                // Re-parse payload to reconstruct signal for re-injection
-                                                let dlq_item = items.iter().find(|i| {
-                                                    i.trade_uuid == status_update.trade_uuid
-                                                });
-                                                if let Some(dlq_item) = dlq_item {
-                                                    match serde_json::from_str::<SignalPayload>(&dlq_item.payload) {
-                                                        Ok(payload) => {
-                                                            let signal = Signal::new(
-                                                                payload,
-                                                                chrono::Utc::now().timestamp(),
-                                                                None,
+                                match result {
+                                    Ok(res) if res.rows_affected() > 0 => {
+                                        // Re-parse payload to reconstruct signal for re-injection
+                                        let dlq_item = items.iter().find(|i| {
+                                            i.trade_uuid == status_update.trade_uuid
+                                        });
+                                        if let Some(dlq_item) = dlq_item {
+                                            match serde_json::from_str::<SignalPayload>(&dlq_item.payload) {
+                                                Ok(payload) => {
+                                                    let signal = Signal::new(
+                                                        payload,
+                                                        chrono::Utc::now().timestamp(),
+                                                        None,
+                                                    );
+                                                    // Look up wallet WQS for proper routing
+                                                    let wallet_wqs = dlq_pool
+                                                        .get_wallet(&signal.payload.wallet_address)
+                                                        .await
+                                                        .ok()
+                                                        .flatten()
+                                                        .and_then(|w| w.wqs_score)
+                                                        .and_then(|wqs| wqs.to_f64());
+                                                    match dlq_engine.queue_signal(signal.clone(), wallet_wqs).await {
+                                                        Ok(_) => {
+                                                            updated_count += 1;
+                                                            // Only now mark the DLQ item as processed.
+                                                            successfully_queued.push(chimera_operator::db_abstraction::UpdateDlqItemParams {
+                                                                trade_uuid: status_update.trade_uuid.clone(),
+                                                                retry_count: dlq_item.retry_count + 1,
+                                                                can_retry: (dlq_item.retry_count + 1) < MAX_DLQ_RETRIES,
+                                                                mark_processed: true,
+                                                            });
+                                                            tracing::info!(
+                                                                trade_uuid = %status_update.trade_uuid,
+                                                                retry_count = dlq_item.retry_count + 1,
+                                                                "DLQ retry: signal re-injected into engine"
                                                             );
-                                                            // Look up wallet WQS for proper routing
-                                                            let wallet_wqs = dlq_pool
-                                                                .get_wallet(&signal.payload.wallet_address)
-                                                                .await
-                                                                .ok()
-                                                                .flatten()
-                                                                .and_then(|w| w.wqs_score)
-                                                                .and_then(|wqs| wqs.to_f64());
-                                                            match dlq_engine.queue_signal(signal.clone(), wallet_wqs).await {
-                                                                Ok(_) => {
-                                                                    updated_count += 1;
-                                                                    tracing::info!(
-                                                                        trade_uuid = %status_update.trade_uuid,
-                                                                        retry_count = dlq_item.retry_count + 1,
-                                                                        "DLQ retry: signal re-injected into engine"
-                                                                    );
-                                                                }
-                                                                Err(e) => {
-                                                                    tracing::warn!(
-                                                                        trade_uuid = %status_update.trade_uuid,
-                                                                        error = %e,
-                                                                        "DLQ retry: failed to queue signal — reverting to DEAD_LETTER"
-                                                                    );
-                                                                    // Revert to DEAD_LETTER so it can be retried next cycle
-                                                                    let _ = dlq_pool.update_trade_status(&chimera_operator::db_abstraction::UpdateTradeStatus {
-                                                                        trade_uuid: status_update.trade_uuid.clone(),
-                                                                        status: "DEAD_LETTER".to_string(),
-                                                                        tx_signature: None,
-                                                                        error_message: Some(format!("DLQ re-queue failed: {}", e)),
-                                                                        network_fee_sol: None,
-                                                                    }).await;
-                                                                }
-                                                            }
                                                         }
                                                         Err(e) => {
                                                             tracing::warn!(
                                                                 trade_uuid = %status_update.trade_uuid,
                                                                 error = %e,
-                                                                "DLQ retry: failed to re-parse payload for re-injection"
+                                                                "DLQ retry: failed to queue signal — reverting to DEAD_LETTER"
                                                             );
+                                                            // Revert to DEAD_LETTER so it can be retried next cycle.
+                                                            // The DLQ row keeps processed_at NULL (never marked),
+                                                            // so the retry worker picks it up again.
+                                                            let _ = dlq_pool.update_trade_status(&chimera_operator::db_abstraction::UpdateTradeStatus {
+                                                                trade_uuid: status_update.trade_uuid.clone(),
+                                                                status: "DEAD_LETTER".to_string(),
+                                                                tx_signature: None,
+                                                                error_message: Some(format!("DLQ re-queue failed: {}", e)),
+                                                                network_fee_sol: None,
+                                                            }).await;
                                                         }
                                                     }
                                                 }
-                                            }
-                                            Ok(_) => {
-                                                tracing::info!(
-                                                    trade_uuid = %status_update.trade_uuid,
-                                                    "DLQ retry: skipping — trade no longer DEAD_LETTER"
-                                                );
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    trade_uuid = %status_update.trade_uuid,
-                                                    error = %e,
-                                                    "DLQ retry: conditional UPDATE failed"
-                                                );
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        trade_uuid = %status_update.trade_uuid,
+                                                        error = %e,
+                                                        "DLQ retry: failed to re-parse payload for re-injection"
+                                                    );
+                                                }
                                             }
                                         }
                                     }
-                                    tracing::info!("DLQ batch: {}/{} items re-injected into engine", updated_count, status_updates.len());
+                                    Ok(_) => {
+                                        tracing::info!(
+                                            trade_uuid = %status_update.trade_uuid,
+                                            "DLQ retry: skipping — trade no longer DEAD_LETTER"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            trade_uuid = %status_update.trade_uuid,
+                                            error = %e,
+                                            "DLQ retry: conditional UPDATE failed"
+                                        );
+                                    }
                                 }
                             }
+
+                            // Phase 4: Batch mark only the successfully re-injected items as processed.
+                            if !successfully_queued.is_empty() {
+                                if let Err(e) = dlq_pool.update_dlq_items_batch(successfully_queued).await {
+                                    tracing::error!(error = %e, "Failed to batch mark DLQ items as processed");
+                                }
+                            }
+                            tracing::info!("DLQ batch: {}/{} items re-injected into engine", updated_count, status_updates.len());
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "Failed to fetch DLQ items");
@@ -1130,30 +1147,24 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn price cache updater
     let price_cache_clone = price_cache.clone();
-    tokio::spawn(async move {
-        price_cache_clone.start_updater().await;
-        // start_updater only returns on error or shutdown; log so silent crashes are visible.
-        tracing::error!("Price cache updater exited — token price data will become stale. All price-dependent checks (stop-loss, circuit breaker USD thresholds) are now degraded.");
-    });
+    let pc_token = cancel_token.clone();
+    task_handles.push(tokio::spawn(async move {
+        tokio::select! {
+            _ = pc_token.cancelled() => {
+                tracing::info!("Price cache updater cancelled on shutdown");
+            }
+            _ = async {
+                price_cache_clone.start_updater().await;
+                // start_updater only returns on error or shutdown; log so silent crashes are visible.
+                tracing::error!("Price cache updater exited — token price data will become stale. All price-dependent checks (stop-loss, circuit breaker USD thresholds) are now degraded.");
+            } => {}
+        }
+    }));
 
     // FIX 1+2+4: Spawn unified cache updater (liquidity + metadata monitoring + active age fetching)
     let token_fetcher_for_updater = if let Some(ref helius) = helius_client {
         // Create a new token_fetcher with HeliusClient for active age fetching in background
-        TokenMetadataFetcher::new_with_rate_limiter_and_jupiter(
-            &config.rpc.primary_url,
-            Some(rpc_rate_limiter.clone()),
-            config.jupiter.api_url.clone(),
-        )
-        .with_price_cache(price_cache.clone())
-        .with_unlisted_heuristic(config.token_safety.allow_unlisted_heuristic)
-        .with_liquidity_ttl(config.token_safety.liquidity_cache_ttl_secs)
-        .with_fdv_ttl(config.token_safety.fdv_cache_ttl_secs)
-        .with_helius_client(helius.clone())
-    } else {
-        // No HeliusClient available, use regular token_fetcher
-        // Extract from Arc to get the TokenMetadataFetcher
-        Arc::try_unwrap(token_fetcher.clone()).unwrap_or_else(|_token_fetcher_arc| {
-            // If Arc is shared (has multiple references), create a new fetcher from the existing one
+        Arc::new(
             TokenMetadataFetcher::new_with_rate_limiter_and_jupiter(
                 &config.rpc.primary_url,
                 Some(rpc_rate_limiter.clone()),
@@ -1163,15 +1174,31 @@ async fn main() -> anyhow::Result<()> {
             .with_unlisted_heuristic(config.token_safety.allow_unlisted_heuristic)
             .with_liquidity_ttl(config.token_safety.liquidity_cache_ttl_secs)
             .with_fdv_ttl(config.token_safety.fdv_cache_ttl_secs)
-        })
+            .with_helius_client(helius.clone()),
+        )
+    } else {
+        // No HeliusClient available — reuse the shared token_fetcher so the
+        // background updater populates the SAME metadata cache consumed by
+        // token_parser / pre-validator. (Arc::try_unwrap always fails here
+        // because the fetcher is shared, and building an independent one would
+        // leave the hot-path cache permanently stale.)
+        Arc::clone(&token_fetcher)
     };
 
-    let token_fetcher_clone = Arc::new(token_fetcher_for_updater);
-    tokio::spawn(async move {
-        token_fetcher_clone.start_cache_updater().await;
-        // This task runs indefinitely; if it exits, cached data will become stale.
-        tracing::error!("Unified cache updater exited — cached liquidity and metadata data will become stale. Pre-validation may reject trades due to stale cache data.");
-    });
+    let token_fetcher_clone = token_fetcher_for_updater;
+    let ucu_token = cancel_token.clone();
+    task_handles.push(tokio::spawn(async move {
+        tokio::select! {
+            _ = ucu_token.cancelled() => {
+                tracing::info!("Unified cache updater cancelled on shutdown");
+            }
+            _ = async {
+                token_fetcher_clone.start_cache_updater().await;
+                // This task runs indefinitely; if it exits, cached data will become stale.
+                tracing::error!("Unified cache updater exited — cached liquidity and metadata data will become stale. Pre-validation may reject trades due to stale cache data.");
+            } => {}
+        }
+    }));
 
     // Spawn daily summary notification task
     let notifier_daily = notifier.clone();
@@ -1994,7 +2021,12 @@ async fn main() -> anyhow::Result<()> {
                                 .unwrap_or(1_000_000_000), // 1 SOL default
                         };
 
-                        let rent_metrics = Arc::new(chimera_operator::metrics::RentScavengerMetrics::new());
+                        // Register with the shared registry so rent-scavenger
+                        // metrics are actually scraped at /metrics.
+                        let rent_metrics = Arc::new(chimera_operator::metrics::RentScavengerMetrics::new(metrics_state.registry()));
+                        // Use the configured interval (RENT_SCAVENGER_INTERVAL_SECS),
+                        // not a hardcoded 6-hour ticker.
+                        let scavenger_interval_secs = rent_scavenger_config.interval_secs;
                         let rpc_url_clone = rpc_url.clone();
                         let rent_scavenger = chimera_operator::engine::RentScavenger::new(
                             rpc_url_clone,
@@ -2008,7 +2040,7 @@ async fn main() -> anyhow::Result<()> {
                         let circuit_breaker_clone = circuit_breaker.clone();
 
                         tokio::spawn(async move {
-                            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+                            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(scavenger_interval_secs));
 
                             loop {
                                 tokio::select! {
@@ -2031,7 +2063,7 @@ async fn main() -> anyhow::Result<()> {
                             }
                         });
 
-                        tracing::info!("✓ Rent scavenger started (6-hour interval, gated on circuit breaker health)");
+                        tracing::info!("✓ Rent scavenger started ({}s interval, gated on circuit breaker health)", scavenger_interval_secs);
                     }
                     None => {
                         tracing::warn!("Rent scavenger disabled: failed to load wallet keypair");
@@ -2299,6 +2331,8 @@ async fn main() -> anyhow::Result<()> {
         engine: Some(Arc::new(_engine_handle.clone())),
         circuit_breaker: circuit_breaker.clone(),
         price_cache: price_cache.clone(),
+        webhook_rate_limiter: Some(webhook_api_rate_limiter.clone()),
+        rpc_rate_limiter: Some(rpc_rate_limiter.clone()),
     });
 
     // Create auth state (reuse already-loaded api_keys_map and jwt_secret)
@@ -2378,7 +2412,6 @@ async fn main() -> anyhow::Result<()> {
             get(chimera_operator::handlers::get_position_size_analysis),
         )
         .route("/incidents/dead-letter", get(list_dead_letter_queue))
-        .route("/incidents/dead-letter/:trade_uuid/retry", post(retry_dead_letter_item))
         .route("/incidents/config-audit", get(list_config_audit))
         .route(
             "/signals/consensus",
@@ -2406,7 +2439,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/scout/status", get(get_scout_status))
         .route("/scout/wqs-distribution", get(get_wqs_distribution))
         .route("/scout/metrics", get(get_scout_metrics))
-        .route("/scout/run", post(trigger_scout_run))
         // Scout integration features
         .route("/scout/budget", get(get_budget_status))
         .route("/scout/cache", get(get_cache_stats))
@@ -2472,6 +2504,11 @@ async fn main() -> anyhow::Result<()> {
             "/admin/caches/clear",
             post(chimera_operator::handlers::clear_monitoring_caches),
         )
+        // State-changing operations — protected with bearer auth (these were
+        // previously exposed on the unauthenticated public router: retrying a
+        // dead-lettered trade can flip it back into the trading queue).
+        .route("/incidents/dead-letter/:trade_uuid/retry", post(retry_dead_letter_item))
+        .route("/scout/run", post(trigger_scout_run))
         .route("/debug/backtest-smoke", post(debug_backtest_smoke))
         .with_state(api_state.clone())
         .layer(axum_middleware::from_fn_with_state(
@@ -2776,7 +2813,7 @@ async fn main() -> anyhow::Result<()> {
             anyhow::anyhow!("Failed to build rate limiter — webhook_rate_limit must be > 0")
         })?;
     let governor_conf = std::sync::Arc::new(governor_conf);
-    let _governor_layer = tower_governor::GovernorLayer {
+    let governor_layer = tower_governor::GovernorLayer {
         config: governor_conf,
     };
 
@@ -2784,7 +2821,9 @@ async fn main() -> anyhow::Result<()> {
     let webhook_routes = Router::new()
         .route("/webhook", post(webhook_handler))
         .with_state(webhook_state.clone())
-        // .layer(governor_layer.clone()) // TEMP: Disabled for paper trading testing
+        // Rate limit the unauthenticated public /webhook endpoint (DoS/abuse
+        // protection). Previously disabled for paper-trading testing.
+        .layer(governor_layer.clone())
         .layer(axum_middleware::from_fn_with_state(
             hmac_state.clone(),
             middleware::hmac_verify,
@@ -2922,6 +2961,7 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/v1", ws_routes)
         .nest("/api/v1", monitoring_routes)
         .merge(metrics_routes)
+        .with_state(app_state.clone())
         .layer(cors)
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             10 * 1024 * 1024,
@@ -3054,7 +3094,7 @@ async fn refresh_verdict(
     decision_recorder: &Option<Arc<chimera_operator::engine::DecisionRecorder>>,
     total_capital_sol: f64,
 ) -> Result<Option<CachedVerdict>, anyhow::Error> {
-    use chimera_operator::handlers::profitability::evaluate_gates;
+    use chimera_operator::handlers::evaluate_gates;
 
     let run_id = run_context.run_id.clone();
 

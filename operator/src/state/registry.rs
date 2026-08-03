@@ -434,10 +434,17 @@ impl StateRegistry {
         let mut shield_exposure = Decimal::ZERO;
         let mut spear_exposure = Decimal::ZERO;
 
-        // Calculate exposure from active positions in memory
+        // Calculate exposure from active positions in memory.
+        // Mirrors the DB fallback in PortfolioHeat::calculate_heat: EXITING
+        // positions still hold capital until the exit confirms, but EXITING
+        // positions stuck >30 minutes (1800s) are dropped so failed recovery
+        // attempts don't lock capital forever.
+        let heat_cutoff = SystemTime::now() - std::time::Duration::from_secs(1800);
         for entry in self.positions.iter() {
             let position = entry.value();
-            if position.state == "ACTIVE" {
+            let include = position.state == "ACTIVE"
+                || (position.state == "EXITING" && position.updated_at >= heat_cutoff);
+            if include {
                 total_exposure += position.entry_amount_sol;
                 match position.strategy.as_str() {
                     "SHIELD" => shield_exposure += position.entry_amount_sol,

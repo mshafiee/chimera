@@ -45,17 +45,41 @@ pub struct JupiterSkillsStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MigrationStatus {
     /// Swap API migration status
-    pub swap_api: String, // "v1", "v2", "migrated"
+    pub swap_api: SwapApiStatus,
     /// Price API migration status
-    pub price_api: String, // "v2", "v3", "migrated"
+    pub price_api: PriceApiStatus,
     /// Lite API migration status
-    pub lite_api: String, // "pending", "migrated"
-    /// Overall migration progress (0-100)
-    pub migration_progress: u8,
+    pub lite_api: LiteApiStatus,
     /// Required migrations
     pub required_migrations: Vec<String>,
     /// Optional migrations
     pub optional_migrations: Vec<String>,
+}
+
+/// Swap API version status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SwapApiStatus {
+    V1,
+    V2,
+    Migrated,
+}
+
+/// Price API version status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PriceApiStatus {
+    V2,
+    V3,
+    Migrated,
+}
+
+/// Lite API migration status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LiteApiStatus {
+    Pending,
+    Migrated,
 }
 
 /// Jupiter skills integration utilities
@@ -80,7 +104,7 @@ impl JupiterSkillsIntegration {
             "unknown"
         };
 
-        let base_url = self.config.api_url.split('/').take(3).collect::<Vec<_>>().join("/");
+        let base_url = self.base_url();
 
         let endpoints = if version == "v2" {
             vec![
@@ -117,11 +141,33 @@ impl JupiterSkillsIntegration {
             features,
             migration_required,
             deprecation_deadline: if migration_required {
-                Some("2026-06-30".to_string()) // Jupiter legacy rate limits expire
+                Some(self.config.deprecation_deadline.clone())
             } else {
                 None
             },
         }
+    }
+
+    /// Scheme + host of the configured API URL.
+    ///
+    /// Split-based derivation ("https:///api.jup.ag" triple-slash bug) is
+    /// avoided: `scheme://host` is extracted explicitly.
+    fn base_url(&self) -> String {
+        let scheme = if self.config.api_url.starts_with("https://") {
+            "https"
+        } else if self.config.api_url.starts_with("http://") {
+            "http"
+        } else {
+            // No scheme — return the input unchanged (best effort).
+            return self.config.api_url.clone();
+        };
+        let rest = self
+            .config
+            .api_url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+        let host = rest.split('/').next().unwrap_or("");
+        format!("{}://{}", scheme, host)
     }
 
     /// Get Jupiter skills integration status
@@ -151,18 +197,28 @@ impl JupiterSkillsIntegration {
         best_practice_compliance.insert("api_key_authentication".to_string(), self.config.api_key.is_some());
         best_practice_compliance.insert("v2_api_usage".to_string(), !api_info.migration_required);
         best_practice_compliance.insert("rtse_enabled".to_string(), self.config.enable_rtse);
-        best_practice_compliance.insert("error_handling".to_string(), true); // We've enhanced this
-        best_practice_compliance.insert("circuit_breaker_integration".to_string(), true); // We've added this
+
+        // Price API: the price cache always requests the v3 endpoint
+        // (`{price_api_url}/v3?ids=...`) unless the base URL explicitly
+        // targets v2.
+        let price_api = if self.config.price_api_url.contains("/v2")
+            || self.config.price_api_url.contains("price/v2")
+        {
+            PriceApiStatus::V2
+        } else {
+            PriceApiStatus::V3
+        };
 
         let migration_status = MigrationStatus {
             swap_api: if self.config.use_swap_v2 {
-                "v2".to_string()
+                SwapApiStatus::V2
             } else {
-                "v1".to_string()
+                SwapApiStatus::V1
             },
-            price_api: "v3".to_string(), // We migrated to v3
-            lite_api: "migrated".to_string(), // We migrated from lite-api
-            migration_progress: if self.config.use_swap_v2 { 90 } else { 70 },
+            price_api,
+            // Primary pricing migrated to the Price API v3; lite-api remains
+            // only as a rate-limit fallback in price_cache.
+            lite_api: LiteApiStatus::Migrated,
             required_migrations: if !self.config.use_swap_v2 {
                 vec!["Swap API v2 migration".to_string()]
             } else {
@@ -183,8 +239,11 @@ impl JupiterSkillsIntegration {
         }
     }
 
-    /// Validate Jupiter integration against best practices
-    pub fn validate_best_practices(&self) -> AppResult<Vec<String>> {
+    /// Validate Jupiter integration against best practices.
+    ///
+    /// Returns a list of issues/warnings (empty when fully compliant); the
+    /// function cannot fail, so no Result wrapper.
+    pub fn validate_best_practices(&self) -> Vec<String> {
         let mut issues = vec![];
         let mut warnings = vec![];
 
@@ -193,9 +252,15 @@ impl JupiterSkillsIntegration {
             warnings.push("API key not configured - keyless access being phased out".to_string());
         }
 
-        // Check API version
-        if !self.config.api_url.contains("/v2") {
+        // Check API version — only an explicit v1 URL is "deprecated"; an
+        // unknown URL gets its own message instead of a misleading v1 claim.
+        if self.config.api_url.contains("/v1") {
             issues.push("Using deprecated Swap API v1 - migrate to v2 for new features".to_string());
+        } else if !self.config.api_url.contains("/v2") {
+            warnings.push(format!(
+                "Cannot determine Swap API version from api_url '{}' — expected a /v1 or /v2 URL",
+                self.config.api_url
+            ));
         }
 
         // Check RTSE enablement
@@ -207,9 +272,9 @@ impl JupiterSkillsIntegration {
         let all_issues: Vec<String> = issues.into_iter().chain(warnings).collect();
 
         if all_issues.is_empty() {
-            Ok(vec!["Jupiter integration follows best practices".to_string()])
+            vec!["Jupiter integration follows best practices".to_string()]
         } else {
-            Ok(all_issues)
+            all_issues
         }
     }
 
@@ -227,10 +292,10 @@ impl JupiterSkillsIntegration {
             recommendations.push("Benefits: RTSE, Jupiter Beam, gasless swaps, better pricing".to_string());
         }
 
-        if api_info.deprecation_deadline.is_some() {
+        if let Some(deadline) = api_info.deprecation_deadline {
             recommendations.push(format!(
                 "Complete migration before deadline: {}",
-                api_info.deprecation_deadline.unwrap()
+                deadline
             ));
         }
 
@@ -240,32 +305,34 @@ impl JupiterSkillsIntegration {
         recommendations
     }
 
-    /// Check if Jupiter skills are properly installed and accessible
+    /// Report whether the Jupiter skill files are assumed to be installed.
+    ///
+    /// This is a STATIC assumption — it does not verify the skills on disk or
+    /// in any registry; it returns `true` for every known skill. Callers must
+    /// not treat this as a genuine availability probe.
     pub fn check_skills_availability(&self) -> AppResult<HashMap<String, bool>> {
         let mut skills_status = HashMap::new();
 
-        // Check for jupiter-swap-migration skill
+        // Static assumption: skills are considered available based on the
+        // documented setup, not verified against the environment.
         skills_status.insert(
             "jupiter-swap-migration".to_string(),
-            true, // Assumed installed based on user setup
+            true,
         );
 
-        // Check for integrating-jupiter skill
         skills_status.insert(
             "integrating-jupiter".to_string(),
-            true, // Assumed installed based on user setup
+            true,
         );
 
-        // Check for jupiter-lend skill
         skills_status.insert(
             "jupiter-lend".to_string(),
-            true, // Assumed installed based on user setup
+            true,
         );
 
-        // Check for jupiter-vrfd skill
         skills_status.insert(
             "jupiter-vrfd".to_string(),
-            true, // Assumed installed based on user setup
+            true,
         );
 
         Ok(skills_status)
@@ -335,7 +402,7 @@ mod tests {
         };
 
         let integration = JupiterSkillsIntegration::new(config);
-        let validation = integration.validate_best_practices().unwrap();
+        let validation = integration.validate_best_practices();
 
         assert!(validation.iter().any(|v| v.contains("best practices")));
     }
@@ -351,7 +418,7 @@ mod tests {
         };
 
         let integration = JupiterSkillsIntegration::new(config);
-        let validation = integration.validate_best_practices().unwrap();
+        let validation = integration.validate_best_practices();
 
         assert!(validation.iter().any(|v| v.contains("deprecated") || v.contains("API key")));
     }
@@ -396,7 +463,7 @@ mod tests {
 
         assert!(!status.available_skills.is_empty());
         assert!(!status.recommendations.is_empty());
-        assert_eq!(status.migration_status.swap_api, "v2");
+        assert_eq!(status.migration_status.swap_api, SwapApiStatus::V2);
         assert!(status.best_practice_compliance.get("v2_api_usage").unwrap_or(&false));
     }
 }

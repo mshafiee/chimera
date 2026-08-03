@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 use reqwest::Client;
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
 use crate::engine::volume_cache::VolumeCache;

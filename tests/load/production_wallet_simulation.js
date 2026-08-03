@@ -1,12 +1,13 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
-import { Trend, Rate, Counter } from 'k6/metrics';
+import { Rate, Counter } from 'k6/metrics';
+import crypto from 'k6/crypto';
 
 // Custom metrics for production simulation
 const productionSignalRate = new Rate('production_signal_rate');
-const walletDiversity = new Trend('wallet_diversity');
-const strategyDistribution = new Counter('strategy_distribution', ['strategy']);
-const signalTypeDistribution = new Counter('signal_type_distribution', ['action']);
+const walletTypeDistribution = new Counter('wallet_type_distribution');
+const strategyDistribution = new Counter('strategy_distribution');
+const signalTypeDistribution = new Counter('signal_type_distribution');
 
 // Production wallet signal templates based on actual Chimera wallet behavior
 const WALLET_TEMPLATES = {
@@ -60,6 +61,9 @@ const WALLET_TEMPLATES = {
 // Token distribution based on production signal patterns
 const TOKENS = ['SOL', 'BONK', 'WIF', 'POPCAT', 'RAY', 'JUP', 'ORCA', 'MNGO', 'SAMO'];
 
+// Production signals loaded in setup() (optional)
+let productionSignals = [];
+
 // Load test scenarios
 export const options = {
     scenarios: {
@@ -69,7 +73,8 @@ export const options = {
             rate: 25, // 25 signals/sec (~2000/day per active wallet)
             timeUnit: '1s',
             duration: '10m',
-            preAllocatedVUs: 50,
+            preAllocatedVUs: 100,
+            maxVUs: 300,
             gracefulStop: '30s',
         },
         // Scenario 2: Alpha Hunter surge (new token discovery)
@@ -77,7 +82,8 @@ export const options = {
             executor: 'ramping-arrival-rate',
             startRate: 10,
             timeUnit: '1s',
-            preAllocatedVUs: 100,
+            preAllocatedVUs: 150,
+            maxVUs: 400,
             gracefulStop: '30s',
             stages: [
                 { duration: '2m', target: 50 },   // Ramp to 50 req/s
@@ -93,6 +99,7 @@ export const options = {
             timeUnit: '1s',
             duration: '30s',
             preAllocatedVUs: 200,
+            maxVUs: 400,
             startTime: '15m', // Starts after steady_state completes
             gracefulStop: '10s',
         },
@@ -102,7 +109,8 @@ export const options = {
             rate: 40, // Higher sustained load
             timeUnit: '1s',
             duration: '5m',
-            preAllocatedVUs: 80,
+            preAllocatedVUs: 150,
+            maxVUs: 400,
             startTime: '20m',
             gracefulStop: '30s',
         },
@@ -124,12 +132,9 @@ function uuidv4() {
     });
 }
 
-// Helper function to generate HMAC signature
+// Helper function to generate HMAC signature (module-level import)
 function generateHMAC(payload, secret) {
-    // Note: In production, this would use crypto.subtle or a compatible HMAC function
-    // For load testing, we're using a simplified version
-    const crypto = require('k6/crypto');
-    const hasher = crypto.createHMAC('sha256', secret || __ENV.WEBHOOK_SECRET || 'test-secret');
+    const hasher = crypto.createHMAC('sha256', secret || __ENV.WEBHOOK_SECRET);
     hasher.update(payload);
     return hasher.digest('hex');
 }
@@ -156,15 +161,38 @@ function pickRandomToken() {
 
 function generateProductionSignal(walletType) {
     const template = WALLET_TEMPLATES[walletType];
-    const strategy = template.strategies[Math.floor(Math.random() * template.strategies.length)];
 
-    // Determine action based on buy_sell_ratio
-    const isBuy = Math.random() < template.buy_sell_ratio;
-    const action = strategy === 'EXIT' ? 'SELL' : (isBuy ? 'BUY' : 'SELL');
+    let strategy;
+    let action;
+    let amount;
+    let token;
 
-    // Calculate amount with some variance
-    const variance = 0.8 + (Math.random() * 0.4); // 0.8 to 1.2
-    const amount = (template.avg_amount_sol * variance).toFixed(4);
+    // When real production signal patterns were loaded, base the signal on a
+    // random sample of them (overriding strategy/action/amount/token)
+    if (productionSignals.length > 0 && Math.random() < 0.5) {
+        const sample = productionSignals[Math.floor(Math.random() * productionSignals.length)];
+        strategy = sample.strategy || template.strategies[0];
+        action = sample.action || 'BUY';
+        amount = parseFloat(sample.amount_sol) || template.avg_amount_sol;
+        token = sample.token || pickRandomToken();
+    } else {
+        strategy = template.strategies[Math.floor(Math.random() * template.strategies.length)];
+
+        // Determine action based on buy_sell_ratio (plain if/else)
+        const isBuy = Math.random() < template.buy_sell_ratio;
+        if (strategy === 'EXIT') {
+            action = 'SELL';
+        } else if (isBuy) {
+            action = 'BUY';
+        } else {
+            action = 'SELL';
+        }
+
+        // Calculate amount with some variance
+        const variance = 0.8 + (Math.random() * 0.4); // 0.8 to 1.2
+        amount = (template.avg_amount_sol * variance).toFixed(4);
+        token = pickRandomToken();
+    }
 
     // Get current timestamp
     const timestamp = new Date().toISOString();
@@ -172,7 +200,7 @@ function generateProductionSignal(walletType) {
     return {
         trade_uuid: uuidv4(),
         wallet_address: __ENV.TEST_WALLET || 'test_wallet_' + walletType + '_' + Date.now().toString(),
-        token: pickRandomToken(),
+        token: token,
         action: action,
         strategy: strategy,
         amount_sol: parseFloat(amount),
@@ -206,9 +234,9 @@ export default function(data) {
         }
     );
 
-    // Track wallet diversity
-    const walletTypeIndex = Object.keys(WALLET_TEMPLATES).indexOf(walletType);
-    walletDiversity.add(walletTypeIndex);
+    // Track wallet diversity via tagged counter (a Trend cannot represent
+    // distinct categories)
+    walletTypeDistribution.add(1, { wallet_type: walletType });
 
     // Track strategy distribution
     strategyDistribution.add(1, { strategy: signal.strategy });
@@ -245,12 +273,24 @@ export default function(data) {
 }
 
 export function handleSummary(data) {
-    // Custom summary output
+    // Custom summary output (returning a value replaces k6's default report)
+    const walletTypes = data.metrics.wallet_type_distribution
+        ? Object.keys(data.metrics.wallet_type_distribution.values).length
+        : 0;
+
+    const summary = {
+        total_requests: data.metrics.http_reqs ? data.metrics.http_reqs.values.count : 0,
+        failed_requests: data.metrics.http_req_failed ? data.metrics.http_req_failed.values.rate : 0,
+        signal_acceptance_rate: data.metrics.production_signal_rate ? data.metrics.production_signal_rate.values.rate : 0,
+        wallet_types_seen: walletTypes,
+    };
+
     console.log('\n=== Production Wallet Simulation Summary ===');
-    console.log('Total requests:', data.metrics.http_reqs_total.values);
-    console.log('Failed requests:', data.metrics.http_req_failed.values);
-    console.log('Signal acceptance rate:', data.metrics.production_signal_rate.values);
-    console.log('Wallet diversity (unique types):', new Set(data.metrics.wallet_diversity.values).size);
+    console.log(JSON.stringify(summary, null, 2));
+
+    return {
+        stdout: JSON.stringify(summary, null, 2),
+    };
 }
 
 export function setup() {
@@ -260,13 +300,23 @@ export function setup() {
     console.log('TEST_WALLET:', __ENV.TEST_WALLET || 'default_test_wallet');
 
     // If PRODUCTION_SIGNALS_FILE is provided, load production signal patterns
+    // and feed them into signal generation
     if (__ENV.PRODUCTION_SIGNALS_FILE) {
         console.log('Loading production signal patterns from:', __ENV.PRODUCTION_SIGNALS_FILE);
         try {
-            const signals = open(__ENV.PRODUCTION_SIGNALS_FILE);
-            console.log('Loaded signals file successfully');
+            const raw = open(__ENV.PRODUCTION_SIGNALS_FILE);
+            const parsed = JSON.parse(raw);
+            const list = Array.isArray(parsed) ? parsed : (parsed.signals || []);
+            productionSignals = list.map((s) => ({
+                strategy: s.strategy,
+                action: s.action,
+                amount_sol: s.amount_sol,
+                token: s.token,
+            }));
+            console.log('Loaded', productionSignals.length, 'production signals');
         } catch (e) {
             console.error('Failed to load signals file:', e);
+            productionSignals = [];
         }
     }
 

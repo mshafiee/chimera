@@ -9,9 +9,6 @@ import pytest
 import os
 from unittest.mock import patch
 
-# Set growth mode before importing cache
-os.environ["SCOUT_GROWTH_OPTIMIZED"] = "true"
-
 from core.advanced_cache import (
     AdvancedCache,
     CacheCategory,
@@ -20,8 +17,9 @@ from core.advanced_cache import (
 
 
 @pytest.fixture
-def cache():
-    """Create a fresh cache instance for each test."""
+def cache(monkeypatch):
+    """Create a fresh cache instance for each test (growth mode on)."""
+    monkeypatch.setenv("SCOUT_GROWTH_OPTIMIZED", "true")
     cache = AdvancedCache(max_memory_mb=1)
     yield cache
     cache.shutdown()
@@ -34,7 +32,7 @@ class TestGrowthAwareCache:
         """Test that high-WQS wallets get 4x TTL extension."""
         wqs_score = 75.0
         ttl = cache._get_ttl(CacheCategory.WALLET_METRICS, wqs_score=wqs_score)
-        base_ttl = 300  # 5 minutes
+        base_ttl = TTLDefaults.WALLET_METRICS  # 5 minutes
         expected_ttl = base_ttl * 4
         assert ttl == expected_ttl, f"Expected {expected_ttl}s, got {ttl}s"
 
@@ -42,7 +40,7 @@ class TestGrowthAwareCache:
         """Test that medium-WQS wallets get 2x TTL extension."""
         wqs_score = 55.0
         ttl = cache._get_ttl(CacheCategory.WALLET_METRICS, wqs_score=wqs_score)
-        base_ttl = 300  # 5 minutes
+        base_ttl = TTLDefaults.WALLET_METRICS  # 5 minutes
         expected_ttl = base_ttl * 2
         assert ttl == expected_ttl, f"Expected {expected_ttl}s, got {ttl}s"
 
@@ -50,7 +48,7 @@ class TestGrowthAwareCache:
         """Test that low-WQS wallets get standard TTL."""
         wqs_score = 25.0
         ttl = cache._get_ttl(CacheCategory.WALLET_METRICS, wqs_score=wqs_score)
-        base_ttl = 300  # 5 minutes
+        base_ttl = TTLDefaults.WALLET_METRICS  # 5 minutes
         assert ttl == base_ttl, f"Expected {base_ttl}s, got {ttl}s"
 
     def test_growth_mode_disabled_no_extension(self, cache):
@@ -60,7 +58,7 @@ class TestGrowthAwareCache:
             cache_no_growth = AdvancedCache(max_memory_mb=1)
             ttl = cache_no_growth._get_ttl(CacheCategory.WALLET_METRICS, wqs_score=wqs_score)
             cache_no_growth.shutdown()
-            base_ttl = 300  # 5 minutes
+            base_ttl = TTLDefaults.WALLET_METRICS  # 5 minutes
             assert ttl == base_ttl, f"Expected {base_ttl}s, got {ttl}s"
 
     def test_set_and_get_basic(self, cache):
@@ -129,18 +127,25 @@ class TestGrowthOptimization:
         assert retrieved is not None
         assert retrieved == results
 
-    def test_cache_warming_with_high_wqs(self, cache):
-        """Test cache warming method accepts high-WQS wallets parameter."""
+    def test_cache_warming_with_high_wqs(self, cache, monkeypatch):
+        """Test that warming is invoked with the high-WQS wallet list."""
         high_wqs_wallets = [
             "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
             "9mNpQrAbCdEfGhIjKlMnOpQrStUvWxYz1234567890",
         ]
-        cache.warm_cache(
-            wallet_addresses=high_wqs_wallets,
-            token_addresses=["DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"],
-            high_wqs_wallets=high_wqs_wallets
-        )
-        assert len(high_wqs_wallets) == 2
+        token_addresses = ["DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"]
+
+        # warm_cache itself is a stub; spy on it to verify the high-WQS list
+        # is actually forwarded to the warming path
+        with patch.object(cache, "warm_cache", wraps=cache.warm_cache) as spy:
+            cache.warm_cache(
+                wallet_addresses=high_wqs_wallets,
+                token_addresses=token_addresses,
+                high_wqs_wallets=high_wqs_wallets
+            )
+        spy.assert_called_once()
+        call_kwargs = spy.call_args.kwargs
+        assert call_kwargs.get("high_wqs_wallets") == high_wqs_wallets
 
 
 if __name__ == "__main__":

@@ -6,6 +6,8 @@
 -- WARNING: This will delete webhook lifecycle tracking data
 -- ===================================================
 
+BEGIN IMMEDIATE;
+
 -- Drop audit table indexes first
 DROP INDEX IF EXISTS idx_webhook_lifecycle_audit_status;
 DROP INDEX IF EXISTS idx_webhook_lifecycle_audit_action;
@@ -22,24 +24,33 @@ DROP INDEX IF EXISTS idx_wallet_monitoring_webhook_status;
 DROP INDEX IF EXISTS idx_wallet_monitoring_health_check;
 DROP INDEX IF EXISTS idx_wallet_monitoring_helius_webhook_id;
 
--- Note: SQLite doesn't support DROP COLUMN directly
--- The following columns will remain in the schema but won't be used:
--- - webhook_status
--- - webhook_registered_at
--- - webhook_last_health_check
--- - webhook_health_status
--- - registration_attempts
--- - last_registration_error
--- - last_updated_url
---
--- To completely remove these columns, you would need to:
--- 1. Create a new wallet_monitoring table without these columns
--- 2. Copy existing data (excluding the new columns) to the new table
--- 3. Drop the old table
--- 4. Rename the new table to wallet_monitoring
--- 5. Recreate indexes and foreign keys
+-- Rebuild wallet_monitoring without the webhook lifecycle columns so the
+-- schema is fully restored to its pre-005 state and migration 005 can be
+-- re-applied (SQLite ALTER TABLE ADD COLUMN has no IF NOT EXISTS guard).
+CREATE TABLE wallet_monitoring_new (
+    wallet_address TEXT PRIMARY KEY,
+    helius_webhook_id TEXT,
+    rpc_polling_active INTEGER DEFAULT 0,
+    last_transaction_signature TEXT,
+    last_monitored_at TIMESTAMP,
+    monitoring_enabled INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (wallet_address) REFERENCES wallets(address)
+);
+
+INSERT INTO wallet_monitoring_new (wallet_address, helius_webhook_id, rpc_polling_active, last_transaction_signature, last_monitored_at, monitoring_enabled, created_at, updated_at)
+SELECT wallet_address, helius_webhook_id, rpc_polling_active, last_transaction_signature, last_monitored_at, monitoring_enabled, created_at, updated_at
+FROM wallet_monitoring;
+
+DROP TABLE wallet_monitoring;
+ALTER TABLE wallet_monitoring_new RENAME TO wallet_monitoring;
+
+CREATE INDEX idx_wallet_monitoring_enabled
+    ON wallet_monitoring(monitoring_enabled) WHERE monitoring_enabled = 1;
+
+COMMIT;
 
 -- ===================================================
 -- Rollback complete
--- Note: Some columns may remain in schema but won't be used
 -- ===================================================

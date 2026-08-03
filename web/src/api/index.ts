@@ -54,7 +54,7 @@ export {
 export {
   useConsensus,
   useWalletClustering,
-  useSignalAggregation,
+  useSignalAggregation as useConsensusSignalAggregation,
 } from './consensus'
 export {
   useWebhookStats,
@@ -130,7 +130,7 @@ export type {
   ConsensusSignal,
   DivergenceAlert as ConsensusDivergenceAlert,
   WalletClusteringResponse,
-  SignalAggregationResponse,
+  SignalAggregationResponse as ConsensusSignalAggregationResponse,
 } from './consensus'
 export type {
   WebhookStats,

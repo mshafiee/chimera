@@ -119,8 +119,15 @@ class ConceptDriftDetector:
                 )
 
             elif z_score >= self.warning_threshold:
+                # Warning level: clear the harder drift latch, keep the warning
+                self.drift_detected = False
                 self.warning_detected = True
                 result['warning_detected'] = True
+            else:
+                # Performance recovered: clear the latched flags so status
+                # reports stop claiming drift after the fact
+                self.drift_detected = False
+                self.warning_detected = False
 
         return result
 
@@ -136,6 +143,7 @@ class ConceptDriftDetector:
         """Reset baseline with current data."""
         self._establish_baseline()
         self.drift_detected = False
+        self.warning_detected = False
         self.drift_count = 0
 
     def get_status(self) -> Dict[str, Any]:
@@ -145,8 +153,8 @@ class ConceptDriftDetector:
             'warning_detected': self.warning_detected,
             'last_drift_time': self.last_drift_time.isoformat() if self.last_drift_time else None,
             'drift_count': self.drift_count,
-            'baseline_mean': float(self.baseline_mean) if self.baseline_mean else None,
-            'baseline_std': float(self.baseline_std) if self.baseline_std else None,
+            'baseline_mean': float(self.baseline_mean) if self.baseline_mean is not None else None,
+            'baseline_std': float(self.baseline_std) if self.baseline_std is not None else None,
             'baseline_samples': self.baseline_samples,
             'current_samples': len(self.errors),
         }
@@ -196,6 +204,10 @@ class OnlineLearner:
         self.X_buffer = deque(maxlen=max_samples)
         self.y_buffer = deque(maxlen=max_samples)
 
+        # Fixed feature schema, derived from the first sample and validated on
+        # every update (silent zero-filling of mismatched keys is a real risk)
+        self._feature_schema: Optional[list] = None
+
         # Concept drift detector
         self.drift_detector = ConceptDriftDetector(
             drift_threshold=drift_threshold
@@ -233,6 +245,15 @@ class OnlineLearner:
         self.y_buffer.append(actual_value)
         self.samples_seen += 1
 
+        # Validate samples against the fixed feature schema
+        if self._feature_schema is None:
+            self._feature_schema = list(features.keys())
+        elif set(features.keys()) != set(self._feature_schema):
+            logger.warning(
+                "Feature mismatch: expected %s, got %s",
+                set(self._feature_schema), set(features.keys()),
+            )
+
         result = {
             'samples_seen': self.samples_seen,
             'update_performed': False,
@@ -251,6 +272,7 @@ class OnlineLearner:
                 if self.drift_detector.drift_count >= self.retrain_threshold:
                     result['retrain_triggered'] = True
                     logger.info("Retraining triggered due to concept drift")
+                    result['retrain_success'] = self.trigger_retrain()
 
         # Update model weights
         if self.samples_seen >= self.min_samples_for_update:
@@ -300,8 +322,9 @@ class OnlineLearner:
         if not feature_buffer:
             return None
 
-        # Get feature names from first sample
-        feature_names = list(feature_buffer[0].keys())
+        # Use the fixed schema when available so the feature set can't shift
+        # as old samples are evicted from the bounded deque
+        feature_names = self._feature_schema or list(feature_buffer[0].keys())
 
         # Build array
         X = []
@@ -463,14 +486,13 @@ class OnlineLearner:
 
     def _prepare_single_features(self, features: Dict[str, Any]) -> Optional[np.ndarray]:
         """Prepare single feature dict for prediction."""
-        if not self.X_buffer:
-            # Use provided features
-            feature_names = list(features.keys())
-            X = [[float(features.get(name, 0.0)) for name in feature_names]]
-        else:
-            # Use features from buffer
+        if self._feature_schema:
+            feature_names = self._feature_schema
+        elif self.X_buffer:
             feature_names = list(self.X_buffer[0].keys())
-            X = [[float(features.get(name, 0.0)) for name in feature_names]]
+        else:
+            feature_names = list(features.keys())
+        X = [[float(features.get(name, 0.0)) for name in feature_names]]
 
         return np.array(X)
 
@@ -532,10 +554,13 @@ def get_online_learner(
     Returns:
         OnlineLearner instance
     """
-    if model_name not in _online_learners:
-        _online_learners[model_name] = OnlineLearner(
+    # Key by (name, type) so a request for a different backend never
+    # silently reuses a learner configured for another model type
+    key = (model_name, model_type)
+    if key not in _online_learners:
+        _online_learners[key] = OnlineLearner(
             model_type=model_type,
             **kwargs
         )
 
-    return _online_learners[model_name]
+    return _online_learners[key]

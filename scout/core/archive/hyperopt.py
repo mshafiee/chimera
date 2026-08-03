@@ -5,7 +5,8 @@ Automated hyperparameter search using Optuna.
 This module provides:
 - Automated hyperparameter optimization
 - Time-series cross-validation
-- Multi-objective optimization (accuracy vs latency)
+- Latency-penalized RMSE optimization (multi_objective adds a fixed latency
+  penalty to the RMSE objective; it is NOT Optuna multi-objective search)
 - Pruning for faster search
 
 Usage:
@@ -37,6 +38,7 @@ except ImportError:
 
 # Try to import sklearn for cross-validation
 try:
+    import sklearn  # noqa: F401
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
@@ -74,7 +76,7 @@ class HyperparameterOptimizer:
         storage_url: Optional[str] = None,
         sampler: str = "tpe",  # "tpe" or "cmaes"
         pruner: bool = True,
-        direction: str = "maximize"
+        direction: str = "minimize"
     ):
         """
         Initialize the hyperparameter optimizer.
@@ -155,6 +157,14 @@ class HyperparameterOptimizer:
         if self.study is None:
             self.create_study()
 
+        # Optuna does not support n_jobs > 1 with the default in-memory
+        # storage — fail fast instead of raising at runtime mid-search.
+        if n_jobs > 1 and self.storage_url is None:
+            raise ValueError(
+                "n_jobs > 1 requires persistent storage: pass storage_url "
+                "(e.g. 'sqlite:///db.sqlite3')"
+            )
+
         start_time = time.time()
 
         try:
@@ -173,6 +183,25 @@ class HyperparameterOptimizer:
 
         elapsed_time = time.time() - start_time
 
+        # Guard against studies where every trial was pruned/failed: accessing
+        # best_params on an empty study raises ValueError.
+        complete_trials = sum(1 for t in self.study.trials if t.state == optuna.trial.TrialState.COMPLETE)
+
+        if complete_trials == 0:
+            logger.error("No completed trials - hyperparameter optimization produced no valid result")
+            result = OptimizationResult(
+                best_params={},
+                best_value=float('inf'),
+                best_trial=-1,
+                n_trials=len(self.study.trials),
+                study_name=self.study_name,
+                optimization_time_seconds=elapsed_time,
+                pruned_trials=sum(1 for t in self.study.trials if t.state == optuna.trial.TrialState.PRUNED),
+                complete_trials=0,
+            )
+            self.optimization_results[self.study_name] = result
+            return result
+
         # Compile results
         result = OptimizationResult(
             best_params=dict(self.study.best_params),
@@ -182,7 +211,7 @@ class HyperparameterOptimizer:
             study_name=self.study_name,
             optimization_time_seconds=elapsed_time,
             pruned_trials=sum(1 for t in self.study.trials if t.state == optuna.trial.TrialState.PRUNED),
-            complete_trials=sum(1 for t in self.study.trials if t.state == optuna.trial.TrialState.COMPLETE),
+            complete_trials=complete_trials,
         )
 
         self.optimization_results[self.study_name] = result
@@ -494,7 +523,7 @@ def optimize_xgboost(
     if not OPTUNA_AVAILABLE:
         raise ImportError("Optuna is required for hyperparameter optimization")
 
-    optimizer = XGBoostHyperparameterOptimizer(latency_budget_ms=latency_budget_ms)
+    optimizer = XGBoostHyperparameterOptimizer(direction="minimize", latency_budget_ms=latency_budget_ms)
     objective = optimizer.create_objective(
         X_train, y_train, X_val, y_val, feature_names, multi_objective
     )
@@ -531,7 +560,7 @@ def optimize_lightgbm(
     if not OPTUNA_AVAILABLE:
         raise ImportError("Optuna is required for hyperparameter optimization")
 
-    optimizer = LightGBMHyperparameterOptimizer(latency_budget_ms=latency_budget_ms)
+    optimizer = LightGBMHyperparameterOptimizer(direction="minimize", latency_budget_ms=latency_budget_ms)
     objective = optimizer.create_objective(
         X_train, y_train, X_val, y_val, feature_names, multi_objective
     )

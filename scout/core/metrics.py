@@ -58,11 +58,15 @@ class ScoutMetrics:
             'Average WQS score of active roster',
         )
         
-        self.wqs_distribution = Histogram(
+        # Live distribution of current roster WQS (GaugeVec per bucket — a
+        # Histogram would accumulate counts forever and never reflect the
+        # current state)
+        self.wqs_distribution = Gauge(
             'scout_wqs_distribution',
-            'Distribution of WQS scores',
-            buckets=[0, 20, 40, 60, 70, 80, 90, 100]
+            'Distribution of WQS scores (current roster)',
+            ['bucket']
         )
+        self._wqs_buckets = [0, 20, 40, 60, 70, 80, 90, 100]
         
         self.unrealized_pnl_total = Gauge(
             'scout_unrealized_pnl_total',
@@ -133,6 +137,8 @@ class ScoutMetrics:
             return
         
         if not records:
+            # No roster: report "no data" instead of a stale average
+            self.wqs_average.set(float('nan'))
             return
         
         # Calculate average WQS for active wallets
@@ -140,11 +146,22 @@ class ScoutMetrics:
         if active_wallets:
             avg_wqs = sum(r.wqs_score for r in active_wallets) / len(active_wallets)
             self.wqs_average.set(avg_wqs)
+        else:
+            self.wqs_average.set(float('nan'))
         
-        # Record WQS distribution
+        # Record WQS distribution as a live snapshot: zero every bucket first,
+        # then count the current roster
+        for bucket in self._wqs_buckets:
+            self.wqs_distribution.labels(bucket=str(bucket)).set(0)
+
         for record in records:
             if record.wqs_score is not None:
-                self.wqs_distribution.observe(record.wqs_score)
+                bucket = self._wqs_buckets[-1]
+                for b in self._wqs_buckets:
+                    if record.wqs_score <= b:
+                        bucket = b
+                        break
+                self.wqs_distribution.labels(bucket=str(bucket)).inc()
     
     def update_unrealized_pnl(self, total_unrealized_pnl_sol: float):
         """
@@ -168,19 +185,21 @@ class ScoutMetrics:
         if not PROMETHEUS_AVAILABLE:
             return
         
-        # Reset all archetype gauges
-        archetypes = ["SNIPER", "SWING", "SCALPER", "INSIDER", "WHALE"]
+        # Reset all archetype gauges (UNKNOWN included so missing archetypes
+        # are exported rather than silently dropped)
+        archetypes = ["SNIPER", "SWING", "SCALPER", "INSIDER", "WHALE", "UNKNOWN"]
         statuses = ["ACTIVE", "CANDIDATE", "REJECTED"]
         
         for archetype in archetypes:
             for status in statuses:
                 self.wallets_by_archetype.labels(archetype=archetype, status=status).set(0)
         
-        # Count wallets by archetype and status
+        # Count wallets by archetype and status (any other status is ignored
+        # so its stale label series is not left behind)
         for record in records:
             archetype = record.archetype or "UNKNOWN"
             status = record.status
-            if archetype in archetypes:
+            if archetype in archetypes and status in statuses:
                 self.wallets_by_archetype.labels(archetype=archetype, status=status).inc()
     
     def increment_rugcheck_rejections(self, count: int = 1):
@@ -251,7 +270,13 @@ def get_metrics() -> Optional[ScoutMetrics]:
     global _metrics_instance
     
     if _metrics_instance is None:
-        port = int(os.getenv("SCOUT_METRICS_PORT", "8081"))
+        try:
+            port = int(os.getenv("SCOUT_METRICS_PORT", "8081"))
+        except ValueError:
+            # Non-numeric port config: fall back to the default instead of
+            # crashing metric initialization
+            logger.warning("Invalid SCOUT_METRICS_PORT value, using default 8081")
+            port = 8081
         _metrics_instance = ScoutMetrics(port=port)
         
         # Auto-start if enabled

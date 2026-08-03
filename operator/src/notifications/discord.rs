@@ -54,19 +54,25 @@ impl RateLimiter {
         }
     }
 
-    /// Check if we can send a message of this type
-    fn can_send(&self, key: &str) -> bool {
-        let last_sent = self.last_sent.read();
-        match last_sent.get(key) {
-            Some(last) => last.elapsed() >= self.interval,
-            None => true,
-        }
-    }
-
-    /// Mark a message type as sent
-    fn mark_sent(&self, key: &str) {
+    /// Atomically check the rate limit AND reserve the slot under a single
+    /// write lock — a separate check-then-mark would let concurrent callers
+    /// both pass the check and duplicate the alert.
+    fn try_acquire(&self, key: &str) -> bool {
         let mut last_sent = self.last_sent.write();
-        last_sent.insert(key.to_string(), Instant::now());
+        let now = Instant::now();
+
+        // Lazily prune expired entries so the map cannot grow without bound.
+        if last_sent.len() > 1000 {
+            last_sent.retain(|_, last| now.saturating_duration_since(*last) < self.interval);
+        }
+
+        match last_sent.get(key) {
+            Some(last) if now.saturating_duration_since(*last) < self.interval => false,
+            _ => {
+                last_sent.insert(key.to_string(), now);
+                true
+            }
+        }
     }
 
     /// Get rate limit key for an event (same as Telegram)
@@ -127,17 +133,27 @@ impl DiscordNotifier {
 
     /// Create from environment variables
     pub fn from_env() -> Option<Self> {
-        let webhook_url = std::env::var("DISCORD_WEBHOOK_URL").ok()?;
-
-        if webhook_url.is_empty() {
-            return None;
+        match std::env::var("DISCORD_WEBHOOK_URL") {
+            Ok(webhook_url) if webhook_url.trim().is_empty() => {
+                tracing::warn!(
+                    "DISCORD_WEBHOOK_URL is set but empty — Discord notifications disabled"
+                );
+                None
+            }
+            Ok(webhook_url) => Some(Self::new(DiscordConfig {
+                webhook_url,
+                enabled: true,
+                rate_limit_seconds: 60,
+            })),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(e) => {
+                tracing::warn!(
+                    error = ?e,
+                    "DISCORD_WEBHOOK_URL is not valid UTF-8 — Discord notifications disabled"
+                );
+                None
+            }
         }
-
-        Some(Self::new(DiscordConfig {
-            webhook_url,
-            enabled: true,
-            rate_limit_seconds: 60,
-        }))
     }
 
     /// Send a message to Discord
@@ -186,9 +202,21 @@ impl NotificationService for DiscordNotifier {
             return Ok(());
         }
 
-        // Check rate limit (skip for critical alerts)
+        // `is_enabled` also requires a non-empty webhook URL — honor that here
+        // too so an enabled-but-empty config is a clean no-op instead of a
+        // request to "".
+        if self.webhook_url.trim().is_empty() {
+            tracing::warn!(
+                "Discord notifications enabled but webhook URL is empty — skipping notification"
+            );
+            return Ok(());
+        }
+
+        // Atomically check + reserve the rate-limit slot (skip for critical
+        // alerts). Note: the slot is reserved even if the send later fails, so
+        // an API outage cannot cause a request storm.
         let rate_key = RateLimiter::get_key(event);
-        if event.level() != AlertLevel::Critical && !self.rate_limiter.can_send(&rate_key) {
+        if event.level() != AlertLevel::Critical && !self.rate_limiter.try_acquire(&rate_key) {
             tracing::debug!(
                 key = %rate_key,
                 "Rate limited, skipping Discord notification"
@@ -200,7 +228,6 @@ impl NotificationService for DiscordNotifier {
         let message = event.format_message(trade_mode);
 
         self.send_message(&message, level).await?;
-        self.rate_limiter.mark_sent(&rate_key);
 
         tracing::info!(
             level = %level,
@@ -223,14 +250,13 @@ mod tests {
     fn test_rate_limiter() {
         let limiter = RateLimiter::new(1); // 1 second limit
 
-        // First send should be allowed
-        assert!(limiter.can_send("test"));
-        limiter.mark_sent("test");
+        // First send should be allowed (and reserves the slot)
+        assert!(limiter.try_acquire("test"));
 
         // Immediate second send should be blocked
-        assert!(!limiter.can_send("test"));
+        assert!(!limiter.try_acquire("test"));
 
         // Different key should be allowed
-        assert!(limiter.can_send("other"));
+        assert!(limiter.try_acquire("other"));
     }
 }

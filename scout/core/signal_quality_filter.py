@@ -97,11 +97,6 @@ class FilterConfig:
     WQS_MAX: float = 100.0
     WQS_MIN: float = 0.0
 
-    # Timing thresholds
-    TIMING_EXCELLENT: float = 0.8  # Top 20% timing
-    TIMING_GOOD: float = 0.6
-    TIMING_POOR: float = 0.3
-
     # Regime alignment scores
     REGIME_ALIGNMENT: Dict[str, Dict[str, float]] = field(default_factory=lambda: {
         "BULL": {"SPEAR": 1.0, "SHIELD": 0.7},
@@ -111,18 +106,13 @@ class FilterConfig:
     })
 
     # Ensemble confidence thresholds
-    ENSEMBLE_HIGH: float = 0.7
-    ENSEMBLE_MEDIUM: float = 0.5
-    ENSEMBLE_LOW: float = 0.3
+    ENSEMBLE_MIN_CONFIDENCE: float = 0.6
 
     # Signal freshness
     FRESH_SECONDS: int = 300       # 5 minutes = fresh
     STALE_SECONDS: int = 1800      # 30 minutes = stale
     FRESHNESS_MAX_AGE_SECONDS: int = 300       # Max age for signal to be considered (seconds)
     FRESHNESS_OPTIMAL_AGE_SECONDS: int = 60    # Optimal signal age (seconds)
-
-    # Ensemble confidence threshold
-    ENSEMBLE_MIN_CONFIDENCE: float = 0.6
 
     # Timing minimum score
     TIMING_MIN_SCORE: float = 0.3
@@ -218,8 +208,8 @@ class SignalQualityFilter:
         )
         scores['wqs'] = max(0.0, min(1.0, wqs_normalized))
 
-        # Timing score
-        scores['timing'] = signal.timing_score
+        # Timing score (hard gate: below the minimum floor, no timing credit)
+        scores['timing'] = signal.timing_score if signal.timing_score >= self._config.TIMING_MIN_SCORE else 0.0
 
         # Regime alignment (assume SPEAR strategy by default)
         regime = signal.market_regime.upper() if signal.market_regime else "NEUTRAL"
@@ -227,11 +217,20 @@ class SignalQualityFilter:
         # Default to 0.5 for unknown regime
         scores['regime'] = regime_scores.get("SPEAR", 0.5)
 
-        # Ensemble confidence
-        scores['ensemble'] = signal.ensemble_confidence
+        # Ensemble confidence (hard gate: below the minimum, no confidence credit)
+        scores['ensemble'] = (
+            signal.ensemble_confidence
+            if signal.ensemble_confidence >= self._config.ENSEMBLE_MIN_CONFIDENCE
+            else 0.0
+        )
 
-        # Signal freshness (1.0 = fresh, 0.0 = stale)
-        if signal.signal_age_seconds <= self._config.FRESH_SECONDS:
+        # Signal freshness (1.0 = fresh, 0.0 = stale). Signals older than the
+        # absolute cap are rejected outright.
+        if signal.signal_age_seconds > self._config.FRESHNESS_MAX_AGE_SECONDS:
+            scores['freshness'] = 0.0
+        elif signal.signal_age_seconds <= self._config.FRESHNESS_OPTIMAL_AGE_SECONDS:
+            scores['freshness'] = 1.0
+        elif signal.signal_age_seconds <= self._config.FRESH_SECONDS:
             scores['freshness'] = 1.0
         elif signal.signal_age_seconds >= self._config.STALE_SECONDS:
             scores['freshness'] = 0.0
@@ -339,8 +338,8 @@ class SignalQualityFilter:
                 self._check_threshold_adjustment()
 
             logger.debug(
-                f"Signal quality: {quality.value} ({percentile:.1f}th percentile), "
-                f"decision: {decision.value}"
+                "Signal quality: %s (%.1fth percentile), decision: %s",
+                quality.value, percentile, decision.value,
             )
 
             return quality_score
@@ -358,50 +357,54 @@ class SignalQualityFilter:
             pnl_history: List of recent PnL values
         """
         with self._lock:
-            if not pnl_history or len(pnl_history) < self._config.PERFORMANCE_LOOKBACK_TRADES:
-                return
+            self._update_threshold_locked(pnl_history)
 
-            self._pnl_history.clear()
-            self._pnl_history.extend(pnl_history)
+    def _update_threshold_locked(self, pnl_history: List[float]) -> None:
+        """Update threshold based on PnL performance (lock already held)."""
+        if not pnl_history or len(pnl_history) < self._config.PERFORMANCE_LOOKBACK_TRADES:
+            return
 
-            # Calculate metrics
-            wins = sum(1 for pnl in pnl_history if pnl > 0)
-            win_rate = wins / len(pnl_history)
-            avg_pnl = sum(pnl_history) / len(pnl_history)
+        self._pnl_history.clear()
+        self._pnl_history.extend(pnl_history)
 
-            # Adjust threshold based on performance
-            old_threshold = self._current_threshold
+        # Calculate metrics
+        wins = sum(1 for pnl in pnl_history if pnl > 0)
+        win_rate = wins / len(pnl_history)
+        avg_pnl = sum(pnl_history) / len(pnl_history)
 
-            if win_rate > 0.6 and avg_pnl > 0:
-                # Good performance: loosen threshold (allow more signals)
-                self._current_threshold = min(
-                    self._config.MAX_PERCENTILE_THRESHOLD,
-                    self._current_threshold * 1.1
-                )
-            elif win_rate < 0.4 or avg_pnl < 0:
-                # Poor performance: tighten threshold (fewer, better signals)
-                self._current_threshold = max(
-                    self._config.MIN_PERCENTILE_THRESHOLD,
-                    self._current_threshold * 0.9
-                )
+        # Adjust threshold based on performance
+        old_threshold = self._current_threshold
 
-            if old_threshold != self._current_threshold:
-                logger.info(
-                    f"Adjusted threshold: {old_threshold:.1f}% -> {self._current_threshold:.1f}% "
-                    f"(win_rate: {win_rate:.2f}, avg_pnl: ${avg_pnl:.2f})"
-                )
+        if win_rate > 0.6 and avg_pnl > 0:
+            # Good performance: loosen threshold (allow more signals)
+            self._current_threshold = min(
+                self._config.MAX_PERCENTILE_THRESHOLD,
+                self._current_threshold * 1.1
+            )
+        elif win_rate < 0.4 or avg_pnl < 0:
+            # Poor performance: tighten threshold (fewer, better signals)
+            self._current_threshold = max(
+                self._config.MIN_PERCENTILE_THRESHOLD,
+                self._current_threshold * 0.9
+            )
 
-                self._save_state()
+        if old_threshold != self._current_threshold:
+            logger.info(
+                f"Adjusted threshold: {old_threshold:.1f}% -> {self._current_threshold:.1f}% "
+                f"(win_rate: {win_rate:.2f}, avg_pnl: ${avg_pnl:.2f})"
+            )
+
+            self._save_state()
 
     def _check_threshold_adjustment(self) -> None:
-        """Check and perform threshold adjustment if needed."""
+        """Check and perform threshold adjustment if needed (lock held)."""
         now = time.time()
         if now - self._last_threshold_adjustment < self._config.THRESHOLD_ADJUSTMENT_INTERVAL:
             return
 
         if len(self._pnl_history) >= self._config.PERFORMANCE_LOOKBACK_TRADES:
             pnl_list = list(self._pnl_history)
-            self.update_threshold_based_on_performance(pnl_list)
+            self._update_threshold_locked(pnl_list)
 
         self._last_threshold_adjustment = now
 
@@ -422,7 +425,6 @@ class SignalQualityFilter:
             return {
                 'current_threshold': self._current_threshold,
                 'total_signals': self._total_signals,
-                'total_signals_evaluated': self._total_signals,
                 'executed_count': self._executed_count,
                 'skipped_count': self._skipped_count,
                 'execution_rate': (

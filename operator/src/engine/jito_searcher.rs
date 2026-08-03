@@ -47,8 +47,9 @@ pub fn next_tip_account() -> Pubkey {
 /// Poll a `getBundleStatuses` endpoint for a bundle's landed transaction
 /// signatures, returning the **last** one — the swap signature. Bundles execute
 /// in submission order, so the swap is last for both single-tx inlined
-/// (`[swap]`) and two-tx (`[tip, swap]`) bundles. Bounded backoff (~2.5s ceiling
-/// on the live path). Shared by the Jito and Helius resolvers.
+/// (`[swap]`) and two-tx (`[tip, swap]`) bundles. Each send is bounded to 2s
+/// and the whole loop to ~8s so a slow/hung endpoint cannot stall the
+/// confirmation path. Shared by the Jito and Helius resolvers.
 pub async fn resolve_bundle_status(
     http_client: &reqwest::Client,
     url: &str,
@@ -62,15 +63,28 @@ pub async fn resolve_bundle_status(
     });
     // Poll immediately, then back off (~2.5s total over 6 attempts).
     let backoff_ms: [u64; 6] = [0, 300, 400, 500, 600, 700];
+    let overall_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
     for (attempt, &delay) in backoff_ms.iter().enumerate() {
+        if tokio::time::Instant::now() >= overall_deadline {
+            break;
+        }
         if attempt > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         }
-        if let Ok(resp) = http_client.post(url).json(&payload).send().await {
-            if let Ok(val) = resp.json::<serde_json::Value>().await {
-                if let Some(sig) = extract_swap_signature_from_bundle(&val) {
-                    return Some(sig);
-                }
+        // Bound each send: the reqwest client timeout is 10s, far too long for
+        // a time-sensitive confirmation path when the endpoint is hung.
+        let send = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            http_client.post(url).json(&payload).send(),
+        )
+        .await;
+        let Ok(Ok(resp)) = send else {
+            tracing::debug!(attempt, bundle_id, "Bundle status request timed out; retrying");
+            continue;
+        };
+        if let Ok(val) = resp.json::<serde_json::Value>().await {
+            if let Some(sig) = extract_swap_signature_from_bundle(&val) {
+                return Some(sig);
             }
         }
         tracing::debug!(attempt, bundle_id, "Bundle not yet resolved; retrying");
@@ -81,13 +95,18 @@ pub async fn resolve_bundle_status(
 /// Extract the SWAP signature (the LAST in `result.value[].transactions`) from a
 /// `getBundleStatuses` response. Bundles execute in submission order, so the
 /// swap — submitted last in both `[swap]` and `[tip, swap]` bundles — is the
-/// final entry. Returns `None` if the bundle hasn't landed or the shape is wrong.
+/// final entry. Returns `None` if the bundle hasn't landed, the shape is wrong,
+/// or the bundle entry reports an error (`err` non-null / no `Ok`): a failed
+/// bundle's `transactions` array must never be reported as a landed swap.
 pub fn extract_swap_signature_from_bundle(value: &serde_json::Value) -> Option<String> {
     value
         .get("result")
         .and_then(|r| r.get("value"))
         .and_then(|v| v.as_array())
         .and_then(|a| a.first())
+        .filter(|entry| {
+            entry.get("err").is_none_or(|e| e.is_null() || e.get("Ok").is_some())
+        })
         .and_then(|entry| entry.get("transactions"))
         .and_then(|t| t.as_array())
         .and_then(|a| a.last())
@@ -196,6 +215,9 @@ impl JitoSearcherClient {
     /// could not be resolved — callers must then treat the trade as
     /// *unconfirmed* and let recovery reconcile it, never poll the UUID itself.
     pub async fn resolve_bundle_signature(&self, bundle_id: &str) -> Option<String> {
+        // Normalize the `bundle:` prefix so values returned by `send_bundle`/
+        // `submit_single_bundle`/`submit_bundle` can be passed straight in.
+        let bundle_id = bundle_id.strip_prefix("bundle:").unwrap_or(bundle_id);
         let url = format!("{}/api/v1/bundles", self.endpoint);
         resolve_bundle_status(&self.http_client, &url, bundle_id).await
     }

@@ -26,17 +26,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, rate(chimera_rpc_latency_ms_bucket[5m]))",
+          "expr": "histogram_quantile(0.50, sum(rate(chimera_rpc_latency_ms_bucket[5m])) by (le))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, rate(chimera_rpc_latency_ms_bucket[5m]))",
+          "expr": "histogram_quantile(0.95, sum(rate(chimera_rpc_latency_ms_bucket[5m])) by (le))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, rate(chimera_rpc_latency_ms_bucket[5m]))",
+          "expr": "histogram_quantile(0.99, sum(rate(chimera_rpc_latency_ms_bucket[5m])) by (le))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -58,7 +58,7 @@
       },
       "targets": [
         {
-          "expr": "rate(chimera_rpc_errors_total[5m])",
+          "expr": "sum(rate(chimera_rpc_errors_total[5m]))",
           "legendFormat": "RPC Errors/sec",
           "refId": "A"
         }
@@ -75,7 +75,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(chimera_db_query_latency_ms_bucket[5m]))",
+          "expr": "histogram_quantile(0.95, sum(rate(chimera_db_query_latency_ms_bucket[5m])) by (le))",
           "legendFormat": "p95 Query Latency",
           "refId": "A"
         }
@@ -118,7 +118,7 @@
       },
       "targets": [
         {
-          "expr": "sum(pg_stat_activity_count)",
+          "expr": "sum(pg_stat_activity_count{datname=\"chimera\"})",
           "refId": "A"
         }
       ]

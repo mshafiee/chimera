@@ -135,9 +135,16 @@ class StrategyAllocator:
                 alloc_time = data.get('timestamp', 0)
                 alloc_datetime = datetime.fromtimestamp(alloc_time)
                 if alloc_datetime.date() == datetime.now().date():
+                    shield_pct = float(data.get('shield_pct', 0.60))
+                    spear_pct = float(data.get('spear_pct', 0.40))
+                    # Validate the persisted allocation — corrupt/tampered
+                    # values must not flow into portfolio math
+                    if not (0.0 <= shield_pct <= 1.0 and 0.0 <= spear_pct <= 1.0
+                            and abs(shield_pct + spear_pct - 1.0) < 1e-9):
+                        raise ValueError("invalid persisted allocation")
                     self._allocation = StrategyAllocation(
-                        shield_pct=data.get('shield_pct', 0.60),
-                        spear_pct=data.get('spear_pct', 0.40),
+                        shield_pct=shield_pct,
+                        spear_pct=spear_pct,
                         timestamp=alloc_time,
                         regime=MarketRegime(data.get('regime', 'neutral')),
                         capital=data.get('capital', 200.0),
@@ -237,8 +244,16 @@ class StrategyAllocator:
             # Apply regime adjustments
             shield, spear = self.apply_regime_adjustment(shield, spear, regime)
 
-            # Check if rebalance is needed
-            needs_rebalance = force_rebalance or self._needs_rebalance(shield, spear)
+            # Check if rebalance is needed. The time throttle only gates
+            # APPLYING/persisting the rebalance — the freshly computed target
+            # is still returned so callers never see stale capital/regime
+            # values for up to an hour.
+            drift_exceeds = (
+                abs(shield - self._allocation.shield_pct) > self._config.REBALANCE_THRESHOLD
+                or abs(spear - self._allocation.spear_pct) > self._config.REBALANCE_THRESHOLD
+            )
+            time_ok = (time.time() - self._last_rebalance) >= self._config.MIN_REBALANCE_INTERVAL
+            needs_rebalance = force_rebalance or (drift_exceeds and time_ok)
 
             if needs_rebalance:
                 self._allocation = StrategyAllocation(
@@ -286,8 +301,11 @@ class StrategyAllocator:
         Returns:
             Position size in capital units
         """
-        # Get strategy allocation
-        shield_alloc, spear_alloc = self.get_base_allocation(capital)
+        # Size from the CURRENT (regime-adjusted) allocation that is actually
+        # applied and persisted — the base allocation would let a SPEAR
+        # position exceed the spear capital remaining after a regime penalty.
+        shield_alloc = self._allocation.shield_pct
+        spear_alloc = self._allocation.spear_pct
         strategy_capital = spear_alloc * capital if strategy == StrategyType.SPEAR else shield_alloc * capital
 
         # Apply Kelly-inspired sizing with growth multiplier
@@ -356,9 +374,10 @@ class StrategyAllocator:
         return len(issues) == 0, issues
 
     def get_current_allocation(self) -> StrategyAllocation:
-        """Get current strategy allocation."""
+        """Get current strategy allocation (defensive copy)."""
         with self._lock:
-            return self._allocation
+            import dataclasses
+            return dataclasses.replace(self._allocation)
 
     def update_regime(self, regime: MarketRegime):
         """Update market regime and recalculate if needed."""

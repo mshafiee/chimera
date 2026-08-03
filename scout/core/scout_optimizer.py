@@ -294,7 +294,9 @@ class ScoutOptimizer:
         print(f"Growth Optimized: {self._growth_optimized}")
         print(f"Current Capital: ${self._current_capital:.2f}")
         print(f"Target Capital: ${self._target_capital:.2f}")
-        print(f"Growth Progress: {(self._current_capital/self._target_capital)*100:.1f}%")
+        # Guard against a zero/parse-failed target so the report can't crash
+        target = self._target_capital if self._target_capital > 0 else 1.0
+        print(f"Growth Progress: {(self._current_capital / target) * 100:.1f}%")
 
         # Credit tracker status
         if self._credit_tracker:
@@ -366,6 +368,14 @@ class ScoutOptimizer:
 
         if self._production_monitor:
             self._production_monitor.shutdown()
+
+        # Mark as unusable so a shut-down optimizer can't be treated as ready
+        self._initialized = False
+        self._credit_tracker = None
+        self._cache = None
+        self._profitability_predictor = None
+        self._helius_optimizer = None
+        self._production_monitor = None
 
         logger.info("Scout Optimizer shut down complete")
 

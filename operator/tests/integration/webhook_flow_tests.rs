@@ -1,14 +1,18 @@
 //! Webhook Flow Integration Tests
 //!
-//! Tests the full webhook signal processing flow:
-//! - HMAC signature verification
-//! - Timestamp validation (replay protection)
-//! - Payload parsing
-//! - Idempotency (duplicate detection)
+//! Tests the full webhook signal processing flow through the REAL production
+//! components:
+//! - `hmac_verify` middleware (signature verification, size limits, drift)
+//! - `webhook_handler` (payload validation, idempotency, selection pipeline)
+//!
+//! The middleware tests use a minimal 202 stub handler (the middleware is the
+//! code under test); the full-flow test wires the real handler the same way
+//! main.rs does (handler state + hmac_verify layer).
 
 use axum::{
     body::Body,
     http::{Request, StatusCode},
+    middleware::from_fn_with_state,
     routing::post,
     Router,
 };
@@ -17,9 +21,22 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 use tower::ServiceExt;
 
+use chimera_operator::config::AppConfig;
+use chimera_operator::db_abstraction::Database;
+use chimera_operator::engine::{SelectionService, SelectionConfig};
+use chimera_operator::handlers::{webhook_handler, WebhookState};
+use chimera_operator::middleware::{hmac_verify, HmacState};
+use chimera_operator::monitoring::SignalAggregator;
+use chimera_operator::price_cache::{PriceCache, PriceSource};
+use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
+use rust_decimal_macros::dec;
+use std::sync::Arc;
+
 type HmacSha256 = Hmac<Sha256>;
 
-/// Generate HMAC signature for webhook
+/// Generate the same HMAC the middleware expects: hex(HMAC-SHA256(secret,
+/// timestamp || body)) — update order MUST match middleware/hmac.rs
+/// verify_with_secrets.
 fn generate_signature(secret: &str, timestamp: &str, body: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
     mac.update(timestamp.as_bytes());
@@ -27,299 +44,446 @@ fn generate_signature(secret: &str, timestamp: &str, body: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
+const SECRET: &str = "test-secret";
+
+/// A stub handler returning the real handler's accept contract (202 Accepted).
+async fn stub_accepted() -> (StatusCode, axum::Json<Value>) {
+    (
+        StatusCode::ACCEPTED,
+        axum::Json(json!({"status": "accepted", "trade_uuid": "stub"})),
+    )
+}
+
+/// Router with the REAL hmac_verify middleware in front of a stub handler —
+/// mirrors main.rs's webhook route composition.
+fn middleware_app(max_drift_secs: i64) -> Router {
+    let hmac_state = Arc::new(HmacState::new(SECRET.to_string(), max_drift_secs));
+    Router::new()
+        .route("/api/v1/webhook", post(stub_accepted))
+        .layer(from_fn_with_state(hmac_state, hmac_verify))
+}
+
+fn signed_request(timestamp: &str, body: &str, secret: &str) -> Request<Body> {
+    let signature = generate_signature(secret, timestamp, body);
+    Request::builder()
+        .method("POST")
+        .uri("/api/v1/webhook")
+        .header("Content-Type", "application/json")
+        .header("X-Signature", signature)
+        .header("X-Timestamp", timestamp)
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
 // =============================================================================
-// HMAC VERIFICATION TESTS
+// REAL MIDDLEWARE TESTS
 // =============================================================================
 
-/// Test valid HMAC signature passes
 #[tokio::test]
-async fn test_valid_hmac_signature() {
-    let secret = "test-secret";
-    let timestamp = "1733500000";
+async fn test_valid_hmac_passes_middleware() {
+    let app = middleware_app(300);
+    let timestamp = chrono::Utc::now().timestamp().to_string();
+    let body = json!({"strategy": "SHIELD", "token": "BONK"}).to_string();
+
+    let response = app
+        .oneshot(signed_request(&timestamp, &body, SECRET))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::ACCEPTED,
+        "valid HMAC must pass the middleware"
+    );
+}
+
+#[tokio::test]
+async fn test_invalid_hmac_rejected() {
+    let app = middleware_app(300);
+    let timestamp = chrono::Utc::now().timestamp().to_string();
+    let body = json!({"strategy": "SHIELD", "token": "BONK"}).to_string();
+
+    let response = app
+        .oneshot(signed_request(&timestamp, &body, "wrong-secret"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "signature produced with a different secret must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn test_missing_signature_header_rejected() {
+    let app = middleware_app(300);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/webhook")
+                .header("X-Timestamp", chrono::Utc::now().timestamp().to_string())
+                .body(Body::from(r#"{"strategy": "SHIELD"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_oversized_signature_header_rejected() {
+    let app = middleware_app(300);
+
+    // Oversized header (> 4096 bytes) must be rejected with 400 by the
+    // middleware's size guard BEFORE any HMAC work (DoS protection).
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/webhook")
+                .header("X-Signature", "a".repeat(5000))
+                .header("X-Timestamp", chrono::Utc::now().timestamp().to_string())
+                .body(Body::from(r#"{"strategy": "SHIELD"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "oversized signature header must be rejected with 400"
+    );
+}
+
+#[tokio::test]
+async fn test_oversized_timestamp_header_rejected() {
+    let app = middleware_app(300);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/webhook")
+                .header("X-Signature", "a".repeat(64))
+                .header("X-Timestamp", "1".repeat(5000))
+                .body(Body::from(r#"{"strategy": "SHIELD"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "oversized timestamp header must be rejected with 400"
+    );
+}
+
+#[tokio::test]
+async fn test_stale_timestamp_rejected() {
+    let app = middleware_app(60);
+
+    // 120 seconds in the past with max_drift 60: rejected even with a VALID
+    // signature (drift is checked before signature verification).
+    let timestamp = (chrono::Utc::now().timestamp() - 120).to_string();
+    let body = json!({"strategy": "SHIELD", "token": "BONK"}).to_string();
+
+    let response = app
+        .oneshot(signed_request(&timestamp, &body, SECRET))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "stale timestamp must be rejected by the drift gate"
+    );
+}
+
+#[tokio::test]
+async fn test_future_timestamp_rejected() {
+    let app = middleware_app(60);
+
+    let timestamp = (chrono::Utc::now().timestamp() + 120).to_string();
+    let body = json!({"strategy": "SHIELD", "token": "BONK"}).to_string();
+
+    let response = app
+        .oneshot(signed_request(&timestamp, &body, SECRET))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "future timestamp must be rejected by the drift gate"
+    );
+}
+
+#[tokio::test]
+async fn test_timestamp_within_drift_accepted() {
+    // A wide drift window so the request can never cross the boundary between
+    // signing and verification.
+    let app = middleware_app(600);
+    let timestamp = (chrono::Utc::now().timestamp() - 100).to_string();
+    let body = json!({"strategy": "SHIELD", "token": "BONK"}).to_string();
+
+    let response = app
+        .oneshot(signed_request(&timestamp, &body, SECRET))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::ACCEPTED,
+        "timestamp inside the drift window must pass"
+    );
+}
+
+// =============================================================================
+// FULL FLOW: REAL HANDLER BEHIND REAL MIDDLEWARE
+// =============================================================================
+
+const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const WALLET: &str = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+
+async fn build_real_webhook_app() -> (Router, Arc<dyn Database>, crate::common::TestDbGuard) {
+    let (db, guard) = crate::common::create_test_pg_db().await;
+
+    let config = AppConfig::default(); // trade_mode: Paper — never trades live
+
+    // Register the wallet so the selection pipeline's wallet gate admits it
+    // (an unknown wallet is rejected before any token checks).
+    db.upsert_wallet(
+        WALLET,
+        Some(dec!(90.0)),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("wallet upsert must succeed");
+    db.update_wallet_status_ext(WALLET, "ACTIVE", None, None)
+        .await
+        .expect("wallet activation must succeed");
+
+    // Pre-seed the price cache with USDC decimals so the handler's decimals
+    // lookup is hermetic (no RPC fetch for a non-cached token).
+    let price_cache = Arc::new(PriceCache::new().unwrap());
+    price_cache.set_price(USDC_MINT, dec!(1), PriceSource::Jupiter, Some(6));
+
+    let token_parser = Arc::new(TokenParser::new(
+        TokenSafetyConfig::default(),
+        Arc::new(TokenCache::default_config()),
+        Arc::new(
+            TokenMetadataFetcher::new("https://api.mainnet-beta.solana.com")
+                .with_price_cache(price_cache.clone()),
+        ),
+    ));
+
+    let position_sizer = Arc::new(chimera_operator::engine::PositionSizer::new(
+        db.clone(),
+        Arc::new(chimera_operator::config::PositionSizingConfig::default()),
+    ));
+    let signal_aggregator = Arc::new(SignalAggregator::new(db.clone()));
+    let market_regime = Arc::new(chimera_operator::engine::MarketRegimeDetector::new(
+        price_cache.clone(),
+    ));
+    let helius = Arc::new(
+        chimera_operator::monitoring::helius::HeliusClient::new(
+            "test_key".to_string(),
+            Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
+        )
+        .expect("HeliusClient must construct"),
+    );
+
+    let selection_config = SelectionConfig {
+        total_capital_sol: config.position_sizing.total_capital_sol,
+        max_position_sol: config.strategy.max_position_sol,
+        shield_signal_quality_threshold: config.strategy.shield_signal_quality_threshold,
+        spear_signal_quality_threshold: config.strategy.spear_signal_quality_threshold,
+        shield_percent: config.strategy.shield_percent,
+        spear_percent: config.strategy.spear_percent,
+        min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd,
+        min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd,
+        min_liquidity_pumpfun_usd: config.token_safety.min_liquidity_pumpfun_usd,
+        allow_graduated_pumpfun: config.token_safety.allow_graduated_pumpfun,
+        min_token_age_hours: config.token_safety.min_token_age_hours,
+        min_token_age_pumpfun_hours: config.token_safety.min_token_age_pumpfun_hours,
+        min_wqs_score: 70.0,
+        spear_lite_max_size_sol: dec!(0.10),
+        spear_lite_wqs_threshold: 40.0,
+    };
+    let selection = Arc::new(SelectionService::new(
+        db.clone(),
+        token_parser.clone(),
+        None, // portfolio_heat
+        Some(signal_aggregator),
+        Some(market_regime),
+        Some(helius),
+        Some(position_sizer),
+        selection_config,
+    ));
+
+    let (_engine, engine_handle) = chimera_operator::Engine::new(config.clone(), db.clone());
+
+    let state = Arc::new(WebhookState {
+        db: db.clone(),
+        engine: engine_handle,
+        token_parser,
+        circuit_breaker: Arc::new(chimera_operator::CircuitBreaker::new(
+            config.circuit_breakers.clone(),
+            db.clone(),
+            config.position_sizing.total_capital_sol,
+        )),
+        portfolio_heat: None,
+        signal_aggregator: None,
+        market_regime: None,
+        helius_client: None,
+        position_sizer: None,
+        total_capital_sol: config.position_sizing.total_capital_sol,
+        max_position_sol: config.strategy.max_position_sol,
+        shield_signal_quality_threshold: config.strategy.shield_signal_quality_threshold,
+        spear_signal_quality_threshold: config.strategy.spear_signal_quality_threshold,
+        shield_percent: config.strategy.shield_percent,
+        spear_percent: config.strategy.spear_percent,
+        min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd,
+        min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd,
+        selection,
+    });
+
+    let hmac_state = Arc::new(HmacState::new(SECRET.to_string(), 300));
+    let app = Router::new()
+        .route("/api/v1/webhook", post(webhook_handler))
+        .with_state(state)
+        .layer(from_fn_with_state(hmac_state, hmac_verify));
+
+    (app, db, guard)
+}
+
+#[tokio::test]
+async fn test_full_webhook_flow_through_production_components() {
+    // The REAL handler behind the REAL middleware (main.rs composition). A
+    // USDC BUY is deterministic and hermetic: it passes HMAC, payload
+    // validation, and the decimals lookup (seeded cache), then the selection
+    // pipeline rejects stablecoins as non-speculative — proving every stage
+    // ran. The ACCEPTED path requires live token-safety data, so it is not
+    // exercised here.
+    let (app, _db, _guard) = build_real_webhook_app().await;
+
+    let timestamp = chrono::Utc::now().timestamp().to_string();
     let body = json!({
         "strategy": "SHIELD",
-        "token": "BONK",
+        "token": "USDC",
+        "token_address": USDC_MINT,
         "action": "BUY",
         "amount_sol": 0.5,
-        "wallet_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+        "wallet_address": WALLET
     })
     .to_string();
 
-    let signature = generate_signature(secret, timestamp, &body);
+    let response = app
+        .oneshot(signed_request(&timestamp, &body, SECRET))
+        .await
+        .unwrap();
 
-    // Simulate HMAC verification
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-    mac.update(timestamp.as_bytes());
-    mac.update(body.as_bytes());
-
-    let expected = hex::decode(&signature).unwrap();
-    assert!(
-        mac.verify_slice(&expected).is_ok(),
-        "Valid signature should verify"
-    );
-}
-
-/// Test invalid HMAC signature fails
-#[tokio::test]
-async fn test_invalid_hmac_signature() {
-    let secret = "test-secret";
-    let wrong_secret = "wrong-secret";
-    let timestamp = "1733500000";
-    let body = r#"{"test": "data"}"#;
-
-    // Generate with wrong secret
-    let bad_signature = generate_signature(wrong_secret, timestamp, body);
-
-    // Try to verify with correct secret
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-    mac.update(timestamp.as_bytes());
-    mac.update(body.as_bytes());
-
-    let bad_sig_bytes = hex::decode(&bad_signature).unwrap();
-    assert!(
-        mac.verify_slice(&bad_sig_bytes).is_err(),
-        "Invalid signature should fail"
-    );
-}
-
-/// Test signature with empty body
-#[tokio::test]
-async fn test_signature_empty_body() {
-    let secret = "test-secret";
-    let timestamp = "1733500000";
-    let body = "";
-
-    let signature = generate_signature(secret, timestamp, body);
-    assert!(
-        !signature.is_empty(),
-        "Should generate signature for empty body"
-    );
-}
-
-/// Test that oversized signature headers are rejected
-#[tokio::test]
-async fn test_oversized_signature_header_rejected() {
-    let secret = "test-secret";
-    let timestamp = "1733500000";
-    let body = r#"{"test": "data"}"#;
-
-    // Create an oversized signature (larger than 4KB limit)
-    let oversized_signature = "a".repeat(5000);
-
-    // This test verifies the size limit logic
-    // In the actual middleware, this would be rejected before HMAC verification
-    assert!(oversized_signature.len() > 4096, "Test signature should exceed size limit");
-}
-
-/// Test that oversized timestamp headers are rejected
-#[tokio::test]
-async fn test_oversized_timestamp_header_rejected() {
-    let secret = "test-secret";
-    let body = r#"{"test": "data"}"#;
-
-    // Create an oversized timestamp (larger than 4KB limit)
-    let oversized_timestamp = "1".repeat(5000);
-
-    // This test verifies the size limit logic
-    // In the actual middleware, this would be rejected before HMAC verification
-    assert!(oversized_timestamp.len() > 4096, "Test timestamp should exceed size limit");
-}
-
-/// Test that normal-sized headers are accepted
-#[tokio::test]
-async fn test_normal_sized_headers_accepted() {
-    let secret = "test-secret";
-    let timestamp = "1733500000";
-    let body = r#"{"test": "data"}"#;
-
-    let signature = generate_signature(secret, timestamp, body);
-
-    // Verify normal headers are under size limit
-    assert!(signature.len() < 4096, "Normal signature should be under size limit");
-    assert!(timestamp.len() < 4096, "Normal timestamp should be under size limit");
-}
-
-// =============================================================================
-// TIMESTAMP VALIDATION TESTS (Replay Protection)
-// =============================================================================
-
-/// Test timestamp within allowed drift
-#[tokio::test]
-async fn test_timestamp_within_drift() {
-    let now = chrono::Utc::now().timestamp();
-    let max_drift_secs: i64 = 60;
-
-    // 30 seconds ago - should be valid
-    let req_time = now - 30;
-    let diff = (now - req_time).abs();
-    assert!(
-        diff <= max_drift_secs,
-        "30 second old request should be valid"
-    );
-}
-
-/// Test timestamp outside allowed drift
-#[tokio::test]
-async fn test_timestamp_outside_drift() {
-    let now = chrono::Utc::now().timestamp();
-    let max_drift_secs: i64 = 60;
-
-    // 120 seconds ago - should be rejected
-    let req_time = now - 120;
-    let diff = (now - req_time).abs();
-    assert!(
-        diff > max_drift_secs,
-        "120 second old request should be rejected"
-    );
-}
-
-/// Test future timestamp
-#[tokio::test]
-async fn test_future_timestamp() {
-    let now = chrono::Utc::now().timestamp();
-    let max_drift_secs: i64 = 60;
-
-    // 120 seconds in the future - should be rejected
-    let req_time = now + 120;
-    let diff = (now - req_time).abs();
-    assert!(diff > max_drift_secs, "Future request should be rejected");
-}
-
-/// Test timestamp at exact boundary
-#[tokio::test]
-async fn test_timestamp_at_boundary() {
-    let now = chrono::Utc::now().timestamp();
-    let max_drift_secs: i64 = 60;
-
-    // Exactly at boundary
-    let req_time = now - 60;
-    let diff = (now - req_time).abs();
-    assert!(
-        diff <= max_drift_secs,
-        "Request at exact boundary should be valid"
-    );
-}
-
-// =============================================================================
-// PAYLOAD PARSING TESTS
-// =============================================================================
-
-/// Test valid SHIELD payload parsing
-#[tokio::test]
-async fn test_shield_payload_parsing() {
-    let payload = json!({
-        "strategy": "SHIELD",
-        "token": "BONK",
-        "action": "BUY",
-        "amount_sol": 0.5,
-        "wallet_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
-    });
-
-    assert_eq!(payload["strategy"], "SHIELD");
-    assert_eq!(payload["action"], "BUY");
-    assert!(payload["amount_sol"].as_f64().unwrap() > 0.0);
-}
-
-/// Test valid SPEAR payload parsing
-#[tokio::test]
-async fn test_spear_payload_parsing() {
-    let payload = json!({
-        "strategy": "SPEAR",
-        "token": "WIF",
-        "action": "BUY",
-        "amount_sol": 0.3,
-        "wallet_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
-    });
-
-    assert_eq!(payload["strategy"], "SPEAR");
-}
-
-/// Test valid EXIT payload parsing
-#[tokio::test]
-async fn test_exit_payload_parsing() {
-    let payload = json!({
-        "strategy": "EXIT",
-        "token": "BONK",
-        "action": "SELL",
-        "amount_sol": 0.5,
-        "wallet_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
-    });
-
-    assert_eq!(payload["strategy"], "EXIT");
-    assert_eq!(payload["action"], "SELL");
-}
-
-/// Test payload with optional trade_uuid
-#[tokio::test]
-async fn test_payload_with_trade_uuid() {
-    let payload = json!({
-        "strategy": "SHIELD",
-        "token": "BONK",
-        "action": "BUY",
-        "amount_sol": 0.5,
-        "wallet_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
-        "trade_uuid": "custom-uuid-12345"
-    });
-
-    assert_eq!(payload["trade_uuid"], "custom-uuid-12345");
-}
-
-/// Test payload without optional trade_uuid
-#[tokio::test]
-async fn test_payload_without_trade_uuid() {
-    let payload = json!({
-        "strategy": "SHIELD",
-        "token": "BONK",
-        "action": "BUY",
-        "amount_sol": 0.5,
-        "wallet_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
-    });
-
-    assert!(payload.get("trade_uuid").is_none());
-}
-
-// =============================================================================
-// IDEMPOTENCY TESTS
-// =============================================================================
-
-/// Test deterministic UUID generation
-#[tokio::test]
-async fn test_deterministic_uuid_generation() {
-    use sha2::{Digest, Sha256};
-
-    let timestamp = "1733500000";
-    let token = "BONK";
-    let action = "BUY";
-    let amount = "0.5";
-
-    // Same inputs should generate same UUID
-    let input1 = format!("{}{}{}{}", timestamp, token, action, amount);
-    let input2 = format!("{}{}{}{}", timestamp, token, action, amount);
-
-    let hash1 = Sha256::digest(input1.as_bytes());
-    let hash2 = Sha256::digest(input2.as_bytes());
-
-    assert_eq!(hash1, hash2, "Same inputs should produce same hash");
-}
-
-/// Test different inputs produce different UUIDs
-#[tokio::test]
-async fn test_unique_uuid_for_different_inputs() {
-    use sha2::{Digest, Sha256};
-
-    let input1 = "1733500000BONKBUY0.5";
-    let input2 = "1733500000BONKBUY0.6"; // Different amount
-
-    let hash1 = Sha256::digest(input1.as_bytes());
-    let hash2 = Sha256::digest(input2.as_bytes());
+    let status = response.status();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body_bytes).unwrap();
 
     assert_ne!(
-        hash1, hash2,
-        "Different inputs should produce different hashes"
+        status,
+        StatusCode::UNAUTHORIZED,
+        "valid HMAC must pass the middleware"
+    );
+    assert_eq!(
+        json["status"], "rejected",
+        "USDC BUY must be rejected by the selection pipeline, got: {json}"
+    );
+    let reason = json["reason"].as_str().unwrap_or("").to_lowercase();
+    assert!(
+        reason.contains("stablecoin") || reason.contains("speculative"),
+        "rejection reason must come from the selection pipeline's token gate, got: {json}"
+    );
+    // The selection rejection is a 400 BAD_REQUEST (the payload itself was
+    // well-formed and passed HMAC + decimals lookup).
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "selection rejection surfaces as 400: {json}"
     );
 }
 
-/// Test duplicate trade_uuid rejection
+#[tokio::test]
+async fn test_webhook_missing_signature_rejected_by_middleware() {
+    let (app, _db, _guard) = build_real_webhook_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/webhook")
+                .header("Content-Type", "application/json")
+                .header("X-Timestamp", chrono::Utc::now().timestamp().to_string())
+                .body(Body::from(r#"{"strategy": "SHIELD"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "missing signature must be rejected by the real middleware"
+    );
+}
+
+// =============================================================================
+// IDEMPOTENCY: generate_trade_uuid DETERMINISM (production function)
+// =============================================================================
+
+#[tokio::test]
+async fn test_deterministic_uuid_generation() {
+    // The real idempotency key: SignalPayload::generate_trade_uuid hashes
+    // wallet||token||action||amount||strategy||token_address||exit_fraction
+    // (NO timestamp — retries with the same payload must dedupe).
+    let payload = chimera_operator::SignalPayload {
+        strategy: chimera_operator::Strategy::Shield,
+        token: "BONK".to_string(),
+        token_address: Some("DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263".to_string()),
+        action: chimera_operator::Action::Buy,
+        amount_sol: dec!(0.5),
+        wallet_address: WALLET.to_string(),
+        trade_uuid: None,
+        exit_fraction: None,
+    };
+
+    let uuid1 = payload.generate_trade_uuid(1_733_500_000);
+    let uuid2 = payload.generate_trade_uuid(1_733_500_001);
+    assert_eq!(
+        uuid1, uuid2,
+        "identical payloads must generate the same UUID regardless of timestamp"
+    );
+
+    let mut different_amount = payload.clone();
+    different_amount.amount_sol = dec!(0.6);
+    assert_ne!(
+        uuid1,
+        different_amount.generate_trade_uuid(1_733_500_000),
+        "different amounts must produce different UUIDs"
+    );
+}
+
 #[tokio::test]
 async fn test_duplicate_trade_uuid_rejection() {
     use chimera_operator::db_abstraction::InsertTrade;
@@ -327,7 +491,7 @@ async fn test_duplicate_trade_uuid_rejection() {
     use std::str::FromStr;
 
     // This test verifies that the idempotency check works
-    // by checking if trade_uuid_exists correctly identifies duplicates
+    // by checking if trade_uuid_exists correctly identifies duplicates.
 
     // Create an isolated test database (avoids shared-DB duplicate-key residue).
     let (db, _temp_dir) = crate::common::create_test_pg_db().await;
@@ -336,8 +500,8 @@ async fn test_duplicate_trade_uuid_rejection() {
     let test_uuid = "test-duplicate-uuid-12345";
     db.insert_trade(&InsertTrade {
         trade_uuid: test_uuid.to_string(),
-        wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
-        token_address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+        wallet_address: WALLET.to_string(),
+        token_address: USDC_MINT.to_string(),
         token_symbol: Some("USDC".to_string()),
         strategy: "SHIELD".to_string(),
         side: "BUY".to_string(),
@@ -363,152 +527,4 @@ async fn test_duplicate_trade_uuid_rejection() {
         .expect("Failed to check different trade UUID");
 
     assert!(!not_exists, "Different trade UUID should not exist");
-}
-
-// =============================================================================
-// WEBHOOK RESPONSE TESTS
-// =============================================================================
-
-/// Test accepted response format
-#[tokio::test]
-async fn test_accepted_response_format() {
-    let response = json!({
-        "status": "accepted",
-        "trade_uuid": "uuid-12345"
-    });
-
-    assert_eq!(response["status"], "accepted");
-    assert!(response.get("trade_uuid").is_some());
-}
-
-/// Test rejected response format with reason
-#[tokio::test]
-async fn test_rejected_response_format() {
-    let response = json!({
-        "status": "rejected",
-        "reason": "duplicate_signal"
-    });
-
-    assert_eq!(response["status"], "rejected");
-    assert_eq!(response["reason"], "duplicate_signal");
-}
-
-/// Test circuit breaker rejection
-#[tokio::test]
-async fn test_circuit_breaker_rejection_response() {
-    let response = json!({
-        "status": "rejected",
-        "reason": "circuit_breaker_triggered"
-    });
-
-    assert_eq!(response["reason"], "circuit_breaker_triggered");
-}
-
-// =============================================================================
-// INTEGRATION FLOW TESTS
-// =============================================================================
-
-/// Test full valid webhook flow
-#[tokio::test]
-async fn test_full_webhook_flow() {
-    let app = Router::new().route(
-        "/api/v1/webhook",
-        post(|req: Request<Body>| async move {
-            // Check headers
-            let has_signature = req.headers().get("X-Signature").is_some();
-            let has_timestamp = req.headers().get("X-Timestamp").is_some();
-
-            if !has_signature || !has_timestamp {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    axum::Json(json!({
-                        "status": "rejected",
-                        "reason": "missing_headers"
-                    })),
-                );
-            }
-
-            (
-                StatusCode::OK,
-                axum::Json(json!({
-                    "status": "accepted",
-                    "trade_uuid": "generated-uuid"
-                })),
-            )
-        }),
-    );
-
-    let secret = "test-secret";
-    let timestamp = chrono::Utc::now().timestamp().to_string();
-    let body = json!({
-        "strategy": "SHIELD",
-        "token": "BONK",
-        "action": "BUY",
-        "amount_sol": 0.5,
-        "wallet_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
-    })
-    .to_string();
-
-    let signature = generate_signature(secret, &timestamp, &body);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/webhook")
-                .header("Content-Type", "application/json")
-                .header("X-Signature", &signature)
-                .header("X-Timestamp", &timestamp)
-                .body(Body::from(body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: Value = serde_json::from_slice(&body).unwrap();
-
-    assert_eq!(json["status"], "accepted");
-}
-
-/// Test webhook missing signature header
-#[tokio::test]
-async fn test_webhook_missing_signature() {
-    let app = Router::new().route(
-        "/api/v1/webhook",
-        post(|req: Request<Body>| async move {
-            let has_signature = req.headers().get("X-Signature").is_some();
-
-            if !has_signature {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    axum::Json(json!({
-                        "status": "rejected",
-                        "reason": "missing_signature"
-                    })),
-                );
-            }
-
-            (StatusCode::OK, axum::Json(json!({"status": "accepted"})))
-        }),
-    );
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/webhook")
-                .header("Content-Type", "application/json")
-                .header("X-Timestamp", "1733500000")
-                .body(Body::from(r#"{"strategy": "SHIELD"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }

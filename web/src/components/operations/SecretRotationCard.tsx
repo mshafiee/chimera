@@ -61,22 +61,22 @@ export function SecretRotationCard({ data }: SecretRotationCardProps) {
 
       {/* Helpful guidance for fresh deployments */}
       {data.status === 'never_rotated' && (
-        <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
+        <div className="bg-blue-900/20 border border-blue-800 rounded-lg p-4">
           <div className="flex items-start gap-3">
-            <Clock className="w-5 h-5 text-blue-600 dark:text-blue-400 mt-0.5 flex-shrink-0" />
+            <Clock className="w-5 h-5 text-blue-400 mt-0.5 flex-shrink-0" />
             <div className="flex-1">
-              <h4 className="text-sm font-semibold text-blue-900 dark:text-blue-100 mb-1">
+              <h4 className="text-sm font-semibold text-blue-100 mb-1">
                 Fresh Deployment - No Rotation History
               </h4>
-              <p className="text-sm text-blue-800 dark:text-blue-200 mb-2">
+              <p className="text-sm text-blue-200 mb-2">
                 This is a fresh deployment where secret rotation has not been configured yet.
               </p>
-              <div className="text-sm text-blue-700 dark:text-blue-300">
+              <div className="text-sm text-blue-300">
                 <p className="font-medium mb-1">Next steps:</p>
                 <ol className="list-decimal list-inside space-y-1 text-xs">
-                  <li>Run <code className="px-1 py-0.5 bg-blue-100 dark:bg-blue-800 rounded">./ops/initialize-secret-rotation.sh</code> to initialize rotation tracking</li>
-                  <li>Run <code className="px-1 py-0.5 bg-blue-100 dark:bg-blue-800 rounded">./ops/rotate-secrets.sh webhook</code> for first manual rotation</li>
-                  <li>Setup automated cron job with <code className="px-1 py-0.5 bg-blue-100 dark:bg-blue-800 rounded">./ops/install-crons.sh</code></li>
+                  <li>Run <code className="px-1 py-0.5 bg-blue-800 rounded">./ops/initialize-secret-rotation.sh</code> to initialize rotation tracking</li>
+                  <li>Run <code className="px-1 py-0.5 bg-blue-800 rounded">./ops/rotate-secrets.sh webhook</code> for first manual rotation</li>
+                  <li>Setup automated cron job with <code className="px-1 py-0.5 bg-blue-800 rounded">./ops/install-crons.sh</code></li>
                 </ol>
               </div>
             </div>

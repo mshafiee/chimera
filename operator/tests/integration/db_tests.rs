@@ -4,33 +4,23 @@
 //! These tests cover PostgreSQL-native pool behavior: concurrent reads and
 //! serialized concurrent writes through the shared pool.
 
-use chimera_operator::db_abstraction::{create_database, Database, DatabaseConfig, DbPool};
+use chimera_operator::db_abstraction::Database;
 use sqlx::Pool;
 use sqlx::Postgres;
 use std::sync::Arc;
-use tempfile::TempDir;
+
+#[path = "../common/mod.rs"]
+mod common;
 
 fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
-    match db.pool() {
-        DbPool::PostgreSQL(pool) => pool,
-        _ => panic!("test requires PostgreSQL backend"),
-    }
-}
-
-/// Create a temporary database for testing
-async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
-    let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::postgres(
-        std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"),
-    );
-    let db = create_database(&config).await.unwrap();
-    db.run_migrations().await.unwrap();
-    (db, temp_dir)
+    common::pg_pool(db)
 }
 
 #[tokio::test]
 async fn test_concurrent_reads() {
-    let (db, _temp_dir) = create_test_db().await;
+    // Each test gets its own isolated database (dropped on teardown), so
+    // concurrent tests never share or race on schema/state.
+    let (db, _guard) = common::create_test_db().await;
     let pool = pg_pool(&db);
 
     // Spawn multiple concurrent read queries through the shared pool.
@@ -54,7 +44,7 @@ async fn test_concurrent_reads() {
 
 #[tokio::test]
 async fn test_concurrent_writes_serialized() {
-    let (db, _temp_dir) = create_test_db().await;
+    let (db, _guard) = common::create_test_db().await;
     let pool = pg_pool(&db);
 
     sqlx::query(
@@ -63,7 +53,9 @@ async fn test_concurrent_writes_serialized() {
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO concurrency_counter (id, value) VALUES (1, 0) ON CONFLICT (id) DO NOTHING")
+    // Reset the counter explicitly so the test starts from a known state even
+    // if a previous (failed) run left a row behind.
+    sqlx::query("INSERT INTO concurrency_counter (id, value) VALUES (1, 0) ON CONFLICT (id) DO UPDATE SET value = 0")
         .execute(&pool)
         .await
         .unwrap();

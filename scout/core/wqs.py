@@ -76,6 +76,9 @@ class ScoreTracker:
         self.positive = 0.0
         self.negative = 0.0
         self.components: Dict[Union[str, PenaltyCategory], float] = {}
+        # Individual penalty applications, kept so per-category precedence
+        # (most severe penalty wins) is actually enforceable
+        self._penalty_entries: List[Tuple[Union[str, PenaltyCategory], float]] = []
 
     def add_pos(self, name: str, amount: float) -> None:
         self.positive += amount
@@ -83,6 +86,7 @@ class ScoreTracker:
 
     def add_neg(self, category: Union[str, PenaltyCategory], amount: float) -> None:
         self.negative += amount
+        self._penalty_entries.append((category, amount))
         self.components[category] = self.components.get(category, 0.0) - amount
 
     def to_components(self, is_instant_reject: bool = False) -> "RawScoreComponents":
@@ -98,20 +102,24 @@ class ScoreTracker:
         )
 
     def _apply_penalty_precedence(self) -> None:
-        penalty_categories: Dict[PenaltyCategory, List[Tuple[PenaltyCategory, float]]] = {
-            cat: [] for cat in PenaltyCategory
-        }
-        for category, value in self.components.items():
-            if isinstance(category, PenaltyCategory) and value < 0:
-                penalty_categories[category].append((category, value))
-        for cat, penalties in penalty_categories.items():
-            if len(penalties) > 1:
-                penalties.sort(key=lambda x: abs(x[1]), reverse=True)
-                most_severe_name, most_severe_value = penalties[0]
-                for other_name, _ in penalties[1:]:
-                    if other_name in self.components:
-                        del self.components[other_name]
-                self.components[most_severe_name] = most_severe_value
+        # Keep only the most severe individual penalty per category. The
+        # aggregated component dict alone always has <= 1 entry per category,
+        # so precedence must operate on the individual applications.
+        if len(self._penalty_entries) <= 1:
+            return
+        by_category: Dict[Any, List[float]] = {}
+        for category, amount in self._penalty_entries:
+            if isinstance(category, PenaltyCategory):
+                by_category.setdefault(category, []).append(amount)
+        for category, amounts in by_category.items():
+            if len(amounts) > 1:
+                most_severe = max(amounts)
+                self.components[category] = -most_severe
+                self._penalty_entries = [
+                    (c, a) for c, a in self._penalty_entries
+                    if not (c == category and a != most_severe)
+                ]
+        self.negative = abs(sum(v for v in self.components.values() if v < 0))
 
     def _apply_penalty_confidence(self) -> None:
         penalty_confidence = {
@@ -672,9 +680,10 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
         elif metrics.profit_factor >= 1.2:
             logger.debug("[WQS] bonus pf_score +2.00 addr=%s profit_factor=%.2f", addr, metrics.profit_factor)
             tracker.add_pos("pf_score", 2.0)
-        elif metrics.profit_factor >= 1.15:
-            logger.debug("[WQS] penalty pf_score -1.00 addr=%s profit_factor=%.2f", addr, metrics.profit_factor)
-            tracker.add_neg("pf_score", 1.0)
+        # [1.15, 1.2) is a NEUTRAL zone: penalizing it (-1) created a 3-point
+        # scoring cliff against the +2 bonus at exactly 1.2, while the win-rate
+        # bonus gate treats >= 1.2 as good. Keeping this band at 0 smooths the
+        # transition (1.2 is now consistently "good" everywhere).
         elif metrics.profit_factor >= 1.1:
             logger.debug("[WQS] penalty pf_score -3.00 addr=%s profit_factor=%.2f", addr, metrics.profit_factor)
             tracker.add_neg("pf_score", 3.0)
@@ -902,7 +911,11 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
     except Exception as e:
         logger.warning("Failed to apply dynamic weights: %s", e)
 
-    max_total_penalty = float(os.getenv("SCOUT_MAX_TOTAL_PENALTY", "80.0"))
+    max_total_penalty = 80.0
+    try:
+        max_total_penalty = float(os.getenv("SCOUT_MAX_TOTAL_PENALTY", "80.0"))
+    except ValueError:
+        logger.warning("Invalid SCOUT_MAX_TOTAL_PENALTY value, using default 80.0")
     penalty_cap_enabled = os.getenv("SCOUT_PENALTY_CAP_ENABLED", "true").lower() == "true"
     penalty_precedence_enabled = os.getenv("SCOUT_PENALTY_PRECEDENCE", "true").lower() == "true"
 
@@ -910,10 +923,67 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
     # and should never be diluted by a proportional cap.
     UNCAPPABLE_PENALTIES = {PenaltyCategory.SNIPER, PenaltyCategory.SCAM}
 
+    # Advanced Risk Features Integration (CVaR, Drawdown Duration, Ulcer Index).
+    # Applied UNCONDITIONALLY whenever the features are populated — they were
+    # previously nested inside the cap guard, silently skipped when the cap
+    # was disabled or before any other penalty accumulated. They are applied
+    # here so they feed into the cap/confidence pipeline below.
+    if hasattr(metrics, 'advanced_risk_features') and metrics.advanced_risk_features:
+        arf = metrics.advanced_risk_features
+
+        # Only apply if extraction was successful with complete data
+        # Require: extraction_success=True, sample_count>=5, all required fields present, no extraction errors
+        if (arf.get('extraction_success') and
+            arf.get('sample_count', 0) >= 5 and
+            all(key in arf for key in ['cvar_95', 'max_drawdown_duration_trades', 'ulcer_index']) and
+            not arf.get('extraction_errors')):
+
+            # Apply CVaR penalty (95th percentile conditional value at risk)
+            # CVaR measures average loss in the worst 5% of trades
+            # Negative CVaR indicates losses - penalize proportional to severity
+            cvar_95 = arf.get('cvar_95', 0.0)
+            if cvar_95 < 0:  # Only penalize negative CVaR (losses)
+                cvar_penalty = abs(cvar_95) * 0.2
+                tracker.add_neg(PenaltyCategory.CVAR, cvar_penalty)
+                logger.debug(
+                    "[WQS] penalty cvar -%.2f addr=%s cvar_95=%.4f",
+                    cvar_penalty, addr, cvar_95,
+                )
+
+            # Apply Drawdown Duration penalty
+            # Long drawdowns indicate slow recovery from losses
+            # More than 10 trades to recover suggests poor risk management
+            max_dd_duration = arf.get('max_drawdown_duration_trades', 0)
+            if max_dd_duration > 10:  # More than 10 trades to recover
+                dd_duration_penalty = max_dd_duration * 0.1
+                tracker.add_neg(PenaltyCategory.DRAWDOWN_DURATION, dd_duration_penalty)
+                logger.debug(
+                    "[WQS] penalty drawdown_duration -%.2f addr=%s max_drawdown_duration_trades=%d",
+                    dd_duration_penalty, addr, max_dd_duration,
+                )
+
+            # Apply Ulcer Index penalty (depth + duration combined metric)
+            # Ulcer Index > 5.0 indicates severe, prolonged drawdowns
+            ulcer_index = arf.get('ulcer_index', 0.0)
+            if ulcer_index > 5.0:  # Severe, prolonged drawdown
+                ulcer_penalty = min(20.0, ulcer_index * 0.5)
+                tracker.add_neg(PenaltyCategory.ULCER_INDEX, ulcer_penalty)
+                logger.debug(
+                    "[WQS] penalty ulcer_index -%.2f addr=%s ulcer_index=%.2f",
+                    ulcer_penalty, addr, ulcer_index,
+                )
+
     if penalty_cap_enabled and tracker.negative > 0:
-        total_negative_before = tracker.negative
+        # Precedence must run BEFORE the cap: it collapses each category to its
+        # single most-severe entry by re-reading the raw _penalty_entries.
+        # Running it after the cap would resurrect uncapped values and defeat
+        # the SCOUT_MAX_TOTAL_PENALTY invariant.
+        if penalty_precedence_enabled:
+            tracker._apply_penalty_precedence()
+            logger.debug("[WQS] penalty precedence applied addr=%s negative=%.2f components=%s", addr, tracker.negative, list(tracker.components.keys()))
 
         if tracker.negative > max_total_penalty:
+            total_negative_before = tracker.negative
             # Separate cappable from uncappable penalties.
             # String-keyed negatives (e.g. "pf_score", "enhanced_momentum")
             # are never uncappable — they are always proportional to the penalty.
@@ -943,58 +1013,7 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
                     addr, total_negative_before, tracker.negative, cappable, uncappable,
                 )
 
-        if penalty_precedence_enabled:
-            tracker._apply_penalty_precedence()
-            logger.debug("[WQS] penalty precedence applied addr=%s negative=%.2f components=%s", addr, tracker.negative, list(tracker.components.keys()))
-
         tracker._apply_penalty_confidence()
-
-        # Advanced Risk Features Integration (CVaR, Drawdown Duration, Ulcer Index)
-        # These provide sophisticated risk detection beyond basic drawdown percentage
-        if hasattr(metrics, 'advanced_risk_features') and metrics.advanced_risk_features:
-            arf = metrics.advanced_risk_features
-
-            # Only apply if extraction was successful with complete data
-            # Require: extraction_success=True, sample_count>=5, all required fields present, no extraction errors
-            if (arf.get('extraction_success') and
-                arf.get('sample_count', 0) >= 5 and
-                all(key in arf for key in ['cvar_95', 'max_drawdown_duration_trades', 'ulcer_index']) and
-                not arf.get('extraction_errors')):
-
-                # Apply CVaR penalty (95th percentile conditional value at risk)
-                # CVaR measures average loss in the worst 5% of trades
-                # Negative CVaR indicates losses - penalize proportional to severity
-                cvar_95 = arf.get('cvar_95', 0.0)
-                if cvar_95 < 0:  # Only penalize negative CVaR (losses)
-                    cvar_penalty = abs(cvar_95) * 0.2
-                    tracker.add_neg(PenaltyCategory.CVAR, cvar_penalty)
-                    logger.debug(
-                        "[WQS] penalty cvar -%.2f addr=%s cvar_95=%.4f",
-                        cvar_penalty, addr, cvar_95,
-                    )
-
-                # Apply Drawdown Duration penalty
-                # Long drawdowns indicate slow recovery from losses
-                # More than 10 trades to recover suggests poor risk management
-                max_dd_duration = arf.get('max_drawdown_duration_trades', 0)
-                if max_dd_duration > 10:  # More than 10 trades to recover
-                    dd_duration_penalty = max_dd_duration * 0.1
-                    tracker.add_neg(PenaltyCategory.DRAWDOWN_DURATION, dd_duration_penalty)
-                    logger.debug(
-                        "[WQS] penalty drawdown_duration -%.2f addr=%s max_drawdown_duration_trades=%d",
-                        dd_duration_penalty, addr, max_dd_duration,
-                    )
-
-                # Apply Ulcer Index penalty (depth + duration combined metric)
-                # Ulcer Index > 5.0 indicates severe, prolonged drawdowns
-                ulcer_index = arf.get('ulcer_index', 0.0)
-                if ulcer_index > 5.0:  # Severe, prolonged drawdown
-                    ulcer_penalty = min(20.0, ulcer_index * 0.5)
-                    tracker.add_neg(PenaltyCategory.ULCER_INDEX, ulcer_penalty)
-                    logger.debug(
-                        "[WQS] penalty ulcer_index -%.2f addr=%s ulcer_index=%.2f",
-                        ulcer_penalty, addr, ulcer_index,
-                    )
 
     return tracker.to_components()
 
@@ -1065,8 +1084,11 @@ def calculate_wqs_with_confidence(metrics: WalletMetrics, strategy: str = "SHIEL
 
     trade_count = metrics.trade_count_30d or 0
     confidence = _compute_confidence(trade_count, metrics.profit_factor, metrics, metrics.is_unproven)
+    # adjusted_score keeps penalties at full strength while confidence-scales
+    # only the bonus side. Reverted from `raw_score * confidence`, which was an
+    # unflagged scoring-distribution shift that silently promoted low-confidence
+    # wallets (penalties were being discounted by confidence).
     adjusted_score = max(0.0, min(components.positive * confidence - components.negative, 100.0))
-
     adjusted_score = max(0.0, min(adjusted_score, 100.0))
     logger.info(
         "[WQS] FINAL addr=%s wqs=%.2f confidence=%.3f adjusted=%.2f positive=%.2f negative=%.2f",

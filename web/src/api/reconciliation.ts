@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { apiClient } from './client'
+import { apiClient, getApiError } from './client'
 
 // Reconciliation Status Response
 export interface ReconciliationStatusResponse {
@@ -59,34 +59,41 @@ export interface ReconciliationStatsResponse {
 }
 
 export interface DiscrepancyTypeStats {
-  type: string
+  type: Discrepancy['type']
   count: number
   percentage: number
+}
+
+const STATUS_ENDPOINT = '/reconciliation/status'
+const HISTORY_ENDPOINT = '/reconciliation/history'
+const STATS_ENDPOINT = '/reconciliation/stats'
+const TRIGGER_ENDPOINT = '/reconciliation/trigger'
+
+function handleReconciliationError(label: string, authMessage: string) {
+  return (error: unknown) => {
+    console.error(`[Reconciliation API] Failed to fetch ${label}:`, error)
+    if (error && typeof error === 'object' && 'response' in error) {
+      const err = error as { response?: { status?: number } }
+      if (err.response?.status === 401) {
+        toast.error(authMessage)
+      }
+    }
+  }
 }
 
 // Fetch Reconciliation Status
 export function useReconciliationStatus(refetchInterval?: number) {
   return useQuery({
     queryKey: ['reconciliation', 'status'],
-    queryFn: async ({ signal: _signal }) => {
-      const response = await apiClient.get<ReconciliationStatusResponse>('/reconciliation/status')
+    queryFn: async ({ signal }) => {
+      const response = await apiClient.get<ReconciliationStatusResponse>(STATUS_ENDPOINT, { signal })
       return response.data
     },
     refetchInterval,
     staleTime: 5000,
     retry: 1,
     meta: {
-      onError: (error: unknown) => {
-        console.error('[Reconciliation API] Failed to fetch status:', error)
-        // Reconciliation requires authentication - handle 401 errors
-        if (error && typeof error === 'object' && 'response' in error) {
-          const err = error as { response?: { status?: number } }
-          if (err.response?.status === 401) {
-            toast.error('Authentication required for reconciliation data')
-          }
-        }
-        // Reconciliation is optional - console only for other errors
-      },
+      onError: handleReconciliationError('status', 'Authentication required for reconciliation data'),
     },
   })
 }
@@ -95,26 +102,17 @@ export function useReconciliationStatus(refetchInterval?: number) {
 export function useReconciliationHistory(limit?: number) {
   return useQuery({
     queryKey: ['reconciliation', 'history', limit],
-    queryFn: async ({ signal: _signal }) => {
-      const response = await apiClient.get<ReconciliationHistoryResponse>('/reconciliation/history', {
-        params: limit ? { limit } : undefined,
+    queryFn: async ({ signal }) => {
+      const response = await apiClient.get<ReconciliationHistoryResponse>(HISTORY_ENDPOINT, {
+        params: limit !== undefined ? { limit } : undefined,
+        signal,
       })
       return response.data
     },
     staleTime: 60000,
     retry: 1,
     meta: {
-      onError: (error: unknown) => {
-        console.error('[Reconciliation API] Failed to fetch history:', error)
-        // Reconciliation requires authentication - handle 401 errors
-        if (error && typeof error === 'object' && 'response' in error) {
-          const err = error as { response?: { status?: number } }
-          if (err.response?.status === 401) {
-            toast.error('Authentication required for reconciliation history')
-          }
-        }
-        // Reconciliation history is optional - console only for other errors
-      },
+      onError: handleReconciliationError('history', 'Authentication required for reconciliation history'),
     },
   })
 }
@@ -123,26 +121,17 @@ export function useReconciliationHistory(limit?: number) {
 export function useReconciliationStats(timeRange?: string) {
   return useQuery({
     queryKey: ['reconciliation', 'stats', timeRange],
-    queryFn: async ({ signal: _signal }) => {
-      const response = await apiClient.get<ReconciliationStatsResponse>('/reconciliation/stats', {
+    queryFn: async ({ signal }) => {
+      const response = await apiClient.get<ReconciliationStatsResponse>(STATS_ENDPOINT, {
         params: timeRange ? { range: timeRange } : undefined,
+        signal,
       })
       return response.data
     },
     staleTime: 300000,
     retry: 1,
     meta: {
-      onError: (error: unknown) => {
-        console.error('[Reconciliation API] Failed to fetch stats:', error)
-        // Reconciliation requires authentication - handle 401 errors
-        if (error && typeof error === 'object' && 'response' in error) {
-          const err = error as { response?: { status?: number } }
-          if (err.response?.status === 401) {
-            toast.error('Authentication required for reconciliation stats')
-          }
-        }
-        // Reconciliation stats is optional - console only for other errors
-      },
+      onError: handleReconciliationError('stats', 'Authentication required for reconciliation stats'),
     },
   })
 }
@@ -153,8 +142,11 @@ export function useTriggerReconciliation() {
 
   return useMutation({
     mutationFn: async () => {
-      const response = await apiClient.post<{ run_id: string; scheduled_at: string }>('/reconciliation/trigger', {})
+      const response = await apiClient.post<{ run_id: string; scheduled_at: string }>(TRIGGER_ENDPOINT, {})
       return response.data
+    },
+    onError: (error: unknown) => {
+      toast.error(getApiError(error))
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['reconciliation'] })
@@ -168,8 +160,14 @@ export function useResolveDiscrepancy() {
 
   return useMutation({
     mutationFn: async ({ id, resolution }: { id: number; resolution: string }) => {
-      const response = await apiClient.post(`/reconciliation/discrepancies/${id}/resolve`, { resolution })
+      const response = await apiClient.post<{ success: boolean }>(
+        `/reconciliation/discrepancies/${id}/resolve`,
+        { resolution }
+      )
       return response.data
+    },
+    onError: (error: unknown) => {
+      toast.error(getApiError(error))
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['reconciliation'] })

@@ -13,7 +13,11 @@ NC='\033[0m'
 
 API_URL="http://localhost:8080"
 # Get webhook secret from running container
-WEBHOOK_SECRET=$(docker exec chimera-operator printenv CHIMERA_SECURITY__WEBHOOK_SECRET 2>/dev/null || echo "devnet-webhook-secret-change-me-in-production")
+WEBHOOK_SECRET=$(docker exec chimera-operator printenv CHIMERA_SECURITY__WEBHOOK_SECRET 2>/dev/null || true)
+if [ -z "$WEBHOOK_SECRET" ]; then
+    echo "ERROR: cannot obtain webhook secret from chimera-operator container" >&2
+    exit 1
+fi
 
 PASSED=0
 FAILED=0
@@ -63,7 +67,7 @@ test_webhook() {
         -H "Content-Type: application/json" \
         -H "X-Signature: $signature" \
         -H "X-Timestamp: $timestamp" \
-        -d "$payload" 2>&1)
+        -d "$payload" 2>&1 || true)
     
     status_code=$(echo "$response" | tail -1)
     response_body=$(echo "$response" | sed '$d')
@@ -78,15 +82,19 @@ test_webhook() {
     fi
 }
 
-# Test wallet promotion
-test_wallet_promotion() {
-    log_section "Testing Wallet Promotion"
+# Test wallet API
+test_wallet_api() {
+    log_section "Testing Wallet API"
     
     local test_wallet="7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
     
     log_info "Getting wallet status..."
     local response
-    response=$(curl -s "${API_URL}/api/v1/wallets/${test_wallet}" 2>&1)
+    if ! response=$(curl -sf --max-time 5 "${API_URL}/api/v1/wallets/${test_wallet}" 2>&1); then
+        log_error "Wallet API failed (endpoint unreachable)"
+        echo "Response: $response"
+        return 1
+    fi
     
     if echo "$response" | grep -q "wallet_address"; then
         log_success "Wallet API endpoint accessible"
@@ -104,7 +112,7 @@ test_circuit_breaker() {
     
     log_info "Checking circuit breaker status..."
     local health
-    health=$(curl -s "${API_URL}/api/v1/health" | python3 -m json.tool 2>/dev/null)
+    health=$(curl -s --max-time 5 "${API_URL}/api/v1/health" | python3 -m json.tool 2>/dev/null || true)
     
     local cb_state
     cb_state=$(echo "$health" | grep -A 2 '"circuit_breaker"' | grep '"state"' | cut -d'"' -f4)
@@ -129,7 +137,7 @@ verify_grafana_metrics() {
     
     for metric in "${metrics[@]}"; do
         local result
-        result=$(curl -s "http://localhost:9090/api/v1/query?query=${metric}" | python3 -m json.tool 2>/dev/null | grep -c "result" || echo "0")
+        result=$(curl -s --max-time 5 "http://localhost:9090/api/v1/query?query=${metric}" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('data',{}).get('result',[])))" 2>/dev/null || echo "0")
         
         if [ "$result" -gt 0 ]; then
             log_success "Metric ${metric} is available in Prometheus"
@@ -189,34 +197,26 @@ test_web_dashboard() {
     
     # Test health endpoint
     local health
-    health=$(curl -s "${API_URL}/api/v1/health" 2>&1)
-    if echo "$health" | grep -q "status"; then
-        log_success "Health endpoint accessible"
-    else
+    if ! health=$(curl -sf --max-time 5 "${API_URL}/api/v1/health" 2>&1); then
         log_error "Health endpoint failed"
         return 1
     fi
+    log_success "Health endpoint accessible"
     
     # Test positions endpoint
-    local positions
-    positions=$(curl -s "${API_URL}/api/v1/positions" 2>&1)
-    if echo "$positions" | grep -q "\[\|positions"; then
+    if curl -sf --max-time 5 "${API_URL}/api/v1/positions" > /dev/null 2>&1; then
         log_success "Positions endpoint accessible"
     else
-        log_info "Positions endpoint returned: $(echo "$positions" | head -1)"
-        # This is OK - might be empty array
-        log_success "Positions endpoint accessible (may be empty)"
+        log_error "Positions endpoint failed"
+        return 1
     fi
     
     # Test trades endpoint
-    local trades
-    trades=$(curl -s "${API_URL}/api/v1/trades" 2>&1)
-    if echo "$trades" | grep -q "\[\|trades"; then
+    if curl -sf --max-time 5 "${API_URL}/api/v1/trades" > /dev/null 2>&1; then
         log_success "Trades endpoint accessible"
     else
-        log_info "Trades endpoint returned: $(echo "$trades" | head -1)"
-        # This is OK - might be empty array
-        log_success "Trades endpoint accessible (may be empty)"
+        log_error "Trades endpoint failed"
+        return 1
     fi
     
     log_info "Web dashboard available at http://localhost:3000"
@@ -228,16 +228,17 @@ monitor_metrics() {
     
     log_info "Collecting metrics samples over 30 seconds..."
     
+    local query_value='import sys,json; r=json.load(sys.stdin).get("data",{}).get("result",[]); print(r[0]["value"][1] if r else "N/A")'
     for i in {1..6}; do
         echo -n "Sample $i: "
         local queue_depth
-        queue_depth=$(curl -s "http://localhost:9090/api/v1/query?query=chimera_queue_depth" | python3 -m json.tool 2>/dev/null | grep '"value"' | head -1 | cut -d'"' -f4 | cut -d',' -f2 | tr -d ' ]')
+        queue_depth=$(curl -s --max-time 5 "http://localhost:9090/api/v1/query?query=chimera_queue_depth" | python3 -c "$query_value" 2>/dev/null || echo "N/A")
         local rpc_health
-        rpc_health=$(curl -s "http://localhost:9090/api/v1/query?query=chimera_rpc_health" | python3 -m json.tool 2>/dev/null | grep '"value"' | head -1 | cut -d'"' -f4 | cut -d',' -f2 | tr -d ' ]')
+        rpc_health=$(curl -s --max-time 5 "http://localhost:9090/api/v1/query?query=chimera_rpc_health" | python3 -c "$query_value" 2>/dev/null || echo "N/A")
         local cb_state
-        cb_state=$(curl -s "http://localhost:9090/api/v1/query?query=chimera_circuit_breaker_state" | python3 -m json.tool 2>/dev/null | grep '"value"' | head -1 | cut -d'"' -f4 | cut -d',' -f2 | tr -d ' ]')
+        cb_state=$(curl -s --max-time 5 "http://localhost:9090/api/v1/query?query=chimera_circuit_breaker_state" | python3 -c "$query_value" 2>/dev/null || echo "N/A")
         
-        echo "Queue: ${queue_depth:-N/A}, RPC: ${rpc_health:-N/A}, CB: ${cb_state:-N/A}"
+        echo "Queue: $queue_depth, RPC: $rpc_health, CB: $cb_state"
         sleep 5
     done
     
@@ -297,7 +298,7 @@ main() {
     
     # Run tests
     test_webhook || true
-    test_wallet_promotion || true
+    test_wallet_api || true
     test_circuit_breaker || true
     verify_prometheus || true
     verify_grafana_metrics || true

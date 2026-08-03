@@ -50,8 +50,12 @@ impl SignalQuality {
         use rust_decimal::Decimal;
         let mut score = 0.0;
 
-        // 1. Wallet quality (40% weight)
-        let wallet_score = (wallet_wqs / 100.0).min(1.0);
+        // 1. Wallet quality (40% weight).
+        // Clamp to [0, 100]: a negative value would silently drag the score
+        // down, and NaN would produce wallet_score = 1.0 (f64::min ignores
+        // NaN), inflating it.
+        let wallet_wqs = wallet_wqs.clamp(0.0, 100.0);
+        let wallet_score = wallet_wqs / 100.0;
         score += wallet_score * 0.4;
 
         // 2. Consensus strength (30% weight) — graduated by wallet count
@@ -66,14 +70,16 @@ impl SignalQuality {
 
         // 3. Liquidity score (20% weight) - use Decimal directly for comparisons
         // Note: We keep the score calculation in f64 since it's a statistical metric (0.0-1.0)
-        // but we use Decimal for the liquidity threshold comparisons to avoid precision issues
-        let liquidity_score: f64 = if liquidity_usd > Decimal::from(50000) {
+        // but we use Decimal for the liquidity threshold comparisons to avoid precision issues.
+        // `>=` at the boundaries keeps this consistent with `passes_liquidity_floor`
+        // (a token at exactly the floor must not be scored a tier lower).
+        let liquidity_score: f64 = if liquidity_usd >= Decimal::from(50000) {
             1.0
-        } else if liquidity_usd > Decimal::from(20000) {
+        } else if liquidity_usd >= Decimal::from(20000) {
             0.7
-        } else if liquidity_usd > Decimal::from(10000) {
+        } else if liquidity_usd >= Decimal::from(10000) {
             0.5
-        } else if liquidity_usd > Decimal::from(5000) {
+        } else if liquidity_usd >= Decimal::from(5000) {
             0.3
         } else {
             0.1
@@ -113,7 +119,7 @@ impl SignalQuality {
     /// Check if signal should be entered based on minimum quality threshold
     ///
     /// # Arguments
-    /// * `min_quality` - Minimum quality score required (default: 0.7)
+    /// * `min_quality` - Minimum quality score required
     ///
     /// # Returns
     /// true if quality >= min_quality, false otherwise

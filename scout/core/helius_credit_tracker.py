@@ -88,7 +88,7 @@ class CreditBudget:
 
     # Growth goal optimization ($200 → $1000)
     # Allocate more budget to high-conviction wallets
-    HIGH_CONVICTIO_BONUS = 1.5  # 1.5x credits for WQS > 70
+    HIGH_CONVICTION_BONUS = 1.5  # 1.5x credits for WQS > 70
     EMERGING_WALLET_LIMIT = 0.3  # Max 30% of budget for WQS < 50
 
 
@@ -145,10 +145,11 @@ class HeliusCreditTracker:
         self._requests_today = 0
         self._day_start_time = time.time()
         self._month_start_time = time.time()
+        self._tracked_day = datetime.now().strftime('%Y-%m-%d')
+        self._tracked_month = datetime.now().strftime('%Y-%m')
 
-        # Request queue (priority queue)
-        self._request_queue: List[RequestCost] = []
-        self._queue_lock = threading.Lock()
+        # Thread-safety for counters shared across discovery/analysis tasks
+        self._lock = threading.Lock()
 
         # Performance tracking
         self._request_history: List[RequestCost] = []
@@ -209,13 +210,19 @@ class HeliusCreditTracker:
                 with open(state_file, 'r') as f:
                     state = json.load(f)
 
+                # Monthly usage is calendar-based: restore it whenever the
+                # saved state is from the current month (a previous-day state
+                # still carries the month-to-date usage).
+                state_month = datetime.fromtimestamp(state.get('timestamp', 0)).strftime('%Y-%m')
+                if state_month == self._tracked_month:
+                    self._credits_used_month = state.get('credits_used_month', 0)
+
                 # Check if state is from today
                 state_date = datetime.fromtimestamp(state.get('timestamp', 0))
                 today = datetime.now()
 
                 if state_date.date() == today.date():
                     self._credits_used_today = state.get('credits_used_today', 0)
-                    self._credits_used_month = state.get('credits_used_month', 0)
                     self._requests_today = state.get('requests_today', 0)
                     self._discovery_spent = state.get('discovery_spent', 0)
                     self._analysis_spent = state.get('analysis_spent', 0)
@@ -244,27 +251,42 @@ class HeliusCreditTracker:
                 'validation_spent': self._validation_spent,
             }
 
-            os.makedirs(os.path.dirname(state_file), exist_ok=True)
+            dir_path = os.path.dirname(state_file)
+            if dir_path:
+                os.makedirs(dir_path, exist_ok=True)
             with open(state_file, 'w') as f:
                 json.dump(state, f, indent=2)
         except Exception as e:
             logger.warning(f"Failed to save credit state: {e}")
 
     def _check_daily_reset(self):
-        """Check if we need to reset daily counters."""
-        now = time.time()
-        hours_since_day_start = (now - self._day_start_time) / 3600
+        """Check if we need to reset daily counters (calendar-day aligned)."""
+        with self._lock:
+            today = datetime.now().strftime('%Y-%m-%d')
+            if today != self._tracked_day:
+                logger.info("New calendar day detected, resetting daily counters")
+                self._credits_used_today = 0
+                self._requests_today = 0
+                self._discovery_spent = 0
+                self._analysis_spent = 0
+                self._validation_spent = 0
+                self._reserve_spent = 0
+                self._day_start_time = time.time()
+                self._tracked_day = today
 
-        if hours_since_day_start >= 24:
-            logger.info("24 hours elapsed, resetting daily counters")
-            self._credits_used_today = 0
-            self._requests_today = 0
-            self._discovery_spent = 0
-            self._analysis_spent = 0
-            self._validation_spent = 0
-            self._reserve_spent = 0
-            self._day_start_time = now
-            self._save_state()
+                # Also roll over the monthly counter when the month changes
+                self._check_monthly_reset()
+                self._save_state()
+
+    def _check_monthly_reset(self):
+        """Reset the month-to-date counter when the calendar month changes."""
+        with self._lock:
+            current_month = datetime.now().strftime('%Y-%m')
+            if current_month != self._tracked_month:
+                logger.info("New calendar month detected, resetting monthly credits")
+                self._credits_used_month = 0
+                self._month_start_time = time.time()
+                self._tracked_month = current_month
 
     def _check_rate_limit(self) -> bool:
         """Check if we're within rate limits (50 req/s for Developer Plan)."""
@@ -282,7 +304,6 @@ class HeliusCreditTracker:
             return False
 
         return True
-
     def _get_category_budget(self, category: str) -> Tuple[int, int]:
         """Get budget and spent for a category."""
         if category == "discovery":
@@ -363,24 +384,25 @@ class HeliusCreditTracker:
         """
         self._check_daily_reset()
 
-        # Update counters
-        self._credits_used_today += cost
-        self._credits_used_month += cost
-        self._requests_today += 1
+        with self._lock:
+            # Update counters
+            self._credits_used_today += cost
+            self._credits_used_month += cost
+            self._requests_today += 1
 
-        # Update category-specific counters
-        if category == "discovery":
-            self._discovery_spent += cost
-        elif category == "analysis":
-            self._analysis_spent += cost
-        elif category == "validation":
-            self._validation_spent += cost
-        elif category == "reserve":
-            self._reserve_spent += cost
+            # Update category-specific counters
+            if category == "discovery":
+                self._discovery_spent += cost
+            elif category == "analysis":
+                self._analysis_spent += cost
+            elif category == "validation":
+                self._validation_spent += cost
+            elif category == "reserve":
+                self._reserve_spent += cost
 
-        # Update rate limiting
-        now = time.time()
-        self._request_times.append(now)
+            # Update rate limiting
+            now = time.time()
+            self._request_times.append(now)
 
         # Record in history
         request = RequestCost(
@@ -478,7 +500,7 @@ class HeliusCreditTracker:
 
         return suggestions
 
-    def optimize_for_growth(self, wallet_wqs: Optional[float] = None) -> int:
+    def optimize_for_growth(self, wallet_wqs: Optional[float] = None) -> float:
         """
         Calculate optimized credit allocation for growth goal ($200 → $1000).
 
@@ -493,7 +515,7 @@ class HeliusCreditTracker:
 
         # High-conviction wallets get more analysis budget
         if wallet_wqs >= 70:
-            return int(self._budget.HIGH_CONVICTIO_BONUS)
+            return self._budget.HIGH_CONVICTION_BONUS  # 1.5x (keep the float!)
         elif wallet_wqs >= 60:
             return 1
         elif wallet_wqs >= 50:
@@ -796,7 +818,9 @@ def can_analyze_wallet(wallet_wqs: Optional[float] = None) -> Tuple[bool, str]:
     tracker = get_credit_tracker()
     multiplier = tracker.optimize_for_growth(wallet_wqs)
     return tracker.can_make_request(
-        cost=int(CreditCost.SWAP_ANALYSIS.value * 50 * multiplier),  # Assume 50 swaps
+        # Real per-page cost: getTransactionsForAddress (50 credits) for the
+        # primary page plus follow-up pages of the wallet's history
+        cost=int(CreditCost.GET_TRANSACTIONS.value * 2 * multiplier),
         category="analysis",
         priority=RequestPriority.HIGH if wallet_wqs and wallet_wqs >= 60 else RequestPriority.MEDIUM,
         expected_value=0.7 if wallet_wqs and wallet_wqs >= 60 else 0.5
@@ -807,7 +831,8 @@ def can_validate_backtest() -> Tuple[bool, str]:
     """Check if we can run backtest validation."""
     tracker = get_credit_tracker()
     return tracker.can_make_request(
-        cost=CreditCost.POSITION_TRACK.value * 20,  # Assume 20 trades
+        # Real cost: single-transaction detail lookups for each closed trade
+        cost=CreditCost.GET_TRANSACTION.value * 20,  # Assume 20 trades
         category="validation",
         priority=RequestPriority.CRITICAL,
         expected_value=0.9

@@ -9,7 +9,9 @@
 -- Add webhook lifecycle tracking columns to existing wallet_monitoring table
 -- These columns track webhook registration status, health, and retry attempts
 
-ALTER TABLE wallet_monitoring ADD COLUMN webhook_status TEXT DEFAULT 'active' CHECK(webhook_status IN ('active', 'paused', 'failed', 'orphaned'));
+BEGIN TRANSACTION;
+
+ALTER TABLE wallet_monitoring ADD COLUMN webhook_status TEXT CHECK(webhook_status IN ('active', 'paused', 'failed', 'orphaned'));
 ALTER TABLE wallet_monitoring ADD COLUMN webhook_registered_at TIMESTAMP;
 ALTER TABLE wallet_monitoring ADD COLUMN webhook_last_health_check TIMESTAMP;
 ALTER TABLE wallet_monitoring ADD COLUMN webhook_health_status TEXT DEFAULT 'unknown' CHECK(webhook_health_status IN ('healthy', 'unhealthy', 'unknown', 'timeout', 'error'));
@@ -42,7 +44,7 @@ CREATE TABLE IF NOT EXISTS webhook_lifecycle_audit (
     error_message TEXT,
     duration_ms INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
+    FOREIGN KEY (wallet_address) REFERENCES wallets(address)
 );
 
 -- Create indexes for audit table queries
@@ -62,12 +64,11 @@ CREATE TABLE IF NOT EXISTS webhook_configuration (
     updated_by TEXT DEFAULT 'system'
 );
 
--- Insert current webhook URL configuration if it exists
-INSERT OR IGNORE INTO webhook_configuration (config_key, config_value, updated_by)
-SELECT 'current_webhook_url',
-       (SELECT value FROM config WHERE key = 'helius_webhook_url'),
-       'migration'
-WHERE EXISTS (SELECT 1 FROM config WHERE key = 'helius_webhook_url');
+-- NOTE: no config seed here — a legacy `config` table is not guaranteed to
+-- exist, and the operator seeds webhook_configuration.current_webhook_url at
+-- runtime (webhook_lifecycle.rs).
+
+COMMIT;
 
 -- ===================================================
 -- Migration complete

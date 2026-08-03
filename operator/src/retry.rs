@@ -24,9 +24,11 @@ pub fn is_retryable_status(status: u16) -> bool {
 /// Check if an error represents a network error (retryable).
 #[inline]
 pub fn is_network_error(err: &anyhow::Error) -> bool {
-    // Check for reqwest error types
+    // Check for reqwest error types. Only timeout and connect failures are
+    // transient network conditions — `is_request()` indicates a failure while
+    // BUILDING the request (e.g. invalid URL/header), which is permanent.
     if let Some(e) = err.downcast_ref::<reqwest::Error>() {
-        e.is_timeout() || e.is_connect() || e.is_request()
+        e.is_timeout() || e.is_connect()
     } else {
         false
     }
@@ -43,7 +45,7 @@ pub fn extract_status(err: &anyhow::Error) -> u16 {
 
 /// Calculate backoff duration with exponential backoff and ±25% jitter.
 ///
-/// Pattern: 1s, 2s, 4s, 8s, 16s with jitter, capped at 30s
+/// Pattern: 1s, 2s, 4s, 8s, 16s, ... with jitter, capped at 30s
 /// Per Helius best practices.
 ///
 /// # Arguments
@@ -52,8 +54,10 @@ pub fn extract_status(err: &anyhow::Error) -> u16 {
 /// # Returns
 /// Duration to wait before next retry
 pub fn calculate_backoff(attempt: u32) -> Duration {
-    // Base backoff: 2^attempt seconds (1, 2, 4, 8, 16 for attempts 0-4)
-    let base = 2_u64.pow(attempt.min(4));
+    // Base backoff: 2^attempt seconds (1, 2, 4, 8, 16 for attempts 0-4).
+    // Cap the BASE at 30s (not the exponent) so the 30s ceiling is actually
+    // reachable: 2^attempt.min(4) could never exceed 16s.
+    let base = 2_u64.pow(attempt).min(30);
 
     // Add ±25% jitter (random value between -0.25 and +0.25)
     let mut rng = rand::rng();
@@ -61,7 +65,7 @@ pub fn calculate_backoff(attempt: u32) -> Duration {
 
     // Calculate final duration with jitter, ensure at least 1 second minimum
     let with_jitter = base as f64 * (1.0 + jitter);
-    let millis = (with_jitter.min(30.0) * 1000.0).max(100.0) as u64;
+    let millis = (with_jitter.min(30.0) * 1000.0).max(1000.0) as u64;
 
     Duration::from_millis(millis)
 }
@@ -106,6 +110,12 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
+    if max_retries == 0 {
+        return Err(anyhow::anyhow!(
+            "retry_with_backoff called with max_retries = 0 — nothing to attempt"
+        ));
+    }
+
     for attempt in 0..max_retries {
         match operation().await {
             Ok(result) => return Ok(result),
@@ -113,11 +123,13 @@ where
                 let status = extract_status(&e);
                 let is_network = is_network_error(&e);
 
-                // Determine if error is retryable
+                // Determine if error is retryable:
                 // 1. Explicit retryable status (408, 429, 500, 502, 503, 504)
                 // 2. Network errors (timeout, connection issues)
-                // 3. Unknown errors (status = 0) - retry with caution for transient issues
-                let is_retryable = is_retryable_status(status) || is_network || status == 0;
+                // Unknown non-reqwest errors (status = 0) are NOT retried —
+                // they are usually permanent application/programming errors,
+                // and blindly retrying them masks the root cause.
+                let is_retryable = is_retryable_status(status) || is_network;
 
                 if is_retryable {
                     let backoff = calculate_backoff(attempt);
@@ -215,9 +227,15 @@ mod tests {
             async move {
                 let count = counter.fetch_add(1, Ordering::SeqCst);
                 if count < 2 {
-                    // Use a retryable error (500 internal server error)
-                    // We create an anyhow error that indicates retryable status
-                    Err(anyhow::anyhow!("HTTP error: 500").context("Simulated server error"))
+                    // Produce a genuine reqwest connect error (connection refused)
+                    // — a retryable network failure. Plain anyhow errors are no
+                    // longer retried (they carry no retryable classification).
+                    let err = reqwest::Client::new()
+                        .get("http://127.0.0.1:1/")
+                        .send()
+                        .await
+                        .unwrap_err();
+                    Err(anyhow::anyhow!(err).context("Simulated connect failure"))
                 } else {
                     Ok::<(), anyhow::Error>(())
                 }
@@ -227,6 +245,30 @@ mod tests {
         let result = retry_with_backoff(operation, 5).await;
         assert!(result.is_ok());
         assert_eq!(counter.load(Ordering::SeqCst), 3); // 2 failures + 1 success
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_backoff_does_not_retry_unknown_errors() {
+        // A non-reqwest error (no status, not a network error) must fail
+        // immediately — previously the `status == 0` branch retried it.
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = counter.clone();
+
+        let operation = || {
+            let counter = counter_clone.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err::<(), anyhow::Error>(anyhow::anyhow!("HTTP error: 500"))
+            }
+        };
+
+        let result = retry_with_backoff(operation, 5).await;
+        assert!(result.is_err());
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "non-retryable unknown error must fail on the first attempt"
+        );
     }
 
     #[tokio::test]

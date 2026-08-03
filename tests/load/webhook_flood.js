@@ -13,14 +13,25 @@ import http from 'k6/http';
 import { check, sleep, Trend, Counter, Rate } from 'k6';
 import crypto from 'k6/crypto';
 
+// Never fall back to a committed default secret
+if (!__ENV.WEBHOOK_SECRET) {
+  throw new Error('WEBHOOK_SECRET must be set (the real webhook signing secret)');
+}
+const SECRET = __ENV.WEBHOOK_SECRET;
+
 export const options = {
-  stages: [
-    { duration: '30s', target: 50 },   // Ramp up to 50 req/s
-    { duration: '1m', target: 100 },  // Ramp up to 100 req/s (threshold)
-    { duration: '30s', target: 150 }, // Exceed threshold to test load shedding
-    { duration: '1m', target: 100 },  // Maintain at threshold
-    { duration: '30s', target: 0 },   // Ramp down
-  ],
+  scenarios: {
+    load: {
+      // constant-arrival-rate drives a controlled RPS (stages[].target would
+      // set VU count, not requests per second)
+      executor: 'constant-arrival-rate',
+      rate: 100, // requests per second (the queue-drop threshold)
+      timeUnit: '1s',
+      duration: '3m',
+      preAllocatedVUs: 50,
+      maxVUs: 200,
+    },
+  },
   thresholds: {
     // Latency thresholds
     http_req_duration: [
@@ -28,16 +39,16 @@ export const options = {
       'p(95)<500',  // 95% of requests should be below 500ms
       'p(99)<1000', // 99% of requests should be below 1000ms
     ],
-    // Error rate thresholds
-    http_req_failed: ['rate<0.05'],  // Less than 5% failures (allows for queue drops)
-    // Custom metrics
-    'dropped_signals': ['rate<0.20'], // Less than 20% should be dropped at peak load
-    'accepted_signals': ['rate>0.80'], // At least 80% should be accepted
+    // http_req_failed counts every 4xx/5xx including the intentional 503/429
+    // load-shedding drops, so the threshold must accommodate them
+    http_req_failed: ['rate<0.25'],  // allows for ~20% intentional drops
+    // Custom metrics (Counter `rate` is a per-second increment, not a
+    // percentage — the acceptance_rate Rate metric measures the real ratio)
+    'acceptance_rate': ['rate>0.80'], // At least 80% of requests should be accepted
   },
 };
 
 const WEBHOOK_URL = __ENV.WEBHOOK_URL || 'http://localhost:8080/api/v1/webhook';
-const SECRET = __ENV.WEBHOOK_SECRET || 'test-secret';
 
 // Custom metrics for tracking
 const latencyTrend = new Trend('webhook_latency_ms');
@@ -58,7 +69,7 @@ function generateHMAC(timestamp, payload, secret) {
 export default function () {
   // Rotate strategies to test priority queuing
   const strategy = STRATEGIES[Math.floor(Math.random() * STRATEGIES.length)];
-  
+
   const timestamp = Date.now().toString();
   const payload = JSON.stringify({
     strategy: strategy,
@@ -80,7 +91,7 @@ export default function () {
   const startTime = Date.now();
   const res = http.post(WEBHOOK_URL, payload, { headers });
   const latency = Date.now() - startTime;
-  
+
   latencyTrend.add(latency);
 
   // Check response status and categorize
@@ -99,17 +110,11 @@ export default function () {
     acceptedRate.add(0);
   }
 
-  // Verify response structure
-  let responseBody = {};
-  try {
-    responseBody = JSON.parse(res.body);
-  } catch (e) {
-    // Ignore parse errors for dropped/rejected requests
-  }
-
   check(res, {
-    'status is 200 or 202 (accepted)': (r) => r.status === 200 || r.status === 202,
-    'status is 503 or 429 (dropped)': (r) => r.status === 503 || r.status === 429,
+    // Single combined check: any expected status passes (accepted, load-shed
+    // drop, or legitimate reject)
+    'status in expected set (accepted/dropped/rejected)': (r) =>
+      [200, 202, 400, 401, 403, 429, 503].includes(r.status),
     'response time < 500ms': (r) => r.timings.duration < 500,
     'response has trade_uuid (if accepted)': (r) => {
       if (r.status === 200 || r.status === 202) {
@@ -131,7 +136,7 @@ export default function () {
     },
   });
 
-  // Minimal sleep to maintain target rate (k6 handles this, but helps with timing)
+  // Minimal sleep to keep iteration timing consistent
   sleep(0.01);
 }
 

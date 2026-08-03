@@ -30,6 +30,9 @@ pub struct DecisionRecorder {
     attempted: Arc<AtomicU64>,
     /// Every successful insert increments this.
     persisted: Arc<AtomicU64>,
+    /// Caps the number of in-flight persistence tasks so a decision flood (or
+    /// slow DB) cannot pile up unbounded tasks and saturate the connection pool.
+    write_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl DecisionRecorder {
@@ -39,6 +42,7 @@ impl DecisionRecorder {
             run_context,
             attempted: Arc::new(AtomicU64::new(0)),
             persisted: Arc::new(AtomicU64::new(0)),
+            write_semaphore: Arc::new(tokio::sync::Semaphore::new(64)),
         }
     }
 
@@ -60,12 +64,23 @@ impl DecisionRecorder {
         let db = self.db.clone();
         let run_context = self.run_context.clone();
         let persisted = self.persisted.clone();
+        let write_semaphore = self.write_semaphore.clone();
 
         // Snapshot everything the insert needs before spawning so the spawned
         // task is 'static and does not borrow the decision.
         let row = DecisionRow::from_decision(decision, req, trade_uuid, received_at, &run_context);
 
         tokio::spawn(async move {
+            // Bound concurrent writes: when the semaphore is saturated, skip
+            // the insert rather than queue unboundedly. The completeness
+            // metric surfaces the loss immediately.
+            let Ok(permit) = write_semaphore.try_acquire_owned() else {
+                tracing::warn!(
+                    decision_id = %row.decision_id,
+                    "Decision persistence saturated; dropping decision record"
+                );
+                return;
+            };
             if let Err(e) = insert_decision_record(&db, &row).await {
                 tracing::warn!(
                     error = %e,
@@ -75,6 +90,7 @@ impl DecisionRecorder {
             } else {
                 persisted.fetch_add(1, Ordering::Relaxed);
             }
+            drop(permit);
         });
     }
 
@@ -85,15 +101,12 @@ impl DecisionRecorder {
     pub fn update_quote(&self, decision_id: String, quote_json: serde_json::Value) {
         let db = self.db.clone();
         tokio::spawn(async move {
-            let pool = match db.pool() {
-                DbPool::PostgreSQL(p) => p,
-            };
-            let res = sqlx::query(
-                "UPDATE decision_records SET quote_json = $1 WHERE decision_id = $2",
-            )
-            .bind(quote_json)
-            .bind(&decision_id)
-            .execute(&pool)
+            let DbPool::PostgreSQL(pool) = db.pool();
+            let res = retry_update(&pool, || {
+                sqlx::query("UPDATE decision_records SET quote_json = $1 WHERE decision_id = $2")
+                    .bind(quote_json.clone())
+                    .bind(&decision_id)
+            })
             .await;
             if let Err(e) = res {
                 tracing::warn!(
@@ -120,21 +133,20 @@ impl DecisionRecorder {
         let db = self.db.clone();
         let model_version = model_version.to_string();
         tokio::spawn(async move {
-            let pool = match db.pool() {
-                DbPool::PostgreSQL(p) => p,
-            };
-            let res = sqlx::query(
-                r#"UPDATE decision_records
-                   SET quote_json = $1,
-                       simulated_fill_model_version = $2,
-                       price_impact_pct = COALESCE($3, price_impact_pct)
-                   WHERE decision_id = $4"#,
-            )
-            .bind(quote_json)
-            .bind(&model_version)
-            .bind(modeled_slippage_pct)
-            .bind(&decision_id)
-            .execute(&pool)
+            let DbPool::PostgreSQL(pool) = db.pool();
+            let res = retry_update(&pool, || {
+                sqlx::query(
+                    r#"UPDATE decision_records
+                       SET quote_json = $1,
+                           simulated_fill_model_version = $2,
+                           price_impact_pct = COALESCE($3, price_impact_pct)
+                       WHERE decision_id = $4"#,
+                )
+                .bind(quote_json.clone())
+                .bind(&model_version)
+                .bind(modeled_slippage_pct)
+                .bind(&decision_id)
+            })
             .await;
             if let Err(e) = res {
                 tracing::warn!(
@@ -155,15 +167,12 @@ impl DecisionRecorder {
     pub fn link_trade(&self, decision_id: String, trade_uuid: String) {
         let db = self.db.clone();
         tokio::spawn(async move {
-            let pool = match db.pool() {
-                DbPool::PostgreSQL(p) => p,
-            };
-            let res = sqlx::query(
-                "UPDATE decision_records SET trade_uuid = $1 WHERE decision_id = $2",
-            )
-            .bind(&trade_uuid)
-            .bind(&decision_id)
-            .execute(&pool)
+            let DbPool::PostgreSQL(pool) = db.pool();
+            let res = retry_update(&pool, || {
+                sqlx::query("UPDATE decision_records SET trade_uuid = $1 WHERE decision_id = $2")
+                    .bind(&trade_uuid)
+                    .bind(&decision_id)
+            })
             .await;
             if let Err(e) = res {
                 tracing::warn!(
@@ -178,11 +187,13 @@ impl DecisionRecorder {
     /// Persistence completeness ratio in `[0, 1]`. Returns 1.0 when nothing
     /// has been attempted yet (no evidence of loss).
     pub fn completeness(&self) -> f64 {
-        let a = self.attempted.load(Ordering::Relaxed);
+        let a = self.attempted.load(Ordering::Acquire);
         if a == 0 {
             return 1.0;
         }
-        self.persisted.load(Ordering::Relaxed) as f64 / a as f64
+        let p = self.persisted.load(Ordering::Acquire);
+        // Clamp so transient read skew can never yield a ratio outside [0,1].
+        (p as f64 / a as f64).clamp(0.0, 1.0)
     }
 }
 
@@ -246,13 +257,13 @@ impl DecisionRow {
             wqs: decision.wqs,
             wqs_confidence: decision.wqs_confidence,
             quality_score: decision.quality_score,
-            consensus_wallet_count: decision.consensus_wallet_count.map(|c| c as i32),
+            consensus_wallet_count: decision.consensus_wallet_count.and_then(|c| i32::try_from(c).ok()),
             regime_multiplier: decision.regime_multiplier.and_then(|d| d.to_f64()),
             token_age_hours: decision.token_age_hours,
             liquidity_usd: decision.liquidity_usd.and_then(|d| d.to_f64()),
             volume_24h_usd: decision.volume_24h_usd.and_then(|d| d.to_f64()),
             price_impact_pct: decision.price_impact_pct.and_then(|d| d.to_f64()),
-            source_slot: req.source_slot.map(|s| s as i64),
+            source_slot: req.source_slot.and_then(|s| i64::try_from(s).ok()),
             received_at,
             decided_at: Utc::now(),
             code_revision: run_context.code_revision.clone(),
@@ -262,13 +273,39 @@ impl DecisionRow {
     }
 }
 
+/// Run a bounded-retry UPDATE against the decision records table.
+///
+/// Transient DB failures are retried with a short backoff so a hiccup does not
+/// permanently leave the row missing `quote_json`/`trade_uuid`.
+async fn retry_update<'q, F>(
+    pool: &sqlx::PgPool,
+    run: F,
+) -> Result<(), sqlx::Error>
+where
+    F: Fn() -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+{
+    for attempt in 1..=3u32 {
+        match run().execute(pool).await {
+            Ok(_) => return Ok(()),
+            Err(e) if attempt < 3 => {
+                tracing::warn!(
+                    attempt,
+                    error = %e,
+                    "Decision record update failed transiently; retrying"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100 * attempt as u64)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
+}
+
 async fn insert_decision_record(
     db: &Arc<dyn Database>,
     row: &DecisionRow,
 ) -> Result<(), crate::error::AppError> {
-    let pool = match db.pool() {
-        DbPool::PostgreSQL(p) => p,
-    };
+    let DbPool::PostgreSQL(pool) = db.pool();
     sqlx::query(
         r#"
         INSERT INTO decision_records (

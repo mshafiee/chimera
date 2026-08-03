@@ -234,7 +234,7 @@ class ValidationResult:
     notes: Optional[str] = None
     
     # Metadata
-    validated_at: datetime = field(default_factory=datetime.utcnow)
+    validated_at: datetime = field(default_factory=utcnow)
 
 
 @dataclass 
@@ -317,6 +317,7 @@ class BacktestConfig:
         self.mev_penalty_pct = _d(self.mev_penalty_pct)
         self.shield_multiplier = _d(self.shield_multiplier)
         self.spear_multiplier = _d(self.spear_multiplier)
+        self.simulate_at_size_sol = _d(self.simulate_at_size_sol) if self.simulate_at_size_sol is not None else None
 
     def get_min_liquidity(self, strategy: str) -> Decimal:
         """Get minimum liquidity for a strategy type."""

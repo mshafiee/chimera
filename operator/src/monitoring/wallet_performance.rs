@@ -6,11 +6,24 @@
 //! - Average return per trade
 //! - Exit timing accuracy
 
-use crate::config::{AppConfig, InactivityRotationConfig};
+use crate::config::AppConfig;
 use crate::db_abstraction::Database;
 use rust_decimal::prelude::*;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// Why a wallet should be demoted. `should_demote` returns this so callers can
+/// apply the correct demotion policy (inactivity rotation vs copy-PnL
+/// underperformance) instead of conflating the two reasons — which previously
+/// let an inactivity breach hit the copy-PnL branch first and skip the
+/// inactivity oscillation / REJECTED escalation path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DemotionReason {
+    /// Wallet inactive beyond the tiered inactivity threshold.
+    Inactivity,
+    /// Copy PnL < 70% of expected for 7+ continuous days.
+    CopyPnl,
+}
 
 /// Wallet performance tracker
 pub struct WalletPerformanceTracker {
@@ -50,10 +63,15 @@ impl WalletPerformanceTracker {
     }
 
     pub fn new_with_config(db: Arc<dyn Database>, config: Arc<AppConfig>) -> Self {
+        let auto_demote_enabled = config
+            .monitoring
+            .as_ref()
+            .map(|m| m.auto_demote_wallets)
+            .unwrap_or(false);
         Self {
             db,
             metrics_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            auto_demote_enabled: false,
+            auto_demote_enabled,
             config,
         }
     }
@@ -250,8 +268,13 @@ impl WalletPerformanceTracker {
                 "WQS adjusted based on copy performance"
             );
 
-            // Check if should auto-demote
-            if self.auto_demote_enabled && self.should_demote(wallet_address).await {
+            // Determine the demotion reason ONCE so inactivity and copy-PnL
+            // policies can't be conflated. Previously should_demote returned a
+            // single bool for both reasons, so an inactivity breach hit the
+            // copy-PnL branch first (when auto_demote_enabled) and skipped the
+            // inactivity oscillation / REJECTED escalation path.
+            let demotion_reason = self.should_demote(wallet_address).await;
+            if matches!(demotion_reason, Some(DemotionReason::CopyPnl)) && self.auto_demote_enabled {
                 tracing::warn!(
                     wallet_address = %wallet_address,
                     "Auto-demoting wallet due to poor copy performance"
@@ -297,7 +320,7 @@ impl WalletPerformanceTracker {
                 // Phase 1: Inactivity-based rotation (separate from auto_demote_enabled)
                 if let Some(monitoring_config) = &self.config.monitoring {
                     if monitoring_config.inactivity_rotation_enabled {
-                        if self.should_demote(wallet_address).await {
+                        if matches!(demotion_reason, Some(DemotionReason::Inactivity)) {
                             // Determine target status and reason
                             let demotion_count = self.db.get_inactivity_demotion_count(wallet_address).await.unwrap_or(0);
                             let max_cycles = monitoring_config.inactivity_rotation
@@ -380,11 +403,13 @@ impl WalletPerformanceTracker {
         cache.get(wallet_address).cloned()
     }
 
-    /// Check if wallet should be auto-demoted.
-    /// Demotes if copy PnL < 70% of expected (based on original ROI) continuously for 7+ days.
+    /// Check if (and why) a wallet should be auto-demoted.
+    /// Returns `Some(Inactivity)` when the wallet has been inactive beyond the
+    /// tiered inactivity threshold, or `Some(CopyPnl)` when copy PnL < 70% of
+    /// expected (based on original ROI) continuously for 7+ days, else `None`.
     /// The 7-day timer starts when performance first breaches the threshold and is stored in
     /// `breach_started_at`; it is NOT reset on every trade close (that was the old bug).
-    pub async fn should_demote(&self, wallet_address: &str) -> bool {
+    pub async fn should_demote(&self, wallet_address: &str) -> Option<DemotionReason> {
         // Phase 1: Inactivity-based rotation
         if let Some(monitoring_config) = &self.config.monitoring {
             if monitoring_config.inactivity_rotation_enabled {
@@ -419,7 +444,7 @@ impl WalletPerformanceTracker {
                             if let Some(last_activity_dt) = last_activity {
                                 let elapsed = chrono::Utc::now().signed_duration_since(last_activity_dt);
                                 if elapsed.num_seconds() >= threshold_secs as i64 {
-                                    return true;
+                                    return Some(DemotionReason::Inactivity);
                                 }
                             }
                         }
@@ -450,15 +475,18 @@ impl WalletPerformanceTracker {
                         // This timer is set on the first breach and only reset on recovery, so
                         // it accurately reflects continuous underperformance rather than resetting
                         // on every trade close (which was the previous bug).
-                        return metrics
+                        if metrics
                             .breach_started_at
                             .map(|t| t.elapsed().as_secs() >= 7 * 24 * 3600)
-                            .unwrap_or(false);
+                            .unwrap_or(false)
+                        {
+                            return Some(DemotionReason::CopyPnl);
+                        }
                     }
                 }
             }
         }
-        false
+        None
     }
 
     /// Check if wallet should be promoted faster (strong signals)

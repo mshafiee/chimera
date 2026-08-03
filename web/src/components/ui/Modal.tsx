@@ -48,6 +48,7 @@ export function Modal({ isOpen, onClose, title, children, size = 'md' }: ModalPr
 
       {/* Modal */}
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- dialog panel traps focus/events */}
         <div
           ref={panelRef}
           role="dialog"
@@ -64,7 +65,10 @@ export function Modal({ isOpen, onClose, title, children, size = 'md' }: ModalPr
               'max-w-2xl': size === 'xl',
             }
           )}
-          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            e.stopPropagation()
+            if (e.key === 'Escape') onClose()
+          }}
         >
           {/* Header */}
           {title && (

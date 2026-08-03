@@ -27,6 +27,7 @@
 //!   "nonlanding_prob": <f64> }
 //! ```
 
+use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -42,11 +43,19 @@ const SHADOW_SLIPPAGE_BPS: u16 = 1000;
 
 /// Default non-landing probability (binary mask) for the v1 model.
 fn default_nonlanding_prob() -> f64 {
-    std::env::var("CHIMERA_NONLANDING_PROB")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|p: &f64| *p >= 0.0 && *p <= 1.0)
-        .unwrap_or(0.03)
+    match std::env::var("CHIMERA_NONLANDING_PROB") {
+        Ok(raw) => match raw.parse::<f64>() {
+            Ok(p) if (0.0..=1.0).contains(&p) => p,
+            _ => {
+                tracing::warn!(
+                    raw = %raw,
+                    "Invalid CHIMERA_NONLANDING_PROB (must be 0.0-1.0); using default 0.03"
+                );
+                0.03
+            }
+        },
+        Err(_) => 0.03,
+    }
 }
 
 /// Rolling latency sampler (microseconds) with p50/p95 percentile lookup.
@@ -55,14 +64,14 @@ fn default_nonlanding_prob() -> f64 {
 /// O(n log n) over the window, called once per admitted decision.
 #[derive(Default)]
 pub struct LatencyTracker {
-    samples: Mutex<Vec<u64>>,
+    samples: Mutex<VecDeque<u64>>,
     cap: usize,
 }
 
 impl LatencyTracker {
     pub fn new(cap: usize) -> Self {
         Self {
-            samples: Mutex::new(Vec::with_capacity(cap)),
+            samples: Mutex::new(VecDeque::with_capacity(cap)),
             cap,
         }
     }
@@ -70,19 +79,29 @@ impl LatencyTracker {
     /// Record a latency sample (microseconds).
     pub fn record(&self, latency_us: u64) {
         let mut s = self.samples.lock();
-        if s.len() >= self.cap {
-            s.remove(0);
+        // A cap of 0 means "don't track" — guard against the default.
+        if self.cap == 0 {
+            return;
         }
-        s.push(latency_us);
+        if s.len() >= self.cap {
+            s.pop_front();
+        }
+        s.push_back(latency_us);
     }
 
     /// Percentile `p` in `[0, 100]` of recorded latencies (microseconds).
+    ///
+    /// The sample buffer is copied under the lock but sorted AFTER releasing
+    /// it, so `record` is not blocked for the whole O(n log n) sort.
     pub fn percentile(&self, p: f64) -> u64 {
-        let s = self.samples.lock();
-        if s.is_empty() {
+        let snapshot: Vec<u64> = {
+            let s = self.samples.lock();
+            s.iter().copied().collect()
+        };
+        if snapshot.is_empty() {
             return 0;
         }
-        let mut sorted = s.clone();
+        let mut sorted = snapshot;
         sorted.sort_unstable();
         let idx = ((p / 100.0) * (sorted.len() - 1) as f64).round() as usize;
         sorted[idx.min(sorted.len() - 1)]
@@ -114,13 +133,30 @@ pub async fn capture_and_model_fill(
         Ok(p) => p,
         Err(_) => return,
     };
-    // 1 SOL = 1e9 lamports.
-    let amount_lamports = (size_sol * 1e9).round() as u64;
+    // Validate the size before any lamport conversion: NaN/negative/inf or
+    // values beyond u64 lamport range must fail loudly, not silently corrupt
+    // the modeled fill.
+    let amount_lamports = if !size_sol.is_finite() || size_sol <= 0.0 {
+        tracing::warn!(size_sol, "Invalid size_sol for shadow-fill; skipping");
+        return;
+    } else {
+        let lamports = (size_sol * 1e9).round();
+        if lamports > u64::MAX as f64 {
+            tracing::warn!(size_sol, "size_sol exceeds u64 lamport range; skipping");
+            return;
+        }
+        lamports as u64
+    };
     if amount_lamports == 0 {
         return;
     }
 
     let nonlanding_prob = default_nonlanding_prob();
+
+    // Capture the decision-time deadline BEFORE the decision quote so the
+    // delayed requote lands at decided_at + p50 regardless of how long the
+    // quote round-trip (with its own retries) takes.
+    let task_start = tokio::time::Instant::now();
 
     // Decision-time quote. For BUY: WSOL→TOKEN; for SELL: TOKEN→WSOL.
     let decision_quote = if is_buy {
@@ -141,9 +177,14 @@ pub async fn capture_and_model_fill(
     latency_tracker.record(decide_latency_us);
     let latency_p50 = latency_tracker.p50_us();
 
-    // Delayed requote at decided_at + latency_p50.
+    // Delayed requote at decided_at + latency_p50 (measured from the task
+    // start, not from the decision quote's completion).
     let delayed_quote = if latency_p50 > 0 {
-        tokio::time::sleep(std::time::Duration::from_micros(latency_p50)).await;
+        let requote_deadline = task_start + std::time::Duration::from_micros(latency_p50);
+        let now = tokio::time::Instant::now();
+        if requote_deadline > now {
+            tokio::time::sleep(requote_deadline - now).await;
+        }
         if is_buy {
             quote_client
                 .get_jupiter_quote(wsol, token, amount_lamports, SHADOW_SLIPPAGE_BPS)
@@ -188,24 +229,38 @@ pub async fn capture_and_model_fill(
 /// For SELL (TOKEN→WSOL) it is `outAmount_lamports / inAmount_base`. Both
 /// reduce to a per-token-base-unit price in lamports; the ratio of delayed
 /// to decision price yields the modeled slippage independent of direction.
+///
+/// Amounts are parsed as integers (u128) and the ratio computed from them,
+/// avoiding the 2^53 precision loss of f64 parsing; non-finite ratios are
+/// rejected.
 fn fill_price(quote: &Value, is_buy: bool) -> Option<f64> {
-    let in_amount = quote
-        .get("inAmount")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<f64>().ok())
-        .or_else(|| quote.get("inAmount").and_then(|v| v.as_f64()))?;
-    let out_amount = quote
-        .get("outAmount")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<f64>().ok())
-        .or_else(|| quote.get("outAmount").and_then(|v| v.as_f64()))?;
-    if in_amount == 0.0 || out_amount == 0.0 {
+    let in_amount = parse_amount(quote.get("inAmount"))?;
+    let out_amount = parse_amount(quote.get("outAmount"))?;
+    if in_amount == 0 || out_amount == 0 {
         return None;
     }
-    if is_buy {
-        Some(in_amount / out_amount)
+    let ratio = if is_buy {
+        in_amount as f64 / out_amount as f64
     } else {
-        Some(out_amount / in_amount)
+        out_amount as f64 / in_amount as f64
+    };
+    if !ratio.is_finite() {
+        return None;
+    }
+    Some(ratio)
+}
+
+/// Parse a Jupiter amount as a non-negative integer (`u128`), accepting both
+/// string and numeric JSON values. Returns `None` for absent/unparseable/
+/// negative values ("NaN"/"inf" strings fail the parse).
+fn parse_amount(value: Option<&Value>) -> Option<u128> {
+    match value? {
+        Value::String(s) => s.parse::<u128>().ok(),
+        Value::Number(n) => n
+            .as_u64()
+            .map(u128::from)
+            .or_else(|| n.as_i64().and_then(|i| u128::try_from(i).ok())),
+        _ => None,
     }
 }
 

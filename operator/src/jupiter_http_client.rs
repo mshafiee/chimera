@@ -12,9 +12,10 @@ use parking_lot::{Mutex, RwLock};
 /// Jupiter HTTP client configuration optimized for high-frequency API calls
 #[derive(Debug, Clone)]
 pub struct JupiterClientConfig {
-    /// Maximum idle connections per host
+    /// Maximum idle connections overall (informational; reqwest exposes no
+    /// overall idle cap — `max_idle_connections_per_host` is the effective knob)
     pub max_idle_connections: usize,
-    /// Maximum idle connections overall
+    /// Maximum idle connections per host
     pub max_idle_connections_per_host: usize,
     /// Connection timeout
     pub connect_timeout: Duration,
@@ -24,7 +25,8 @@ pub struct JupiterClientConfig {
     pub keep_alive_duration: Duration,
     /// Whether to use connection pooling
     pub enable_pooling: bool,
-    /// Maximum concurrent streams per connection (HTTP/2)
+    /// Maximum concurrent streams per connection (HTTP/2) — informational;
+    /// the pinned reqwest version exposes no builder knob for this
     pub max_concurrent_streams: u32,
     /// Enable TCP keepalive
     pub tcp_keepalive: bool,
@@ -52,7 +54,8 @@ impl Default for JupiterClientConfig {
 pub struct JupiterHttpClient {
     /// HTTP client
     client: Client,
-    /// Configuration
+    /// Configuration (used at construction to wire pooling/keepalive knobs)
+    #[allow(dead_code)]
     config: JupiterClientConfig,
     /// Health status
     health_status: Arc<RwLock<HealthStatus>>,
@@ -84,6 +87,8 @@ pub struct ClientMetrics {
     pub successful_requests: u64,
     /// Failed requests
     pub failed_requests: u64,
+    /// Number of duration samples recorded (for the rolling average)
+    pub duration_samples: u64,
     /// Average request duration (ms)
     pub avg_request_duration_ms: f64,
     /// Active connections
@@ -97,14 +102,22 @@ pub struct ClientMetrics {
 impl JupiterHttpClient {
     /// Create new Jupiter HTTP client with optimized configuration
     pub fn new(config: JupiterClientConfig) -> AppResult<Self> {
-        let client_builder = Client::builder()
+        let mut builder = Client::builder()
             .timeout(config.request_timeout)
             .connect_timeout(config.connect_timeout)
-            .pool_max_idle_per_host(config.max_idle_connections_per_host)
             .pool_idle_timeout(config.keep_alive_duration)
-            .tcp_nodelay(true);  // Reduce latency by disabling Nagle's algorithm
+            .tcp_nodelay(true); // Reduce latency by disabling Nagle's algorithm
 
-        let client = client_builder.build().map_err(|e| {
+        // Wire the pooling/keepalive knobs into the reqwest builder so the
+        // config actually controls the client (previously these were ignored).
+        if config.enable_pooling {
+            builder = builder.pool_max_idle_per_host(config.max_idle_connections_per_host);
+        }
+        if config.tcp_keepalive {
+            builder = builder.tcp_keepalive(config.keep_alive_duration);
+        }
+
+        let client = builder.build().map_err(|e| {
             AppError::Internal(format!("Failed to create Jupiter HTTP client: {}", e))
         })?;
 
@@ -181,20 +194,20 @@ impl JupiterHttpClient {
         status.last_check = chrono::Utc::now();
     }
 
-    /// Perform health check on the client
+    /// Evaluate local health state (NOT a network probe — see doc note).
+    ///
+    /// Re-reads the locally recorded `consecutive_failures` set by
+    /// [`update_request_status`] and derives `is_healthy` from it. It performs
+    /// no TCP/TLS/HTTP probe, so a dead connection that has not yet produced 3
+    /// recorded failures will not be detected here.
     pub async fn health_check(&self) -> AppResult<bool> {
-        // Simple health check: verify client is not in a broken state
-        let status = self.get_health_status();
-        let consecutive_failures = status.consecutive_failures;
-
-        // Use same threshold as update_request_status for consistency
-        let is_healthy = consecutive_failures < 3;
-
-        // Update health status
-        let mut status_lock = self.health_status.write();
-        status_lock.is_healthy = is_healthy;
-        status_lock.last_check = chrono::Utc::now();
-
+        // Compute and persist health state under a single lock to avoid a
+        // check-then-act race where a concurrent update_request_status(false)
+        // is overwritten by a stale read.
+        let mut status = self.health_status.write();
+        let is_healthy = status.consecutive_failures < 3;
+        status.is_healthy = is_healthy;
+        status.last_check = chrono::Utc::now();
         Ok(is_healthy)
     }
 
@@ -212,10 +225,14 @@ impl JupiterHttpClient {
     pub fn record_request_duration(&self, duration_ms: u64) {
         let mut metrics = self.metrics.lock();
 
-        // Update rolling average
-        let total_requests = metrics.total_requests as f64;
-        let current_avg = metrics.avg_request_duration_ms;
-        metrics.avg_request_duration_ms = (current_avg * (total_requests - 1.0) + duration_ms as f64) / total_requests.max(1.0);
+        // Update rolling average using a dedicated sample counter: previously
+        // this derived the count from metrics.total_requests, which is only
+        // incremented by update_request_status — giving a wrong sample count
+        // (and a negative multiplier before any status update).
+        let n = metrics.duration_samples as f64;
+        metrics.avg_request_duration_ms =
+            (metrics.avg_request_duration_ms * n + duration_ms as f64) / (n + 1.0);
+        metrics.duration_samples += 1;
     }
 
     /// Get connection pool statistics

@@ -95,7 +95,7 @@ check_time_sync() {
         # Check for ntpq (alternative check)
         if command -v ntpq &> /dev/null; then
             local peers
-            peers=$(ntpq -p 2>/dev/null | grep -c "^\*" || echo "0")
+            peers=$(ntpq -p 2>/dev/null | grep -c "^\*") || true
             if [[ "$peers" -gt 0 ]]; then
                 log_pass "NTP peer synchronized (ntpq)"
             else
@@ -106,7 +106,7 @@ check_time_sync() {
     elif command -v ntpq &> /dev/null; then
         # Fallback to ntpq
         local peers
-        peers=$(ntpq -p 2>/dev/null | grep -c "^\*" || echo "0")
+        peers=$(ntpq -p 2>/dev/null | grep -c "^\*") || true
         if [[ "$peers" -gt 0 ]]; then
             log_pass "NTP peer synchronized (ntpq)"
         else
@@ -222,8 +222,8 @@ check_rpc_latency() {
         sleep 0.1
     done
     
-    if [[ $success_count -eq 0 ]]; then
-        log_fail "All RPC requests failed"
+    if [[ $success_count -lt 8 ]]; then
+        log_fail "Only $success_count/10 RPC requests succeeded (need >= 8)"
         log_info "Check network connectivity and RPC endpoint"
         return 1
     fi
@@ -315,11 +315,21 @@ check_circuit_breaker() {
     fi
     
     # Insert a fake loss that exceeds threshold
+    if [[ ! "$max_loss" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        log_fail "Invalid max_loss threshold from config: '$max_loss'"
+        return 1
+    fi
     local fake_loss
     fake_loss=$(echo "$max_loss + 100" | bc)
     local test_uuid="preflight-test-$(date +%s)"
     
     log_info "Inserting test trade with loss: \$${fake_loss} (threshold: \$${max_loss})"
+    
+    # Ensure the fake trade is always removed, even if the script is interrupted
+    cleanup_test_trade() {
+        sqlite3 "$DB_PATH" "DELETE FROM trades WHERE trade_uuid LIKE 'preflight-test-%';" 2>/dev/null || true
+    }
+    trap cleanup_test_trade EXIT
     
     sqlite3 "$DB_PATH" <<EOF
 INSERT INTO trades (
@@ -360,7 +370,16 @@ EOF
         # Test that webhook is rejected when circuit breaker is tripped
         log_info "Testing webhook rejection with tripped circuit breaker..."
         local webhook_secret
-        webhook_secret=$(grep "^CHIMERA_SECURITY__WEBHOOK_SECRET=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2 || echo "")
+        webhook_secret=""
+        if [ -f "$CONFIG_FILE" ]; then
+            set +u
+            set -a
+            # shellcheck disable=SC1090
+            . "$CONFIG_FILE"
+            set +a
+            set -u
+            webhook_secret="${CHIMERA_SECURITY__WEBHOOK_SECRET:-}"
+        fi
         
         if [[ -n "$webhook_secret" ]]; then
             local test_timestamp
@@ -387,9 +406,20 @@ EOF
         
         # Reset circuit breaker for next test
         log_info "Resetting circuit breaker..."
-        curl -s -X POST http://localhost:8080/api/v1/config/circuit-breaker/reset \
-            -H "Authorization: Bearer $(cat /opt/chimera/config/.env | grep API_KEY | cut -d= -f2)" \
-            > /dev/null 2>&1 || log_warn "Could not reset circuit breaker (may require manual reset)"
+        local admin_key
+        admin_key=$(grep -A 15 "api_keys:" "${CHIMERA_HOME}/config/config.yaml" 2>/dev/null | grep -m1 'key:' | sed -n 's/.*key: *"\([^"]*\)".*/\1/p' || true)
+        if [[ -z "$admin_key" ]]; then
+            log_fail "Could not extract admin API key from config.yaml to reset circuit breaker"
+            return 1
+        fi
+        if curl -s -X POST http://localhost:8080/api/v1/config/circuit-breaker/reset \
+            -H "Authorization: Bearer $admin_key" \
+            --max-time 10 > /dev/null 2>&1; then
+            log_pass "Circuit breaker reset"
+        else
+            log_fail "Could not reset circuit breaker (trading remains halted)"
+            return 1
+        fi
         
         return 0
     else
@@ -442,7 +472,7 @@ main() {
     elif [[ $WARNINGS -gt 0 ]]; then
         echo -e "${YELLOW}⚠ Pre-flight checks passed with warnings${NC}"
         echo "Review warnings before production deployment"
-        exit 0
+        exit 2
     else
         echo -e "${GREEN}✓ All pre-flight checks passed${NC}"
         exit 0

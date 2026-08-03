@@ -27,7 +27,8 @@ use crate::handlers::ApiState;
 /// Scout status response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScoutStatusResponse {
-    pub last_run_at: String,
+    /// Last run timestamp; None when no analysis history exists.
+    pub last_run_at: Option<String>,
     pub next_run_at: Option<String>,
     pub wallets_analyzed: i64,
     pub analysis_duration_seconds: f64,
@@ -227,17 +228,17 @@ pub async fn get_scout_status(
     // Get rejection queue (REJECTED wallets with recent notes)
     let rejection_queue = get_rejection_queue(&state.db).await?;
 
-    // Determine Scout status (simplified - in reality this would check Scout process)
-    let status = if wallet_stats.total_wallets > 0 {
+    // Scout process state is not tracked by the operator; report "idle" unless
+    // analysis history exists (a run has at least produced data). "completed"
+    // means "a run completed at least once", never a live process claim.
+    let status = if wallet_stats.last_analysis_time.is_some() {
         "completed".to_string()
     } else {
         "idle".to_string()
     };
 
     let response = ScoutStatusResponse {
-        last_run_at: wallet_stats
-            .last_analysis_time
-            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+        last_run_at: wallet_stats.last_analysis_time,
         next_run_at: None, // Would be calculated from cron schedule
         wallets_analyzed: wallet_stats.total_wallets,
         analysis_duration_seconds: wallet_stats.avg_analysis_time,
@@ -284,22 +285,12 @@ pub async fn get_scout_metrics(
 pub async fn trigger_scout_run(
     State(_state): State<Arc<ApiState>>,
 ) -> Result<Json<ScoutRunResponse>, AppError> {
-    // Generate a run ID
-    let run_id = uuid::Uuid::new_v4().to_string();
-    let scheduled_at = chrono::Utc::now().to_rfc3339();
-
-    // In a real implementation, this would:
-    // 1. Call the Python Scout process via API or signal
-    // 2. Store the run request in a queue table
-    // 3. Return the run ID for tracking
-
-    // For now, return a placeholder response
-    let response = ScoutRunResponse {
-        run_id,
-        scheduled_at,
-    };
-
-    Ok(Json(response))
+    // Real scheduling (enqueue a run request and signal the Scout process) is
+    // not implemented. Returning a fabricated run_id would make callers believe
+    // a run was triggered when nothing happened.
+    Err(AppError::ServiceUnavailable(
+        "Scout run triggering is not implemented — no run was scheduled".to_string(),
+    ))
 }
 
 // =============================================================================
@@ -308,78 +299,15 @@ pub async fn trigger_scout_run(
 
 /// Get PredictiveBudgetManager status and forecasting
 pub async fn get_budget_status(
-    State(state): State<Arc<ApiState>>,
+    State(_state): State<Arc<ApiState>>,
 ) -> Result<Json<BudgetStatusResponse>, AppError> {
-    let pool = pg_pool(&state.db)?;
-
-    // Get total wallet count for budget estimation
-    let total_wallets: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE status IN ('ACTIVE', 'CANDIDATE')",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    // Simulated budget data (in production, this would come from Scout's budget manager)
-    let monthly_credits: i64 = 10_000_000;
-    let estimated_credits_per_wallet: i64 = 2500;
-    let credits_used = total_wallets.saturating_mul(estimated_credits_per_wallet);
-    let credits_remaining = monthly_credits.saturating_sub(credits_used);
-    let usage_percentage = if monthly_credits > 0 {
-        (credits_used as f64 / monthly_credits as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    let daily_target = monthly_credits / 30;
-    let daily_usage_percentage = if daily_target > 0 {
-        ((credits_used / 30) as f64 / daily_target as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    let alert_level = if usage_percentage >= 95.0 {
-        "depleted"
-    } else if usage_percentage >= 80.0 {
-        "critical"
-    } else if usage_percentage >= 50.0 {
-        "warning"
-    } else {
-        "normal"
-    };
-
-    let forecast = BudgetForecast {
-        horizon_hours: 24,
-        projected_usage: (total_wallets.saturating_mul(estimated_credits_per_wallet) / 30),
-        projected_remaining: credits_remaining.saturating_sub(total_wallets.saturating_mul(estimated_credits_per_wallet) / 30),
-        confidence: 0.85,
-        trend: if daily_usage_percentage < 80.0 { "stable" } else { "increasing" }.to_string(),
-        recommendations: vec![
-            "Continue monitoring daily usage".to_string(),
-            "Cache hit rate is optimal".to_string(),
-        ],
-    };
-
-    let response = BudgetStatusResponse {
-        credits_used,
-        credits_remaining,
-        total_monthly_credits: monthly_credits,
-        daily_target,
-        usage_percentage,
-        daily_usage_percentage,
-        alert_level: alert_level.to_string(),
-        forecast_24h: forecast,
-        optimization_suggestions: vec![
-            OptimizationSuggestion {
-                action_type: "cache_optimization".to_string(),
-                description: "Increase cache TTL for inactive wallets".to_string(),
-                expected_savings: 50000,
-                priority: "medium".to_string(),
-            },
-        ],
-    };
-
-    Ok(Json(response))
+    // Simulated budget figures are not wired to a real budget manager —
+    // returning plausible-but-fake data as live production numbers would be
+    // worse than an explicit not-implemented error.
+    Err(AppError::ServiceUnavailable(
+        "Budget status is not implemented — no budget manager is wired to this endpoint"
+            .to_string(),
+    ))
 }
 
 /// Get ActivityBasedCache statistics
@@ -388,37 +316,19 @@ pub async fn get_cache_stats(
 ) -> Result<Json<CacheStatsResponse>, AppError> {
     let pool = pg_pool(&state.db)?;
 
-    // Get wallet activity distribution (proxy for cache activity)
-    let very_high: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE' AND updated_at > NOW() - INTERVAL '1 hour'",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    let high: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE' AND updated_at > NOW() - INTERVAL '24 hours'",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    let medium: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE status = 'CANDIDATE' AND updated_at > NOW() - INTERVAL '7 days'",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    let low: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE status = 'CANDIDATE' AND updated_at <= NOW() - INTERVAL '7 days'",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    let inactive: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE status = 'REJECTED' OR updated_at <= NOW() - INTERVAL '30 days'",
+    // Activity buckets are mutually exclusive (single conditional-aggregation
+    // query). Previously `very_high` was a strict subset of `high` and
+    // `inactive` overlapped `low`/`medium`, double-counting totals.
+    let (very_high, high, medium, low, inactive): (i64, i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'ACTIVE' AND updated_at > NOW() - INTERVAL '1 hour') AS very_high,
+            COUNT(*) FILTER (WHERE status = 'ACTIVE' AND updated_at <= NOW() - INTERVAL '1 hour' AND updated_at > NOW() - INTERVAL '24 hours') AS high,
+            COUNT(*) FILTER (WHERE status = 'CANDIDATE' AND updated_at > NOW() - INTERVAL '7 days') AS medium,
+            COUNT(*) FILTER (WHERE status = 'CANDIDATE' AND updated_at <= NOW() - INTERVAL '7 days' AND updated_at > NOW() - INTERVAL '30 days') AS low,
+            COUNT(*) FILTER (WHERE status = 'REJECTED' OR updated_at <= NOW() - INTERVAL '30 days') AS inactive
+        FROM wallets
+        "#,
     )
     .fetch_one(&pool)
     .await
@@ -467,161 +377,15 @@ pub async fn get_cache_stats(
 
 /// Get HighConvictionAllocator status and allocation
 pub async fn get_conviction_allocation(
-    State(state): State<Arc<ApiState>>,
+    State(_state): State<Arc<ApiState>>,
 ) -> Result<Json<ConvictionAllocationResponse>, AppError> {
-    let pool = pg_pool(&state.db)?;
-
-    // Get total wallets analyzed
-    let total_wallets_analyzed: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE status IN ('ACTIVE', 'CANDIDATE')",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    // Get high-conviction wallets (WQS 70+)
-    let high_conviction_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE wqs_score >= 70.0 AND status = 'ACTIVE'",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    // Get conviction breakdown
-    let very_high: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE wqs_score >= 80.0 AND status = 'ACTIVE'",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    let high: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE wqs_score >= 70.0 AND wqs_score < 80.0 AND status = 'ACTIVE'",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    let medium: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE wqs_score >= 50.0 AND wqs_score < 70.0 AND status IN ('ACTIVE', 'CANDIDATE')",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    let emerging: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE wqs_score >= 30.0 AND wqs_score < 50.0 AND status = 'CANDIDATE'",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    let low: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE wqs_score < 30.0 AND status = 'REJECTED'",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    // Simulated budget allocation (in production, get from HighConvictionAllocator)
-    let total_budget: i64 = 5000;
-    let high_conviction_budget = (total_budget as f64 * 0.70) as i64; // 70% to high conviction
-    let emerging_budget = (total_budget as f64 * 0.20) as i64; // 20% to emerging
-    let reserve_budget = total_budget.saturating_sub(high_conviction_budget).saturating_sub(emerging_budget);
-
-    let avg_wqs_very_high: f64 = sqlx::query_scalar::<_, Option<f64>>(
-        "SELECT AVG(wqs_score) FROM wallets WHERE wqs_score >= 80.0 AND status = 'ACTIVE'",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?
-    .unwrap_or(0.0);
-
-    let avg_wqs_high: f64 = sqlx::query_scalar::<_, Option<f64>>(
-        "SELECT AVG(wqs_score) FROM wallets WHERE wqs_score >= 70.0 AND wqs_score < 80.0 AND status = 'ACTIVE'",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?
-    .unwrap_or(0.0);
-
-    let avg_wqs_medium: f64 = sqlx::query_scalar::<_, Option<f64>>(
-        "SELECT AVG(wqs_score) FROM wallets WHERE wqs_score >= 50.0 AND wqs_score < 70.0 AND status IN ('ACTIVE', 'CANDIDATE')",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?
-    .unwrap_or(0.0);
-
-    let avg_wqs_emerging: f64 = sqlx::query_scalar::<_, Option<f64>>(
-        "SELECT AVG(wqs_score) FROM wallets WHERE wqs_score >= 30.0 AND wqs_score < 50.0 AND status = 'CANDIDATE'",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?
-    .unwrap_or(0.0);
-
-    let avg_wqs_low: f64 = sqlx::query_scalar::<_, Option<f64>>(
-        "SELECT AVG(wqs_score) FROM wallets WHERE wqs_score < 30.0 AND status = 'REJECTED'",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?
-    .unwrap_or(0.0);
-
-    let response = ConvictionAllocationResponse {
-        total_wallets_analyzed,
-        high_conviction_count,
-        budget_remaining: BudgetBreakdown {
-            high_conviction: high_conviction_budget,
-            emerging: emerging_budget,
-            reserve: reserve_budget,
-        },
-        wallets_analyzed: WalletAnalysisBreakdown {
-            very_high: WalletLevelStats {
-                count: very_high,
-                credits_used: very_high.saturating_mul(3), // 3x multiplier
-                average_wqs: avg_wqs_very_high,
-                roi_score: 0.85,
-            },
-            high: WalletLevelStats {
-                count: high,
-                credits_used: high.saturating_mul(2), // 2.5x multiplier
-                average_wqs: avg_wqs_high,
-                roi_score: 0.75,
-            },
-            medium: WalletLevelStats {
-                count: medium,
-                credits_used: medium,
-                average_wqs: avg_wqs_medium,
-                roi_score: 0.60,
-            },
-            emerging: WalletLevelStats {
-                count: emerging,
-                credits_used: emerging.saturating_mul(2),
-                average_wqs: avg_wqs_emerging,
-                roi_score: 0.40,
-            },
-            low: WalletLevelStats {
-                count: low,
-                credits_used: 0,
-                average_wqs: avg_wqs_low,
-                roi_score: 0.10,
-            },
-        },
-        allocation_summary: AllocationSummary {
-            total_credits_allocated: high_conviction_budget,
-            high_conviction_percentage: 70.0,
-            emerging_percentage: 20.0,
-            average_credits_per_wallet: if total_wallets_analyzed > 0 {
-                high_conviction_budget as f64 / total_wallets_analyzed as f64
-            } else {
-                0.0
-            },
-        },
-    };
-
-    Ok(Json(response))
+    // The budget split, ROI scores and credit multipliers are hard-coded
+    // simulations — there is no real allocator wired to this endpoint.
+    // Return an explicit not-implemented error instead of fabricated numbers.
+    Err(AppError::ServiceUnavailable(
+        "Conviction allocation is not implemented — no allocator is wired to this endpoint"
+            .to_string(),
+    ))
 }
 
 // =============================================================================
@@ -631,9 +395,6 @@ pub async fn get_conviction_allocation(
 fn pg_pool(db: &Arc<dyn Database>) -> AppResult<sqlx::Pool<sqlx::Postgres>> {
     match db.pool() {
         DbPool::PostgreSQL(p) => Ok(p),
-        _ => Err(AppError::Internal(
-            "PostgreSQL backend required".to_string(),
-        )),
     }
 }
 
@@ -670,43 +431,52 @@ async fn get_wallet_statistics(db: &Arc<dyn Database>) -> Result<WalletStatistic
 async fn calculate_wqs_distribution(db: &Arc<dyn Database>) -> Result<Vec<WQSBucket>, AppError> {
     let pool = pg_pool(db)?;
 
-    let ranges = vec![
-        ("0-20", 0.0, 20.0),
-        ("20-40", 20.0, 40.0),
-        ("40-60", 40.0, 60.0),
-        ("60-80", 60.0, 80.0),
-        ("80-100", 80.0, 100.0),
-    ];
+    // Compute all buckets in a single GROUP BY query (no N+1 round trips).
+    // The final bucket is inclusive of 100 so no score is dropped.
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        r#"
+        SELECT
+            CASE
+                WHEN wqs_score < 20 THEN '0-20'
+                WHEN wqs_score < 40 THEN '20-40'
+                WHEN wqs_score < 60 THEN '40-60'
+                WHEN wqs_score < 80 THEN '60-80'
+                ELSE '80-100'
+            END AS bucket,
+            COUNT(*) AS count
+        FROM wallets
+        WHERE wqs_score IS NOT NULL
+        GROUP BY bucket
+        "#,
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(AppError::Database)?;
 
-    let mut distribution = Vec::new();
     let total_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM wallets WHERE wqs_score IS NOT NULL")
             .fetch_one(&pool)
             .await
             .map_err(AppError::Database)?;
 
-    for (range_name, min, max) in ranges {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM wallets WHERE wqs_score >= $1 AND wqs_score < $2",
-        )
-        .bind(min)
-        .bind(max)
-        .fetch_one(&pool)
-        .await
-        .map_err(AppError::Database)?;
-
-        let percentage = if total_count > 0 {
-            (count as f64 / total_count as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        distribution.push(WQSBucket {
-            range: range_name.to_string(),
-            count,
-            percentage,
-        });
-    }
+    let mut counts: std::collections::HashMap<String, i64> =
+        rows.into_iter().collect();
+    let distribution = vec!["0-20", "20-40", "40-60", "60-80", "80-100"]
+        .into_iter()
+        .map(|range_name| {
+            let count = counts.remove(range_name).unwrap_or(0);
+            let percentage = if total_count > 0 {
+                (count as f64 / total_count as f64) * 100.0
+            } else {
+                0.0
+            };
+            WQSBucket {
+                range: range_name.to_string(),
+                count,
+                percentage,
+            }
+        })
+        .collect();
 
     Ok(distribution)
 }
@@ -796,7 +566,9 @@ async fn calculate_scout_metrics(db: &Arc<dyn Database>) -> Result<ScoutMetricsR
             .await
             .map_err(AppError::Database)?;
 
-    // Calculate backtest success rate (from ACTIVE wallets that passed validation)
+    // Calculate backtest success rate (from wallets that actually have a
+    // backtest result — REJECTED/CANDIDATE wallets were never backtested and
+    // must not dilute the denominator).
     let backtest_passed: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE' AND notes LIKE '%Backtest: PASSED%'",
     )
@@ -804,21 +576,36 @@ async fn calculate_scout_metrics(db: &Arc<dyn Database>) -> Result<ScoutMetricsR
     .await
     .map_err(AppError::Database)?;
 
-    let backtest_success_rate = if total_analyzed > 0 {
-        (backtest_passed as f64 / total_analyzed as f64) * 100.0
+    let backtest_total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallets WHERE notes LIKE '%Backtest:%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    let backtest_success_rate = if backtest_total > 0 {
+        (backtest_passed as f64 / backtest_total as f64) * 100.0
     } else {
         0.0
     };
 
-    // Validation pass rate (wallets that met promotion criteria)
+    // Validation pass rate: ACTIVE wallets over the population that underwent
+    // validation (ACTIVE + CANDIDATE), not over REJECTED wallets too.
     let validation_passed: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE'")
             .fetch_one(&pool)
             .await
             .map_err(AppError::Database)?;
 
-    let validation_pass_rate = if total_analyzed > 0 {
-        (validation_passed as f64 / total_analyzed as f64) * 100.0
+    let validation_total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallets WHERE status IN ('ACTIVE', 'CANDIDATE')",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    let validation_pass_rate = if validation_total > 0 {
+        (validation_passed as f64 / validation_total as f64) * 100.0
     } else {
         0.0
     };
@@ -837,7 +624,7 @@ async fn get_promotion_queue(db: &Arc<dyn Database>) -> Result<Vec<PromotionItem
     let pool = pg_pool(db)?;
 
     let rows = sqlx::query_as::<_, (String, f64, String, DateTime<Utc>)>(
-        "SELECT address, wqs_score, notes, promoted_at FROM wallets
+        "SELECT address, COALESCE(wqs_score, 0.0), COALESCE(notes, ''), promoted_at FROM wallets
          WHERE status = 'ACTIVE' AND promoted_at IS NOT NULL
          ORDER BY promoted_at DESC LIMIT 20",
     )
@@ -867,7 +654,7 @@ async fn get_rejection_queue(db: &Arc<dyn Database>) -> Result<Vec<RejectionItem
     let pool = pg_pool(db)?;
 
     let rows = sqlx::query_as::<_, (String, f64, String, DateTime<Utc>)>(
-        "SELECT address, wqs_score, notes, updated_at FROM wallets
+        "SELECT address, COALESCE(wqs_score, 0.0), COALESCE(notes, ''), updated_at FROM wallets
          WHERE status = 'REJECTED'
          ORDER BY updated_at DESC LIMIT 20",
     )

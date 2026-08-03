@@ -13,21 +13,28 @@ echo -e "${BLUE}=== Trading Activity Diagnosis ===${NC}\n"
 
 # 1. Check system health
 echo -e "${BLUE}1. System Health:${NC}"
-HEALTH=$(curl -s http://localhost:8080/api/v1/health 2>/dev/null)
-if echo "$HEALTH" | grep -q '"status".*"healthy"'; then
+HEALTH=$(curl -fsS --connect-timeout 3 --max-time 5 http://localhost:8080/api/v1/health 2>/dev/null || true)
+if [ -z "$HEALTH" ]; then
+    echo -e "${RED}✗ Operator unreachable at localhost:8080${NC}"
+elif echo "$HEALTH" | grep -q '"status".*"healthy"'; then
     echo -e "${GREEN}✓ Operator is healthy${NC}"
+    echo "$HEALTH" | python3 -m json.tool 2>/dev/null | grep -E "(status|trading_allowed|circuit_breaker)" || echo "$HEALTH"
 else
     echo -e "${RED}✗ Operator health check failed${NC}"
+    echo "$HEALTH" | python3 -m json.tool 2>/dev/null | grep -E "(status|trading_allowed|circuit_breaker)" || echo "$HEALTH"
 fi
-echo "$HEALTH" | python3 -m json.tool 2>/dev/null | grep -E "(status|trading_allowed|circuit_breaker)" || echo "$HEALTH"
 
 # 2. Check wallets
 echo -e "\n${BLUE}2. Wallet Status:${NC}"
-WALLETS=$(curl -s http://localhost:8080/api/v1/wallets 2>/dev/null)
-TOTAL=$(echo "$WALLETS" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('total', 0))" 2>/dev/null || echo "0")
+WALLETS=$(curl -fsS --connect-timeout 3 --max-time 5 http://localhost:8080/api/v1/wallets 2>/dev/null || true)
+TOTAL=$(echo "$WALLETS" | python3 -c "import sys, json; d=json.load(sys.stdin); print(int(d.get('total') or 0))" 2>/dev/null || echo "0")
 ACTIVE=$(echo "$WALLETS" | python3 -c "import sys, json; d=json.load(sys.stdin); wallets=d.get('wallets', []); print(sum(1 for w in wallets if w.get('status') == 'ACTIVE'))" 2>/dev/null || echo "0")
 echo "Total wallets: $TOTAL"
 echo "Active wallets: $ACTIVE"
+
+if [ -z "$WALLETS" ]; then
+    echo -e "${RED}✗ Operator unreachable - cannot read wallet status${NC}"
+fi
 
 if [ "$ACTIVE" -eq 0 ]; then
     echo -e "${RED}✗ No ACTIVE wallets - trading cannot start${NC}"
@@ -35,18 +42,20 @@ fi
 
 # 3. Check monitoring status
 echo -e "\n${BLUE}3. Monitoring Status:${NC}"
-MONITORING=$(curl -s http://localhost:8080/api/v1/monitoring/status 2>/dev/null)
-if [ -n "$MONITORING" ] && echo "$MONITORING" | grep -q "enabled"; then
+MONITORING=$(curl -fsS --connect-timeout 3 --max-time 5 http://localhost:8080/api/v1/monitoring/status 2>/dev/null || true)
+if [ -n "$MONITORING" ] && echo "$MONITORING" | python3 -c "import sys, json; sys.exit(0 if json.load(sys.stdin).get('enabled') is True else 1)" 2>/dev/null; then
     echo "$MONITORING" | python3 -m json.tool 2>/dev/null | head -20
+elif [ -z "$MONITORING" ]; then
+    echo -e "${YELLOW}⚠ Monitoring endpoint not available (operator unreachable)${NC}"
 else
-    echo -e "${YELLOW}⚠ Monitoring endpoint not available or not configured${NC}"
+    echo -e "${YELLOW}⚠ Monitoring is not enabled${NC}"
     echo "This means wallets are not being monitored for trades"
 fi
 
 # 4. Check trades
 echo -e "\n${BLUE}4. Trading Activity:${NC}"
-TRADES=$(curl -s 'http://localhost:8080/api/v1/trades?limit=5' 2>/dev/null)
-TRADE_COUNT=$(echo "$TRADES" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('total', 0))" 2>/dev/null || echo "0")
+TRADES=$(curl -fsS --connect-timeout 3 --max-time 5 'http://localhost:8080/api/v1/trades?limit=5' 2>/dev/null || true)
+TRADE_COUNT=$(echo "$TRADES" | python3 -c "import sys, json; d=json.load(sys.stdin); print(int(d.get('total') or 0))" 2>/dev/null || echo "0")
 echo "Total trades: $TRADE_COUNT"
 
 if [ "$TRADE_COUNT" -eq 0 ]; then
@@ -55,23 +64,27 @@ fi
 
 # 5. Check operator logs for errors
 echo -e "\n${BLUE}5. Recent Errors:${NC}"
-ERRORS=$(docker logs chimera-operator --tail 50 2>&1 | grep -iE "ERROR" | tail -5)
-if [ -n "$ERRORS" ]; then
-    echo "$ERRORS"
+if docker inspect chimera-operator >/dev/null 2>&1; then
+    ERRORS=$(docker logs chimera-operator --tail 50 2>&1 | grep -iE "ERROR" | tail -5 || true)
+    if [ -n "$ERRORS" ]; then
+        echo "$ERRORS"
+    else
+        echo -e "${GREEN}✓ No recent errors${NC}"
+    fi
 else
-    echo -e "${GREEN}✓ No recent errors${NC}"
+    echo -e "${RED}✗ chimera-operator container not found${NC}"
 fi
 
 # 6. Check for monitoring configuration
 echo -e "\n${BLUE}6. Configuration Check:${NC}"
-if grep -q "helius_webhook_url" docker/env.mainnet-paper 2>/dev/null; then
+if grep -qE '^[^#]*helius_webhook_url=[^[:space:]]' docker/env.mainnet-paper 2>/dev/null; then
     echo -e "${GREEN}✓ Helius webhook URL configured${NC}"
 else
     echo -e "${YELLOW}⚠ Helius webhook URL not found in config${NC}"
     echo "  Monitoring requires: CHIMERA_MONITORING__HELIUS_WEBHOOK_URL"
 fi
 
-if grep -q "HELIUS_API_KEY" docker/env.mainnet-paper 2>/dev/null; then
+if grep -qE '^[^#]*HELIUS_API_KEY=[^[:space:]]' docker/env.mainnet-paper 2>/dev/null; then
     if grep -q "YOUR_HELIUS_API_KEY" docker/env.mainnet-paper 2>/dev/null; then
         echo -e "${RED}✗ Helius API key not configured (still has placeholder)${NC}"
     else
@@ -104,6 +117,3 @@ if [ "$TRADE_COUNT" -eq 0 ]; then
     echo "  3. Ensure Helius API key is set"
     echo "  4. Check if wallets are actually trading on-chain"
 fi
-
-
-

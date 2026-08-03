@@ -160,6 +160,8 @@ class TestParseSwapFromDeltas:
         # causing wSOL and native SOL to net to zero in token_deltas.
         # The early-return correctly sees only the native SOL delta.
         assert result["sol_amount"] == pytest.approx(0.5)
+        assert result["token_mint"] == "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+        assert result["token_amount"] == pytest.approx(100.0)
 
 
 class TestParseSwapFromEvents:
@@ -180,7 +182,8 @@ class TestParseSwapFromEvents:
                 "swap": {
                     "nativeInput": {"amount": 1_000_000_000},
                     "tokenOutputs": [
-                        {"mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", "rawTokenAmount": "100000000"},
+                        {"mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+                         "rawTokenAmount": {"tokenAmount": "100000000", "decimals": 9}},
                     ],
                 }
             },
@@ -190,6 +193,8 @@ class TestParseSwapFromEvents:
         result = helius_client.parse_swap_transaction(tx, WALLET)
         assert result is not None
         assert result["direction"] == "BUY"
+        assert result["token_mint"] == "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+        assert result["token_amount"] == pytest.approx(0.1)
         assert result["sol_amount"] == pytest.approx(1.0)
 
     def test_events_sol_out_only_is_sell(self, helius_client):
@@ -203,7 +208,8 @@ class TestParseSwapFromEvents:
                 "swap": {
                     "nativeOutput": {"amount": 1_000_000_000},
                     "tokenInputs": [
-                        {"mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", "rawTokenAmount": "100000000"},
+                        {"mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+                         "rawTokenAmount": {"tokenAmount": "100000000", "decimals": 9}},
                     ],
                 }
             },
@@ -213,6 +219,8 @@ class TestParseSwapFromEvents:
         result = helius_client.parse_swap_transaction(tx, WALLET)
         assert result is not None
         assert result["direction"] == "SELL"
+        assert result["token_mint"] == "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+        assert result["token_amount"] == pytest.approx(0.1)
         assert result["sol_amount"] == pytest.approx(1.0)
 
     def test_events_both_sides_still_works(self, helius_client):
@@ -227,7 +235,8 @@ class TestParseSwapFromEvents:
                     "nativeInput": {"amount": 2_000_000_000},
                     "nativeOutput": {"amount": 1_000_000_000},
                     "tokenOutputs": [
-                        {"mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", "rawTokenAmount": "100000000"},
+                        {"mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+                         "rawTokenAmount": {"tokenAmount": "100000000", "decimals": 9}},
                     ],
                 }
             },
@@ -237,6 +246,8 @@ class TestParseSwapFromEvents:
         result = helius_client.parse_swap_transaction(tx, WALLET)
         assert result is not None
         assert result["direction"] == "BUY"
+        assert result["token_mint"] == "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+        assert result["token_amount"] == pytest.approx(0.1)
         assert result["sol_amount"] == pytest.approx(1.0)  # net SOL spent
 
 
@@ -261,6 +272,7 @@ class TestParseSwapFromAccountData:
                     "tokenBalanceChanges": [
                         {
                             "mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+                            "userAccount": WALLET,
                             "rawTokenAmountBefore": "0",
                             "rawTokenAmountAfter": "100000000",
                             "decimals": 9,
@@ -274,6 +286,8 @@ class TestParseSwapFromAccountData:
         result = helius_client.parse_swap_transaction(tx, WALLET)
         assert result is not None
         assert result["direction"] == "BUY"
+        assert result["token_mint"] == "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+        assert result["token_amount"] == pytest.approx(0.1)
         assert result["sol_amount"] == pytest.approx(1.0)
 
     def test_native_balance_change_positive_is_sell(self, helius_client):
@@ -290,6 +304,7 @@ class TestParseSwapFromAccountData:
                     "tokenBalanceChanges": [
                         {
                             "mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+                            "userAccount": WALLET,
                             "rawTokenAmountBefore": "100000000",
                             "rawTokenAmountAfter": "0",
                             "decimals": 9,
@@ -303,6 +318,8 @@ class TestParseSwapFromAccountData:
         result = helius_client.parse_swap_transaction(tx, WALLET)
         assert result is not None
         assert result["direction"] == "SELL"
+        assert result["token_mint"] == "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+        assert result["token_amount"] == pytest.approx(0.1)
         assert result["sol_amount"] == pytest.approx(1.0)
 
     def test_native_balance_change_zero_is_ignored(self, helius_client):
@@ -365,4 +382,8 @@ class TestMultiTokenSwap:
         }
         result = helius_client.parse_swap_transaction(tx, WALLET)
         assert result is not None
-        assert result["direction"] in ("BUY", "SELL")
+        # Primary token is the one bought (largest token delta toward the wallet)
+        assert result["direction"] == "BUY"
+        assert result["token_mint"] == "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm"
+        assert result["token_amount"] == pytest.approx(200.0)
+        assert result["sol_amount"] == pytest.approx(0.5)

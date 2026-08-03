@@ -132,6 +132,7 @@ class EnsemblePredictor:
         self._models = {}
         self._performance = {}
         self._weights = {}
+        self._prediction_history: Dict[str, Dict[ModelType, ModelPrediction]] = {}
 
         # Initialize available models
         if GRADIENT_BOOST_AVAILABLE:
@@ -259,6 +260,10 @@ class EnsemblePredictor:
         start_time = time.time()
         predictions = {}
 
+        # Take a consistent snapshot of mutable state before reading
+        with self._lock:
+            weight_snapshot = self._weights.copy()
+
         # Get predictions from all models
         for model_type in self._models:
             prediction = self.predict_single_model(model_type, features)
@@ -275,20 +280,31 @@ class EnsemblePredictor:
                 consensus_score=0.0,
             )
 
-        # Calculate weighted average
+        # Record predictions for outcome-based weight updates (keyed by wallet)
+        wallet_address = features.get('wallet_address')
+        if wallet_address:
+            with self._lock:
+                self._prediction_history[wallet_address] = predictions.copy()
+
+        # Calculate weighted average over the models that produced predictions,
+        # renormalizing so surviving models are not under-weighted.
+        weight_sum = sum(weight_snapshot.get(mt, 0.0) for mt in predictions)
         weighted_pnl = 0.0
         weighted_confidence = 0.0
 
         for model_type, prediction in predictions.items():
-            weight = self._weights.get(model_type, 0.0)
+            weight = weight_snapshot.get(model_type, 0.0) / weight_sum if weight_sum > 0 else 0.0
             weighted_pnl += prediction.predicted_pnl * weight
             weighted_confidence += prediction.confidence * weight
 
-        # Calculate consensus score
+        # Calculate consensus score: std deviation around the mean, normalized
+        # by the mean magnitude so agreement-based scoring is magnitude-free.
         pnl_values = [p.predicted_pnl for p in predictions.values()]
         if pnl_values:
-            pnl_std = (sum(p**2 for p in pnl_values) / len(pnl_values)) ** 0.5
-            consensus = 1.0 - min(pnl_std / (abs(weighted_pnl) + 1.0), 1.0)
+            mean_pnl = sum(pnl_values) / len(pnl_values)
+            pnl_std = (sum((p - mean_pnl) ** 2 for p in pnl_values) / len(pnl_values)) ** 0.5
+            mean_abs = sum(abs(p) for p in pnl_values) / len(pnl_values)
+            consensus = 1.0 - min(pnl_std / (mean_abs + 1e-9), 1.0)
         else:
             consensus = 0.0
 
@@ -311,6 +327,24 @@ class EnsemblePredictor:
             actual_outcomes: Dictionary mapping wallet_address to actual PnL
         """
         with self._lock:
+            # Score each model's recorded predictions against actual outcomes
+            for wallet_address, actual_pnl in actual_outcomes.items():
+                history = self._prediction_history.pop(wallet_address, None)
+                if not history:
+                    continue
+                for model_type, prediction in history.items():
+                    perf = self._performance.get(model_type)
+                    if perf is None:
+                        continue
+                    error = prediction.predicted_pnl - actual_pnl
+                    perf.predictions_made += 1
+                    perf.mae = (perf.mae * (perf.predictions_made - 1) + abs(error)) / perf.predictions_made
+                    perf.rmse = ((perf.rmse ** 2 * (perf.predictions_made - 1)) + error ** 2) / perf.predictions_made
+                    perf.rmse = perf.rmse ** 0.5
+                    perf.correct_predictions += 1 if (prediction.predicted_pnl > 0) == (actual_pnl > 0) else 0
+                    perf.last_7d_accuracy = perf.correct_predictions / perf.predictions_made
+                    perf.last_updated = time.time()
+
             # Calculate accuracy for each model over recent predictions
             model_accuracies = {}
 
@@ -328,9 +362,21 @@ class EnsemblePredictor:
                     accuracy = model_accuracies.get(model_type, 0.5)
                     # Softmax-style weighting
                     new_weight = accuracy / total_accuracy
-                    # Apply max influence cap
-                    new_weight = min(new_weight, self._config.MAX_INFLUENCE_SINGLE_MODEL)
                     self._weights[model_type] = new_weight
+
+            self._normalize_weights()
+
+            # Enforce the max-influence cap after normalization and
+            # redistribute the excess to the remaining models
+            for model_type in list(self._weights):
+                if self._weights[model_type] > self._config.MAX_INFLUENCE_SINGLE_MODEL:
+                    excess = self._weights[model_type] - self._config.MAX_INFLUENCE_SINGLE_MODEL
+                    self._weights[model_type] = self._config.MAX_INFLUENCE_SINGLE_MODEL
+                    others = [m for m in self._weights if m != model_type and self._weights[m] > 0]
+                    if others:
+                        share = excess / len(others)
+                        for m in others:
+                            self._weights[m] += share
 
             self._normalize_weights()
             self._save_weights()

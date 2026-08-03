@@ -6,11 +6,39 @@ and cache invalidation.
 """
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 from datetime import datetime, timedelta
 
 from core.security_client import RugCheckClient
 from core.advanced_cache import CacheCategory
+
+
+class FakeResponse:
+    """Minimal aiohttp response stand-in for RugCheck API calls."""
+
+    def __init__(self, payload, status=200):
+        self.status = status
+        self._payload = payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def json(self):
+        return self._payload
+
+
+class FakeSession:
+    """Minimal aiohttp session stand-in (patch for _get_session)."""
+
+    def __init__(self, payload, status=200):
+        self._payload = payload
+        self._status = status
+
+    def get(self, url, headers=None, timeout=None):
+        return FakeResponse(self._payload, self._status)
 
 
 @pytest.mark.asyncio
@@ -70,13 +98,12 @@ class TestRugCheckClientL1Cache:
             "risks": []
         }
         
-        with patch.object(client, '_make_request') as mock_request:
-            mock_request.return_value = (200, mock_response)
-            
+        with patch.object(client, '_get_session',
+                           new=AsyncMock(return_value=FakeSession(mock_response))):
             result = await client.get_token_risk("test_token_mint")
-            
-            assert mock_request.called
+
             assert result["cached"] is False
+            assert result["score"] == 0
 
     async def test_l1_cache_expiration(self):
         """Test that L1 cache entries expire after 2 hours."""
@@ -101,13 +128,11 @@ class TestRugCheckClientL1Cache:
             "risks": ["TestRisk"]
         }
         
-        with patch.object(client, '_make_request') as mock_request:
-            mock_request.return_value = (200, mock_response)
-            
+        with patch.object(client, '_get_session',
+                           new=AsyncMock(return_value=FakeSession(mock_response))):
             result = await client.get_token_risk(token_mint)
-            
+
             # Should have called API due to expiration
-            assert mock_request.called
             assert result["score"] == 100
 
     async def test_l1_cache_stores_results(self):
@@ -120,12 +145,11 @@ class TestRugCheckClientL1Cache:
             "risks": ["MutableMetadata"]
         }
         
-        with patch.object(client, '_make_request') as mock_request:
-            mock_request.return_value = (200, mock_response)
-            
+        with patch.object(client, '_get_session',
+                           new=AsyncMock(return_value=FakeSession(mock_response))):
             token_mint = "test_token_mint"
             await client.get_token_risk(token_mint)
-            
+
             # Should be cached in L1
             assert token_mint in client._l1_cache
             assert client._l1_cache[token_mint]["data"]["score"] == 50
@@ -157,7 +181,8 @@ class TestRugCheckClientL2Cache:
     async def test_l2_cache_hit(self):
         """Test that L2 cache returns cached results."""
         with patch('core.security_client.CACHE_AVAILABLE', True):
-            with patch('core.security_client.AdvancedCache') as MockCache:
+            with patch('core.security_client.CacheCategory', CacheCategory), \
+                    patch('core.security_client.AdvancedCache') as MockCache:
                 # Mock cache instance
                 mock_cache_instance = MagicMock()
                 mock_cache_instance.get.return_value = {
@@ -180,7 +205,8 @@ class TestRugCheckClientL2Cache:
     async def test_l2_cache_miss_fallback_to_l1(self):
         """Test L2 cache miss falls back to L1."""
         with patch('core.security_client.CACHE_AVAILABLE', True):
-            with patch('core.security_client.AdvancedCache') as MockCache:
+            with patch('core.security_client.CacheCategory', CacheCategory), \
+                    patch('core.security_client.AdvancedCache') as MockCache:
                 # Mock cache instance
                 mock_cache_instance = MagicMock()
                 mock_cache_instance.get.return_value = None  # L2 miss
@@ -211,7 +237,8 @@ class TestRugCheckClientL2Cache:
     async def test_l2_cache_stores_results(self):
         """Test that L2 cache stores API results."""
         with patch('core.security_client.CACHE_AVAILABLE', True):
-            with patch('core.security_client.AdvancedCache') as MockCache:
+            with patch('core.security_client.CacheCategory', CacheCategory), \
+                    patch('core.security_client.AdvancedCache') as MockCache:
                 # Mock cache instance
                 mock_cache_instance = MagicMock()
                 mock_cache_instance.get.return_value = None  # L2 miss
@@ -225,20 +252,21 @@ class TestRugCheckClientL2Cache:
                     "risks": ["HighConcentration"]
                 }
                 
-                with patch.object(client, '_make_request') as mock_request:
-                    mock_request.return_value = (200, mock_response)
-                    
+                with patch.object(client, '_get_session',
+                                   new=AsyncMock(return_value=FakeSession(mock_response))):
                     await client.get_token_risk("test_token_mint")
-                    
-                    # Should have stored in L2
+
+                    # Should have stored in L2 under the TOKEN_SECURITY prefix
                     assert mock_cache_instance.set.called
                     call_args = mock_cache_instance.set.call_args
-                    assert "token_security:" in str(call_args)
+                    assert call_args[0][0] == "token_security"
+                    assert call_args[0][1] == "test_token_mint"
 
     async def test_l2_cache_uses_correct_category(self):
         """Test that L2 cache uses TOKEN_SECURITY category."""
         with patch('core.security_client.CACHE_AVAILABLE', True):
-            with patch('core.security_client.AdvancedCache') as MockCache:
+            with patch('core.security_client.CacheCategory', CacheCategory), \
+                    patch('core.security_client.AdvancedCache') as MockCache:
                 # Mock cache instance
                 mock_cache_instance = MagicMock()
                 mock_cache_instance.get.return_value = None
@@ -249,21 +277,20 @@ class TestRugCheckClientL2Cache:
                 # Mock API response
                 mock_response = {"score": 0, "risks": []}
                 
-                with patch.object(client, '_make_request') as mock_request:
-                    mock_request.return_value = (200, mock_response)
-                    
+                with patch.object(client, '_get_session',
+                                   new=AsyncMock(return_value=FakeSession(mock_response))):
                     await client.get_token_risk("test_token_mint")
-                    
+
                     # Should use TOKEN_SECURITY category
                     assert mock_cache_instance.set.called
                     call_args = mock_cache_instance.set.call_args
-                    # Check that category argument is passed
-                    assert call_args is not None
+                    assert call_args.kwargs.get('category') == CacheCategory.TOKEN_SECURITY
 
     async def test_l2_cache_error_handling(self):
         """Test that L2 cache errors don't break functionality."""
         with patch('core.security_client.CACHE_AVAILABLE', True):
-            with patch('core.security_client.AdvancedCache') as MockCache:
+            with patch('core.security_client.CacheCategory', CacheCategory), \
+                    patch('core.security_client.AdvancedCache') as MockCache:
                 # Mock cache instance that raises exception
                 mock_cache_instance = MagicMock()
                 mock_cache_instance.get.side_effect = Exception("Redis error")
@@ -274,15 +301,14 @@ class TestRugCheckClientL2Cache:
                 # Mock API response
                 mock_response = {"score": 0, "risks": []}
                 
-                with patch.object(client, '_make_request') as mock_request:
-                    mock_request.return_value = (200, mock_response)
-                    
+                with patch.object(client, '_get_session',
+                                   new=AsyncMock(return_value=FakeSession(mock_response))):
                     # Should not raise exception
                     result = await client.get_token_risk("test_token_mint")
-                    
+
                     # Should fall back to API call
-                    assert mock_request.called
                     assert result["cached"] is False
+                    assert result["score"] == 0
 
 
 @pytest.mark.asyncio
@@ -312,7 +338,8 @@ class TestRugCheckClientCacheIntegration:
     async def test_cache_precedence_l2_over_l1(self):
         """Test that L2 cache takes precedence over L1."""
         with patch('core.security_client.CACHE_AVAILABLE', True):
-            with patch('core.security_client.AdvancedCache') as MockCache:
+            with patch('core.security_client.CacheCategory', CacheCategory), \
+                    patch('core.security_client.AdvancedCache') as MockCache:
                 # Mock L2 cache
                 mock_cache_instance = MagicMock()
                 mock_cache_instance.get.return_value = {
@@ -348,7 +375,8 @@ class TestRugCheckClientCacheIntegration:
     async def test_both_caches_updated_on_api_call(self):
         """Test that both L1 and L2 caches are updated on API call."""
         with patch('core.security_client.CACHE_AVAILABLE', True):
-            with patch('core.security_client.AdvancedCache') as MockCache:
+            with patch('core.security_client.CacheCategory', CacheCategory), \
+                    patch('core.security_client.AdvancedCache') as MockCache:
                 # Mock L2 cache
                 mock_cache_instance = MagicMock()
                 mock_cache_instance.get.return_value = None  # L2 miss
@@ -362,12 +390,11 @@ class TestRugCheckClientCacheIntegration:
                     "risks": ["MutableMetadata"]
                 }
                 
-                with patch.object(client, '_make_request') as mock_request:
-                    mock_request.return_value = (200, mock_response)
-                    
+                with patch.object(client, '_get_session',
+                                   new=AsyncMock(return_value=FakeSession(mock_response))):
                     token_mint = "test_token_mint"
                     await client.get_token_risk(token_mint)
-                    
+
                     # Both caches should be updated
                     assert token_mint in client._l1_cache
                     assert client._l1_cache[token_mint]["data"]["score"] == 25
@@ -376,7 +403,8 @@ class TestRugCheckClientCacheIntegration:
     async def test_clear_all_caches(self):
         """Test clearing both L1 and L2 caches."""
         with patch('core.security_client.CACHE_AVAILABLE', True):
-            with patch('core.security_client.AdvancedCache') as MockCache:
+            with patch('core.security_client.CacheCategory', CacheCategory), \
+                    patch('core.security_client.AdvancedCache') as MockCache:
                 # Mock L2 cache
                 mock_cache_instance = MagicMock()
                 MockCache.return_value = mock_cache_instance
@@ -399,22 +427,29 @@ class TestRugCheckClientCacheIntegration:
                 assert token_mint not in client._l1_cache
                 
                 # L2 clear should be called
-                assert mock_cache_instance.invalidate_by_category.called
+                assert mock_cache_instance.invalidate_category.called
 
     async def test_clear_all_caches_handles_errors(self):
         """Test clear_all_caches handles L2 errors gracefully."""
         with patch('core.security_client.CACHE_AVAILABLE', True):
-            with patch('core.security_client.AdvancedCache') as MockCache:
+            with patch('core.security_client.CacheCategory', CacheCategory), \
+                    patch('core.security_client.AdvancedCache') as MockCache:
                 # Mock L2 cache that raises exception
                 mock_cache_instance = MagicMock()
                 mock_cache_instance.invalidate_by_category.side_effect = Exception("Redis error")
                 MockCache.return_value = mock_cache_instance
                 
                 client = RugCheckClient()
-                
+
+                # Populate L1 cache so the assertion is meaningful
+                client._l1_cache["test_token_mint"] = {
+                    "data": {"is_safe": True},
+                    "timestamp": datetime.now()
+                }
+
                 # Should not raise exception
                 await client.clear_all_caches()
-                
+
                 # L1 should still be cleared
                 assert len(client._l1_cache) == 0
 
@@ -426,7 +461,8 @@ class TestRugCheckClientCacheKeys:
     async def test_l2_cache_key_format(self):
         """Test that L2 cache uses correct key format."""
         with patch('core.security_client.CACHE_AVAILABLE', True):
-            with patch('core.security_client.AdvancedCache') as MockCache:
+            with patch('core.security_client.CacheCategory', CacheCategory), \
+                    patch('core.security_client.AdvancedCache') as MockCache:
                 # Mock L2 cache
                 mock_cache_instance = MagicMock()
                 mock_cache_instance.get.return_value = None
@@ -437,24 +473,24 @@ class TestRugCheckClientCacheKeys:
                 # Mock API response
                 mock_response = {"score": 0, "risks": []}
                 
-                with patch.object(client, '_make_request') as mock_request:
-                    mock_request.return_value = (200, mock_response)
-                    
+                with patch.object(client, '_get_session',
+                                   new=AsyncMock(return_value=FakeSession(mock_response))):
                     token_mint = "test_token_mint"
                     await client.get_token_risk(token_mint)
-                    
-                    # Check cache key format
+
+                    # Check cache key format (prefix + identifier)
+                    assert mock_cache_instance.set.called
                     call_args = mock_cache_instance.set.call_args
-                    if call_args:
-                        key = call_args[0][0] if call_args[0] else call_args.kwargs.get('key')
-                        assert key is not None
-                        assert "token_security:" in key
-                        assert token_mint in key
+                    prefix = call_args[0][0]
+                    identifier = call_args[0][1]
+                    assert prefix == "token_security"
+                    assert identifier == token_mint
 
     async def test_different_tokens_different_keys(self):
         """Test that different tokens use different cache keys."""
         with patch('core.security_client.CACHE_AVAILABLE', True):
-            with patch('core.security_client.AdvancedCache') as MockCache:
+            with patch('core.security_client.CacheCategory', CacheCategory), \
+                    patch('core.security_client.AdvancedCache') as MockCache:
                 # Mock L2 cache
                 mock_cache_instance = MagicMock()
                 mock_cache_instance.get.return_value = None
@@ -465,14 +501,15 @@ class TestRugCheckClientCacheKeys:
                 # Mock API response
                 mock_response = {"score": 0, "risks": []}
                 
-                with patch.object(client, '_make_request') as mock_request:
-                    mock_request.return_value = (200, mock_response)
-                    
+                with patch.object(client, '_get_session',
+                                   new=AsyncMock(return_value=FakeSession(mock_response))):
                     await client.get_token_risk("token1")
                     await client.get_token_risk("token2")
-                    
-                    # Should have made 2 cache set calls with different keys
+
+                    # Should have made 2 cache set calls with different identifiers
                     assert mock_cache_instance.set.call_count == 2
+                    identifiers = [call.args[1] for call in mock_cache_instance.set.call_args_list]
+                    assert len(set(identifiers)) == 2
 
     async def test_cache_key_isolation(self):
         """Test that cache keys are properly isolated between tokens."""

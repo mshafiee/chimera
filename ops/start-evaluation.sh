@@ -83,9 +83,7 @@ if [ ! -f "docker-compose.evaluation.yml" ]; then
 fi
 
 # Start services with evaluation profile
-docker-compose -f docker-compose.yml -f docker-compose.evaluation.yml --profile evaluation up -d
-
-if [ $? -eq 0 ]; then
+if docker-compose -f docker-compose.yml -f docker-compose.evaluation.yml --profile "${COMPOSE_PROFILE}" up -d; then
     echo -e "${GREEN}✓ Docker services started successfully${NC}"
 else
     echo -e "${RED}✗ Failed to start Docker services${NC}"
@@ -122,12 +120,14 @@ check_service_health() {
 # Check critical services
 check_service_health "Operator" "http://localhost:8080/api/v1/health"
 
-# Check Scout container health (Scout is a periodic batch job, not a web service)
+# Check Scout container status (Scout is a periodic batch job, not a web
+# service; a missing container is a hard failure for the evaluation)
 echo -e "${YELLOW}⏳ Checking Scout container status...${NC}"
 if docker ps --format "{{.Names}}" | grep -q "chimera-scout"; then
     echo -e "${GREEN}✓ Scout container is running${NC}"
 else
     echo -e "${RED}✗ Scout container is not running${NC}"
+    exit 1
 fi
 
 check_service_health "Prometheus Eval" "http://localhost:9091/-/healthy"
@@ -137,21 +137,27 @@ check_service_health "Prometheus Eval" "http://localhost:9091/-/healthy"
 # ===================================================================
 echo -e "${BLUE}[4/8] Initializing evaluation database...${NC}"
 
-# Wait for PostgreSQL to be ready
+# Wait for PostgreSQL to be ready (bounded, 60 attempts)
+PG_ATTEMPT=0
 until docker-compose exec postgres-eval pg_isready -U chimera -d chimera_evaluation > /dev/null 2>&1; do
-    echo -e "${YELLOW}⏳ Waiting for PostgreSQL to be ready...${NC}"
+    PG_ATTEMPT=$((PG_ATTEMPT + 1))
+    if [ $PG_ATTEMPT -ge 60 ]; then
+        echo -e "${RED}✗ PostgreSQL did not become ready in time${NC}"
+        exit 1
+    fi
+    echo -e "${YELLOW}⏳ Waiting for PostgreSQL to be ready... (${PG_ATTEMPT}/60)${NC}"
     sleep 2
 done
 
 echo -e "${GREEN}✓ PostgreSQL is ready${NC}"
 
-# Create evaluation database schema if needed
-docker-compose exec postgres-eval psql -U chimera -d chimera_evaluation -c "\dt" > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-    echo -e "${YELLOW}⚠ Database schema not found, initializing...${NC}"
-    docker-compose exec postgres-eval psql -U chimera -d chimera_evaluation -f /docker-entrypoint-initdb.d/01-schema.sql
-else
+# Create evaluation database schema if needed (check a known table via
+# to_regclass; '\dt' returns 0 even when no tables exist)
+if docker-compose exec -T postgres-eval psql -U chimera -d chimera_evaluation -tAc "SELECT to_regclass('public.alerts')" | grep -q .; then
     echo -e "${GREEN}✓ Evaluation database schema exists${NC}"
+else
+    echo -e "${YELLOW}⚠ Database schema not found, initializing...${NC}"
+    docker-compose exec -T postgres-eval psql -U chimera -d chimera_evaluation -f /docker-entrypoint-initdb.d/01-schema.sql
 fi
 
 # ===================================================================
@@ -167,8 +173,9 @@ if grep -E "^\s*vector:" docker-compose.yml 2>/dev/null || grep -E "^\s*vector:"
         mkdir -p "${EVAL_DIR}/logs"
         mkdir -p "${EVAL_DIR}/logs/evaluation"
 
-        # Restart Vector to load configuration
-        docker-compose -f docker-compose.evaluation.yml restart vector
+        # Restart Vector to load configuration (both files, matching how the
+        # services were started)
+        docker-compose -f docker-compose.yml -f docker-compose.evaluation.yml restart vector
 
         echo -e "${GREEN}✓ Vector log aggregation started${NC}"
     else
@@ -186,8 +193,10 @@ echo -e "${BLUE}[6/8] Setting up automated data collection...${NC}"
 # Make data collection script executable
 chmod +x ops/collect-evaluation-data.sh
 
-# Create hourly cron job for data collection
-CRON_JOB="0 * * * * root ${EVAL_DIR}/ops/collect-evaluation-data.sh"
+# Create hourly cron job for data collection (user crontab format is
+# `minute hour day month weekday command` — no user field; use the symlink
+# created below so the path always resolves)
+CRON_JOB="0 * * * * ${EVAL_DIR}/collect-data.sh"
 
 # Check if cron job already exists
 if crontab -l 2>/dev/null | grep -q "collect-evaluation-data.sh"; then
@@ -242,12 +251,30 @@ echo -e "${BLUE}[8/8] Starting anomaly detection service...${NC}"
 # Make anomaly detection script executable
 chmod +x ops/detect-anomalies.py
 
-# Start anomaly detector in background
-python3 ops/detect-anomalies.py --interval 60 > "${EVAL_DIR}/anomaly-detection.log" 2>&1 &
-ANOMALY_PID=$!
+# Start anomaly detector in background (refuse to start a duplicate)
+ANOMALY_PID=""
+if [ -f "${EVAL_DIR}/anomaly-detector.pid" ]; then
+    EXISTING_PID=$(cat "${EVAL_DIR}/anomaly-detector.pid" 2>/dev/null || true)
+    if [ -n "$EXISTING_PID" ] && kill -0 "$EXISTING_PID" 2>/dev/null; then
+        echo -e "${YELLOW}⚠ Anomaly detector already running (PID: ${EXISTING_PID})${NC}"
+        ANOMALY_PID=$EXISTING_PID
+    fi
+fi
 
-echo $ANOMALY_PID > "${EVAL_DIR}/anomaly-detector.pid"
-echo -e "${GREEN}✓ Anomaly detection started (PID: ${ANOMALY_PID})${NC}"
+if [ -z "$ANOMALY_PID" ]; then
+    python3 ops/detect-anomalies.py --interval 60 > "${EVAL_DIR}/anomaly-detection.log" 2>&1 &
+    ANOMALY_PID=$!
+    echo $ANOMALY_PID > "${EVAL_DIR}/anomaly-detector.pid"
+    echo -e "${GREEN}✓ Anomaly detection started (PID: ${ANOMALY_PID})${NC}"
+fi
+
+# Ensure background jobs are stopped when this script exits or fails
+cleanup_background_jobs() {
+    if [ -n "$ANOMALY_PID" ] && kill -0 "$ANOMALY_PID" 2>/dev/null; then
+        kill "$ANOMALY_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup_background_jobs EXIT
 
 # ===================================================================
 # MONITORING DASHBOARD STARTUP
@@ -255,9 +282,7 @@ echo -e "${GREEN}✓ Anomaly detection started (PID: ${ANOMALY_PID})${NC}"
 echo -e "${BLUE}[9/9] Starting monitoring dashboards...${NC}"
 
 # Start Grafana and Prometheus check
-docker-compose ps grafana-eval prometheus-eval > /dev/null 2>&1
-
-if [ $? -eq 0 ]; then
+if docker-compose ps grafana-eval prometheus-eval > /dev/null 2>&1; then
     echo -e "${GREEN}✓ Monitoring dashboards are running${NC}"
     echo -e "${BLUE}  Grafana: http://localhost:3003${NC}"
     echo -e "${BLUE}  Prometheus Eval: http://localhost:9091${NC}"
@@ -312,8 +337,8 @@ Services: Operator, Scout, Monitoring, Anomaly Detection
 Status: All systems operational"
 
     curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        -d "chat_id=${TELEGRAM_CHAT_ID}" \
-        -d "text=${STARTUP_MESSAGE}" > /dev/null 2>&1
+        --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+        --data-urlencode "text=${STARTUP_MESSAGE}" > /dev/null 2>&1 || true
 
     echo -e "${GREEN}✓ Startup notification sent${NC}"
 fi

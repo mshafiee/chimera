@@ -8,6 +8,8 @@ RugCheck flags a majority of tokens as risky (>50%).
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 
+from config import ScoutConfig
+
 
 class MockTrade:
     """Mock trade for testing."""
@@ -32,14 +34,18 @@ class MockAnalyzer:
     ):
         """
         Simulate the RugCheck filtering block with circuit breaker.
-        
-        This mirrors the logic in analyzer.py lines 2067-2133.
-        
+
+        This mirrors the RugCheck filtering block in the real analyzer
+        (core/analyzer.py, the circuit-breaker block near the token safety
+        filter): with the breaker tripped in closed mode the risky tokens are
+        FILTERED OUT and the safe subset is kept — the wallet is not dropped
+        wholesale from this block.
+
         Args:
             address: Wallet address
             trades: List of trades
             safe_ratio: Ratio of tokens that are safe (0.0-1.0)
-        
+
         Returns:
             Filtered trades or None if wallet is dropped
         """
@@ -58,7 +64,9 @@ class MockAnalyzer:
             else:
                 risky_tokens.append(token)
         
-        # Circuit breaker logic
+        # Circuit breaker logic (mirrors analyzer.py: with the breaker tripped in
+        # closed mode the risky tokens are FILTERED OUT and the safe subset is
+        # kept — the wallet is not dropped wholesale from this block)
         risky_ratio = len(risky_tokens) / max(1, len(unique_tokens)) if risky_tokens else 0.0
         if risky_tokens:
             if risky_ratio > 0.5:
@@ -66,13 +74,12 @@ class MockAnalyzer:
                 if self.fail_mode == "open":
                     # Escape hatch: keep all trades
                     return trades
-                else:
-                    # Capital-protective: drop wallet
-                    return None
+                # Capital-protective: filter to the safe subset (may be empty)
+                return [t for t in trades if t.token_address in safe_tokens]
             else:
                 # Filter risky tokens
                 filtered = [t for t in trades if t.token_address in safe_tokens]
-                return filtered if filtered else None
+                return filtered if filtered else []
         else:
             return trades
 
@@ -82,26 +89,30 @@ class MockAnalyzer:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_rugcheck_closed_mode_drops_wallet_on_majority_risky():
+async def test_rugcheck_closed_mode_filters_to_safe_subset_on_majority_risky():
     """
     With RUGCHECK_FAIL_MODE=closed and majority risky tokens,
-    the wallet is dropped (capital-protective).
+    the risky tokens are filtered out and the safe subset is kept
+    (capital-protective; matches the real analyzer).
     """
     analyzer = MockAnalyzer(fail_mode="closed")
-    
+
     # Create 10 tokens, 7 risky (70% > 50% threshold)
     trades = [MockTrade(f"safe_{i}") for i in range(3)]
     trades.extend([MockTrade(f"risky_{i}") for i in range(7)])
-    
+
     with patch.dict("os.environ", {"RUGCHECK_FAIL_MODE": "closed"}):
+        analyzer = MockAnalyzer(fail_mode=ScoutConfig.get_rugcheck_fail_mode())
         result = await analyzer.simulate_rugcheck_circuit_breaker(
             "test_wallet",
             trades,
             safe_ratio=0.3  # 30% safe
         )
-    
-    # Should drop wallet (return None)
-    assert result is None
+
+    # The safe subset (3 trades) is kept; the wallet is not dropped
+    assert result is not None
+    assert len(result) == 3
+    assert all("safe" in t.token_address for t in result)
 
 
 @pytest.mark.asyncio
@@ -110,13 +121,14 @@ async def test_rugcheck_open_mode_keeps_wallet_on_majority_risky():
     With RUGCHECK_FAIL_MODE=open and majority risky tokens,
     all trades are retained (escape hatch).
     """
-    analyzer = MockAnalyzer(fail_mode="open")
-    
     # Create 10 tokens, 7 risky (70% > 50% threshold)
     trades = [MockTrade(f"safe_{i}") for i in range(3)]
     trades.extend([MockTrade(f"risky_{i}") for i in range(7)])
-    
+
     with patch.dict("os.environ", {"RUGCHECK_FAIL_MODE": "open"}):
+        # Construct the analyzer INSIDE the patch so the env -> config wiring
+        # is actually exercised
+        analyzer = MockAnalyzer(fail_mode=ScoutConfig.get_rugcheck_fail_mode())
         result = await analyzer.simulate_rugcheck_circuit_breaker(
             "test_wallet",
             trades,
@@ -207,40 +219,15 @@ async def test_rugcheck_closed_mode_drops_when_all_filtered():
     
     # Create tokens, all will be filtered as risky
     trades = [MockTrade(f"risky_{i}") for i in range(10)]
-    
+
     result = await analyzer.simulate_rugcheck_circuit_breaker(
         "test_wallet",
         trades,
         safe_ratio=0.0  # 0% safe
     )
-    
-    # Should drop wallet (return None)
-    assert result is None
 
-
-@pytest.mark.asyncio
-async def test_rugcheck_open_mode_drops_when_all_filtered():
-    """
-    With RUGCHECK_FAIL_MODE=open and filtering removes all trades,
-    wallet is dropped (even in open mode, if < 50% risky).
-    """
-    analyzer = MockAnalyzer(fail_mode="open")
-    
-    # Create tokens, all will be filtered as risky (100% > 50%, but not circuit breaker)
-    # Wait, 100% risky would trigger circuit breaker in open mode and keep all
-    # Let's test 40% risky which is < 50% so not circuit breaker
-    trades = [MockTrade(f"risky_{i}") for i in range(4)]
-    trades.extend([MockTrade(f"safe_{i}") for i in range(6)])
-    
-    result = await analyzer.simulate_rugcheck_circuit_breaker(
-        "test_wallet",
-        trades,
-        safe_ratio=0.6  # 60% safe, 40% risky
-    )
-    
-    # Should filter out risky tokens, leaving 6 safe ones
-    assert result is not None
-    assert len(result) == 6
+    # The safe subset is empty -> no trades survive the filter
+    assert result == []
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ import logging
 import sys
 from pathlib import Path
 from datetime import datetime
+from typing import Any, Dict
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -80,8 +81,10 @@ def calculate_evaluation_metrics(y_true, y_pred):
         metrics['correlation'] = 0.0
 
     # Additional metrics
+    # Clamp the MAPE denominator so near-zero targets do not explode the error
+    mape_denom = np.maximum(np.abs(y_true), 1e-3)
     metrics['mean_absolute_percentage_error'] = float(
-        np.mean(np.abs((y_true - y_pred) / (y_true + 1e-8))) * 100
+        np.mean(np.abs((y_true - y_pred) / mape_denom)) * 100
     )
 
     # Direction accuracy (for financial predictions)
@@ -95,6 +98,33 @@ def calculate_evaluation_metrics(y_true, y_pred):
         metrics['direction_accuracy'] = 0.0
 
     return metrics
+
+
+def predict_with_specific_model(
+    predictor: GradientBoostPredictor,
+    model_attr: str,
+    features: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Predict using a specific underlying model, bypassing best_model_type selection.
+
+    Returns a dict with 'predicted_pnl_sol' and 'model_type', or an error dict.
+    """
+    model = getattr(predictor, model_attr, None)
+    if model is None:
+        return {'error': f'{model_attr} not loaded'}
+    features_array, _ = predictor._prepare_features(features)
+    if features_array is None:
+        return {'error': 'feature preparation failed'}
+    try:
+        prediction = predictor._predict_with_model(model, features_array)
+        return {
+            'predicted_pnl_sol': float(prediction),
+            'model_type': model_attr,
+            'fallback': False,
+        }
+    except Exception as e:
+        return {'error': str(e)}
 
 
 def evaluate_models(
@@ -134,7 +164,7 @@ def evaluate_models(
         logger.error(f"Failed to load test data: {e}")
         return {'error': 'data_loading_failed', 'message': str(e)}
 
-    logger.info(f"Loaded {len(X_test)} test samples with {len(feature_names)} features")
+    logger.info("Loaded %d test samples with %d features", len(X_test), len(feature_names))
 
     # 2. Load and evaluate models
     results = {}
@@ -149,19 +179,27 @@ def evaluate_models(
                 model_path=model_dir
             )
 
-            # Make predictions
+            # Make predictions pinned to the xgboost model specifically
             predictions = []
+            fallback_count = 0
             for i in range(len(X_test)):
                 features = dict(zip(feature_names, X_test[i]))
-                pred = xgb_model.predict_profitability(features)
-                predictions.append(pred.get('predicted_pnl_sol', 0.0))
+                pred = predict_with_specific_model(xgb_model, "xgboost_model", features)
+                if 'error' in pred:
+                    fallback_count += 1
+                    continue
+                predictions.append(pred['predicted_pnl_sol'])
+
+            if not predictions:
+                raise RuntimeError("No valid XGBoost predictions produced")
 
             # Calculate metrics
-            metrics = calculate_evaluation_metrics(y_test, predictions)
+            metrics = calculate_evaluation_metrics(y_test[:len(predictions)], predictions)
             results['xgboost'] = {
                 'status': 'success',
                 'metrics': metrics,
                 'model_path': str(xgb_path),
+                'fallback_predictions_excluded': fallback_count,
             }
 
             logger.info(f"XGBoost RMSE: {metrics['rmse']:.4f}, R²: {metrics['r2']:.4f}")
@@ -183,19 +221,27 @@ def evaluate_models(
                 model_path=model_dir
             )
 
-            # Make predictions
+            # Make predictions pinned to the lightgbm model specifically
             predictions = []
+            fallback_count = 0
             for i in range(len(X_test)):
                 features = dict(zip(feature_names, X_test[i]))
-                pred = lgb_model.predict_profitability(features)
-                predictions.append(pred.get('predicted_pnl_sol', 0.0))
+                pred = predict_with_specific_model(lgb_model, "lightgbm_model", features)
+                if 'error' in pred:
+                    fallback_count += 1
+                    continue
+                predictions.append(pred['predicted_pnl_sol'])
+
+            if not predictions:
+                raise RuntimeError("No valid LightGBM predictions produced")
 
             # Calculate metrics
-            metrics = calculate_evaluation_metrics(y_test, predictions)
+            metrics = calculate_evaluation_metrics(y_test[:len(predictions)], predictions)
             results['lightgbm'] = {
                 'status': 'success',
                 'metrics': metrics,
                 'model_path': str(lgb_path),
+                'fallback_predictions_excluded': fallback_count,
             }
 
             logger.info(f"LightGBM RMSE: {metrics['rmse']:.4f}, R²: {metrics['r2']:.4f}")
@@ -313,6 +359,10 @@ Examples:
         )
 
         # Print summary
+        if 'error' in results:
+            logger.error(f"Evaluation failed: {results['error']}")
+            sys.exit(1)
+
         print("\n" + "=" * 60)
         print("EVALUATION SUMMARY")
         print("=" * 60)

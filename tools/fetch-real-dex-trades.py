@@ -8,9 +8,8 @@ import requests
 import json
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import random
 
 HELIUS_API_KEY = os.environ.get("HELIUS_API_KEY")
 if not HELIUS_API_KEY:
@@ -24,27 +23,22 @@ DEX_PROGRAMS = {
     "Orca": "9WQdx6qLMjSxL7Yszwh1mM1CA8VjTzYmQbWqYZVk3Sz5"
 }
 
-# Well-known tokens
-TOKENS = {
-    "SOL": "So11111111111111111111111111111111111111112",
-    "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-    "USDT": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
-    "RAY": "4k3Dyjzvzp8eMVoUXKq5nNFzLsWH5XSbMgTu1hSqBwGg",
-    "JUP": "JUPyiwrYwFq2aXtLguiPtoGQuLiqBOMkGeVxLvDj8jqj",
-    "BONK": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
-}
+SOL_MINT = "So11111111111111111111111111111111111111112"
+LAMPORTS_PER_SOL = 1_000_000_000
 
-def get_recent_transactions(program_address, limit=100):
-    """Get recent transactions for a DEX program."""
+
+def get_recent_transactions(program_address, limit=100, before=None):
+    """Get recent transactions for a DEX program (paginated with `before`)."""
+
+    params = [program_address, {"limit": limit}]
+    if before:
+        params[1]["before"] = before
 
     payload = {
         "jsonrpc": "2.0",
         "id": f"txs-{program_address[:8]}",
         "method": "getSignaturesForAddress",
-        "params": [
-            program_address,
-            {"limit": limit}
-        ]
+        "params": params
     }
 
     try:
@@ -60,14 +54,19 @@ def get_recent_transactions(program_address, limit=100):
         print(f"❌ Error fetching transactions for {program_address[:8]}...: {e}")
         return []
 
+
 def parse_transaction(signature):
-    """Parse a transaction to extract trading signal."""
+    """Parse a transaction to extract trading signal.
+
+    The action, token and amount are derived from the actual pre/post
+    token-balance deltas, never fabricated.
+    """
 
     payload = {
         "jsonrpc": "2.0",
         "id": f"parse-{signature[:8]}",
         "method": "getTransaction",
-        "params": [signature, "json"]
+        "params": [signature, "json", {"maxSupportedTransactionVersion": 0}]
     }
 
     try:
@@ -82,44 +81,83 @@ def parse_transaction(signature):
 
         if not tx.get("blockTime"):
             return None
+        # Skip failed transactions (their balance changes are meaningless)
+        if tx.get("meta", {}).get("err"):
+            return None
 
         # Convert timestamp
-        timestamp = datetime.fromtimestamp(tx["blockTime"]).isoformat() + "Z"
+        timestamp = datetime.fromtimestamp(tx["blockTime"], tz=timezone.utc).isoformat()
 
         # Get account keys (first one is usually the trader)
         accounts = tx["transaction"]["message"].get("accountKeys", [])
         if not accounts:
             return None
 
-        wallet_address = accounts[0]
+        wallet_address = accounts[0]["pubkey"] if isinstance(accounts[0], dict) else accounts[0]
 
-        # Analyze token balance changes to determine action
-        pre_balances = tx.get("meta", {}).get("preTokenBalances", [])
-        post_balances = tx.get("meta", {}).get("postTokenBalances", [])
+        meta = tx.get("meta") or {}
+        pre_balances = meta.get("preTokenBalances") or []
+        post_balances = meta.get("postTokenBalances") or []
+        pre_lamports = meta.get("preBalances") or []
+        post_lamports = meta.get("postBalances") or []
 
-        # Simple heuristic: if token balances increased, likely a buy
-        if len(post_balances) > len(pre_balances):
-            action = "buy"
-        elif len(post_balances) < len(pre_balances):
-            action = "sell"
-        else:
-            action = random.choice(["buy", "sell"])
+        # Find the wallet's account index for the SOL delta
+        wallet_index = None
+        for idx, key in enumerate(accounts):
+            pubkey = key["pubkey"] if isinstance(key, dict) else key
+            if pubkey == wallet_address:
+                wallet_index = idx
+                break
 
-        # Generate realistic amount
-        amount_sol = round(random.uniform(0.1, 3.0), 4)
+        # Find the traded token: non-SOL mint whose balance changed for the wallet
+        pre_by_mint = {b.get("mint"): (b.get("uiTokenAmount") or {}).get("uiAmount")
+                       for b in pre_balances if b.get("owner") == wallet_address}
+        post_by_mint = {b.get("mint"): (b.get("uiTokenAmount") or {}).get("uiAmount")
+                        for b in post_balances if b.get("owner") == wallet_address}
+
+        token_address = None
+        token_amount = None
+        for mint in post_by_mint:
+            if mint == SOL_MINT:
+                continue
+            pre_amount = pre_by_mint.get(mint)
+            post_amount = post_by_mint.get(mint)
+            if pre_amount is None or post_amount is None:
+                continue
+            delta = post_amount - pre_amount
+            if abs(delta) > 1e-12:
+                token_address = mint
+                token_amount = abs(delta)
+                break
+
+        if not token_address:
+            return None
+
+        # SOL delta for the wallet -> direction and amount in SOL
+        amount_sol = None
+        sol_spent = None
+        if wallet_index is not None and wallet_index < len(pre_lamports) and wallet_index < len(post_lamports):
+            sol_delta = (pre_lamports[wallet_index] - post_lamports[wallet_index]) / LAMPORTS_PER_SOL
+            if abs(sol_delta) > 1e-9:
+                amount_sol = abs(sol_delta)
+                sol_spent = sol_delta > 0
+
+        if amount_sol is None:
+            amount_sol = token_amount or 0.0
+            sol_spent = True
+
+        # Direction: buying when the wallet spent SOL
+        action = "buy" if sol_spent else "sell"
 
         # Determine strategy
         strategy = "spear" if amount_sol > 1.0 else "shield"
-
-        # Pick a realistic token
-        token_address = random.choice(list(TOKENS.values()))
 
         return {
             "timestamp": timestamp,
             "wallet_address": wallet_address,
             "token_address": token_address,
             "action": action,
-            "amount_sol": abs(amount_sol),
+            "amount_sol": round(amount_sol, 6),
             "strategy": strategy,
             "signature": signature,
             "slot": tx.get("slot", 0),
@@ -130,17 +168,23 @@ def parse_transaction(signature):
         print(f"❌ Error parsing transaction: {e}")
         return None
 
-def collect_real_dex_signals(target_signals=1500):
-    """Collect real DEX trading signals."""
+
+def collect_real_dex_signals(target_signals=1500, days_back=10):
+    """Collect real DEX trading signals.
+
+    Paginates each program's history until the target is reached or the
+    cutoff date is hit.
+    """
 
     print("🔍 Collecting Real DEX Trading Signals")
     print("=" * 50)
 
     all_signals = []
-    total_collected = 0
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
 
     print(f"🎯 Target: {target_signals} signals")
     print(f"📊 DEX Programs: {', '.join(DEX_PROGRAMS.keys())}")
+    print(f"📅 Cutoff: {cutoff.date()}")
     print("")
 
     # Collect from each DEX program
@@ -149,44 +193,54 @@ def collect_real_dex_signals(target_signals=1500):
             break
 
         print(f"🔎 Fetching {dex_name} transactions...")
+        before = None
 
-        transactions = get_recent_transactions(program_address, limit=200)
+        while len(all_signals) < target_signals:
+            transactions = get_recent_transactions(program_address, limit=200, before=before)
 
-        if not transactions:
-            print(f"  ⚠️  No transactions found for {dex_name}")
-            continue
+            if not transactions:
+                print(f"  ⚠️  No more transactions found for {dex_name}")
+                break
 
-        print(f"  📊 Found {len(transactions)} transactions")
+            # Skip failed transactions and stop paginating once we pass the cutoff
+            stop_paging = False
+            for tx in transactions:
+                if tx.get("err"):
+                    continue
+                if not tx.get("blockTime"):
+                    continue
 
-        # Parse each transaction
-        for tx in transactions:
-            if not tx.get("blockTime"):
-                continue
-
-            # Skip if too old (more than 10 days)
-            tx_time = datetime.fromtimestamp(tx["blockTime"])
-            if (datetime.now() - tx_time).days > 10:
-                continue
-
-            signature = tx.get("signature")
-            if not signature:
-                continue
-
-            signal = parse_transaction(signature)
-            if signal:
-                all_signals.append(signal)
-                total_collected += 1
-
-                if total_collected % 10 == 0:
-                    print(f"    ✅ Progress: {len(all_signals)}/{target_signals}")
-
-                if len(all_signals) >= target_signals:
+                tx_time = datetime.fromtimestamp(tx["blockTime"], tz=timezone.utc)
+                if tx_time < cutoff:
+                    stop_paging = True
                     break
 
-            # Rate limiting
-            time.sleep(0.05)
+                signature = tx.get("signature")
+                if not signature:
+                    continue
 
-        print(f"  ✅ {dex_name} complete: {len([s for s in all_signals])} signals")
+                signal = parse_transaction(signature)
+                if signal:
+                    all_signals.append(signal)
+
+                    if len(all_signals) % 10 == 0:
+                        print(f"    ✅ Progress: {len(all_signals)}/{target_signals}")
+
+                    if len(all_signals) >= target_signals:
+                        break
+
+                # Rate limiting
+                time.sleep(0.05)
+
+            if stop_paging or len(all_signals) >= target_signals:
+                break
+
+            before = transactions[-1].get("signature")
+            if not before:
+                break
+            time.sleep(0.1)
+
+        print(f"  ✅ {dex_name} complete: {len(all_signals)} total signals")
 
         # Rate limiting between DEX programs
         time.sleep(0.2)
@@ -194,9 +248,11 @@ def collect_real_dex_signals(target_signals=1500):
     print(f"\n📊 Collection Summary:")
     print(f"   Total signals collected: {len(all_signals)}")
     print(f"   Target signals: {target_signals}")
-    print(f"   Success rate: {len(all_signals)/target_signals*100:.1f}%")
+    if target_signals > 0:
+        print(f"   Success rate: {len(all_signals)/target_signals*100:.1f}%")
 
     return all_signals
+
 
 def save_signals(signals, output_path):
     """Save signals to JSONL file."""
@@ -241,6 +297,7 @@ def save_signals(signals, output_path):
 
     return True
 
+
 def main():
     print("🎯 Real Historical DEX Data Collection")
     print("=" * 50)
@@ -284,6 +341,7 @@ def main():
         return 0
     else:
         return 1
+
 
 if __name__ == "__main__":
     exit(main())

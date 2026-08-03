@@ -13,13 +13,15 @@ In production, this connects to:
 from collections import OrderedDict
 
 import asyncio
-import json
 import os
 import time
 import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import List, Optional, Dict, Any, Tuple
+from typing import TYPE_CHECKING, List, Optional, Dict, Any, Tuple
+
+if TYPE_CHECKING:
+    from .predictive_budget_manager import PredictiveBudgetManager
 
 from .utils import utcnow
 
@@ -29,6 +31,11 @@ from .helius_client import HeliusClient
 from .liquidity import LiquidityProvider
 from .decimal_utils import float_to_decimal, decimal_to_float, safe_decimal_divide
 from .denylist import is_known_scam_address, check_wallet_correlation
+
+# Parse-cache sentinels: distinguish "not cached" from "cached failure" so
+# failed transactions are stored without being re-parsed, yet never served.
+_PARSE_CACHE_MISS = object()
+_PARSE_CACHE_FAILURE = object()
 
 # Import state persistence for multi-timeframe discovery tracking
 try:
@@ -471,20 +478,6 @@ class WalletAnalyzer:
             return True, "No budget manager configured"
 
         try:
-            from core.predictive_budget_manager import BudgetCategory
-
-            # Map string category to BudgetCategory enum
-            budget_category = BudgetCategory.ANALYSIS  # Default
-            if category:
-                category_map = {
-                    "discovery": BudgetCategory.DISCOVERY,
-                    "analysis": BudgetCategory.ANALYSIS,
-                    "validation": BudgetCategory.VALIDATION,
-                    "enrichment": BudgetCategory.ENRICHMENT,
-                    "monitoring": BudgetCategory.MONITORING,
-                }
-                budget_category = category_map.get(category.lower(), BudgetCategory.ANALYSIS)
-
             # Get current snapshot
             snapshot = self._budget_manager.get_realtime_snapshot()
 
@@ -695,7 +688,7 @@ class WalletAnalyzer:
         # Get max API calls budget
         max_api_calls = ScoutConfig.get_max_api_calls_per_run() if CONFIG_AVAILABLE else 500
 
-        print(f"[Analyzer] Multi-timeframe configuration:")
+        print("[Analyzer] Multi-timeframe configuration:")
         print(f"  Parallel execution: {parallel}")
         print(f"  Discovery goal: {discovery_goal}")
         print(f"  API budget: {max_api_calls} calls")
@@ -727,7 +720,7 @@ class WalletAnalyzer:
                 self._candidate_wallets = discovered
 
                 # Log sophisticated statistics
-                print(f"[Multi-Timeframe] Discovery completed successfully:")
+                print("[Multi-Timeframe] Discovery completed successfully:")
                 print(f"  Total discovered: {result.total_unique_wallets} unique wallets")
                 print(f"  Selected: {len(self._candidate_wallets)} for analysis")
                 print(f"  Deduplication ratio: {result.deduplication_stats.get('deduplication_ratio', 0):.2%}")
@@ -790,7 +783,7 @@ class WalletAnalyzer:
             can_proceed, reason = self.can_spend_budget(estimated_credits, "discovery")
             if not can_proceed:
                 print(f"[Analyzer] Budget check failed: {reason}")
-                print(f"[Analyzer] Skipping wallet discovery due to budget constraints")
+                print("[Analyzer] Skipping wallet discovery due to budget constraints")
                 return
 
             discovered = await asyncio.wait_for(
@@ -888,8 +881,10 @@ class WalletAnalyzer:
             "8wQpRsAbCdEfGhIjKlMnOpQrStUvWxYz6677889900",
         ]
         
-        # Sample metrics cache (in production, fetch from chain)
-        self._metrics_cache = {
+        # Sample metrics cache (in production, fetch from chain).
+        # Keep OrderedDict so _metrics_cache_set (move_to_end/popitem) works
+        # when a real wallet is later fetched.
+        self._metrics_cache = OrderedDict({
             "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU": WalletMetrics(
                 address="7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
                 roi_7d=12.5,
@@ -945,14 +940,14 @@ class WalletAnalyzer:
                 last_trade_at=(utcnow() - timedelta(hours=12)).isoformat(),
                 win_streak_consistency=0.50,
             ),
-        }
+        })
         
         # Sample historical trades for backtesting
         self._trades_cache = self._generate_sample_trades()
     
     def _generate_sample_trades(self) -> dict:
         """Generate sample historical trades for each wallet."""
-        trades_cache = {}
+        trades_cache = OrderedDict()
         
         # Known tokens for sample trades
         tokens = [
@@ -1224,18 +1219,22 @@ class WalletAnalyzer:
 
             # Use async lock to prevent race conditions on the OrderedDict between coroutines
             async with self._parse_cache_lock:
-                cached = self._parse_cache.get(tx_sig)
-            if cached is not None:
-                self._parse_cache_hits += 1
-                swap = cached
-            else:
+                cached = self._parse_cache.get(tx_sig, _PARSE_CACHE_MISS)
+            if cached is _PARSE_CACHE_MISS:
                 self._parse_cache_misses += 1
                 # Attempt standard parsing
                 swap = self.helius_client.parse_swap_transaction(tx, wallet_address=address)
 
-                # Cache the result (even if None) to avoid re-parsing
+                # Cache the result (failures via a sentinel so failed txs are
+                # not re-parsed every time) with bounded FIFO eviction
                 async with self._parse_cache_lock:
-                    self._parse_cache[tx_sig] = swap
+                    self._parse_cache_set(tx_sig, swap if swap is not None else _PARSE_CACHE_FAILURE)
+            elif cached is _PARSE_CACHE_FAILURE:
+                self._parse_cache_misses += 1
+                swap = None
+            else:
+                self._parse_cache_hits += 1
+                swap = cached
 
             if swap:
                 self._parse_stats["swaps_parsed"] += 1
@@ -1511,12 +1510,14 @@ class WalletAnalyzer:
         if not token_mint:
             return None
         
-        # Check Redis cache first (persistent across restarts)
+        # Check Redis cache first (persistent across restarts).
+        # RedisClient calls are synchronous with socket timeouts — offload
+        # them to a thread so the event loop is not blocked per token.
         if self._redis_client and self._redis_client.is_available():
             try:
                 import json
                 cache_key = f"token_meta:{token_mint}"
-                cached_json = self._redis_client.get(cache_key)
+                cached_json = await asyncio.to_thread(self._redis_client.get, cache_key)
                 if cached_json:
                     cached_meta = json.loads(cached_json)
                     async with self._token_meta_cache_lock:
@@ -1541,7 +1542,7 @@ class WalletAnalyzer:
                 try:
                     import json
                     cache_key = f"token_meta:{token_mint}"
-                    self._redis_client.set(cache_key, json.dumps(meta), ttl_seconds=7 * 24 * 3600)
+                    await asyncio.to_thread(self._redis_client.set, cache_key, json.dumps(meta), 7 * 24 * 3600)
                 except Exception:
                     pass
             return symbol
@@ -1553,7 +1554,7 @@ class WalletAnalyzer:
             try:
                 import json
                 cache_key = f"token_meta:{token_mint}"
-                self._redis_client.set(cache_key, json.dumps({}), ttl_seconds=24 * 3600)  # 1 day for empty results
+                await asyncio.to_thread(self._redis_client.set, cache_key, json.dumps({}), 24 * 3600)  # 1 day for empty results
             except Exception:
                 pass
         return None
@@ -1733,12 +1734,13 @@ class WalletAnalyzer:
         if not token_address:
             return None
         
-        # Check Redis cache first (persistent across restarts)
+        # Check Redis cache first (persistent across restarts).
+        # Offload the synchronous Redis call so it can't block the event loop.
         if self._redis_client and self._redis_client.is_available():
             try:
                 import json
                 cache_key = f"token_creation:{token_address}"
-                cached_json = self._redis_client.get(cache_key)
+                cached_json = await asyncio.to_thread(self._redis_client.get, cache_key)
                 if cached_json:
                     cached_data = json.loads(cached_json)
                     # Handle None values (cached as "null" string)
@@ -1776,26 +1778,33 @@ class WalletAnalyzer:
                 import aiohttp
                 jupiter_url = "https://api.jup.ag/price"
                 session = await self.helius_client._get_session() if (self.helius_client and self.helius_client.api_key) else None
+                own_session = False
                 if not session:
                     import aiohttp as _aiohttp
                     session = _aiohttp.ClientSession()
-                async with session.get(
-                    jupiter_url,
-                    params={"ids": token_address},
-                    timeout=aiohttp.ClientTimeout(total=8),
-                ) as resp:
-                    if resp.status == 200:
-                        jdata = await resp.json()
-                        if jdata and "data" in jdata and token_address in jdata["data"]:
-                            jd = jdata["data"][token_address]
-                            # Jupiter price API may include 'created' timestamp in extensions
-                            ext = jd.get("extensions", {}) or {}
-                            jts = ext.get("created_at") or ext.get("creation_time")
-                            if jts:
-                                try:
-                                    timestamp = float(int(jts))
-                                except (ValueError, TypeError):
-                                    pass
+                    own_session = True
+                try:
+                    async with session.get(
+                        jupiter_url,
+                        params={"ids": token_address},
+                        timeout=aiohttp.ClientTimeout(total=8),
+                    ) as resp:
+                        if resp.status == 200:
+                            jdata = await resp.json()
+                            if jdata and "data" in jdata and token_address in jdata["data"]:
+                                jd = jdata["data"][token_address]
+                                # Jupiter price API may include 'created' timestamp in extensions
+                                ext = jd.get("extensions", {}) or {}
+                                jts = ext.get("created_at") or ext.get("creation_time")
+                                if jts:
+                                    try:
+                                        timestamp = float(int(jts))
+                                    except (ValueError, TypeError):
+                                        pass
+                finally:
+                    # Never leak a session created on the fly
+                    if own_session:
+                        await session.close()
             except Exception as e:
                 if os.getenv("SCOUT_VERBOSE") == "true":
                     print(f"[Analyzer] Jupiter creation fetch failed for {token_address[:8]}: {e}")
@@ -1814,10 +1823,10 @@ class WalletAnalyzer:
         if timestamp is None:
             try:
                 import aiohttp
-                from datetime import datetime, timezone
+                from datetime import timezone
                 
                 if self.helius_client and self.helius_client.api_key:
-                    tm_url = f"https://api.helius.xyz/v1/token-metadata"
+                    tm_url = "https://api.helius.xyz/v1/token-metadata"
                     params = {
                         "api-key": self.helius_client.api_key,
                         "MintAddresses": token_address,
@@ -1856,11 +1865,11 @@ class WalletAnalyzer:
                 if timestamp is not None:
                     # Cache successful results for 7 days (token creation time never changes)
                     cache_value = json.dumps(timestamp)
-                    self._redis_client.set(cache_key, cache_value, ttl_seconds=7 * 24 * 3600)
+                    await asyncio.to_thread(self._redis_client.set, cache_key, cache_value, 7 * 24 * 3600)
                 else:
                     # Cache negative results for only 1 hour so the API is retried
                     # on subsequent runs (prevents permanent cache poisoning)
-                    self._redis_client.set(cache_key, json.dumps(None), ttl_seconds=3600)
+                    await asyncio.to_thread(self._redis_client.set, cache_key, json.dumps(None), 3600)
             except Exception as e:
                 logger.debug(f"Redis cache write failed for token creation: {e}")
         
@@ -1931,8 +1940,10 @@ class WalletAnalyzer:
             if self.helius_client and self.helius_client.api_key:
                 import aiohttp
                 import base64
-                
-                url = os.getenv("CHIMERA_RPC__PRIMARY_URL", "") or os.getenv("SOLANA_RPC_URL", "")
+
+                # Prefer the analyzer's configured RPC endpoint; fall back to
+                # env vars / Helius mainnet only when it isn't set.
+                url = self.rpc_url or os.getenv("CHIMERA_RPC__PRIMARY_URL", "") or os.getenv("SOLANA_RPC_URL", "")
                 if not url:
                     url = f"https://mainnet.helius-rpc.com/?api-key={self.helius_client.api_key}"
                 payload = {
@@ -1997,6 +2008,23 @@ class WalletAnalyzer:
 
                                     # mint_authority == 0 means fixed supply (safe);
                                     # rely on RugCheck for comprehensive mint authority analysis
+                        else:
+                            # Account not found (value is null) — degraded RPC or
+                            # unknown token: apply the fail-mode policy.
+                            fail_mode = os.getenv("SCOUT_SAFETY_FAIL_MODE", "closed").lower()
+                            logger.warning(
+                                f"Token safety check: no account data for {token_address[:8]}... "
+                                f"(fail-mode={fail_mode})"
+                            )
+                            return fail_mode == "open"
+                    else:
+                        # Non-200 response: RPC error/timeout — apply fail mode
+                        fail_mode = os.getenv("SCOUT_SAFETY_FAIL_MODE", "closed").lower()
+                        logger.warning(
+                            f"Token safety check: RPC HTTP {resp.status} for {token_address[:8]}... "
+                            f"(fail-mode={fail_mode})"
+                        )
+                        return fail_mode == "open"
         except Exception as e:
             import traceback
             logger.warning(f"Token safety check failed for {token_address}: {e}\n{traceback.format_exc()}")
@@ -2251,7 +2279,7 @@ class WalletAnalyzer:
         
         return round_trip_count / analyzed_count
     
-    async def _detect_insider_patterns(self, address: str, trades: List[HistoricalTrade]) -> Dict[str, Any]:
+    async def _detect_insider_patterns(self, address: str, trades: List[HistoricalTrade], avg_entry_delay: Optional[float] = None) -> Dict[str, Any]:
         """
         Detect insider behavior based on wallet age, funding, and token creation proximity.
 
@@ -2262,6 +2290,12 @@ class WalletAnalyzer:
 
         Also checks token_creation_awareness: if >60% of BUYs happen within 5 min
         of token creation AND the wallet enters quickly, classify as insider.
+
+        Args:
+            address: Wallet address
+            trades: Historical trades for this wallet
+            avg_entry_delay: This wallet's average entry delay (passed explicitly
+                so concurrent analyses can't cross-contaminate each other)
 
         Returns:
             Dict with insider metrics
@@ -2318,9 +2352,8 @@ class WalletAnalyzer:
 
         # If >60% of BUYs happen within 5 min of token creation AND the wallet
         # enters quickly overall, classify as insider regardless of wallet age.
-        avg_entry = getattr(self, '_cached_avg_entry_delay', None)
         if token_creation_awareness_ratio > 0.6:
-            if avg_entry is not None and avg_entry < 120:
+            if avg_entry_delay is not None and avg_entry_delay < 120:
                 is_fresh_wallet = True
 
         return {
@@ -2589,9 +2622,17 @@ class WalletAnalyzer:
         # The sniper check uses only the 5 most recent; insider detection uses all.
         all_token_addresses = list(set(t.token_address for t in buy_trades))
         
-        # Pre-fetch creation times (this will cache them) — sniper tokens first, then all remaining
+        # Pre-fetch creation times (this will cache them) — sniper tokens first, then all remaining.
+        # Bound concurrency so batch analysis doesn't burst into dozens of parallel
+        # external HTTP calls and trip Birdeye/Jupiter/Helius rate limits.
         print(f"  [{address[:8]}] Fetching token creation times for {len(all_token_addresses)} tokens...")
-        tasks = [self._fetch_token_creation_time(token) for token in all_token_addresses]
+        creation_semaphore = asyncio.Semaphore(8)
+
+        async def _fetch_limited(token: str):
+            async with creation_semaphore:
+                return await self._fetch_token_creation_time(token)
+
+        tasks = [_fetch_limited(token) for token in all_token_addresses]
         await asyncio.gather(*tasks, return_exceptions=True)
         print(f"  [{address[:8]}] Token creation times fetched")
             
@@ -2609,13 +2650,14 @@ class WalletAnalyzer:
         if entry_delays:
             avg_entry_delay = sum(entry_delays) / len(entry_delays)
 
-        # Store on self so _detect_insider_patterns can access it for B4 token-awareness check
-        self._cached_avg_entry_delay = avg_entry_delay
-        
+        # Note: avg_entry_delay is passed to _detect_insider_patterns explicitly
+        # (never stored on self) so concurrent wallet analyses can't read
+        # another wallet's value.
+
         print(f"  [{address[:8]}] Detecting insider patterns...")
         # 3. Detect Insider Patterns (Fresh Wallet Check)
         try:
-            insider_metrics = await self._detect_insider_patterns(address, trades)
+            insider_metrics = await self._detect_insider_patterns(address, trades, avg_entry_delay=avg_entry_delay)
             is_fresh_wallet = insider_metrics.get("is_fresh_wallet", False)
             print(f"  [{address[:8]}] Insider detection complete (fresh={is_fresh_wallet})")
         except Exception as e:
@@ -3586,25 +3628,13 @@ class WalletAnalyzer:
                 # Check if this is an IN transfer
                 elif tr.get("toUserAccount") != wallet_address:
                     token_deltas[mint] = token_deltas.get(mint, 0.0) + amt
-            if tr.get("fromUserAccount") == wallet_address:
-                token_deltas[mint] = token_deltas.get(mint, 0.0) - amt
-            if tr.get("toUserAccount") == wallet_address:
-                token_deltas[mint] = token_deltas.get(mint, 0.0) + amt
 
         # Detailed logging for parse failures
         non_sol_mints = [m for m in token_deltas if m != "So11111111111111111111111111111111111111112"]
-        
-        # Build failure details for logging
-        failure_details = {
-            "token_transfers_count": len(token_transfers),
-            "token_deltas": {k: round(v, 6) for k, v in token_deltas.items()},
-            "non_sol_mints": non_sol_mints,
-            "all_individual_transfers": all_individual_transfers
-        }
 
         has_non_sol = any(m != "So11111111111111111111111111111111111111112" for m in token_deltas)
         if not has_non_sol:
-            print(f"\n[Parse Fail] no_primary_token")
+            print("\n[Parse Fail] no_primary_token")
             print(f"  Signature: {tx.get('signature', 'N/A')[:20]}")
             print(f"  tokenTransfers: {len(token_transfers)} items")
             print(f"  All individual transfers: {len(all_individual_transfers)}")
@@ -3630,7 +3660,7 @@ class WalletAnalyzer:
         has_sol_movement = abs(sol_delta) > Decimal('0.001')
 
         if not has_sol_movement and (not has_positive and not has_negative):
-            print(f"\n[Parse Fail] direction_ambiguous")
+            print("\n[Parse Fail] direction_ambiguous")
             print(f"  Signature: {tx.get('signature', 'N/A')[:20]}")
             print(f"  tokenTransfers: {len(token_transfers)} items")
             print(f"  SOL net delta: {sol_delta}")

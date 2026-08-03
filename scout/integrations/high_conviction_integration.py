@@ -44,7 +44,7 @@ class HighConvictionIntegration:
         self._total_wallets = 0
         self._high_conviction_count = 0
 
-        logger.info(f"HighConvictionIntegration initialized with {total_credits} credits")
+        logger.info("HighConvictionIntegration initialized with %s credits", total_credits)
 
     def prioritize_wallets_for_analysis(
         self, wallet_addresses: List[str], wqs_scores: Dict[str, float]
@@ -89,8 +89,8 @@ class HighConvictionIntegration:
         self._total_wallets = len(wallet_addresses)
 
         logger.info(
-            f"Prioritized {len(high_conviction)} high-conviction wallets "
-            f"({self._high_conviction_count}/{self._total_wallets})"
+            "Prioritized %d high-conviction wallets (%d/%d)",
+            len(high_conviction), self._high_conviction_count, self._total_wallets,
         )
 
         return prioritized
@@ -116,8 +116,8 @@ class HighConvictionIntegration:
         self._wallets_analyzed[wallet_address] = result
 
         logger.debug(
-            f"Allocated {result.credits_allocated} credits to {wallet_address[:8]}... "
-            f"(WQS: {wqs_score:.1f}, Level: {result.conviction_level.value})"
+            "Allocated %s credits to %s (WQS: %.1f, Level: %s)",
+            result.credits_allocated, wallet_address[:8], wqs_score, result.conviction_level.value,
         )
 
         return result
@@ -133,25 +133,21 @@ class HighConvictionIntegration:
         Returns:
             Tuple of (should_analyze: bool, reason: str)
         """
-        # Get conviction level
+        # Gate each conviction level on its OWN pool's remaining credits so an
+        # exhausted pool actually blocks further approvals.
         level = self.allocator.get_conviction_level(wqs_score)
+        summary = self.allocator.get_allocation_summary()
+        by_level = summary['allocations_by_level']
+        level_remaining = by_level.get(level.value, {}).get('remaining', 0)
 
-        # Always analyze high-conviction wallets if we have budget
         if level in [ConvictionLevel.VERY_HIGH, ConvictionLevel.HIGH]:
-            high_budget = self.allocator.get_high_conviction_budget()
+            high_budget = summary['high_conviction_budget']
             if high_budget > 0:
                 return True, f"High-conviction wallet ({level.value}) with {high_budget} credits remaining"
 
-        # Check emerging wallet budget
-        if level == ConvictionLevel.EMERGING:
-            emerging_budget = self.allocator.get_emerging_wallet_budget()
-            if emerging_budget > 0:
-                return True, f"Emerging wallet with {emerging_budget} credits remaining"
-
-        # For low-conviction wallets, only analyze if we have good overall budget
-        low_budget = self.allocator.get_high_conviction_budget()  # Use as proxy
-        if low_budget > 500:  # Arbitrary threshold
-            return True, f"Low-conviction wallet (sufficient budget: {low_budget})"
+        # Check the wallet's own conviction-level pool (emerging/medium/low)
+        if level_remaining > 0:
+            return True, f"{level.value} wallet with {level_remaining} credits remaining in its pool"
 
         return False, f"Insufficient budget for {level.value} wallet"
 
@@ -176,24 +172,29 @@ class HighConvictionIntegration:
         high_budget = self.allocator.get_high_conviction_budget()
 
         # If we have plenty of budget, return all wallets
-        if high_budget > len(wallets) * 100:
-            logger.info(f"Sufficient budget for all {len(wallets)} wallets")
+        if high_budget >= len(wallets) * 100:
+            logger.info("Sufficient budget for all %d wallets", len(wallets))
             return wallets
 
-        # Budget-limited: prioritize high-conviction wallets
+        # Budget-limited: fit the roster to what the budget can actually cover
+        affordable = max(0, high_budget // 100)
+        if affordable == 0:
+            logger.warning("High-conviction budget exhausted - returning empty roster")
+            return []
+
+        # Prioritize high-conviction wallets, then others
         high_conviction = [w for w in wallets if w.wqs_score and w.wqs_score >= 70.0]
         others = [w for w in wallets if not (w.wqs_score and w.wqs_score >= 70.0)]
 
-        # Allocate 70% of slots to high-conviction, 30% to others
-        total_slots = len(wallets)
-        high_slots = int(total_slots * 0.70)
-        other_slots = total_slots - high_slots
+        # Allocate 70% of the affordable slots to high-conviction, 30% to others
+        high_slots = min(len(high_conviction), max(1, int(affordable * 0.70)))
+        other_slots = affordable - high_slots
 
         filtered = high_conviction[:high_slots] + others[:other_slots]
 
         logger.info(
-            f"Budget-limited roster: {len(filtered)}/{len(wallets)} wallets "
-            f"({len(high_conviction[:high_slots])} high-conviction)"
+            "Budget-limited roster: %d/%d wallets (%d high-conviction)",
+            len(filtered), len(wallets), len(high_conviction[:high_slots]),
         )
 
         return filtered
@@ -248,11 +249,11 @@ class HighConvictionIntegration:
         print(f"Wallets Analyzed: {summary['total_wallets_analyzed']}")
         print(f"High-Conviction (WQS 70+): {summary['high_conviction_count']}")
 
-        print(f"\nBudget Remaining:")
+        print("\nBudget Remaining:")
         print(f"  High-Conviction: {summary['budget_remaining']['high_conviction']:,} credits")
         print(f"  Emerging: {summary['budget_remaining']['emerging']:,} credits")
 
-        print(f"\nAnalysis by Conviction Level:")
+        print("\nAnalysis by Conviction Level:")
         for level, data in summary["wallets_analyzed"].items():
             print(f"  {level.upper()}:")
             print(f"    Wallets: {data['count']}")

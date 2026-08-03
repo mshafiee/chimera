@@ -5,21 +5,19 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
-use chrono::Utc;
 use serde::Serialize;
 use std::sync::Arc;
 
 use crate::circuit_breaker::CircuitBreaker;
-use crate::db_abstraction::{Database, DbPool, InsertTrade, UpdateTradeStatus};
-use crate::engine::position_sizer::SizingFactors;
-use crate::engine::{EngineHandle, PositionSizer, SignalQuality};
+use crate::db_abstraction::{Database, InsertTrade, UpdateTradeStatus};
+use crate::engine::{EngineHandle, PositionSizer};
 use crate::error::AppError;
 use crate::middleware::TIMESTAMP_HEADER;
-use crate::models::{Signal, SignalPayload, Strategy};
+use crate::models::{Signal, SignalPayload};
 use crate::monitoring::{HeliusClient, SignalAggregator};
 use crate::token::TokenParser;
-use rust_decimal::prelude::*;
-use solana_sdk::pubkey::Pubkey;
+use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 
 /// Webhook request - already validated by HMAC middleware
 /// Body is the SignalPayload
@@ -106,7 +104,26 @@ pub async fn webhook_handler(
     headers: HeaderMap,
     Json(payload): Json<WebhookRequest>,
 ) -> Result<(StatusCode, Json<WebhookResponse>), AppError> {
-    // Check circuit breaker first
+    // Extract timestamp from header (already validated by middleware). Missing
+    // or malformed timestamps must be rejected, not silently stamped with
+    // server time — a stale/retried webhook without a valid header must not be
+    // accepted under a fresh timestamp (defense in depth behind hmac.rs).
+    let timestamp = headers
+        .get(TIMESTAMP_HEADER)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<i64>().ok())
+        .ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "Missing or invalid {} header",
+                TIMESTAMP_HEADER
+            ))
+        })?;
+
+    // Compute a correlation id up front so every rejection path (including the
+    // circuit breaker) returns a traceable trade_uuid.
+    let pre_trade_uuid = payload.generate_trade_uuid(timestamp);
+
+    // Check circuit breaker
     if !state.circuit_breaker.is_trading_allowed() {
         let reason = state
             .circuit_breaker
@@ -114,33 +131,28 @@ pub async fn webhook_handler(
             .map(|r| r.to_string())
             .unwrap_or_else(|| "Circuit breaker tripped".to_string());
 
-        tracing::warn!(reason = %reason, "Signal rejected by circuit breaker");
+        tracing::warn!(reason = %reason, trade_uuid = %pre_trade_uuid, "Signal rejected by circuit breaker");
 
         return Ok((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(WebhookResponse {
                 status: WebhookStatus::Rejected,
-                trade_uuid: String::new(),
+                trade_uuid: pre_trade_uuid,
                 reason: Some(format!("circuit_breaker_triggered: {}", reason)),
             }),
         ));
     }
 
-    // Extract timestamp from header (already validated by middleware)
-    let timestamp = headers
-        .get(TIMESTAMP_HEADER)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or_else(|| Utc::now().timestamp());
-
     // Validate signal payload
     if let Err(validation_error) = payload.validate() {
         tracing::warn!(error = %validation_error, "Signal validation failed");
+        // Return a correlation id so rejections are traceable.
+        let trade_uuid = payload.generate_trade_uuid(timestamp);
         return Ok((
             StatusCode::BAD_REQUEST,
             Json(WebhookResponse {
                 status: WebhookStatus::Rejected,
-                trade_uuid: String::new(),
+                trade_uuid,
                 reason: Some(validation_error),
             }),
         ));
@@ -171,6 +183,37 @@ pub async fn webhook_handler(
     // which is wrong for USDC (6), USDT (6), and other non-standard tokens.
     if let Some(ref token_address) = signal.payload.token_address {
         signal.token_decimals = state.token_parser.get_token_decimals(token_address).await;
+        // A fetch failure must NOT be treated as "token uses default decimals" —
+        // the executor would silently misprice the fill. Reject instead.
+        if signal.token_decimals.is_none() {
+            let reason = format!(
+                "Could not resolve token decimals for {} — rejecting to avoid mispriced fills",
+                token_address.chars().take(16).collect::<String>()
+            );
+            tracing::warn!(
+                trade_uuid = %signal.trade_uuid,
+                token_address = %token_address,
+                "Token decimals unresolved, rejecting signal"
+            );
+            let _ = state
+                .db
+                .insert_dlq(
+                    Some(&signal.trade_uuid),
+                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                    "DECIMALS_UNRESOLVED",
+                    Some(&reason),
+                    None,
+                )
+                .await;
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(WebhookResponse {
+                    status: WebhookStatus::Rejected,
+                    trade_uuid: signal.trade_uuid,
+                    reason: Some(reason),
+                }),
+            ));
+        }
     }
 
     // B1: Unified decision pipeline — wallet gate, WQS, token safety, liquidity,
@@ -179,7 +222,7 @@ pub async fn webhook_handler(
     // Helius monitoring path call the same function.
     let req = crate::engine::SelectionRequest {
         wallet_address: signal.payload.wallet_address.clone(),
-        token_address: signal.token_address().to_string(),
+        token_address: signal.token_address().unwrap_or("").to_string(),
         action: signal.payload.action,
         source_amount_sol: signal.payload.amount_sol,
         ingress: crate::engine::Ingress::Webhook,
@@ -200,8 +243,9 @@ pub async fn webhook_handler(
             reason = %reason,
             "Signal rejected by selection service"
         );
-        // Log to dead letter queue (best-effort)
-        let _ = state
+        // Log to dead letter queue (best-effort — a failure here must still be
+        // visible so rejections remain traceable).
+        if let Err(dlq_err) = state
             .db
             .insert_dlq(
                 Some(&signal.trade_uuid),
@@ -210,7 +254,14 @@ pub async fn webhook_handler(
                 Some(&reason),
                 None,
             )
-            .await;
+            .await
+        {
+            tracing::warn!(
+                error = %dlq_err,
+                trade_uuid = %signal.trade_uuid,
+                "Failed to insert rejected signal into dead-letter queue"
+            );
+        }
         return Ok((
             StatusCode::BAD_REQUEST,
             Json(WebhookResponse {
@@ -246,20 +297,41 @@ pub async fn webhook_handler(
         "Signal admitted by selection service"
     );
 
-    // Insert into database as PENDING
-    state
+    // Insert into database as PENDING. The pre-check above is not atomic with
+    // this insert — two concurrent identical webhooks can both pass it, so a
+    // unique-violation here is the winner's duplicate path (PDD-shaped
+    // response), not a server error.
+    match state
         .db
         .insert_trade(&InsertTrade {
             trade_uuid: signal.trade_uuid.clone(),
             wallet_address: signal.payload.wallet_address.clone(),
-            token_address: signal.token_address().to_string(),
+            token_address: signal.token_address().unwrap_or("").to_string(),
             token_symbol: Some(signal.payload.token.clone()),
             strategy: signal.payload.strategy.to_string(),
             side: signal.payload.action.to_string(),
             amount_sol: trade_amount_sol,
             status: "PENDING".to_string(),
         })
-        .await?;
+        .await
+    {
+        Ok(_) => {}
+        Err(e) if e.to_string().contains("duplicate key") => {
+            tracing::info!(
+                trade_uuid = %signal.trade_uuid,
+                "Duplicate signal rejected at insert (concurrent duplicate)"
+            );
+            return Ok((
+                StatusCode::OK,
+                Json(WebhookResponse {
+                    status: WebhookStatus::Rejected,
+                    trade_uuid: signal.trade_uuid,
+                    reason: Some("duplicate_signal".to_string()),
+                }),
+            ));
+        }
+        Err(e) => return Err(e),
+    }
 
     // C1: link the persisted decision record to its trade (fire-and-forget).
     if let Some(recorder) = state.selection.decision_recorder() {
@@ -311,8 +383,10 @@ pub async fn webhook_handler(
             );
 
             // Update trade status to DEAD_LETTER first, then insert the DLQ entry.
-            // The status update is authoritative; the DLQ entry is supplementary audit data.
-            state
+            // A failure of the status update must NOT abort the DLQ insert: the
+            // trade would then be stuck in PENDING with no audit trail. Log it,
+            // still write the DLQ entry, and return the original queue error.
+            if let Err(status_err) = state
                 .db
                 .update_trade_status(&UpdateTradeStatus {
                     trade_uuid: signal.trade_uuid.clone(),
@@ -321,7 +395,14 @@ pub async fn webhook_handler(
                     error_message: Some(e.to_string()),
                     network_fee_sol: None,
                 })
-                .await?;
+                .await
+            {
+                tracing::error!(
+                    error = %status_err,
+                    trade_uuid = %signal.trade_uuid,
+                    "Failed to update trade status to DEAD_LETTER — trade may remain PENDING"
+                );
+            }
 
             // Log to dead letter queue (best-effort — status is already DEAD_LETTER above).
             if let Err(dlq_err) = state
@@ -351,6 +432,8 @@ pub async fn webhook_handler(
 mod tests {
     use super::*;
     use crate::models::{Action, Strategy};
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
 
     #[test]
     fn test_webhook_response_serialization() {

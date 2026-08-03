@@ -13,6 +13,9 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Run from the repo root regardless of invocation directory
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
+
 # Parse arguments
 FORCE=false
 RESTART_OPERATOR=false
@@ -70,14 +73,22 @@ BACKUP_FILE="backups/preserved_data_${TIMESTAMP}.sql"
 
 for t in admin_wallets wallets wallet_monitoring webhook_configuration toxic_wallets circuit_breaker_state kill_switch_state; do
     echo "-- Table: $t" >> "$BACKUP_FILE"
-    docker compose -f docker-compose.yml -f docker-compose-haproxy.yml exec -T postgres psql -U chimera -d chimera -c "COPY $t TO STDOUT" 2>/dev/null >> "$BACKUP_FILE" || true
+    if ! docker compose -f docker-compose.yml -f docker-compose-haproxy.yml exec -T postgres psql -U chimera -d chimera -c "COPY $t TO STDOUT" >> "$BACKUP_FILE" 2>&1; then
+        echo "ERROR: backup of table $t failed; aborting before destructive steps" >&2
+        exit 1
+    fi
 done
+if [ ! -s "$BACKUP_FILE" ]; then
+    echo "ERROR: backup file is empty; aborting before destructive steps" >&2
+    exit 1
+fi
 echo "Backup saved to: $BACKUP_FILE"
 
 # Step 3 — Truncate History Tables
 echo -e "${GREEN}[3/8]${NC} Truncating history tables..."
 docker compose -f docker-compose.yml -f docker-compose-haproxy.yml exec -T postgres psql -U chimera -d chimera <<'EOF'
 TRUNCATE TABLE trades RESTART IDENTITY CASCADE;
+TRUNCATE TABLE positions RESTART IDENTITY CASCADE;
 TRUNCATE TABLE dead_letter_queue RESTART IDENTITY;
 TRUNCATE TABLE decision_records RESTART IDENTITY;
 TRUNCATE TABLE promotion_episodes RESTART IDENTITY;
@@ -99,22 +110,23 @@ TRUNCATE TABLE roi_metrics RESTART IDENTITY;
 TRUNCATE TABLE metrics RESTART IDENTITY;
 TRUNCATE TABLE historical_liquidity RESTART IDENTITY;
 TRUNCATE TABLE backups RESTART IDENTITY;
-UPDATE circuit_breaker_state SET state = 'ACTIVE', tripped_at = NULL, trip_reason = NULL WHERE id = 1;
-UPDATE kill_switch_state SET state = 'INACTIVE', changed_at = NOW(), changed_by = 'SYSTEM', reason = 'Fresh DB reset for paper trading' WHERE id = 1;
+INSERT INTO circuit_breaker_state (id, state, tripped_at, trip_reason)
+VALUES (1, 'ACTIVE', NULL, NULL)
+ON CONFLICT (id) DO UPDATE SET state = 'ACTIVE', tripped_at = NULL, trip_reason = NULL;
+INSERT INTO kill_switch_state (id, state, changed_at, changed_by, reason)
+VALUES (1, 'INACTIVE', NOW(), 'SYSTEM', 'Fresh DB reset for paper trading')
+ON CONFLICT (id) DO UPDATE SET state = 'INACTIVE', changed_at = NOW(), changed_by = 'SYSTEM', reason = 'Fresh DB reset for paper trading';
 EOF
 
-# Step 4 — Drop Orphaned Test Databases
+# Step 4 — Drop Orphaned Test Databases (discover dynamically, terminate
+# lingering backends first)
 echo -e "${GREEN}[4/8]${NC} Dropping orphaned test databases..."
 docker compose -f docker-compose.yml -f docker-compose-haproxy.yml exec -T postgres bash -c \
-    "psql -U chimera -c \"DROP DATABASE IF EXISTS test_ab2d5b72_fb3d_419a_a46f_c2cf44765f83\" && \
-     psql -U chimera -c \"DROP DATABASE IF EXISTS test_1f1de278_24e0_45bd_a6b2_e6270b4639b3\" && \
-     psql -U chimera -c \"DROP DATABASE IF EXISTS test_f8e777eb_306a_447f_bf85_2d8dd6823220\" && \
-     psql -U chimera -c \"DROP DATABASE IF EXISTS test_90ba7e53_ff77_4999_986f_a5a5a5a401bd\" && \
-     psql -U chimera -c \"DROP DATABASE IF EXISTS test_7fd913a7_d01f_441c_9f6f_d41bad46d294\"" 2>&1
+    "psql -U chimera -Atc \"SELECT 'DROP DATABASE IF EXISTS ' || quote_ident(datname) || ' WITH (FORCE);' FROM pg_database WHERE datname LIKE 'test_%'\" | psql -U chimera" 2>&1
 
 # Step 5 — Flush Redis Cache
 echo -e "${GREEN}[5/8]${NC} Flushing Redis cache..."
-docker compose -f docker-compose.yml -f docker-compose-haproxy.yml exec -T redis redis-cli FLUSHDB > /dev/null
+docker compose -f docker-compose.yml -f docker-compose-haproxy.yml exec -T redis redis-cli FLUSHALL > /dev/null
 
 # Step 6 — Clean Stale Operator Data
 echo -e "${GREEN}[6/8]${NC} Cleaning stale operator data files..."

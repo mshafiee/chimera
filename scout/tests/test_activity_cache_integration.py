@@ -8,12 +8,9 @@ and reducing redundant API calls.
 
 import pytest
 import time
-from unittest.mock import Mock, AsyncMock, MagicMock
-from datetime import datetime, timedelta
 
-from core.activity_cache import ActivityBasedCache, ActivityLevel, CacheConfig
+from core.activity_cache import ActivityBasedCache, ActivityLevel
 from core.caching import HeliusCachingWrapper
-from core.helius_client import HeliusClient
 
 
 class TestActivityBasedCache:
@@ -221,15 +218,16 @@ class TestActivityBasedCache:
         cache = ActivityBasedCache()
 
         # Add wallets with different activity levels
+        # (production thresholds: >=50 -> VERY_HIGH, >=1 -> MEDIUM, 0 -> INACTIVE)
         cache.update_wallet_activity("very_high", tx_count_24h=100, wqs=85.0)
         cache.update_wallet_activity("medium", tx_count_24h=5, wqs=55.0)
-        cache.update_wallet_activity("low", tx_count_24h=1, wqs=35.0)
+        cache.update_wallet_activity("inactive", tx_count_24h=0, wqs=35.0)
 
         distribution = cache.get_activity_distribution()
 
         assert distribution['very_high'] == 1
         assert distribution['medium'] == 1
-        assert distribution['low'] == 1
+        assert distribution['inactive'] == 1
 
 
 class TestHeliusCachingWrapper:
@@ -332,13 +330,12 @@ class TestHeliusCachingWrapper:
         wrapper._wallet_activity[high_activity_wallet] = {'tx_count_24h': 100}
         wrapper._wallet_activity[low_activity_wallet] = {'tx_count_24h': 5}
 
-        # Check activity levels
+        # Check activity levels (production mapping: 100 -> VERY_HIGH, 5 -> MEDIUM)
         high_level = wrapper.get_wallet_activity_level(high_activity_wallet)
         low_level = wrapper.get_wallet_activity_level(low_activity_wallet)
 
-        # High activity wallet should have higher activity level
-        assert high_level.value in ["very_high", "high"]
-        assert low_level.value in ["low", "medium", "inactive"]
+        assert high_level == ActivityLevel.VERY_HIGH
+        assert low_level == ActivityLevel.MEDIUM
 
     def test_cleanup_inactive_wallets(self):
         """Test cleanup of inactive wallet caches."""

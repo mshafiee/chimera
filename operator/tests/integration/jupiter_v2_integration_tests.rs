@@ -11,7 +11,7 @@ use chimera_operator::config::{AppConfig, JupiterConfig};
 use chimera_operator::db_abstraction::Database;
 use chimera_operator::engine::transaction_builder::TransactionBuilder;
 use chimera_operator::jupiter_error_handling::{JupiterError, JupiterErrorType, RetryConfig, calculate_retry_delay};
-use chimera_operator::circuit_breaker::{CircuitBreaker, TripReason};
+use chimera_operator::circuit_breaker::CircuitBreaker;
 use chimera_operator::models::{Action, Signal, SignalPayload};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
@@ -113,9 +113,10 @@ async fn test_jupiter_v2_rtse_support() {
     // RTSE should provide better slippage protection
     // Verify that price impact is reasonable (should be optimized by RTSE)
     let built_tx = result.unwrap();
-    if let Some(price_impact) = built_tx.price_impact_pct() {
-        assert!(price_impact < dec!(5.0), "RTSE should keep price impact under 5%");
-    }
+    let price_impact = built_tx
+        .price_impact_pct()
+        .expect("RTSE should provide price impact for a valid swap");
+    assert!(price_impact < dec!(5.0), "RTSE should keep price impact under 5%");
 }
 
 #[tokio::test]
@@ -158,16 +159,18 @@ async fn test_jupiter_v2_error_handling() {
 
     assert!(result.is_err(), "Invalid token should fail gracefully");
 
-    // Verify error is appropriate (validation or parse error)
+    // Verify error is appropriate (validation or parse error). A live API call
+    // for an invalid mint can also surface Http/Internal/InvalidTokenAddress
+    // variants — the contract is that the failure is handled gracefully, not
+    // the exact variant.
     match result.unwrap_err() {
-        chimera_operator::error::AppError::Validation(_) => {
-            // Expected - invalid token should be caught
-        }
-        chimera_operator::error::AppError::Parse(_) => {
-            // Also acceptable - Jupiter might return parse error
-        }
+        chimera_operator::error::AppError::Validation(_)
+        | chimera_operator::error::AppError::Parse(_)
+        | chimera_operator::error::AppError::InvalidTokenAddress(_)
+        | chimera_operator::error::AppError::Http(_)
+        | chimera_operator::error::AppError::Internal(_) => {}
         other => {
-            panic!("Expected validation or parse error, got: {:?}", other);
+            panic!("unexpected error variant for invalid token: {:?}", other);
         }
     }
 }
@@ -209,10 +212,17 @@ fn test_retry_delay_calculation() {
 
     let config = RetryConfig::default();
 
+    // Bounds derived from the config fields (initial_delay ± jitter) instead
+    // of hard-coded literals, so a default change updates them automatically.
+    let first_lo = (config.initial_delay_ms as f64 * (1.0 - config.jitter_factor)) as u128;
+    let first_hi = (config.initial_delay_ms as f64 * (1.0 + config.jitter_factor)) as u128;
+
     // First retry should have minimal delay
     let delay1 = calculate_retry_delay(1, &config);
-    assert!(delay1.as_millis() >= 90, "First retry should be around 100ms");
-    assert!(delay1.as_millis() <= 110, "First retry should not be too long");
+    assert!(
+        delay1.as_millis() >= first_lo && delay1.as_millis() <= first_hi,
+        "First retry should be within [{first_lo}, {first_hi}]ms"
+    );
 
     // Second retry should have longer delay (exponential backoff)
     let delay2 = calculate_retry_delay(2, &config);
@@ -236,12 +246,22 @@ fn test_retry_delay_capping() {
         ..Default::default()
     };
 
+    // Cap bound derived from the config (max_delay + jitter).
+    let cap_hi = (config.max_delay_ms as f64 * (1.0 + config.jitter_factor)) as u128;
+
     // Even with many retries, delay should not exceed max
     let delay_10 = calculate_retry_delay(10, &config);
-    assert!(delay_10.as_millis() <= 220, "Delay should be capped at max + jitter");
+    assert!(
+        delay_10.as_millis() <= cap_hi,
+        "Delay should be capped at max + jitter ({cap_hi}ms), got {}",
+        delay_10.as_millis()
+    );
 
     let delay_100 = calculate_retry_delay(100, &config);
-    assert!(delay_100.as_millis() <= 220, "Delay should be capped even at 100 retries");
+    assert!(
+        delay_100.as_millis() <= cap_hi,
+        "Delay should be capped even at 100 retries"
+    );
 }
 
 #[tokio::test]
@@ -308,15 +328,14 @@ async fn test_jupiter_retry_exhaustion() {
 }
 
 #[tokio::test]
+#[ignore] // Requires external Postgres (TEST_DATABASE_URL) - run with cargo test -- --ignored
 async fn test_circuit_breaker_jupiter_integration() {
     // Test circuit breaker integration with Jupiter failures
 
     use chimera_operator::config::{CircuitBreakerConfig};
-    use chimera_operator::db_abstraction::{create_database, Database, DatabaseConfig};
-    use tempfile::TempDir;
+    use chimera_operator::db_abstraction::{create_database, DatabaseConfig};
 
-    // Create a real temp SQLite database
-    let _temp = TempDir::new().unwrap();
+    // Requires an external Postgres instance (TEST_DATABASE_URL)
     let db = create_database(&DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set")))
         .await
         .unwrap();
@@ -329,22 +348,24 @@ async fn test_circuit_breaker_jupiter_integration() {
     let circuit_breaker = CircuitBreaker::new(config, db, dec!(10.0));
 
     // Record Jupiter failures
-    let _ = circuit_breaker.record_jupiter_failure("rate_limit".to_string()).unwrap();
+    let tripped = circuit_breaker.record_jupiter_failure("rate_limit".to_string()).await.unwrap();
+    assert!(!tripped, "1 failure below the threshold must not trip");
     assert_eq!(circuit_breaker.get_jupiter_failure_count(), 1, "Should have 1 failure");
 
-    let _ = circuit_breaker.record_jupiter_failure("timeout".to_string()).unwrap();
+    let tripped = circuit_breaker.record_jupiter_failure("timeout".to_string()).await.unwrap();
+    assert!(!tripped, "2 failures below the threshold must not trip");
     assert_eq!(circuit_breaker.get_jupiter_failure_count(), 2, "Should have 2 failures");
 
-    // Reset after successful call
-    circuit_breaker.reset_jupiter_failures();
-    assert_eq!(circuit_breaker.get_jupiter_failure_count(), 0, "Failures should be reset");
-
-    // Test threshold trip - trip the circuit breaker directly to avoid runtime nesting
-    circuit_breaker.manual_trip("test", "manual trip for testing".to_string()).await.unwrap();
+    // Third consecutive failure reaches the threshold: must AUTO-TRIP and
+    // transition to TRIPPED (this is the auto-trip path in
+    // record_jupiter_failure, not manual_trip).
+    let tripped = circuit_breaker.record_jupiter_failure("timeout".to_string()).await.unwrap();
+    assert!(tripped, "Third consecutive failure should trip the breaker");
+    assert_eq!(circuit_breaker.get_jupiter_failure_count(), 3, "Should have 3 failures");
 
     // Verify circuit breaker state
-    let status = circuit_breaker.status();  // Changed from get_status().await
-    assert_eq!(status.state.to_string(), "TRIPPED", "Circuit breaker should be tripped");
+    let status = circuit_breaker.status();
+    assert_eq!(status.state.to_string(), "TRIPPED", "Circuit breaker should trip after 3 failures");
     assert!(status.trip_reason.is_some(), "Should have trip reason");
 }
 

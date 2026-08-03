@@ -77,6 +77,56 @@ pub enum ProfitTargetAction {
 /// first becomes available (~2 min after position open at 5s intervals).
 const VOL_RAMP_TICKS: u32 = 60;
 
+/// Build a fresh (never-persisted) `ProfitTargetState` for a new position.
+#[allow(clippy::too_many_arguments)]
+fn build_fresh_state(
+    trade_uuid: &str,
+    entry_price: Decimal,
+    entry_amount_sol: Decimal,
+    current_price: Decimal,
+    entry_time: std::time::SystemTime,
+    config: &ProfitManagementConfig,
+    price_cache: &PriceCache,
+    token_address: &str,
+) -> ProfitTargetState {
+    ProfitTargetState {
+        trade_uuid: trade_uuid.to_string(),
+        entry_price,
+        entry_amount_sol,
+        current_price,
+        peak_price: current_price,
+        peak_profit_percent: Decimal::ZERO,
+        targets_hit: Vec::new(),
+        trailing_stop_active: false,
+        trailing_stop_price: Decimal::ZERO,
+        entry_time,
+        remaining_fraction: Decimal::ONE,
+        initial_vol_scale: {
+            // Capture initial volatility estimate if available at registration.
+            // `Decimal::from_f64` yields a full-scale fallback for NaN/inf
+            // readings (a zero scale would collapse the trailing stop), and
+            // the result is clamped at zero.
+            match price_cache.calculate_volatility(token_address) {
+                Some(vol) => {
+                    let vol_dec = Decimal::from_f64(vol).unwrap_or(Decimal::ONE);
+                    if config.target_vol_scale_threshold.is_zero() {
+                        None
+                    } else {
+                        Some(
+                            (vol_dec / config.target_vol_scale_threshold)
+                                .min(Decimal::ONE)
+                                .max(Decimal::ZERO),
+                        )
+                    }
+                }
+                None => None,
+            }
+        },
+        ticks_since_entry: 0,
+        last_logged_vol_scale: None,
+    }
+}
+
 /// Compute the volatility scale factor for profit targets.
 ///
 /// Returns a value in `[0, 1]`:
@@ -97,10 +147,10 @@ fn compute_vol_scale(
             if threshold.is_zero() {
                 return Decimal::ONE;
             }
-            let vol_dec = Decimal::from_str(&format!("{:.4}", vol))
-                .unwrap_or(Decimal::ZERO);
-            // Clamp at zero: a negative volatility reading (shouldn't happen but
-            // could from corrupted data) must never produce a negative scale.
+            // Decimal::from_f64 handles NaN/inf safely (→ None → full scale),
+            // and the result is clamped at zero so a corrupted negative
+            // volatility reading can never produce a negative scale.
+            let vol_dec = Decimal::from_f64(vol).unwrap_or(Decimal::ONE);
             ((vol_dec / threshold).min(Decimal::ONE)).max(Decimal::ZERO)
         }
         None => {
@@ -202,19 +252,15 @@ impl ProfitTargetManager {
         token_address: &str,
         entry_time: std::time::SystemTime,
     ) {
-        let mut targets = self.active_targets.write().await;
-
-        // Skip if already tracked in-memory (idempotent) — check under write lock to prevent TOCTOU race
-        if targets.contains_key(trade_uuid) {
-            return;
-        }
-
         let current_price = self
             .price_cache
             .get_price_usd(token_address)
             .unwrap_or(entry_price);
 
-        // Try to restore state from DB (survives restarts)
+        // Load/restore state BEFORE taking the write lock: the DB round-trips
+        // below must not stall every other tracking operation (check_targets,
+        // sweep_hwm_stale_entries, remove_position) for all positions.
+        let mut pending_upsert: Option<(Decimal, Decimal, Decimal)> = None;
         let state = match self.db.load_exit_target(trade_uuid).await {
             Ok(Some(data)) => {
                 let peak = data.peak_price.max(current_price);
@@ -254,13 +300,13 @@ impl ProfitTargetManager {
                     initial_vol_scale: {
                         match self.price_cache.calculate_volatility(token_address) {
                             Some(vol) => {
-                                let vol_dec = Decimal::from_str(&format!("{:.4}", vol))
-                                    .unwrap_or(Decimal::ZERO);
+                                let vol_dec = Decimal::from_f64(vol).unwrap_or(Decimal::ONE);
                                 if self.config.target_vol_scale_threshold.is_zero() {
                                     None
                                 } else {
-                                    Some((vol_dec / self.config.target_vol_scale_threshold)
+                                    Some(((vol_dec / self.config.target_vol_scale_threshold)
                                         .min(Decimal::ONE))
+                                        .max(Decimal::ZERO))
                                 }
                             }
                             None => None,
@@ -270,63 +316,72 @@ impl ProfitTargetManager {
                     last_logged_vol_scale: None,
                 }
             }
-            _ => {
+            Ok(None) => {
                 // Fresh state — also write to DB so it survives the next restart
-                let state = ProfitTargetState {
-                    trade_uuid: trade_uuid.to_string(),
+                let state = build_fresh_state(
+                    trade_uuid,
                     entry_price,
                     entry_amount_sol,
                     current_price,
-                    peak_price: current_price,
-                    peak_profit_percent: Decimal::ZERO,
-                    targets_hit: Vec::new(),
-                    trailing_stop_active: false,
-                    trailing_stop_price: Decimal::ZERO,
                     entry_time,
-                    remaining_fraction: Decimal::ONE,
-                    initial_vol_scale: {
-                        // Capture initial volatility estimate if available at registration
-                        match self.price_cache.calculate_volatility(token_address) {
-                            Some(vol) => {
-                                let vol_dec = Decimal::from_str(&format!("{:.4}", vol))
-                                    .unwrap_or(Decimal::ZERO);
-                                if self.config.target_vol_scale_threshold.is_zero() {
-                                    None
-                                } else {
-                                    let scale = (vol_dec
-                                        / self.config.target_vol_scale_threshold)
-                                        .min(Decimal::ONE);
-                                    Some(scale)
-                                }
-                            }
-                            None => None,
-                        }
-                    },
-                    ticks_since_entry: 0,
-                    last_logged_vol_scale: None,
-                };
-                if let Err(e) = self
-                    .db
-                    .upsert_exit_target(
-                        trade_uuid,
-                        entry_price,
-                        entry_amount_sol,
-                        current_price,
-                        rust_decimal::Decimal::ZERO,
-                        "[]",
-                        false,
-                        rust_decimal::Decimal::ZERO,
-                        rust_decimal::Decimal::ONE,
-                    )
-                    .await
-                {
-                    tracing::warn!(trade_uuid, error = %e, "Failed to persist initial profit target state");
-                }
+                    &self.config,
+                    &self.price_cache,
+                    token_address,
+                );
+                pending_upsert = Some((entry_price, entry_amount_sol, current_price));
                 state
+            }
+            Err(e) => {
+                // A load failure is NOT "no row": upserting over the persisted
+                // state would silently wipe saved tier progress and the
+                // trailing stop. Keep fresh in-memory state without touching
+                // the DB row — the next successful check will restore it.
+                tracing::warn!(
+                    trade_uuid,
+                    error = %e,
+                    "Failed to load persisted exit target state; using fresh in-memory state (DB row untouched)"
+                );
+                build_fresh_state(
+                    trade_uuid,
+                    entry_price,
+                    entry_amount_sol,
+                    current_price,
+                    entry_time,
+                    &self.config,
+                    &self.price_cache,
+                    token_address,
+                )
             }
         };
 
+        // Idempotency check + insert under the write lock (short, no DB I/O).
+        let mut targets = self.active_targets.write().await;
+        if targets.contains_key(trade_uuid) {
+            return;
+        }
         targets.insert(trade_uuid.to_string(), state);
+        drop(targets);
+
+        // Persist the fresh row after releasing the lock.
+        if let Some((ep, ea, cp)) = pending_upsert {
+            if let Err(e) = self
+                .db
+                .upsert_exit_target(
+                    trade_uuid,
+                    ep,
+                    ea,
+                    cp,
+                    rust_decimal::Decimal::ZERO,
+                    "[]",
+                    false,
+                    rust_decimal::Decimal::ZERO,
+                    rust_decimal::Decimal::ONE,
+                )
+                .await
+            {
+                tracing::warn!(trade_uuid, error = %e, "Failed to persist initial profit target state");
+            }
+        }
     }
 
     /// Check profit targets and return action if needed.
@@ -517,8 +572,13 @@ impl ProfitTargetManager {
         } else {
             self.config.trailing_stop_distance
         };
-        // Scale trailing distance by vol_scale so low-vol tokens get tighter stops
-        let scaled_base_distance = base_trailing_distance * vol_scale;
+        // Scale trailing distance by vol_scale so low-vol tokens get tighter
+        // stops, but keep a floor so the stop can never collapse to the peak
+        // and instantly fire: `calculate_volatility` returns Some(0.0) for a
+        // flat/stable price history, which would otherwise make the stop
+        // trigger the very tick it activates.
+        let scaled_base_distance =
+            (base_trailing_distance * vol_scale).max(Decimal::from(1)); // at least 1% trailing distance
         let trailing_distance =
             if let Some(vol) = self.price_cache.calculate_volatility(token_address) {
                 let vol_mult = if vol > 50.0 {
@@ -659,26 +719,14 @@ impl ProfitTargetManager {
             }
         }
 
-        // Tiered exit (only if no momentum crash)
-        if let Some(action) = tiered_action {
-            tracing::info!(
-                trade_uuid = %trade_uuid,
-                token_address = token_address,
-                current_price = %current_price,
-                entry_price = %entry_price_snap,
-                profit_percent = %profit_percent,
-                pnl_percent = %profit_percent,
-                tiered_action = ?action,
-                reason = "tiered_target",
-                "Profit exit triggered: tiered profit target hit"
-            );
-            return action;
-        }
-
+        // Trailing stop / time exit take priority over the tiered partial
+        // exit: if a tier target and a protective-stop breach occur in the
+        // same tick, a partial sell would leave the position open past its
+        // stop for at least one more full tick.
         if trailing_hit || time_exit {
             tracing::info!(
                 trade_uuid = %trade_uuid,
-                token_address = token_address,
+                token_address = %token_address,
                 current_price = %current_price,
                 entry_price = %entry_price_snap,
                 profit_percent = %profit_percent,
@@ -692,6 +740,22 @@ impl ProfitTargetManager {
                 "Profit exit triggered: trailing stop or time exit"
             );
             return ProfitTargetAction::FullExit;
+        }
+
+        // Tiered exit (only if no momentum crash and no protective stop hit)
+        if let Some(action) = tiered_action {
+            tracing::info!(
+                trade_uuid = %trade_uuid,
+                token_address = %token_address,
+                current_price = %current_price,
+                entry_price = %entry_price_snap,
+                profit_percent = %profit_percent,
+                pnl_percent = %profit_percent,
+                tiered_action = ?action,
+                reason = "tiered_target",
+                "Profit exit triggered: tiered profit target hit"
+            );
+            return action;
         }
 
         tracing::debug!(

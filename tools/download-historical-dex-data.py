@@ -7,10 +7,9 @@ Supports Vybe Network, Hugging Face, and Kaggle datasets.
 import requests
 import json
 import csv
-import time
-from datetime import datetime, timedelta
+import random
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import sys
 
 # Configuration
 OUTPUT_DIR = "evaluation/signals"
@@ -73,13 +72,18 @@ def download_huggingface_data():
         with open(file_path, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                # Convert to our signal format
+                # Convert to our signal format (skip malformed rows instead
+                # of discarding the whole source)
+                try:
+                    amount = float(row.get('amount') or row.get('quantity') or row.get('volume') or 0.1)
+                except ValueError:
+                    continue
                 signals.append({
-                    "timestamp": row.get('timestamp', datetime.now().isoformat()),
+                    "timestamp": row.get('timestamp') or datetime.now(timezone.utc).isoformat(),
                     "wallet_address": row.get('wallet', 'unknown'),
                     "token_address": row.get('token_mint', ''),
-                    "action": "buy" if float(row.get('amount', 0)) > 0 else "sell",
-                    "amount_sol": abs(float(row.get('amount', 0.1))),
+                    "action": "buy" if amount > 0 else "sell",
+                    "amount_sol": abs(amount),
                     "strategy": "shield",
                     "source": "huggingface"
                 })
@@ -125,12 +129,16 @@ def download_kaggle_data():
             with open(csv_file, 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
+                    try:
+                        amount = float(row.get('volume') or 0.1)
+                    except ValueError:
+                        continue
                     signals.append({
-                        "timestamp": row.get('timestamp', datetime.now().isoformat()),
+                        "timestamp": row.get('timestamp') or datetime.now(timezone.utc).isoformat(),
                         "wallet_address": "unknown",
                         "token_address": "So11111111111111111111111111111111111111112",
                         "action": "buy",
-                        "amount_sol": float(row.get('volume', 0.1)),
+                        "amount_sol": amount,
                         "strategy": "shield",
                         "source": "kaggle"
                     })
@@ -195,7 +203,7 @@ def generate_realistic_signals_from_sources():
     ]
 
     signals = []
-    current_time = datetime.now()
+    current_time = datetime.now(timezone.utc)
 
     print(f"📊 Generating {TARGET_SIGNALS} realistic signals...")
 
@@ -211,6 +219,9 @@ def generate_realistic_signals_from_sources():
                 minute = random.randint(0, 59)
                 second = random.randint(0, 59)
                 timestamp = day_time.replace(hour=hour, minute=minute, second=second)
+                # Never emit timestamps in the future (today's later hours)
+                if timestamp > current_time:
+                    timestamp = current_time
 
                 # Realistic trading patterns
                 action = random.choices(["buy", "sell"], weights=[0.55, 0.45])[0]
@@ -229,7 +240,7 @@ def generate_realistic_signals_from_sources():
                 )[0]
 
                 signal = {
-                    "timestamp": timestamp.isoformat() + "Z",
+                    "timestamp": timestamp.isoformat().replace("+00:00", "Z"),
                     "wallet_address": random.choice(real_wallets),
                     "token_address": token,
                     "action": action,

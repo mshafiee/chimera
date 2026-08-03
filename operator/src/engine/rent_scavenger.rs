@@ -275,36 +275,49 @@ impl RentScavenger {
                 ))
             })?;
 
-        // Find empty accounts (zero balance, no delegate)
+        // Find empty accounts (zero balance, no delegate, closable by this keypair)
         let mut empty_accounts = Vec::new();
-        
+        // Rent exemption is queried once per distinct account size (Token-2022
+        // extension accounts can be larger than 165 bytes).
+        let mut rent_cache: std::collections::HashMap<usize, u64> = std::collections::HashMap::new();
+
         for keyed_account in accounts {
             if let UiAccountData::Json(parsed) = keyed_account.account.data {
-                // jsonParsed token accounts nest under `parsed.parsed.info`:
-                //   info = { tokenAmount: { amount, ... }, delegate, delegatedAmount: { amount, ... }, ... }
+                // jsonParsed token accounts nest the balance/authority fields
+                // under `parsed.parsed.info`:
+                //   info = { tokenAmount: { amount, ... }, delegate, state, closeAuthority }
+                // (Account data length lives on the ParsedAccount struct as
+                // `parsed.space`, not inside `info`.)
                 if let Some(info) = parsed.parsed.get("info") {
-                    if let (Some(amount_str), Some(delegated_amount)) = (
-                        info.get("tokenAmount").and_then(|t| t.get("amount")).and_then(|a| a.as_str()),
-                        info.get("delegatedAmount").and_then(|d| d.get("amount")).and_then(|a| a.as_str()),
-                    ) {
-                        // Check if balance is zero and no delegated amount
-                        if amount_str == "0" && delegated_amount == "0" {
-                            let has_delegate = info
-                                .get("delegate")
-                                .and_then(|d| d.as_str())
-                                .map(|s| !s.is_empty() && s != "11111111111111111111111111111111")
-                                .unwrap_or(false);
-
-                            if !has_delegate {
-                                if let Ok(account_pubkey) = keyed_account.pubkey.parse::<Pubkey>() {
-                                    let rent = rpc_client
-                                        .get_minimum_balance_for_rent_exemption(165)
-                                        .unwrap_or(2_040_000); // Default to ~0.002 SOL
-
-                                    empty_accounts.push((account_pubkey, rent));
-                                }
+                    if !Self::is_closable_empty_account(info, owner) {
+                        continue;
+                    }
+                    if let Ok(account_pubkey) = keyed_account.pubkey.parse::<Pubkey>() {
+                        // `space` is a field of ParsedAccount (a sibling of the
+                        // inner `parsed` JSON), NOT a key inside `info`. It
+                        // reports the on-chain account data length, so Token-2022
+                        // extension accounts correctly report >165 bytes here.
+                        let space: usize = if parsed.space > 0 {
+                            parsed.space as usize
+                        } else {
+                            165
+                        };
+                        let rent = match rent_cache.get(&space) {
+                            Some(r) => *r,
+                            None => {
+                                let r = rpc_client
+                                    .get_minimum_balance_for_rent_exemption(space)
+                                    .map_err(|e| {
+                                        AppError::Rpc(format!(
+                                            "Failed to get rent exemption for {} (space {}): {}",
+                                            program_name, space, e
+                                        ))
+                                    })?;
+                                rent_cache.insert(space, r);
+                                r
                             }
-                        }
+                        };
+                        empty_accounts.push((account_pubkey, rent));
                     }
                 }
             }
@@ -320,13 +333,21 @@ impl RentScavenger {
             "Found empty token accounts"
         );
 
+        // Re-verification snapshot: fetch the current empty set ONCE per program
+        // instead of once per batch (O(batches × total) round-trips otherwise).
+        let current_empty = self.fetch_current_empty_accounts(&rpc_client, &program_pubkey, owner)?;
+
         // Close accounts in batches
         let mut total_closed = 0u64;
         let mut total_rent_reclaimed = 0u64;
 
         for batch in empty_accounts.chunks(self.config.max_batch_size) {
             // Re-verify accounts are still empty before closing (prevents race conditions)
-            let verified_batch = self.verify_empty_accounts(batch, &rpc_client, &program_pubkey).await?;
+            let verified_batch: Vec<(Pubkey, u64)> = batch
+                .iter()
+                .filter(|(account_pubkey, _)| current_empty.contains(account_pubkey))
+                .cloned()
+                .collect();
             
             if verified_batch.is_empty() {
                 debug!("All accounts in batch failed re-verification, skipping");
@@ -364,80 +385,90 @@ impl RentScavenger {
         Ok((total_closed, total_rent_reclaimed))
     }
 
-    /// Verify that accounts are still empty before closing (prevents race conditions)
-    async fn verify_empty_accounts(
+    /// Whether a parsed token account is a safe close candidate: zero balance,
+    /// no delegate, not frozen, and either no close authority or one this
+    /// funding keypair can exercise.
+    fn is_closable_empty_account(info: &serde_json::Value, owner: &Pubkey) -> bool {
+        let amount_zero = info
+            .get("tokenAmount")
+            .and_then(|t| t.get("amount"))
+            .and_then(|a| a.as_str())
+            .map(|s| s == "0")
+            .unwrap_or(false);
+        if !amount_zero {
+            return false;
+        }
+        // Accounts with a delegate cannot be closed.
+        let has_delegate = info
+            .get("delegate")
+            .and_then(|d| d.as_str())
+            .map(|s| !s.is_empty() && s != "11111111111111111111111111111111")
+            .unwrap_or(false);
+        if has_delegate {
+            return false;
+        }
+        // Frozen accounts cannot be closed.
+        if info
+            .get("state")
+            .and_then(|s| s.as_str())
+            .map(|s| s == "frozen")
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        // closeAuthority must be absent, the system program (i.e. effectively
+        // none), or this funding keypair — otherwise the batch transaction
+        // would fail with the funding keypair's signature.
+        let owner_str = owner.to_string();
+        let close_authority_ok = info
+            .get("closeAuthority")
+            .and_then(|d| d.as_str())
+            .map(|s| {
+                s.is_empty()
+                    || s == "11111111111111111111111111111111"
+                    || s == owner_str
+            })
+            .unwrap_or(true);
+        close_authority_ok
+    }
+
+    /// Fetch the set of currently-closable empty token accounts for a program.
+    /// The empty set is re-fetched once per program run and shared by every
+    /// batch re-verification.
+    fn fetch_current_empty_accounts(
         &self,
-        accounts: &[(Pubkey, u64)],
         rpc_client: &RpcClient,
-        program_id: &Pubkey,
-    ) -> AppResult<Vec<(Pubkey, u64)>> {
+        program_pubkey: &Pubkey,
+        owner: &Pubkey,
+    ) -> AppResult<std::collections::HashSet<Pubkey>> {
         use solana_client::rpc_request::TokenAccountsFilter;
-        
-        let owner = self.funding_keypair.pubkey();
-        let mut verified = Vec::new();
-        
-        // Get current state of all token accounts
+
         let current_accounts = rpc_client
-            .get_token_accounts_by_owner(
-                &owner,
-                TokenAccountsFilter::ProgramId(*program_id),
-            )
+            .get_token_accounts_by_owner(owner, TokenAccountsFilter::ProgramId(*program_pubkey))
             .map_err(|e| {
                 AppError::Rpc(format!("Failed to fetch current token accounts: {}", e))
             })?;
-        
-        // Build set of current empty accounts
+
         let mut current_empty: std::collections::HashSet<Pubkey> = std::collections::HashSet::new();
-        
         for keyed_account in current_accounts {
             if let UiAccountData::Json(parsed) = keyed_account.account.data {
-                // jsonParsed token accounts nest under `parsed.parsed.info`:
-                //   info = { tokenAmount: { amount, ... }, delegate, delegatedAmount: { amount, ... }, ... }
                 if let Some(info) = parsed.parsed.get("info") {
-                    if let (Some(amount_str), Some(delegated_amount)) = (
-                        info.get("tokenAmount").and_then(|t| t.get("amount")).and_then(|a| a.as_str()),
-                        info.get("delegatedAmount").and_then(|d| d.get("amount")).and_then(|a| a.as_str()),
-                    ) {
-                        if amount_str == "0" && delegated_amount == "0" {
-                            let has_delegate = info
-                                .get("delegate")
-                                .and_then(|d| d.as_str())
-                                .map(|s| !s.is_empty() && s != "11111111111111111111111111111111")
-                                .unwrap_or(false);
-
-                            if !has_delegate {
-                                if let Ok(account_pubkey) = keyed_account.pubkey.parse::<Pubkey>() {
-                                    current_empty.insert(account_pubkey);
-                                }
-                            }
+                    if Self::is_closable_empty_account(info, owner) {
+                        if let Ok(account_pubkey) = keyed_account.pubkey.parse::<Pubkey>() {
+                            current_empty.insert(account_pubkey);
                         }
                     }
                 }
             }
         }
-        
-        // Only include accounts that are still empty
-        for (account_pubkey, rent) in accounts {
-            if current_empty.contains(account_pubkey) {
-                verified.push((*account_pubkey, *rent));
-            } else {
-                debug!(
-                    account = %account_pubkey,
-                    "Account failed re-verification (no longer empty)"
-                );
-            }
-        }
-        
-        debug!(
-            original_count = accounts.len(),
-            verified_count = verified.len(),
-            "Account re-verification completed"
-        );
-        
-        Ok(verified)
+        Ok(current_empty)
     }
 
-    /// Close a batch of token accounts
+    /// Close a batch of token accounts.
+    ///
+    /// If the whole batch fails (e.g. one account was closed/frozen between
+    /// verification and send), retry each account individually so a single bad
+    /// account cannot block the others; per-account failures are non-fatal.
     async fn close_token_accounts_batch(
         &self,
         accounts: &[(Pubkey, u64)],
@@ -448,6 +479,50 @@ impl RentScavenger {
             return Ok(0);
         }
 
+        match self.send_close_transaction(accounts, program_id, rpc_client).await {
+            Ok(sig) => {
+                info!(
+                    accounts_closed = accounts.len(),
+                    signature = %sig,
+                    "Successfully closed token accounts batch"
+                );
+                Ok(accounts.len() as u64)
+            }
+            Err(e) => {
+                warn!(
+                    batch_size = accounts.len(),
+                    error = %e,
+                    "Batch close failed — retrying per-account (non-fatal)"
+                );
+                let mut closed = 0u64;
+                for (account_pubkey, rent) in accounts {
+                    let single = [(*account_pubkey, *rent)];
+                    match self.send_close_transaction(&single, program_id, rpc_client).await {
+                        Ok(sig) => {
+                            debug!(account = %account_pubkey, signature = %sig, "Closed account individually");
+                            closed += 1;
+                        }
+                        Err(per_account_err) => {
+                            warn!(
+                                account = %account_pubkey,
+                                error = %per_account_err,
+                                "Failed to close account individually; skipping"
+                            );
+                        }
+                    }
+                }
+                Ok(closed)
+            }
+        }
+    }
+
+    /// Send one CloseAccount transaction for the given accounts.
+    async fn send_close_transaction(
+        &self,
+        accounts: &[(Pubkey, u64)],
+        program_id: &Pubkey,
+        rpc_client: &RpcClient,
+    ) -> AppResult<solana_sdk::signature::Signature> {
         let owner = self.funding_keypair.pubkey();
         let recent_blockhash = rpc_client
             .get_latest_blockhash()
@@ -511,14 +586,7 @@ impl RentScavenger {
                 })
         }).await?;
 
-        info!(
-            accounts_closed = accounts.len(),
-            signature = %signature,
-            tx_size = tx_size,
-            "Successfully closed token accounts batch"
-        );
-
-        Ok(accounts.len() as u64)
+        Ok(signature)
     }
 }
 

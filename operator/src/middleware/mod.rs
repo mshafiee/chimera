@@ -6,6 +6,6 @@ mod auth;
 mod hmac;
 mod rate_limit;
 
-pub use auth::*;
-pub use hmac::*;
-pub use rate_limit::*;
+pub use auth::{AuthExtension, AuthState, AuthenticatedUser, Role, bearer_auth, get_auth_user, require_role};
+pub use hmac::{HmacState, SIGNATURE_HEADER, TIMESTAMP_HEADER, hmac_verify};
+pub use rate_limit::ProxyAwareKeyExtractor;

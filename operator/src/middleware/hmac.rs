@@ -29,7 +29,13 @@ use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
 /// HMAC verification state with support for secret rotation
-#[derive(Clone, Debug)]
+///
+/// NOTE: Replay protection is process-local — `seen_nonces` lives only in this
+/// process's memory. In a multi-instance / scale-out deployment (or after a
+/// restart), a captured signed request can be replayed once per instance within
+/// the drift window. Operators must NOT rely on this as a hard replay guard in
+/// such deployments (the nonce store would need to be shared, e.g. via Redis).
+#[derive(Clone)]
 pub struct HmacState {
     /// List of valid HMAC secrets (current + previous during rotation)
     secrets: Arc<Vec<Vec<u8>>>,
@@ -39,9 +45,20 @@ pub struct HmacState {
     seen_nonces: Arc<Mutex<HashMap<String, i64>>>,
 }
 
+impl std::fmt::Debug for HmacState {
+    /// Secrets must never reach logs/debug output — only the count is shown.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HmacState")
+            .field("secret_count", &self.secrets.len())
+            .field("max_drift_secs", &self.max_drift_secs)
+            .finish_non_exhaustive()
+    }
+}
+
 impl HmacState {
     /// Create a new HMAC state with a single secret
     pub fn new(secret: String, max_drift_secs: i64) -> Self {
+        assert!(!secret.is_empty(), "HMAC secret must not be empty");
         Self {
             secrets: Arc::new(vec![secret.into_bytes()]),
             max_drift_secs,
@@ -79,28 +96,35 @@ impl HmacState {
     /// rate limit is raised or if eviction falls behind during a burst.
     const MAX_NONCE_STORE: usize = 100_000;
 
-    /// Check nonce and record it. Returns false if the nonce was already seen (replay).
-    fn check_and_record_nonce(&self, nonce: &str, now: i64) -> bool {
+    /// Eviction is amortized: the O(n) sweep runs only when the store grows
+    /// past this threshold, so the common case stays O(1) per request.
+    const EVICTION_THRESHOLD: usize = 4096;
+
+    /// Check nonce and record it.
+    fn check_and_record_nonce(&self, nonce: &str, now: i64) -> NonceResult {
         let mut store = self.seen_nonces.lock();
-        // Evict expired entries to bound memory usage.
-        // FIX 8: Use strict less-than to match the rejection gate (drift > max_drift_secs)
+        // Amortized eviction. Boundary matches the rejection gate exactly
+        // (`drift > max_drift_secs` rejects, so `<=` keeps entries): a replay
+        // arriving at the drift boundary still finds its nonce in the store.
+        if store.len() >= Self::EVICTION_THRESHOLD {
+            store.retain(|_, ts| now - *ts <= self.max_drift_secs);
+        }
         // Hard cap: if post-eviction the store is still oversized, reject the new nonce
         // rather than dropping valid replay-protection entries. This prevents a burst of
         // requests from opening a replay window — callers receive false here and the
         // request is treated as a duplicate (safe fail-closed).
-        store.retain(|_, ts| now - *ts < self.max_drift_secs);
         if store.len() >= Self::MAX_NONCE_STORE {
             tracing::warn!(
                 store_size = store.len(),
                 "Nonce store at capacity — rejecting nonce to preserve replay protection"
             );
-            return false;
+            return NonceResult::Capacity;
         }
         if store.contains_key(nonce) {
-            return false; // Replay detected
+            return NonceResult::Replay; // Replay detected
         }
         store.insert(nonce.to_string(), now);
-        true
+        NonceResult::Accepted
     }
 
     /// Check if rotation is active (multiple secrets configured)
@@ -116,6 +140,17 @@ pub const TIMESTAMP_HEADER: &str = "X-Timestamp";
 /// Maximum allowed size for signature and timestamp headers (4KB)
 /// Prevents DoS via memory exhaustion from oversized headers
 const MAX_HEADER_SIZE: usize = 4096;
+
+/// Result of a nonce check
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NonceResult {
+    /// Nonce recorded; request may proceed
+    Accepted,
+    /// Nonce already seen within the drift window — genuine replay
+    Replay,
+    /// Store is at capacity — a load/DoS condition, not an authentication failure
+    Capacity,
+}
 
 /// Result of signature verification
 #[derive(Debug)]
@@ -232,9 +267,12 @@ pub async fn hmac_verify(
         }
     };
 
-    // Check timestamp drift (replay protection)
+    // Check timestamp drift (replay protection).
+    // saturating_sub: `timestamp` is attacker-controlled and reaches this line
+    // before any signature check; unchecked subtraction would panic in debug
+    // (cheap remote DoS) and wrap in release.
     let now = Utc::now().timestamp();
-    let drift = (now - timestamp).abs();
+    let drift = now.saturating_sub(timestamp).abs();
     if drift > state.max_drift_secs {
         tracing::warn!(
             timestamp = timestamp,
@@ -270,12 +308,25 @@ pub async fn hmac_verify(
             // Replay protection: signature must not have been seen within the drift window.
             // The nonce is the signature itself — it encodes (timestamp || body) so it's unique per request.
             let now = Utc::now().timestamp();
-            if !state.check_and_record_nonce(&signature, now) {
-                tracing::warn!(
-                    signature = %&signature[..8],
-                    "Replay attack detected — nonce already seen"
-                );
-                return error_response(StatusCode::UNAUTHORIZED, "Replay detected");
+            match state.check_and_record_nonce(&signature, now) {
+                NonceResult::Accepted => {}
+                NonceResult::Replay => {
+                    tracing::warn!(
+                        signature_prefix = %signature.get(..8).unwrap_or(&signature),
+                        "Replay attack detected — nonce already seen"
+                    );
+                    return error_response(StatusCode::UNAUTHORIZED, "Replay detected");
+                }
+                NonceResult::Capacity => {
+                    tracing::warn!(
+                        store_size = state.seen_nonces.lock().len(),
+                        "Nonce store at capacity — rejecting request with 503"
+                    );
+                    return error_response(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "Too many requests",
+                    );
+                }
             }
 
             if secret_index > 0 {
@@ -340,25 +391,15 @@ fn verify_with_secrets(
 
 /// Constant-time string comparison to prevent timing attacks.
 ///
-/// Pads the shorter input to the length of the longer one before calling
-/// `ct_eq`, so that the comparison always iterates over the same number of
-/// bytes regardless of which input is shorter. This prevents an attacker
-/// from deducing the expected length by measuring execution time.
-///
-/// FIX 13: avoids early-exit on length mismatch that leaks expected length.
+/// The expected digest is a fixed-format 64-char lowercase hex string (public
+/// format), so a length mismatch can be rejected up front — the comparison
+/// then always runs a fixed length. Comparing only equal-length slices also
+/// means the work per request is bounded.
 fn constant_time_compare(a: &str, b: &str) -> bool {
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    let max_len = a_bytes.len().max(b_bytes.len());
-
-    // Pad both to max_len with zeros so ct_eq always processes the same byte count
-    let mut a_padded = vec![0u8; max_len];
-    let mut b_padded = vec![0u8; max_len];
-    a_padded[..a_bytes.len()].copy_from_slice(a_bytes);
-    b_padded[..b_bytes.len()].copy_from_slice(b_bytes);
-
-    // ct_eq on equal-length slices — no early exit
-    a_padded.ct_eq(&b_padded).into()
+    if a.len() != b.len() {
+        return false;
+    }
+    a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
 /// Create an error response
@@ -371,9 +412,6 @@ fn error_response(status: StatusCode, message: &str) -> Response {
 
     (status, Json(body)).into_response()
 }
-
-/// Extension trait to add the verified timestamp to request extensions
-pub struct VerifiedTimestamp(pub i64);
 
 #[cfg(test)]
 mod tests {
@@ -688,24 +726,24 @@ mod tests {
     #[test]
     fn test_nonce_store_basic_accept() {
         let state = HmacState::with_rotation(vec!["test".to_string()], 60).unwrap();
-        assert!(state.check_and_record_nonce("nonce-1", 1000));
+        assert_eq!(state.check_and_record_nonce("nonce-1", 1000), NonceResult::Accepted);
     }
 
     #[test]
     fn test_nonce_store_replay_rejected() {
         let state = HmacState::with_rotation(vec!["test".to_string()], 60).unwrap();
-        assert!(state.check_and_record_nonce("nonce-1", 1000));
-        assert!(!state.check_and_record_nonce("nonce-1", 1001));
+        assert_eq!(state.check_and_record_nonce("nonce-1", 1000), NonceResult::Accepted);
+        assert_eq!(state.check_and_record_nonce("nonce-1", 1001), NonceResult::Replay);
     }
 
     #[test]
     fn test_nonce_store_expired_evicted() {
         let state = HmacState::with_rotation(vec!["test".to_string()], 60).unwrap();
         // Insert a nonce at t=0
-        assert!(state.check_and_record_nonce("old-nonce", 0));
+        assert_eq!(state.check_and_record_nonce("old-nonce", 0), NonceResult::Accepted);
         // At t=120 (past 60s drift), old-nonce should be evicted
         // The new nonce is accepted because old was evicted during retain
-        assert!(state.check_and_record_nonce("new-nonce", 120));
+        assert_eq!(state.check_and_record_nonce("new-nonce", 120), NonceResult::Accepted);
     }
 
     #[test]
@@ -717,9 +755,9 @@ mod tests {
         }
         // The store can hold more than 2001 entries (MAX is 100_000).
         // Verify retain logic still works: old entry evicted when drift expired
-        assert!(state.check_and_record_nonce("recent", 1000));
+        assert_eq!(state.check_and_record_nonce("recent", 1000), NonceResult::Accepted);
         // Verify replay is still detected
-        assert!(!state.check_and_record_nonce("nonce-0", 1000));
+        assert_eq!(state.check_and_record_nonce("nonce-0", 1000), NonceResult::Replay);
     }
 
     #[test]
@@ -727,9 +765,9 @@ mod tests {
         let state = HmacState::with_rotation(vec!["test".to_string()], 1).unwrap();
         // With 1-second drift, inserting at t=0 then checking at t=2
         // should evict the first entry and accept a new one.
-        assert!(state.check_and_record_nonce("first", 0));
+        assert_eq!(state.check_and_record_nonce("first", 0), NonceResult::Accepted);
         // At t=2 (past 1s drift), the first entry should be evicted
-        assert!(state.check_and_record_nonce("second", 2));
+        assert_eq!(state.check_and_record_nonce("second", 2), NonceResult::Accepted);
     }
 
     #[test]

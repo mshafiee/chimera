@@ -17,6 +17,22 @@ pub struct MevProtection {
 
 impl MevProtection {
     pub fn new(config: Arc<MevProtectionConfig>) -> Self {
+        // A zero/negative tip would silently disable MEV protection (or produce
+        // an invalid bundle tip) with no signal at the call site. Surface it at
+        // construction so misconfiguration is visible.
+        for (name, tip) in [
+            ("exit_tip_sol", config.exit_tip_sol),
+            ("consensus_tip_sol", config.consensus_tip_sol),
+            ("standard_tip_sol", config.standard_tip_sol),
+        ] {
+            if tip <= Decimal::ZERO {
+                tracing::warn!(
+                    config_key = name,
+                    tip = %tip,
+                    "MEV protection tip is non-positive — effective MEV protection disabled; configure a positive tip"
+                );
+            }
+        }
         Self { config }
     }
 
@@ -37,8 +53,8 @@ impl MevProtection {
         // Consensus signals get higher priority (increased tip for consensus)
         if is_consensus {
             // Use higher tip for consensus (1.5x the standard consensus tip)
-            return self.config.consensus_tip_sol
-                * Decimal::from_str("1.5").unwrap_or(Decimal::from(3) / Decimal::from(2));
+            let consensus_tip_multiplier: Decimal = Decimal::new(15, 1);
+            return self.config.consensus_tip_sol * consensus_tip_multiplier;
         }
 
         // Standard signals get low priority

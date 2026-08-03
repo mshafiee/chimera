@@ -89,14 +89,6 @@ interface UpdateConfigRequest {
     capacity?: number
     load_shed_threshold_percent?: number
   }
-  notification_rules?: {
-    circuit_breaker_triggered?: boolean
-    wallet_drained?: boolean
-    position_exited?: boolean
-    wallet_promoted?: boolean
-    daily_summary?: boolean
-    rpc_fallback?: boolean
-  }
 }
 
 export function useUpdateConfig() {
@@ -104,6 +96,9 @@ export function useUpdateConfig() {
 
   return useMutation({
     mutationFn: async (body: UpdateConfigRequest) => {
+      if (Object.keys(body).length === 0) {
+        throw new Error('Nothing to update: request body is empty')
+      }
       const { data } = await apiClient.put<ConfigResponse>('/config', body)
       return data
     },
@@ -120,6 +115,11 @@ interface CircuitBreakerResetResponse {
   new_state: string
 }
 
+function invalidateConfigAndHealth(queryClient: ReturnType<typeof useQueryClient>) {
+  queryClient.invalidateQueries({ queryKey: ['config'] })
+  queryClient.invalidateQueries({ queryKey: ['health'] })
+}
+
 export function useResetCircuitBreaker() {
   const queryClient = useQueryClient()
 
@@ -129,8 +129,7 @@ export function useResetCircuitBreaker() {
       return data
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['config'] })
-      queryClient.invalidateQueries({ queryKey: ['health'] })
+      invalidateConfigAndHealth(queryClient)
     },
   })
 }
@@ -141,13 +140,12 @@ export function useTripCircuitBreaker() {
   return useMutation({
     mutationFn: async (reason?: string) => {
       const { data } = await apiClient.post<CircuitBreakerResetResponse>('/config/circuit-breaker/trip', {
-        reason: reason || 'Emergency kill switch activated',
+        reason: reason ?? 'Emergency kill switch activated',
       })
       return data
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['config'] })
-      queryClient.invalidateQueries({ queryKey: ['health'] })
+      invalidateConfigAndHealth(queryClient)
     },
   })
 }

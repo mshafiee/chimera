@@ -91,7 +91,9 @@ fn test_trade_mode_display() {
 
 #[test]
 fn test_trade_mode_default() {
-    assert_eq!(TradeMode::default(), TradeMode::Live);
+    // Safety: the default must NEVER be Live (real money) — it is an explicit
+    // opt-in via CHIMERA_TRADE_MODE=live or `trade_mode: live` in config.
+    assert_eq!(TradeMode::default(), TradeMode::Paper);
 }
 
 #[test]
@@ -139,4 +141,50 @@ fn test_paper_sell_amount_large() {
 #[test]
 fn test_paper_sell_amount_clamping() {
     assert_eq!(paper_sell_amount(1, dec!(0.9999999)), 0);
+}
+
+// NOTE: these pin the CURRENT paper-SELL behavior, which mirrors the
+// production path (executor.rs): `.to_u64().unwrap_or(0)`. An exit_fraction
+// outside [0, 1] silently produces a 0-lamport (or over-sized) sell instead
+// of being refused — the live path refuses empty sells; paper does not.
+
+#[test]
+fn test_paper_sell_amount_fraction_above_one_not_refused() {
+    // Fraction > 1: over-sized sell (not refused).
+    assert_eq!(paper_sell_amount(1_000_000, dec!(1.5)), 1_500_000);
+}
+
+#[test]
+fn test_paper_sell_amount_negative_fraction_zeroes_out() {
+    // Negative fraction: to_u64() fails → 0-lamport sell (not refused).
+    assert_eq!(paper_sell_amount(1_000_000, dec!(-0.5)), 0);
+}
+
+#[test]
+fn test_lamports_per_base_zero_lamports() {
+    let result = lamports_per_base_to_sol_per_token(Decimal::ZERO, Some(9)).unwrap();
+    assert_eq!(result, Decimal::ZERO);
+}
+
+#[test]
+fn test_lamports_per_base_decimals_zero() {
+    let result = lamports_per_base_to_sol_per_token(Decimal::ONE, Some(0)).unwrap();
+    let expected = dec!(0.000000001);
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_lamports_per_base_decimals_19() {
+    // 10^19 raw units per base → 10^10 SOL per base (still fits u64).
+    let result = lamports_per_base_to_sol_per_token(Decimal::ONE, Some(19)).unwrap();
+    assert_eq!(result, dec!(10_000_000_000));
+}
+
+#[test]
+#[should_panic(expected = "attempt to multiply with overflow")]
+fn test_lamports_per_base_decimals_20_panics_in_debug() {
+    // 10u64.pow(20) overflows u64: panics in debug builds, silently wraps in
+    // release. Tokens can report up to 255 decimals on-chain, so this is a
+    // real (documented) footgun in the production helper.
+    let _ = lamports_per_base_to_sol_per_token(Decimal::ONE, Some(20)).unwrap();
 }

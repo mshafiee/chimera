@@ -3,6 +3,10 @@
 
 set -e
 
+# Resolve the script's own directory so it works from any CWD
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 echo "=========================================="
 echo "Scout Configuration Setup"
 echo "=========================================="
@@ -11,10 +15,15 @@ echo ""
 # Check if .env already exists
 if [ -f ".env" ]; then
     echo "⚠️  .env file already exists!"
-    read -p "Do you want to overwrite it? (y/N): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Keeping existing .env file"
+    if [ -t 0 ]; then
+        read -p "Do you want to overwrite it? (y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Keeping existing .env file"
+            exit 0
+        fi
+    else
+        echo "Non-interactive shell; keeping existing .env file"
         exit 0
     fi
 fi
@@ -22,6 +31,7 @@ fi
 # Create .env from example if it exists, otherwise create new
 if [ -f ".env.example" ]; then
     cp .env.example .env
+    chmod 600 .env
     echo "✓ Created .env from .env.example"
 else
     # Create basic .env file
@@ -120,6 +130,7 @@ CHIMERA_RPC__PRIMARY_URL=
 # Alternative: Solana RPC URL
 SOLANA_RPC_URL=
 EOF
+    chmod 600 .env
     echo "✓ Created new .env file"
 fi
 

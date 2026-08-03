@@ -467,24 +467,6 @@ def test_wqs_momentum_bonus_not_applied_when_both_roi_negative():
         f"Negative ROI pair must not get a momentum bonus: {score_neg} vs {score_none}"
     )
 
-    wallet_no_recent = WalletMetrics(
-        address="test_no_recent",
-        roi_30d=-50.0,
-        roi_7d=None,
-        win_streak_consistency=0.6,
-        trade_count_30d=25,
-        max_drawdown_30d=10.0,
-        last_trade_at=recent,
-    )
-
-    score_neg = calculate_wqs(wallet)
-    score_none = calculate_wqs(wallet_no_recent)
-
-    # Negative ROI wallet gets WMI penalty → should score <= wallet without roi_7d
-    assert score_neg <= score_none, (
-        f"Negative ROI pair must not get a momentum bonus: {score_neg} vs {score_none}"
-    )
-
 
 def test_wqs_profit_factor_single_win_heavily_penalized_by_confidence():
     """
@@ -696,15 +678,26 @@ def test_dust_trader_penalty_applies_below_0_05_sol():
     )
 
 
-def test_sniper_detection_below_30s_returns_zero():
-    """M3a: avg_entry_delay_seconds < 30 → immediate WQS=0 (not just penalized)."""
+def test_sniper_detection_below_10s_returns_zero():
+    """M3a: avg_entry_delay_seconds < 10 → immediate WQS=0 (not just penalized)."""
+    score = calculate_wqs(WalletMetrics(
+        address="sniper",
+        roi_30d=80.0, roi_7d=20.0, win_rate=0.9,
+        trade_count_30d=30, max_drawdown_30d=3.0,
+        avg_entry_delay_seconds=5.0,
+    ))
+    assert score == 0.0, f"Entry delay <10s must return WQS=0 (bot/sniper), got {score}"
+
+
+def test_sniper_detection_30s_applies_heavy_penalty():
+    """M3a': 10s <= delay < 60s → heavy penalty but NOT zero."""
     score = calculate_wqs(WalletMetrics(
         address="sniper",
         roi_30d=80.0, roi_7d=20.0, win_rate=0.9,
         trade_count_30d=30, max_drawdown_30d=3.0,
         avg_entry_delay_seconds=29.9,
     ))
-    assert score == 0.0, f"Entry delay <30s must return WQS=0 (bot/sniper), got {score}"
+    assert score > 0.0, f"29.9s delay must be penalized but not zero, got {score}"
 
 
 def test_sniper_detection_at_60s_applies_heavy_penalty():
@@ -808,13 +801,12 @@ def test_roi_momentum_bonus_requires_recent_trade_and_both_roi_positive():
     )
 
 
-def test_wqs_thin_history_roi_guard():
+def test_wqs_thin_history_roi_guard(monkeypatch):
     """The thin-history ROI guard must cap ROI contributions for wallets with
     few trades: a 1-trade wallet with astronomical ROI must not saturate the
     raw score (this was the scoring artifact that produced WQS 105 phantom
     wallets). With the same ROI, more trades => higher raw score."""
-    import os
-    os.environ["SCOUT_WQS_RECENCY_WEIGHT"] = "true"
+    monkeypatch.setenv("SCOUT_WQS_RECENCY_WEIGHT", "true")
 
     base = dict(
         roi_30d=5000.0,      # extreme ROI — would saturate roi_score to max
@@ -892,7 +884,6 @@ def test_wqs_gate_admission_nonzero_no_penalty():
 def test_wqs_gate_admission_thin_sample_no_penalty():
     """A wallet with fewer than MIN_ADMISSION_SAMPLE decisions must NOT be
     penalized — one or two monitored signals isn't a trustworthy verdict."""
-    from core.wqs import MIN_ADMISSION_SAMPLE
     w = WalletMetrics(
         address="thin_sample",
         roi_30d=50.0, roi_7d=30.0, trade_count_30d=20, win_rate=0.6,

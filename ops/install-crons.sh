@@ -100,55 +100,73 @@ install_crons() {
     
     # Create crontab entries
     local cron_file="/etc/cron.d/chimera"
+    local cron_content=""
     
-    cat > "$cron_file" << EOF
-# Chimera scheduled tasks
-# Managed by install-crons.sh - do not edit manually
-
-SHELL=/bin/bash
-PATH=/usr/local/bin:/usr/bin:/bin
-CHIMERA_HOME=$CHIMERA_HOME
-MAILTO=""
-
-# Daily backup at 3:00 AM
-0 3 * * * $CHIMERA_USER $CHIMERA_HOME/ops/backup.sh >> /var/log/chimera/backup.log 2>&1
-
-# Daily reconciliation at 4:00 AM
-0 4 * * * $CHIMERA_USER $CHIMERA_HOME/ops/reconcile.sh >> /var/log/chimera/reconcile.log 2>&1
-
-# Daily metrics update at 4:30 AM (after reconciliation)
-30 4 * * * $CHIMERA_USER $CHIMERA_HOME/ops/update-metrics.sh >> /var/log/chimera/metrics-update.log 2>&1
-
-# Daily ML model validation - 3:00 AM (automatic)
-0 3 * * * $CHIMERA_USER cd $CHIMERA_HOME/scout && python3 -m scout.scripts.run_validation --db-path $CHIMERA_HOME/data/chimera.db --time-window 7d >> /var/log/chimera/validation.log 2>&1
-
-# Weekly Scout run (update wallet roster) - Sundays at 2:00 AM
-# Uses locking to prevent overlap with twice-daily runs
-0 2 * * 0 $CHIMERA_USER cd $CHIMERA_HOME/scout && flock -n /tmp/scout_weekly.lock -c "python3 main.py --output $CHIMERA_HOME/data/roster_new.db >> /var/log/chimera/scout.log 2>&1" || echo "Scout weekly run skipped (already running)" >> /var/log/chimera/scout.log 2>&1
-
-# Scout run twice daily (every 12 hours) - 12:00 AM and 12:00 PM UTC
-# Uses locking to prevent overlap with weekly runs
-0 */12 * * * $CHIMERA_USER cd $CHIMERA_HOME/scout && flock -n /tmp/scout_daily.lock -c "python3 main.py --output $CHIMERA_HOME/data/roster_new.db >> /var/log/chimera/scout.log 2>&1" || echo "Scout daily run skipped (already running)" >> /var/log/chimera/scout.log 2>&1
-
-# Prune old Jito tip history (keep 7 days) - daily at 3:30 AM
-# PostgreSQL-only: runs against the Compose chimera-postgres container.
-30 3 * * * root docker exec chimera-postgres psql -U chimera -d chimera -c "DELETE FROM jito_tip_history WHERE created_at < NOW() - INTERVAL '7 days';" >> /var/log/chimera/db-maintenance.log 2>&1
-
-# Prune old dead letter queue entries (keep 30 days) - daily at 3:35 AM
-35 3 * * * root docker exec chimera-postgres psql -U chimera -d chimera -c "DELETE FROM dead_letter_queue WHERE received_at < NOW() - INTERVAL '30 days';" >> /var/log/chimera/db-maintenance.log 2>&1
-
-# Secret rotation check (webhook: every 30 days, RPC: every 90 days) - daily at 5:00 AM
-0 5 * * * $CHIMERA_USER $CHIMERA_HOME/ops/rotate-secrets.sh >> /var/log/chimera/secret-rotation.log 2>&1
-
-# Daily PnL summary report - daily at 8:00 PM UTC (20:00)
-0 20 * * * $CHIMERA_USER $CHIMERA_HOME/ops/generate-reports.sh --format=csv --period=1d --type=pnl >> /var/log/chimera/reports.log 2>&1
-
-# Weekly full compliance report - Sundays at 6:00 AM UTC
-0 6 * * 0 $CHIMERA_USER $CHIMERA_HOME/ops/generate-reports.sh --format=csv --period=7d --type=full >> /var/log/chimera/reports.log 2>&1
-
-# Monthly compliance package - 1st of month at 7:00 AM UTC
-0 7 1 * * $CHIMERA_USER $CHIMERA_HOME/ops/generate-reports.sh --format=csv --period=30d --type=full --package >> /var/log/chimera/reports.log 2>&1
-EOF
+    cron_content+="# Chimera scheduled tasks\n"
+    cron_content+="# Managed by install-crons.sh - do not edit manually\n\n"
+    cron_content+="SHELL=/bin/bash\n"
+    cron_content+="PATH=/usr/local/bin:/usr/bin:/bin\n"
+    cron_content+="CHIMERA_HOME=$CHIMERA_HOME\n"
+    cron_content+="MAILTO=\"\"\n\n"
+    
+    cron_content+="# Daily backup at 3:00 AM\n"
+    cron_content+="0 3 * * * $CHIMERA_USER $CHIMERA_HOME/ops/backup.sh >> /var/log/chimera/backup.log 2>&1\n\n"
+    
+    cron_content+="# Daily reconciliation at 4:00 AM\n"
+    cron_content+="0 4 * * * $CHIMERA_USER $CHIMERA_HOME/ops/reconcile.sh >> /var/log/chimera/reconcile.log 2>&1\n\n"
+    
+    # Only install cron entries for helper scripts that actually exist
+    if [[ -f "$OPS_DIR/update-metrics.sh" ]]; then
+        cron_content+="# Daily metrics update at 4:30 AM (after reconciliation)\n"
+        cron_content+="30 4 * * * $CHIMERA_USER $CHIMERA_HOME/ops/update-metrics.sh >> /var/log/chimera/metrics-update.log 2>&1\n\n"
+    else
+        log_warn "update-metrics.sh not found - skipping its cron job"
+    fi
+    
+    cron_content+="# Daily ML model validation - 3:00 AM (automatic)\n"
+    cron_content+="0 3 * * * $CHIMERA_USER cd $CHIMERA_HOME/scout && python3 -m scout.scripts.run_validation --db-path $CHIMERA_HOME/data/chimera.db --time-window 7d >> /var/log/chimera/validation.log 2>&1\n\n"
+    
+    # Scout runs: locks live in a chimera-owned directory (not world-writable /tmp),
+    # and lock contention (flock exit 1) is reported separately from other failures.
+    cron_content+="# Weekly Scout run (update wallet roster) - Sundays at 2:00 AM\n"
+    cron_content+="0 2 * * 0 $CHIMERA_USER bash -c 'cd \"$CHIMERA_HOME/scout\" || exit 3; flock -n \"$CHIMERA_HOME/data/scout_weekly.lock\" -c \"python3 main.py --output $CHIMERA_HOME/data/roster_new.db\" >> /var/log/chimera/scout.log 2>&1; rc=\$?; if [ \"\$rc\" -eq 1 ]; then echo \"Scout weekly run skipped (already running)\" >> /var/log/chimera/scout.log; exit 0; fi; exit \"\$rc\"'\n\n"
+    
+    cron_content+="# Scout run twice daily (every 12 hours) - 12:00 AM and 12:00 PM UTC\n"
+    cron_content+="0 */12 * * * $CHIMERA_USER bash -c 'cd \"$CHIMERA_HOME/scout\" || exit 3; flock -n \"$CHIMERA_HOME/data/scout_daily.lock\" -c \"python3 main.py --output $CHIMERA_HOME/data/roster_new.db\" >> /var/log/chimera/scout.log 2>&1; rc=\$?; if [ \"\$rc\" -eq 1 ]; then echo \"Scout daily run skipped (already running)\" >> /var/log/chimera/scout.log; exit 0; fi; exit \"\$rc\"'\n\n"
+    
+    # PostgreSQL-only maintenance jobs: only installed when the postgres
+    # container is actually detected at install time.
+    if command -v docker > /dev/null 2>&1 && docker ps -aq --filter "name=chimera-postgres" | grep -q .; then
+        cron_content+="# Prune old Jito tip history (keep 7 days) - daily at 3:30 AM\n"
+        cron_content+="30 3 * * * root docker exec chimera-postgres psql -U chimera -d chimera -c \"DELETE FROM jito_tip_history WHERE created_at < NOW() - INTERVAL '7 days';\" >> /var/log/chimera/db-maintenance.log 2>&1\n\n"
+        
+        cron_content+="# Prune old dead letter queue entries (keep 30 days) - daily at 3:35 AM\n"
+        cron_content+="35 3 * * * root docker exec chimera-postgres psql -U chimera -d chimera -c \"DELETE FROM dead_letter_queue WHERE received_at < NOW() - INTERVAL '30 days';\" >> /var/log/chimera/db-maintenance.log 2>&1\n\n"
+    else
+        log_warn "chimera-postgres container not detected - skipping PostgreSQL prune jobs"
+    fi
+    
+    if [[ -f "$OPS_DIR/rotate-secrets.sh" ]]; then
+        cron_content+="# Secret rotation check (webhook: every 30 days, RPC: every 90 days) - daily at 5:00 AM\n"
+        cron_content+="0 5 * * * $CHIMERA_USER $CHIMERA_HOME/ops/rotate-secrets.sh >> /var/log/chimera/secret-rotation.log 2>&1\n\n"
+    else
+        log_warn "rotate-secrets.sh not found - skipping its cron job"
+    fi
+    
+    if [[ -f "$OPS_DIR/generate-reports.sh" ]]; then
+        cron_content+="# Daily PnL summary report - daily at 8:00 PM UTC (20:00)\n"
+        cron_content+="0 20 * * * $CHIMERA_USER $CHIMERA_HOME/ops/generate-reports.sh --format=csv --period=1d --type=pnl >> /var/log/chimera/reports.log 2>&1\n\n"
+        
+        cron_content+="# Weekly full compliance report - Sundays at 6:00 AM UTC\n"
+        cron_content+="0 6 * * 0 $CHIMERA_USER $CHIMERA_HOME/ops/generate-reports.sh --format=csv --period=7d --type=full >> /var/log/chimera/reports.log 2>&1\n\n"
+        
+        cron_content+="# Monthly compliance package - 1st of month at 7:00 AM UTC\n"
+        cron_content+="0 7 1 * * $CHIMERA_USER $CHIMERA_HOME/ops/generate-reports.sh --format=csv --period=30d --type=full --package >> /var/log/chimera/reports.log 2>&1\n"
+    else
+        log_warn "generate-reports.sh not found - skipping its cron jobs"
+    fi
+    
+    printf '%b' "$cron_content" > "$cron_file"
     
     chmod 644 "$cron_file"
     log_info "Cron jobs installed at $cron_file"
@@ -229,7 +247,21 @@ uninstall() {
 # Main installation
 install() {
     log_info "Installing Chimera operations..."
-    
+
+    # Preflight: all unconditionally-copied files must exist before we mutate anything
+    local required_files=(
+        "$OPS_DIR/chimera.service"
+        "$OPS_DIR/logrotate.conf"
+        "$OPS_DIR/backup.sh"
+        "$OPS_DIR/reconcile.sh"
+    )
+    for f in "${required_files[@]}"; do
+        if [[ ! -f "$f" ]]; then
+            log_error "Required file missing: $f"
+            exit 1
+        fi
+    done
+
     create_user
     create_directories
     install_systemd

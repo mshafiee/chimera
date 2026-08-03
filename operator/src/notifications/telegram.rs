@@ -58,19 +58,25 @@ impl RateLimiter {
         }
     }
 
-    /// Check if we can send a message of this type
-    fn can_send(&self, key: &str) -> bool {
-        let last_sent = self.last_sent.read();
-        match last_sent.get(key) {
-            Some(last) => last.elapsed() >= self.interval,
-            None => true,
-        }
-    }
-
-    /// Mark a message type as sent
-    fn mark_sent(&self, key: &str) {
+    /// Atomically check the rate limit AND reserve the slot under a single
+    /// write lock. The slot stays reserved even if the send later fails, so an
+    /// API outage cannot turn into a request storm. Expired entries are pruned
+    /// lazily to bound the map size.
+    fn try_acquire(&self, key: &str) -> bool {
         let mut last_sent = self.last_sent.write();
-        last_sent.insert(key.to_string(), Instant::now());
+        let now = Instant::now();
+
+        if last_sent.len() > 1000 {
+            last_sent.retain(|_, last| now.saturating_duration_since(*last) < self.interval);
+        }
+
+        match last_sent.get(key) {
+            Some(last) if now.saturating_duration_since(*last) < self.interval => false,
+            _ => {
+                last_sent.insert(key.to_string(), now);
+                true
+            }
+        }
     }
 
     /// Get rate limit key for an event
@@ -160,7 +166,12 @@ impl TelegramNotifier {
             "disable_web_page_preview": true,
         });
 
-        let response = self.client.post(&url).json(&payload).send().await?;
+        let response = self.client.post(&url).json(&payload).send().await.map_err(|e| {
+            // reqwest errors embed the request URL, which contains the bot
+            // token — sanitize before the error can reach logs/metrics.
+            let sanitized = e.to_string().replace(&self.bot_token, "***");
+            anyhow::anyhow!("Telegram request failed: {}", sanitized)
+        })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -179,8 +190,19 @@ impl TelegramNotifier {
             AlertLevel::Info => "🔵 <b>INFO</b>",
         };
 
-        format!("{}\n\n{}", level_prefix, message)
+        // Event-derived text is inserted with parse_mode=HTML — escape markup
+        // so `<`, `>`, `&` in reasons/symbols/addresses cannot corrupt the
+        // message or inject formatting.
+        format!("{}\n\n{}", level_prefix, escape_html(message))
     }
+}
+
+/// Escape HTML markup characters for Telegram's HTML parse mode.
+fn escape_html(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 #[async_trait::async_trait]
@@ -190,9 +212,11 @@ impl NotificationService for TelegramNotifier {
             return Ok(());
         }
 
-        // Check rate limit (skip for critical alerts)
+        // Atomically check + reserve the rate-limit slot (skip for critical
+        // alerts). The slot is reserved even if the send later fails, so an
+        // API outage cannot produce a request storm.
         let rate_key = RateLimiter::get_key(event);
-        if event.level() != AlertLevel::Critical && !self.rate_limiter.can_send(&rate_key) {
+        if event.level() != AlertLevel::Critical && !self.rate_limiter.try_acquire(&rate_key) {
             tracing::debug!(
                 key = %rate_key,
                 "Rate limited, skipping notification"
@@ -205,7 +229,6 @@ impl NotificationService for TelegramNotifier {
         let formatted = self.format_with_level(level, &message);
 
         self.send_message(&formatted).await?;
-        self.rate_limiter.mark_sent(&rate_key);
 
         tracing::info!(
             level = %level,
@@ -229,15 +252,14 @@ mod tests {
     fn test_rate_limiter() {
         let limiter = RateLimiter::new(1); // 1 second limit
 
-        // First send should be allowed
-        assert!(limiter.can_send("test"));
-        limiter.mark_sent("test");
+        // First send should be allowed (and reserves the slot)
+        assert!(limiter.try_acquire("test"));
 
         // Immediate second send should be blocked
-        assert!(!limiter.can_send("test"));
+        assert!(!limiter.try_acquire("test"));
 
         // Different key should be allowed
-        assert!(limiter.can_send("other"));
+        assert!(limiter.try_acquire("other"));
     }
 
     #[test]

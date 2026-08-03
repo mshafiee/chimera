@@ -730,7 +730,7 @@ impl WebhookLifecycleManager {
         // Find missing webhooks (in DB but not in Helius)
         let mut missing_wallets: Vec<String> = db_webhooks
             .iter()
-            .filter(|dw| dw.monitoring_enabled == 1 && dw.helius_webhook_id.is_none())
+            .filter(|dw| dw.monitoring_enabled && dw.helius_webhook_id.is_none())
             .map(|dw| dw.wallet_address.clone())
             .collect();
 
@@ -765,7 +765,7 @@ impl WebhookLifecycleManager {
     let recovery_wallets: Vec<String> = db_webhooks
         .iter()
         .filter(|dw| {
-            dw.monitoring_enabled == 1
+            dw.monitoring_enabled
                 && dw.helius_webhook_id.is_some()
                 && (dw.webhook_health_status.as_deref() == Some("unhealthy")
                     || dw.webhook_status.as_deref() == Some("paused")

@@ -1,5 +1,3 @@
-from datetime import datetime, timedelta
-from scout.core.models import WalletRecord, HistoricalTrade, TradeAction
 from scout.core.wqs import WalletMetrics, calculate_wqs
 
 def test_ranking():
@@ -38,15 +36,5 @@ def test_ranking():
     print(f"Smart Money Score: {score_smart}")
     
     # We expect Sniper to be 0.0 and Smart Money to be high
-    if score_sniper == 0.0:
-        print("PASS: Sniper Killed (0.0).")
-    else:
-        print(f"FAIL: Sniper survived with score {score_sniper}")
-        
-    if score_smart > 50.0:
-        print("PASS: Smart Money scored high.")
-    else:
-        print(f"FAIL: Smart Money score too low {score_smart}")
-
-if __name__ == "__main__":
-    test_ranking()
+    assert score_sniper == 0.0, f"Sniper survived with score {score_sniper}"
+    assert score_smart > 50.0, f"Smart Money score too low {score_smart}"

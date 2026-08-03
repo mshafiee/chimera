@@ -1,5 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const baseURL = process.env.BASE_URL ?? 'http://localhost:5173';
+const isCI = !!process.env.CI;
+const workers = process.env.PLAYWRIGHT_WORKERS ? Number(process.env.PLAYWRIGHT_WORKERS) : isCI ? 1 : undefined;
+
 /**
  * Playwright configuration for Chimera Dashboard E2E tests.
  * @see https://playwright.dev/docs/test-configuration
@@ -11,13 +15,13 @@ export default defineConfig({
   fullyParallel: true,
   
   /* Fail the build on CI if you accidentally left test.only in the source code */
-  forbidOnly: !!process.env.CI,
+  forbidOnly: isCI,
   
   /* Retry on CI only */
-  retries: process.env.CI ? 2 : 0,
+  retries: isCI ? 2 : 0,
   
-  /* Opt out of parallel tests on CI */
-  workers: process.env.CI ? 1 : undefined,
+  /* Worker count is configurable; CI defaults to 1 */
+  workers,
   
   /* Reporter to use */
   reporter: [
@@ -28,10 +32,10 @@ export default defineConfig({
   /* Shared settings for all the projects below */
   use: {
     /* Base URL to use in actions like `await page.goto('/')` */
-    baseURL: 'http://localhost:5173',
+    baseURL,
 
-    /* Collect trace when retrying the failed test */
-    trace: 'on-first-retry',
+    /* Collect trace on retry on CI; retain traces for local failures */
+    trace: isCI ? 'on-first-retry' : 'retain-on-failure',
     
     /* Screenshot on failure */
     screenshot: 'only-on-failure',
@@ -53,12 +57,13 @@ export default defineConfig({
     },
   ],
 
-  /* Run your local dev server before starting the tests */
+  /* Run your local dev server before starting the tests.
+     Always start a fresh server by default so tests never run against a stale
+     process; opt in to reuse with REUSE_EXISTING_SERVER=true. */
   webServer: {
     command: 'npm run dev',
-    url: 'http://localhost:5173',
-    reuseExistingServer: !process.env.CI,
+    url: baseURL,
+    reuseExistingServer: process.env.REUSE_EXISTING_SERVER === 'true',
     timeout: 120 * 1000,
   },
 });
-

@@ -65,8 +65,8 @@ class TestWQSBaseScore:
             max_drawdown_30d=5.0,  # Should subtract 5 * 0.2 = 1 point
             avg_trade_size_sol=Decimal('0.5'),
             last_trade_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
-            win_streak_consistency=0.5,  # Should add +5 points
-            profit_factor=1.5,  # +5 points — avoid -20 unproven penalty
+            win_streak_consistency=0.5,  # Flat +5 (streak component > 0.4)
+            profit_factor=1.5,  # Falls in the >= 1.2 band (+2); unproven penalty is off by default
         )
         
         score = calculate_wqs(metrics)
@@ -80,6 +80,7 @@ class TestWQSBaseScore:
     
     def test_wqs_with_negative_roi(self):
         """Test that negative ROI doesn't add to score."""
+        from datetime import datetime, timezone, timedelta
         metrics = WalletMetrics(
             address="test",
             roi_7d=-10.0,
@@ -88,8 +89,8 @@ class TestWQSBaseScore:
             win_rate=0.4,
             max_drawdown_30d=10.0,  # Should subtract 10 * 0.2 = 2 points
             avg_trade_size_sol=Decimal('0.5'),
-            last_trade_at="2025-01-01T00:00:00",
-            win_streak_consistency=0.3,  # Should add 0.3 * 20 = 6 points
+            last_trade_at=(datetime.now(timezone.utc) - timedelta(days=30)).isoformat(),
+            win_streak_consistency=0.3,  # Grants +5 only when > 0.4 (flat); 0.3 adds 0
         )
         
         score = calculate_wqs(metrics)

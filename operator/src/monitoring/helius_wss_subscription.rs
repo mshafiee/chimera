@@ -14,9 +14,11 @@ use crate::db_abstraction::Database;
 /// Subscription manager for Helius WebSocket
 pub struct SubscriptionManager {
     db: Arc<dyn Database>,
+    #[allow(dead_code)] // Retained for future real WebSocket connection management
     websocket_url: String,
     commitment: String,
     subscribed_wallets: Arc<RwLock<HashSet<String>>>,
+    #[allow(dead_code)] // Retained for future subscription-id tracking
     subscription_ids: Arc<RwLock<Vec<u64>>>,
 }
 

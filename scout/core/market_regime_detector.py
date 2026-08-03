@@ -53,6 +53,9 @@ class RegimeTransition(Enum):
     BEAR_TO_VOLATILE = "bear_to_volatile"
     VOLATILE_TO_BULL = "volatile_to_bull"
     VOLATILE_TO_BEAR = "volatile_to_bear"
+    NEUTRAL_TO_BULL = "neutral_to_bull"
+    NEUTRAL_TO_BEAR = "neutral_to_bear"
+    NEUTRAL_TO_VOLATILE = "neutral_to_volatile"
     TO_NEUTRAL = "to_neutral"        # Uncertain conditions
 
 
@@ -106,12 +109,12 @@ class RegimeConfig:
     VOLATILITY_THRESHOLD: float = 0.10       # 10% daily volatility
     HIGH_VOLATILITY_THRESHOLD: float = 0.15   # 15% volatility
 
-    # Feature weights for classification
-    WEIGHT_MOMENTUM: float = 0.35
-    WEIGHT_VOLATILITY: float = 0.25
-    WEIGHT_VOLUME: float = 0.15
-    WEIGHT_BREADTH: float = 0.15
-    WEIGHT_TPS: float = 0.10
+    # Feature weights for classification. Breadth/TPS features are not yet
+    # wired into the classifier (no external data source), so the remaining
+    # weights are renormalized to sum to 1.0.
+    WEIGHT_MOMENTUM: float = 0.47
+    WEIGHT_VOLATILITY: float = 0.33
+    WEIGHT_VOLUME: float = 0.20
 
     # Transition confidence threshold
     TRANSITION_CONFIDENCE: float = 0.7  # 70% confidence for regime change
@@ -133,7 +136,9 @@ class MarketRegimeDetector:
         self._config = config or RegimeConfig()
         self._current_regime = MarketRegime.NEUTRAL
         self._regime_history: List[Tuple[float, MarketRegime]] = []
-        self._lock = threading.Lock()
+        # RLock: detect_regime holds the lock while calling update_price/
+        # update_volume, so the mutation paths must be reentrant-safe
+        self._lock = threading.RLock()
 
         # Price history for momentum/volatility calculation
         self._price_history: List[Tuple[float, float]] = []  # (timestamp, price)
@@ -149,22 +154,24 @@ class MarketRegimeDetector:
         if timestamp is None:
             timestamp = time.time()
 
-        self._price_history.append((timestamp, price))
+        with self._lock:
+            self._price_history.append((timestamp, price))
 
-        # Keep only recent history (1 week)
-        cutoff = timestamp - (self._config.PRICE_LOOKBACK_LONG * 3600)
-        self._price_history = [(t, p) for t, p in self._price_history if t > cutoff]
+            # Keep only recent history (1 week)
+            cutoff = timestamp - (self._config.PRICE_LOOKBACK_LONG * 3600)
+            self._price_history = [(t, p) for t, p in self._price_history if t > cutoff]
 
     def update_volume(self, volume: float, timestamp: Optional[float] = None):
         """Update volume history."""
         if timestamp is None:
             timestamp = time.time()
 
-        self._volume_history.append((timestamp, volume))
+        with self._lock:
+            self._volume_history.append((timestamp, volume))
 
-        # Keep only recent history (1 day)
-        cutoff = timestamp - (24 * 3600)
-        self._volume_history = [(t, v) for t, v in self._volume_history if t > cutoff]
+            # Keep only recent history (1 day)
+            cutoff = timestamp - (24 * 3600)
+            self._volume_history = [(t, v) for t, v in self._volume_history if t > cutoff]
 
     def calculate_momentum(self, lookback_hours: int = 24) -> float:
         """Calculate SOL price momentum over lookback period."""
@@ -213,7 +220,14 @@ class MarketRegimeDetector:
         avg_return = sum(returns) / len(returns)
         variance = sum((r - avg_return) ** 2 for r in returns) / len(returns)
 
-        return (variance ** 0.5) * (24 ** 0.5)  # Annualize to daily
+        # Scale to a daily figure using the ACTUAL average sampling interval
+        # (sqrt(24) assumed exactly hourly data, which real feeds rarely are).
+        timestamps = [t for t, _ in recent_prices]
+        intervals = [timestamps[i] - timestamps[i - 1] for i in range(1, len(timestamps))]
+        avg_interval_hours = (sum(intervals) / len(intervals) / 3600.0) if intervals else 1.0
+        avg_interval_hours = max(avg_interval_hours, 1e-6)
+
+        return (variance ** 0.5) * (avg_interval_hours ** 0.5)
 
     def calculate_volume_ratio(self) -> float:
         """Calculate current volume vs average volume ratio."""
@@ -287,6 +301,23 @@ class MarketRegimeDetector:
         else:
             scores[MarketRegime.NEUTRAL] += self._config.WEIGHT_VOLUME
 
+        # Breadth score (wired from features; neutral placeholder 0.5
+        # contributes to NEUTRAL, so the configured weight is honored)
+        if features.market_breadth > 0.6:
+            scores[MarketRegime.BULL] += self._config.WEIGHT_BREADTH
+        elif features.market_breadth < 0.4:
+            scores[MarketRegime.BEAR] += self._config.WEIGHT_BREADTH
+        else:
+            scores[MarketRegime.NEUTRAL] += self._config.WEIGHT_BREADTH
+
+        # Network TPS score (placeholder 0.0 stays neutral until real data)
+        if features.network_tps > 5000:
+            scores[MarketRegime.VOLATILE] += self._config.WEIGHT_TPS
+        elif features.network_tps > 0:
+            scores[MarketRegime.NEUTRAL] += self._config.WEIGHT_TPS
+        else:
+            scores[MarketRegime.NEUTRAL] += self._config.WEIGHT_TPS
+
         # Normalize scores
         total_score = sum(scores.values())
         if total_score > 0:
@@ -339,9 +370,9 @@ class MarketRegimeDetector:
                 MarketRegime.NEUTRAL: RegimeTransition.TO_NEUTRAL,
             },
             MarketRegime.NEUTRAL: {
-                MarketRegime.BULL: RegimeTransition.TO_NEUTRAL,
-                MarketRegime.BEAR: RegimeTransition.TO_NEUTRAL,
-                MarketRegime.VOLATILE: RegimeTransition.TO_NEUTRAL,
+                MarketRegime.BULL: RegimeTransition.NEUTRAL_TO_BULL,
+                MarketRegime.BEAR: RegimeTransition.NEUTRAL_TO_BEAR,
+                MarketRegime.VOLATILE: RegimeTransition.NEUTRAL_TO_VOLATILE,
             },
         }
 
@@ -406,8 +437,13 @@ class MarketRegimeDetector:
                     logger.info(f"  Confidence: {classification.confidence*100:.0f}%")
                     logger.info(f"  Reason: {classification.reason}")
 
-            # Record in history
-            self._regime_history.append((classification.timestamp, classification.regime))
+            # Record in history. Low-confidence classifications are recorded
+            # as the EFFECTIVE (persisted) regime so the history matches
+            # get_current_regime().
+            effective_regime = self._current_regime
+            if classification.confidence >= self._config.TRANSITION_CONFIDENCE:
+                effective_regime = classification.regime
+            self._regime_history.append((classification.timestamp, effective_regime))
 
             # Keep only recent history (7 days)
             cutoff = time.time() - (7 * 24 * 3600)
@@ -419,6 +455,14 @@ class MarketRegimeDetector:
         """Get current market regime."""
         with self._lock:
             return self._current_regime
+
+    def get_regime_history(self, max_entries: Optional[int] = None) -> List[Tuple[float, MarketRegime]]:
+        """Get the recent regime history (timestamp, regime) pairs."""
+        with self._lock:
+            history = list(self._regime_history)
+        if max_entries is not None:
+            history = history[-max_entries:]
+        return history
 
     def get_regime_summary(self, classification: RegimeClassification) -> Dict[str, Any]:
         """Get summary of regime classification."""

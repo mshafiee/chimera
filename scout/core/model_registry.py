@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import shutil
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -100,6 +101,7 @@ class ModelRegistry:
 
         # A/B test tracking
         self.ab_tests = {}
+        self._ab_lock = threading.Lock()
         self._load_ab_tests()
 
     def _load_index(self) -> Dict[str, Any]:
@@ -241,12 +243,15 @@ class ModelRegistry:
         Returns:
             ModelMetadata object or None
         """
-        if version is None:
+        if version is None or version == 'latest':
             version = self.index.get('default_versions', {}).get(model_name)
             if version is None:
-                # Get latest version
+                # Get latest version (skip non-version keys like rollback refs)
                 if model_name in self.index.get('models', {}):
-                    versions = list(self.index['models'][model_name].keys())
+                    versions = [
+                        v for v in self.index['models'][model_name].keys()
+                        if v != 'rollback_version'
+                    ]
                     if versions:
                         version = versions[-1]
 
@@ -296,16 +301,20 @@ class ModelRegistry:
         # Set as default
         self.index['default_versions'][model_name] = version
 
-        # Save rollback info
+        # Save rollback info outside the version dict so it can never be
+        # mistaken for a model version
         if rollback_version:
-            self.index['models'][model_name]['rollback_version'] = rollback_version
-
-        self._save_index()
+            self.index.setdefault('rollback_versions', {})[model_name] = rollback_version
 
         # Update metadata file
         metadata_file = self.metadata_dir / f"{model_name}_{version.replace('.', '_')}.json"
         with open(metadata_file, 'w') as f:
             json.dump(asdict(metadata), f, indent=2)
+
+        # Sync the per-version status in the index
+        if model_name in self.index.get('models', {}) and version in self.index['models'][model_name]:
+            self.index['models'][model_name][version]['status'] = ModelStatus.PRODUCTION.value
+        self._save_index()
 
         logger.info(f"Promoted {model_name} v{version} to production")
         return True
@@ -326,7 +335,9 @@ class ModelRegistry:
             True if successful
         """
         if target_version is None:
-            target_version = self.index.get('models', {}).get(model_name, {}).get('rollback_version')
+            target_version = self.index.get('rollback_versions', {}).get(model_name)
+            if target_version is None:
+                target_version = self.index.get('models', {}).get(model_name, {}).get('rollback_version')
 
         if not target_version:
             logger.error(f"No rollback version configured for: {model_name}")
@@ -340,6 +351,14 @@ class ModelRegistry:
         # Set as default and production
         metadata.status = ModelStatus.PRODUCTION.value
         self.index['default_versions'][model_name] = target_version
+        if model_name in self.index.get('models', {}) and target_version in self.index['models'][model_name]:
+            self.index['models'][model_name][target_version]['status'] = metadata.status
+
+        # Persist the status change to the metadata file so on-disk state
+        # matches the index
+        metadata_file = self.metadata_dir / f"{model_name}_{target_version.replace('.', '_')}.json"
+        with open(metadata_file, 'w') as f:
+            json.dump(asdict(metadata), f, indent=2)
 
         self._save_index()
 
@@ -372,6 +391,14 @@ class ModelRegistry:
 
         if not metadata_a or not metadata_b:
             logger.error("One or both models not found for A/B test")
+            return False
+
+        # Validate traffic split and duration
+        if not (0.0 <= traffic_split <= 1.0):
+            logger.error(f"Invalid traffic_split: {traffic_split} (must be 0-1)")
+            return False
+        if duration_days <= 0:
+            logger.error(f"Invalid duration_days: {duration_days} (must be > 0)")
             return False
 
         # Store A/B test configuration
@@ -413,29 +440,49 @@ class ModelRegistry:
             Tuple of (version, group)
         """
         test_key = f"{model_name}_ab_test"
-        test = self.ab_tests.get(test_key)
 
-        if not test or test.get('status') != 'active':
-            # No active A/B test, use default
-            default_version = self.index.get('default_versions', {}).get(model_name)
-            return (default_version or 'latest', 'default')
+        with self._ab_lock:
+            test = self.ab_tests.get(test_key)
 
-        # Hash-based assignment
-        hash_val = int(hashlib.sha256(sample_id.encode()).hexdigest(), 16) % 100
-        threshold = test['traffic_split'] * 100
+            if not test or test.get('status') != 'active':
+                # No active A/B test, use default
+                default_version = self.index.get('default_versions', {}).get(model_name)
+                return (default_version or 'latest', 'default')
 
-        if hash_val < threshold:
-            version = test['version_b']
-            group = 'B'
-        else:
-            version = test['version_a']
-            group = 'A'
+            # Expired tests stop receiving traffic (auto-marked completed)
+            end_date = test.get('end_date')
+            if end_date:
+                try:
+                    if datetime.fromisoformat(end_date) < datetime.utcnow():
+                        test['status'] = 'completed'
+                        self._save_ab_tests()
+                        default_version = self.index.get('default_versions', {}).get(model_name)
+                        return (default_version or 'latest', 'default')
+                except ValueError:
+                    pass
 
-        # Track metrics
-        test['metrics'][f'version_{group.lower()}_requests'] += 1
-        self._save_ab_tests()
+            # Hash-based assignment
+            hash_val = int(hashlib.sha256(sample_id.encode()).hexdigest(), 16) % 100
+            threshold = test['traffic_split'] * 100
 
-        return (version, group)
+            if hash_val < threshold:
+                version = test['version_b']
+                group = 'B'
+            else:
+                version = test['version_a']
+                group = 'A'
+
+            # Track metrics (in-memory; persist periodically to avoid a disk
+            # write on every request)
+            test['metrics'][f'version_{group.lower()}_requests'] += 1
+            total_requests = (
+                test['metrics'].get('version_a_requests', 0) +
+                test['metrics'].get('version_b_requests', 0)
+            )
+            if total_requests % 100 == 0:
+                self._save_ab_tests()
+
+            return (version, group)
 
     def list_models(
         self,
@@ -541,9 +588,16 @@ class ModelRegistry:
             metadata_file = self.metadata_dir / f"{model_name}_{version.replace('.', '_')}.json"
             os.remove(metadata_file)
 
-            # Update index
+            # Update index (also clear default/rollback references pointing at
+            # the deleted version so lookups don't resolve to a dead entry)
             if model_name in self.index.get('models', {}) and version in self.index['models'][model_name]:
                 del self.index['models'][model_name][version]
+                if self.index.get('default_versions', {}).get(model_name) == version:
+                    del self.index['default_versions'][model_name]
+                if self.index.get('rollback_versions', {}).get(model_name) == version:
+                    del self.index['rollback_versions'][model_name]
+                if self.index['models'][model_name].get('rollback_version') == version:
+                    del self.index['models'][model_name]['rollback_version']
 
             self._save_index()
 
@@ -591,5 +645,3 @@ def get_model_registry() -> ModelRegistry:
     if _global_registry is None:
         _global_registry = ModelRegistry()
     return _global_registry
-
-# Import timedelta for A/B test

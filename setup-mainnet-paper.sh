@@ -67,6 +67,7 @@ log_info "Checking for running devnet services..."
 if docker ps --format "{{.Names}}" | grep -q "chimera-"; then
     log_warning "Found running Chimera services. Stopping..."
     ./docker/docker-compose.sh stop devnet 2>/dev/null || true
+    ./docker/docker-compose.sh stop mainnet-paper 2>/dev/null || true
     sleep 2
     log_success "Services stopped"
 else
@@ -104,7 +105,9 @@ if ! check_helius_key; then
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         read -p "Enter your Helius API key: " HELIUS_KEY
         if [ -n "$HELIUS_KEY" ]; then
-            sed -i.bak "s/YOUR_HELIUS_API_KEY/$HELIUS_KEY/g" "$ENV_FILE"
+            KEY_ESCAPED=$(printf '%s' "$HELIUS_KEY" | sed 's/[&/\]/\\&/g')
+            sed -i.bak "s/YOUR_HELIUS_API_KEY/$KEY_ESCAPED/g" "$ENV_FILE"
+            rm -f "$ENV_FILE.bak"
             log_success "Helius API key configured"
         else
             log_error "No API key provided"
@@ -124,6 +127,7 @@ if grep -q "mainnet-paper-webhook-secret-change-me" "$ENV_FILE" 2>/dev/null; the
     log_info "Generating secure webhook secret..."
     NEW_SECRET=$(openssl rand -hex 32)
     sed -i.bak "s/mainnet-paper-webhook-secret-change-me/$NEW_SECRET/g" "$ENV_FILE"
+    rm -f "$ENV_FILE.bak"
     log_success "Webhook secret generated"
 else
     log_success "Webhook secret already configured"
@@ -160,12 +164,13 @@ log_section "Step 6: Verifying Services"
 # Check operator health
 log_info "Checking operator health..."
 for i in {1..6}; do
-    if curl -s http://localhost:8080/api/v1/health > /dev/null 2>&1; then
+    if curl -sf --max-time 5 http://localhost:8080/api/v1/health > /dev/null 2>&1; then
         log_success "Operator is healthy"
         break
     else
         if [ $i -eq 6 ]; then
-            log_warning "Operator health check failed (may still be starting)"
+            log_error "Operator did not become healthy after 30 seconds"
+            exit 1
         else
             log_info "Waiting for operator... ($i/6)"
             sleep 5

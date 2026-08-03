@@ -6,6 +6,9 @@
 #[path = "unit/circuit_breaker_tests.rs"]
 mod circuit_breaker_tests;
 
+#[path = "unit/jito_tests.rs"]
+mod jito_tests;
+
 #[path = "unit/state_machine_tests.rs"]
 mod state_machine_tests;
 
@@ -44,7 +47,9 @@ mod position_sizer_tests;
 #[path = "unit/circuit_breaker_real_tests.rs"]
 mod circuit_breaker_real_tests;
 
-// ── Fix-verification tests: assert CORRECT behavior (fail until bugs are fixed) ──
+// ── Fix-verification tests: assert CORRECT (post-fix) behavior; a failure
+//    here means a previously-fixed bug (F3/F7 hard-stop sign, F4 trailing-stop
+//    ratchet, F6 silent status update) has regressed ──────────────────────────
 
 #[path = "unit/fix_verification_tests.rs"]
 mod fix_verification_tests;
@@ -70,3 +75,6 @@ mod tiered_polling_tests;
 
 #[path = "unit/helius_rpc_verify_tests.rs"]
 mod helius_rpc_verify_tests;
+
+#[path = "unit/webhook_restoration_tests.rs"]
+mod webhook_restoration_tests;

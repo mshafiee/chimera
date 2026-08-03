@@ -1,9 +1,9 @@
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../ui/Table'
 import { Badge } from '../ui/Badge'
-import type { SignalAggregationResponse } from '../../api'
+import type { ConsensusSignalAggregationResponse } from '../../api'
 
 interface SignalAggregationViewProps {
-  data: SignalAggregationResponse
+  data: ConsensusSignalAggregationResponse
 }
 
 const ACTION_CONFIG = {

@@ -1,11 +1,10 @@
 //! End-to-End Position Lifecycle Integration Tests
 //!
 //! Validates that the critical financial flows complete correctly:
-//! - Duplicate BUY creates only one position (idempotency)
+//! - Duplicate BUY creates only one trade row + one position (UNIQUE constraint)
 //! - SELL with no matching position is a no-op (not an error)
-//! - PnL accuracy when fees are included
-//! - Circuit-breaker trip blocks new trades at DB level
-//! - Closing an already-CLOSED position is idempotent
+//! - PnL accuracy when fees are included (A1 cost model)
+//! - Status transition correctness and FAILED → RETRY → EXECUTING
 
 use chimera_operator::db_abstraction::{Database, InsertTrade, UpdateTradeStatus};
 use rust_decimal::Decimal;
@@ -21,7 +20,7 @@ fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
+async fn create_test_db() -> (Arc<dyn Database>, crate::common::TestDbGuard) {
     crate::common::create_test_pg_db().await
 }
 
@@ -29,8 +28,10 @@ async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
 
 #[tokio::test]
 async fn test_duplicate_buy_uuid_idempotency() {
-    // Two BUY signals with the same trade_uuid must result in exactly one trade row
-    // (UNIQUE constraint on trades.trade_uuid) and one position.
+    // Two BUY signals with the same trade_uuid: the UNIQUE constraint on
+    // trades.trade_uuid rejects the second insert with an error (callers must
+    // swallow the error on retry — this is NOT an idempotent no-op), and
+    // exactly one trade row + one position must exist.
 
     let (db, _tmp) = create_test_db().await;
     let pool = pg_pool(&db);
@@ -92,6 +93,17 @@ async fn test_duplicate_buy_uuid_idempotency() {
         pos_count.0, 1,
         "Exactly one position must exist for a duplicated trade_uuid"
     );
+
+    // And exactly one trade row
+    let trade_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM trades WHERE trade_uuid = $1")
+        .bind(uuid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        trade_count.0, 1,
+        "Exactly one trade row must exist for a duplicated trade_uuid"
+    );
 }
 
 // ─── Test 88 (plan) ── SELL with no active position is a no-op ───────────────
@@ -134,6 +146,17 @@ async fn test_close_position_no_active_position_is_noop() {
         pos_count.0, 0,
         "No positions should exist after close on empty DB"
     );
+
+    // The documented invariant also covers trades: no trade record is created
+    // by the no-op close path.
+    let trade_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM trades")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        trade_count.0, 0,
+        "No trade rows should exist after close on empty DB"
+    );
 }
 
 // ─── Test 92 (plan) ── PnL accuracy with fees ─────────────────────────────────
@@ -142,18 +165,22 @@ async fn test_close_position_no_active_position_is_noop() {
 async fn test_pnl_calculation_accuracy_with_fees() {
     // Scenario: BUY 1 SOL at $100. SELL at $110.
     // Gross PnL: (110 - 100) / 100 × 1 SOL = +0.1 SOL
-    // Fees: 0.001 SOL Jito tip + 0.0005 SOL DEX fee + 0.0002 SOL slippage = 0.0017 SOL
-    // Net PnL = 0.1 - 0.0017 = 0.0983 SOL
     //
-    // This test validates that close_position() calculates gross PnL correctly.
-    // Fee deduction is done separately via update_trade_costs + close_position_full.
+    // Costs are recorded on the trade rows BEFORE the close (the production
+    // order), so `close_position_full` computes and persists the net PnL
+    // itself using the A1 cost model: net = gross − entry tips − entry network
+    // fees − exit tips − exit network fees (DEX fee and slippage are
+    // attribution-only and are NOT subtracted a second time).
+    //
+    // Entry tip 0.001 + exit tip 0.001, no network fees: net = 0.1 − 0.002 = 0.098.
 
     let (db, _tmp) = create_test_db().await;
     let pool = pg_pool(&db);
-    let uuid = "uuid-pnl-fees";
+    let entry_uuid = "uuid-pnl-fees";
+    let exit_uuid = "uuid-pnl-fees-exit";
 
     db.insert_trade(&InsertTrade {
-        trade_uuid: uuid.to_string(),
+        trade_uuid: entry_uuid.to_string(),
         wallet_address: "wallet_f".to_string(),
         token_address: "token_f".to_string(),
         token_symbol: Some("F".to_string()),
@@ -165,7 +192,7 @@ async fn test_pnl_calculation_accuracy_with_fees() {
     .await
     .unwrap();
     db.activate_trade_and_open_position(
-        uuid,
+        entry_uuid,
         "wallet_f",
         "token_f",
         Some("F"),
@@ -179,9 +206,42 @@ async fn test_pnl_calculation_accuracy_with_fees() {
     .await
     .unwrap();
 
-    // Sell at $110
+    // Entry costs (on the BUY trade row).
+    db.update_trade_costs(
+        entry_uuid,
+        Decimal::from_str("0.001").unwrap(),  // Jito tip
+        Decimal::from_str("0.0005").unwrap(), // DEX fee (attribution only)
+        Decimal::from_str("0.0002").unwrap(), // slippage (attribution only)
+    )
+    .await
+    .unwrap();
+
+    // The SELL trade row carries the exit-side costs (the production flow).
+    db.insert_trade(&InsertTrade {
+        trade_uuid: exit_uuid.to_string(),
+        wallet_address: "wallet_f".to_string(),
+        token_address: "token_f".to_string(),
+        token_symbol: Some("F".to_string()),
+        strategy: "EXIT".to_string(),
+        side: "SELL".to_string(),
+        amount_sol: Decimal::from_str("1.0").unwrap(),
+        status: "EXITING".to_string(),
+    })
+    .await
+    .unwrap();
+    db.update_trade_costs(
+        exit_uuid,
+        Decimal::from_str("0.001").unwrap(), // exit Jito tip
+        Decimal::from_str("0.0005").unwrap(), // exit DEX fee (attribution only)
+        Decimal::from_str("0.0002").unwrap(), // exit slippage (attribution only)
+    )
+    .await
+    .unwrap();
+
+    // Sell at $110 (passing the EXIT trade uuid — its row supplies the
+    // exit-side costs).
     db.close_position_full(
-        uuid,
+        exit_uuid,
         "wallet_f",
         "token_f",
         Decimal::from_str("110.0").unwrap(),
@@ -193,54 +253,36 @@ async fn test_pnl_calculation_accuracy_with_fees() {
     .await
     .unwrap();
 
-    let (realized_pnl,): (f64,) = sqlx::query_as(
-        "SELECT COALESCE(realized_pnl_sol, 0)::FLOAT8 FROM positions WHERE trade_uuid = $1",
+    let (realized_pnl, realized_net_pnl): (Decimal, Decimal) = sqlx::query_as(
+        "SELECT COALESCE(realized_pnl_sol, 0), COALESCE(realized_net_pnl_sol, 0) \
+         FROM positions WHERE trade_uuid = $1",
     )
-    .bind(uuid)
+    .bind(entry_uuid)
     .fetch_one(&pool)
     .await
     .unwrap();
 
-    // Expected: (110 - 100) / 100 × 1.0 = +0.1 SOL
-    assert!(
-        (realized_pnl - 0.1).abs() < 1e-9,
-        "Gross PnL should be +0.1 SOL, got {}",
-        realized_pnl
+    // Expected: (110 - 100) / 100 × 1.0 = +0.1 SOL gross, exactly.
+    assert_eq!(
+        realized_pnl, Decimal::from_str("0.1").unwrap(),
+        "Gross PnL should be exactly +0.1 SOL"
+    );
+    // A1: net = gross − entry tip − exit tip = 0.1 − 0.002.
+    assert_eq!(
+        realized_net_pnl, Decimal::from_str("0.098").unwrap(),
+        "Net PnL after fees should be exactly +0.098 SOL (A1 cost model)"
     );
 
-    // Apply fees and net PnL
-    db.update_trade_costs(
-        uuid,
-        Decimal::from_str("0.001").unwrap(),  // Jito tip
-        Decimal::from_str("0.0005").unwrap(), // DEX fee
-        Decimal::from_str("0.0002").unwrap(), // slippage
-    )
-    .await
-    .unwrap();
-
-    let gross = Decimal::from_str("0.1").unwrap();
-    let fees = Decimal::from_str("0.0017").unwrap();
-    let net = gross - fees;
-
-    sqlx::query("UPDATE trades SET net_pnl_sol = $1 WHERE trade_uuid = $2")
-        .bind(net)
-        .bind(uuid)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-    let (net_stored,): (f64,) = sqlx::query_as(
-        "SELECT COALESCE(net_pnl_sol, 0)::FLOAT8 FROM trades WHERE trade_uuid = $1",
-    )
-    .bind(uuid)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-
-    assert!(
-        (net_stored - 0.0983).abs() < 1e-9,
-        "Net PnL after fees should be +0.0983 SOL, got {}",
-        net_stored
+    // The trades row's own net_pnl_sol is also persisted by the close path.
+    let (trade_net,): (Decimal,) =
+        sqlx::query_as("SELECT COALESCE(net_pnl_sol, 0) FROM trades WHERE trade_uuid = $1")
+            .bind(exit_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        trade_net, Decimal::from_str("0.098").unwrap(),
+        "trades.net_pnl_sol must match the position's realized net PnL"
     );
 }
 

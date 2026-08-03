@@ -15,7 +15,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
-use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -57,10 +56,15 @@ impl WsState {
 
     /// Authenticate a token (either API key or JWT)
     pub async fn authenticate(&self, token: &str) -> Option<crate::middleware::AuthenticatedUser> {
-        // Try API key first
+        // Try API key first. The identifier must NOT embed the raw token —
+        // it is written to logs throughout the connection lifecycle.
         if let Some(role) = self.api_keys.get(token) {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(token.as_bytes());
+            let digest = hex::encode(&hasher.finalize()[..8]);
             return Some(crate::middleware::AuthenticatedUser {
-                identifier: format!("api_key:{}", token),
+                identifier: format!("api_key:{}", digest),
                 role: *role,
             });
         }
@@ -139,7 +143,9 @@ where
     S: serde::Serializer,
 {
     match value {
-        Some(decimal) => serializer.serialize_f64(decimal.to_f64().unwrap_or(0.0)),
+        // Serialize as a string to preserve exactness — f64 rounding corrupts
+        // financial data and a failed conversion must not silently become 0.0.
+        Some(decimal) => serializer.serialize_str(&decimal.to_string()),
         None => serializer.serialize_none(),
     }
 }
@@ -183,8 +189,8 @@ pub async fn ws_handler(
             // No token provided - check if anonymous readonly is allowed
             if state.allow_anonymous_readonly {
                 tracing::info!("WebSocket connection allowed (anonymous readonly)");
-                let response = ws.on_upgrade(|socket| {
-                    handle_socket(socket, state, Some("anonymous".to_string()))
+                let response = ws.on_upgrade(move |socket| {
+                    handle_socket(socket, state, Some("anonymous".to_string()), crate::middleware::Role::Readonly)
                 });
                 tracing::info!("WebSocket upgrade successful (anonymous)");
                 return response;
@@ -195,22 +201,23 @@ pub async fn ws_handler(
         }
     };
 
-    tracing::info!(token_prefix = %&token[..token.len().min(8)], "WebSocket connection attempt");
+    tracing::info!(token_prefix = %token.chars().take(8).collect::<String>(), "WebSocket connection attempt");
 
     // Validate token asynchronously
     match state.authenticate(&token).await {
         Some(user) => {
             let identifier = user.identifier.clone();
-            tracing::info!(identifier = %identifier, role = %user.role, "WebSocket connection authenticated");
+            let role = user.role;
+            tracing::info!(identifier = %identifier, role = %role, "WebSocket connection authenticated");
             let identifier_for_closure = identifier.clone();
             let response = ws.on_upgrade(move |socket| {
-                handle_socket(socket, state, Some(identifier_for_closure))
+                handle_socket(socket, state, Some(identifier_for_closure), role)
             });
             tracing::info!("WebSocket upgrade successful for user: {}", identifier);
             response
         }
         None => {
-            tracing::warn!(token_prefix = %&token[..token.len().min(8)], "WebSocket connection rejected: invalid token");
+            tracing::warn!(token_prefix = %token.chars().take(8).collect::<String>(), "WebSocket connection rejected: invalid token");
             // Return a 401 Unauthorized response instead of upgrading and closing
             StatusCode::UNAUTHORIZED.into_response()
         }
@@ -218,7 +225,12 @@ pub async fn ws_handler(
 }
 
 /// Handle individual WebSocket connection
-async fn handle_socket(socket: WebSocket, state: Arc<WsState>, user_identifier: Option<String>) {
+async fn handle_socket(
+    socket: WebSocket,
+    state: Arc<WsState>,
+    user_identifier: Option<String>,
+    role: crate::middleware::Role,
+) {
     // If no identifier, close the connection immediately
     let user_id = match user_identifier {
         Some(id) => id,
@@ -229,7 +241,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>, user_identifier: 
         }
     };
 
-    tracing::info!(user = %user_id, "WebSocket connection established, starting message handler");
+    tracing::info!(user = %user_id, role = %role, "WebSocket connection established, starting message handler");
 
     let (mut sender, mut receiver) = socket.split();
 
@@ -242,9 +254,36 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>, user_identifier: 
     tracing::debug!(user = %user_id, "WebSocket subscribed to broadcast channel");
 
     // Task to send events to client
-    let send_task = tokio::spawn(async move {
+    let mut send_task = tokio::spawn(async move {
         let mut event_count = 0;
-        while let Ok(event) = rx.recv().await {
+        loop {
+            let event = match rx.recv().await {
+                Ok(event) => event,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    // Slow consumer: instead of silently dropping the client,
+                    // catch up to the latest event and log the skips.
+                    tracing::warn!(
+                        user = %user_id_for_send,
+                        skipped = skipped,
+                        "WebSocket client lagged, skipped events"
+                    );
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::debug!(user = %user_id_for_send, "Broadcast channel closed");
+                    break;
+                }
+            };
+
+            // Role-based filtering: readonly (incl. anonymous) clients receive
+            // only operational events, never position/trade data. Previously
+            // the role was only logged and every client got the full stream.
+            if !role.has_permission(crate::middleware::Role::Operator)
+                && !matches!(event, WsEvent::HealthUpdate(_) | WsEvent::Alert(_))
+            {
+                continue;
+            }
+
             event_count += 1;
             let msg = match serde_json::to_string(&event) {
                 Ok(json) => {
@@ -267,7 +306,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>, user_identifier: 
     });
 
     // Task to receive messages from client (mainly for ping/pong)
-    let recv_task = tokio::spawn(async move {
+    let mut recv_task = tokio::spawn(async move {
         let mut msg_count = 0;
         while let Some(result) = receiver.next().await {
             match result {
@@ -302,12 +341,16 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>, user_identifier: 
         tracing::debug!(user = %user_id_for_recv, messages_received = msg_count, "WebSocket receive task completed");
     });
 
-    // Wait for either task to finish
+    // Wait for either task to finish, then abort the losing task so both
+    // halves of the socket are dropped deterministically (select! alone only
+    // detaches the loser).
     tokio::select! {
-        _ = send_task => {
+        _ = &mut send_task => {
+            recv_task.abort();
             tracing::info!(user = %user_id_cleanup, "WebSocket send task finished first");
         }
-        _ = recv_task => {
+        _ = &mut recv_task => {
+            send_task.abort();
             tracing::info!(user = %user_id_cleanup, "WebSocket receive task finished first");
         }
     }
@@ -318,6 +361,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>, user_identifier: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn test_ws_event_serialization() {

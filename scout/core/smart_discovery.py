@@ -118,8 +118,8 @@ class DiscoveryConfig:
     })
 
     # High-conviction bonus for strategies that find WQS 70+ wallets
-    HIGH_CONVIICTION_BONUS: float = 1.5  # 50% efficiency boost
-    HIGH_CONVIICTION_THRESHOLD: float = 60.0  # WQS threshold for bonus
+    HIGH_CONVICTION_BONUS: float = 1.5  # 50% efficiency boost
+    HIGH_CONVICTION_THRESHOLD: float = 60.0  # WQS threshold for bonus
 
     # Strategy selection thresholds
     MIN_CREDITS_FOR_ANY_STRATEGY: int = 100
@@ -213,24 +213,28 @@ class SmartDiscoveryPrioritizer:
             List of strategies sorted by efficiency (highest first)
         """
         with self._lock:
-            # Check if reevaluation is needed
-            if self._config.ADAPTIVE_SELECTION:
-                now = time.time()
-                if now - self._last_reevaluation > self._config.REEVALUATION_INTERVAL_SECONDS:
-                    self._reevaluate_strategies()
-                    self._last_reevaluation = now
+            return self._rank_discovery_strategies_locked()
 
-            # Sort by efficiency score
-            ranked = sorted(
-                self._strategy_scores.values(),
-                key=lambda s: s.efficiency_score,
-                reverse=True
-            )
+    def _rank_discovery_strategies_locked(self) -> List[StrategyScore]:
+        """Rank strategies (lock already held — avoids re-entrant deadlock)."""
+        # Check if reevaluation is needed
+        if self._config.ADAPTIVE_SELECTION:
+            now = time.time()
+            if now - self._last_reevaluation > self._config.REEVALUATION_INTERVAL_SECONDS:
+                self._reevaluate_strategies_locked()
+                self._last_reevaluation = now
 
-            return ranked
+        # Sort by efficiency score
+        ranked = sorted(
+            self._strategy_scores.values(),
+            key=lambda s: s.efficiency_score,
+            reverse=True
+        )
 
-    def _reevaluate_strategies(self) -> None:
-        """Reevaluate strategy scores based on historical performance."""
+        return ranked
+
+    def _reevaluate_strategies_locked(self) -> None:
+        """Reevaluate strategy scores based on historical performance (lock held)."""
         if not self._discovery_history:
             return
 
@@ -254,12 +258,19 @@ class SmartDiscoveryPrioritizer:
 
             avg_wqs = sum(all_wqs) / max(1, len(all_wqs))
 
+            efficiency = (total_wallets * avg_wqs) / max(1, total_credits)
+
+            # Apply the high-conviction bonus when the strategy consistently
+            # finds WQS >= threshold wallets
+            if avg_wqs >= self._config.HIGH_CONVICTION_THRESHOLD:
+                efficiency *= self._config.HIGH_CONVICTION_BONUS
+
             # Update score
             self._strategy_scores[strategy].total_wallets_found = total_wallets
             self._strategy_scores[strategy].total_credits_consumed = total_credits
             self._strategy_scores[strategy].avg_wqs_found = avg_wqs
             self._strategy_scores[strategy].wallets_per_credit = total_wallets / max(1, total_credits)
-            self._strategy_scores[strategy].efficiency_score = (total_wallets * avg_wqs) / max(1, total_credits)
+            self._strategy_scores[strategy].efficiency_score = efficiency
             self._strategy_scores[strategy].sample_size = len(history)
             self._strategy_scores[strategy].last_updated = time.time()
 
@@ -288,8 +299,9 @@ class SmartDiscoveryPrioritizer:
         with self._lock:
             budget = remaining_credits if remaining_credits is not None else self._remaining_credits
 
-            # Get ranked strategies
-            ranked = self.rank_discovery_strategies()
+            # Get ranked strategies (internal helper — the public method would
+            # re-acquire the non-reentrant lock and deadlock)
+            ranked = self._rank_discovery_strategies_locked()
 
             # Filter by budget
             affordable = []
@@ -334,7 +346,7 @@ class SmartDiscoveryPrioritizer:
         with self._lock:
             self._remaining_credits = budget_remaining
 
-            ranked = self.rank_discovery_strategies()
+            ranked = self._rank_discovery_strategies_locked()
 
             # Select top strategies that fit in budget
             selected = []
@@ -372,7 +384,7 @@ class SmartDiscoveryPrioritizer:
             # Trigger reevaluation if enough data
             strategy_history = [r for r in self._discovery_history if r.strategy == result.strategy]
             if len(strategy_history) >= 5:
-                self._reevaluate_strategies()
+                self._reevaluate_strategies_locked()
 
             logger.debug(
                 f"Recorded discovery result: {result.strategy.value}, "
@@ -400,7 +412,7 @@ class SmartDiscoveryPrioritizer:
         with self._lock:
             suggestions = []
 
-            ranked = self.rank_discovery_strategies()
+            ranked = self._rank_discovery_strategies_locked()
 
             if not ranked:
                 return ["No strategy data available for optimization"]
@@ -692,30 +704,21 @@ class StrategyCoordinator:
                     wallets_found = list(wallet_counts.keys())
                     wqs_scores = {wallet: min(100.0, count * 3) for wallet, count in wallet_counts.items()}
 
-                elif strategy == DiscoveryStrategy.RECENT_SWAPS:
-                    # Discover from recent swaps (real-time)
+                else:
+                    # Remaining strategies (WHALE_ALERTS, LARGE_TRANSFERS,
+                    # PROGRAM_INTERACTIONS, MENTIONED_TOKENS) run a standard
+                    # discovery pass. NOTE: the former RECENT_SWAPS/TOP_TOKENS
+                    # branches referenced enum members that do not exist and
+                    # were unreachable — they have been removed.
+                    logger.debug(f"[StrategyCoordinator] Running {strategy.value} via standard discovery")
                     wallet_counts = await self._execute_with_fallback(
-                        self._helius_client.discover_wallets_from_recent_swaps,
-                        hours_back=6,
-                        max_wallets=150
+                        self._helius_client.discover_wallets,
+                        hours_back=24,
+                        max_wallets=200,
+                        limit_per_token=50
                     )
                     wallets_found = list(wallet_counts.keys())
-                    wqs_scores = {wallet: min(100.0, count * 10) for wallet, count in wallet_counts.items()}
-
-                elif strategy == DiscoveryStrategy.TOP_TOKENS:
-                    # Discover from top performing tokens
-                    wallets_found = await self._execute_with_fallback(
-                        self._helius_client.discover_from_top_performing_tokens,
-                        min_wallets=50,
-                        max_wallets=150
-                    )
-                    wqs_scores = {wallet: 70.0 for wallet in wallets_found}  # Baseline quality
-
-                else:
-                    # Fallback for unknown strategies
-                    logger.warning(f"[StrategyCoordinator] Unknown strategy: {strategy.value}")
-                    wallets_found = []
-                    wqs_scores = {}
+                    wqs_scores = {wallet: min(100.0, count * 5) for wallet, count in wallet_counts.items()}
             else:
                 # No Helius client - simulate for testing
                 await asyncio.sleep(0.1)
@@ -738,7 +741,8 @@ class StrategyCoordinator:
                 efficiency=efficiency,
             )
 
-            # Update performance metrics
+            # Update performance metrics (including the avg wallet/quality/
+            # credits metrics that the health report exposes)
             with self._lock:
                 performance.total_runs += 1
                 performance.successful_runs += 1
@@ -748,6 +752,20 @@ class StrategyCoordinator:
                     / performance.total_runs
                 )
                 performance.success_rate = performance.successful_runs / max(1, performance.total_runs)
+                performance.avg_wallets_per_run = (
+                    (performance.avg_wallets_per_run * (performance.total_runs - 1) + len(wallets_found))
+                    / performance.total_runs
+                )
+                if wqs_scores:
+                    avg_quality = sum(wqs_scores.values()) / len(wqs_scores)
+                    performance.avg_quality_score = (
+                        (performance.avg_quality_score * (performance.total_runs - 1) + avg_quality)
+                        / performance.total_runs
+                    )
+                performance.avg_credits_per_run = (
+                    (performance.avg_credits_per_run * (performance.total_runs - 1) + credits_consumed)
+                    / performance.total_runs
+                )
                 performance.health_status = self._calculate_health_status(performance)
 
             logger.debug(
@@ -861,21 +879,29 @@ class StrategyCoordinator:
     def perform_health_checks(self) -> None:
         """Perform health checks on all strategies and disable failing ones."""
         with self._lock:
-            time.time()
-
+            # Collect decisions under the lock, then mutate directly — the
+            # public disable/enable methods re-acquire the non-reentrant lock
+            # and would deadlock from here.
             for strategy, performance in self._performance.items():
                 # Check if strategy should be disabled
                 if performance.total_runs >= self._performance_window:
                     if performance.success_rate < self._max_failure_rate:
-                        self.disable_strategy(
-                            strategy,
+                        self._disabled_strategies.add(strategy)
+                        performance.last_error = (
                             f"Success rate {performance.success_rate:.2%} below threshold {self._max_failure_rate:.2%}"
                         )
+                        logger.warning(
+                            f"[StrategyCoordinator] Disabled {strategy.value}: {performance.last_error}"
+                        )
 
-                # Check if strategy should be re-enabled
-                elif strategy in self._disabled_strategies:
-                    if performance.success_rate > 0.7:  # 70% success rate for recovery
-                        self.enable_strategy(strategy)
+            # Re-enable checks run separately (an elif on the run-count
+            # condition could never fire for window-reached strategies)
+            for strategy in list(self._disabled_strategies):
+                performance = self._performance.get(strategy)
+                if performance and performance.success_rate > 0.7:  # 70% for recovery
+                    self._disabled_strategies.discard(strategy)
+                    performance.health_status = "healthy"
+                    logger.info(f"[StrategyCoordinator] Re-enabled {strategy.value}")
 
         logger.info("[StrategyCoordinator] Health checks completed")
 

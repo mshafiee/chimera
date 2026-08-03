@@ -75,33 +75,29 @@ async fn poll_wallets_by_tier(
         }
     };
 
-    // Filter out wallets where monitoring_enabled is false
+    // Filter out wallets where monitoring_enabled is false. Fail closed: a
+    // DB error must never turn into "poll everything" — an empty enabled set
+    // means "poll nothing", not "poll all wallets".
     let monitored_wallets: Vec<String> = {
         let wallet_addresses: Vec<String> = wallets.iter().map(|w| w.address.clone()).collect();
         let all_monitoring = match db.get_all_wallet_monitoring().await {
             Ok(m) => m,
             Err(e) => {
-                tracing::warn!(error = %e, "Failed to query wallet_monitoring, using all wallets");
-                // Fallback to all wallets if monitoring query fails - return empty monitoring list
-                vec![]
+                tracing::warn!(error = %e, tier = ?tier, "Failed to query wallet_monitoring — skipping poll cycle");
+                return;
             }
         };
 
         let monitoring_enabled_set: std::collections::HashSet<String> = all_monitoring
             .into_iter()
-            .filter(|wm| wm.monitoring_enabled > 0)
+            .filter(|wm| wm.monitoring_enabled)
             .map(|wm| wm.wallet_address)
             .collect();
 
-        // If monitoring query failed, return all wallets as fallback
-        if monitoring_enabled_set.is_empty() {
-            wallet_addresses
-        } else {
-            wallet_addresses
-                .into_iter()
-                .filter(|addr| monitoring_enabled_set.contains(addr))
-                .collect()
-        }
+        wallet_addresses
+            .into_iter()
+            .filter(|addr| monitoring_enabled_set.contains(addr))
+            .collect()
     };
 
     if monitored_wallets.is_empty() {
@@ -257,14 +253,12 @@ pub async fn start_polling_task(
         Duration::from_secs(5),
     ));
 
-    let mut interval = tokio::time::interval(Duration::from_secs(config.interval_secs));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
     // Shared state for pending exit signals
     let pending_exits: Arc<RwLock<Vec<super::ExitSignal>>> = Arc::new(RwLock::new(Vec::new()));
     let pending_exits_clone = pending_exits.clone();
     let exit_detector_clone = exit_detector.clone();
     let cancel_token_clone = cancel_token.clone();
+    let engine_clone = engine.clone();
 
     // Background task to process pending exit signals
     tokio::spawn(async move {
@@ -278,27 +272,58 @@ pub async fn start_polling_task(
                     break;
                 }
                 _ = exit_interval.tick() => {
-                    let mut pending = pending_exits_clone.write().await;
-                    let mut to_remove = Vec::new();
+                    // Snapshot the pending signals under a short read lock; the
+                    // per-signal readiness check + removal is atomic inside the
+                    // detector, so no write lock is held across awaits here.
+                    let due: Vec<super::ExitSignal> = pending_exits_clone.read().await.clone();
 
-                    for (idx, exit_signal) in pending.iter().enumerate() {
-                        if exit_detector_clone.should_generate_exit(exit_signal).await {
-                            tracing::info!(
+                    for exit_signal in due {
+                        if !exit_detector_clone.take_ready_exit(&exit_signal).await {
+                            continue;
+                        }
+
+                        let timestamp = chrono::Utc::now().timestamp();
+                        let payload = SignalPayload {
+                            strategy: Strategy::Exit,
+                            token: exit_signal.token_address.clone(),
+                            token_address: Some(exit_signal.token_address.clone()),
+                            action: Action::Sell,
+                            amount_sol: exit_signal.amount_sol,
+                            wallet_address: exit_signal.wallet_address.clone(),
+                            trade_uuid: None,
+                            exit_fraction: None,
+                        };
+                        let trade_uuid = payload.generate_trade_uuid(timestamp);
+                        let signal = Signal {
+                            trade_uuid: trade_uuid.clone(),
+                            payload,
+                            timestamp,
+                            source_ip: Some("rpc_polling_exit".to_string()),
+                            liquidity_usd: None,
+                            force_slow_path: true,
+                            token_decimals: None,
+                        };
+
+                        tracing::info!(
+                            wallet = %exit_signal.wallet_address,
+                            token = %exit_signal.token_address,
+                            exit_type = ?exit_signal.exit_type,
+                            amount_sol = %exit_signal.amount_sol,
+                            trade_uuid = %trade_uuid,
+                            "Dispatching delayed exit signal to engine"
+                        );
+
+                        if let Err(e) = engine_clone.queue_signal(signal, None).await {
+                            tracing::error!(
                                 wallet = %exit_signal.wallet_address,
                                 token = %exit_signal.token_address,
-                                exit_type = ?exit_signal.exit_type,
-                                "Generating delayed exit signal"
+                                error = %e,
+                                "Failed to queue delayed exit signal"
                             );
-
-                            // Mark as processed
-                            exit_detector_clone.mark_exit_processed(exit_signal).await;
-                            to_remove.push(idx);
                         }
-                    }
 
-                    // Remove processed signals (in reverse order to maintain indices)
-                    for idx in to_remove.into_iter().rev() {
-                        pending.remove(idx);
+                        let mut pending = pending_exits_clone.write().await;
+                        pending.retain(|s| s != &exit_signal);
                     }
                 }
             }

@@ -37,7 +37,7 @@ check_field() {
 
 # Cargo.toml
 if [ -f "$ROOT_DIR/operator/Cargo.toml" ]; then
-  actual=$(grep '^version' "$ROOT_DIR/operator/Cargo.toml" | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+  actual=$(grep -m1 '^version' "$ROOT_DIR/operator/Cargo.toml" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
   check_field "operator/Cargo.toml" "$actual"
 else
   echo "  ⚠ operator/Cargo.toml not found"
@@ -46,7 +46,7 @@ fi
 
 # package.json
 if [ -f "$ROOT_DIR/web/package.json" ]; then
-  actual=$(grep '"version"' "$ROOT_DIR/web/package.json" | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+  actual=$(grep -m1 '"version"' "$ROOT_DIR/web/package.json" | sed -n 's/.*"\([^"]*\)".*/\1/p' || true)
   check_field "web/package.json" "$actual"
 else
   echo "  ⚠ web/package.json not found"
@@ -55,7 +55,7 @@ fi
 
 # pyproject.toml
 if [ -f "$ROOT_DIR/scout/pyproject.toml" ]; then
-  actual=$(grep '^version' "$ROOT_DIR/scout/pyproject.toml" | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+  actual=$(grep -m1 -E '^[[:space:]]*version[[:space:]]*=' "$ROOT_DIR/scout/pyproject.toml" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
   check_field "scout/pyproject.toml" "$actual"
 else
   echo "  ⚠ scout/pyproject.toml not found"
@@ -64,7 +64,7 @@ fi
 
 # scout/_version.py
 if [ -f "$ROOT_DIR/scout/_version.py" ]; then
-  actual=$(grep '__version__' "$ROOT_DIR/scout/_version.py" | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+  actual=$(grep -m1 '__version__' "$ROOT_DIR/scout/_version.py" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
   check_field "scout/_version.py" "$actual"
 else
   echo "  ⚠ scout/_version.py not found"
@@ -73,7 +73,7 @@ fi
 
 # config.yaml header comment
 if [ -f "$ROOT_DIR/config/config.yaml" ]; then
-  actual=$(grep '^# v' "$ROOT_DIR/config/config.yaml" | head -1 | sed 's/^# v//')
+  actual=$(sed -n '1,10p' "$ROOT_DIR/config/config.yaml" | grep -m1 -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sed 's/^v//' || true)
   check_field "config/config.yaml" "$actual"
 else
   echo "  ⚠ config/config.yaml not found"

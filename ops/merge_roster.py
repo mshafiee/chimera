@@ -74,22 +74,33 @@ def merge_roster(roster_path: str, db_path: str) -> bool:
             if count == 0:
                 raise ValueError("Scout roster is empty — aborting merge to prevent data loss. Check Scout output.")
 
+            # Guard against truncated/partial rosters wiping the production table
+            if roster_count < before_count * 0.5:
+                raise ValueError(
+                    f"Roster is dramatically smaller than the existing database "
+                    f"({roster_count} vs {before_count} wallets); aborting to prevent data loss"
+                )
+
             # Delete existing wallets
             main_cursor.execute("DELETE FROM wallets")
             
-            # Insert from new roster
+            # Insert from new roster (all shared columns)
             main_cursor.execute("""
                 INSERT INTO wallets (
-                    address, status, wqs_score, roi_7d, roi_30d,
-                    trade_count_30d, win_rate, max_drawdown_30d,
-                    avg_trade_size_sol, last_trade_at, promoted_at,
-                    ttl_expires_at, notes, created_at, updated_at
+                    address, status, wqs_score, wqs_confidence,
+                    roi_7d, roi_30d, trade_count_30d, win_rate,
+                    max_drawdown_30d, avg_trade_size_sol, avg_win_sol, avg_loss_sol,
+                    profit_factor, realized_pnl_30d_sol, last_trade_at,
+                    promoted_at, ttl_expires_at, notes, archetype,
+                    avg_entry_delay_seconds, created_at, updated_at
                 )
                 SELECT 
-                    address, status, wqs_score, roi_7d, roi_30d,
-                    trade_count_30d, win_rate, max_drawdown_30d,
-                    avg_trade_size_sol, last_trade_at, promoted_at,
-                    ttl_expires_at, notes, created_at, CURRENT_TIMESTAMP
+                    address, status, wqs_score, wqs_confidence,
+                    roi_7d, roi_30d, trade_count_30d, win_rate,
+                    max_drawdown_30d, avg_trade_size_sol, avg_win_sol, avg_loss_sol,
+                    profit_factor, realized_pnl_30d_sol, last_trade_at,
+                    promoted_at, ttl_expires_at, notes, archetype,
+                    avg_entry_delay_seconds, created_at, CURRENT_TIMESTAMP
                 FROM new_roster.wallets
             """)
             

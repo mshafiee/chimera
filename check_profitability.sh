@@ -3,6 +3,7 @@
 # Run on production server to check profitability over last 12 hours
 
 set -e
+set -o pipefail
 
 # Portable date handling: BSD (macOS) vs GNU (Linux)
 if date -v-1d +%Y-%m-%d >/dev/null 2>&1; then
@@ -30,9 +31,9 @@ echo "----------------------------------------"
 docker compose -f docker-compose.yml -f docker-compose-haproxy.yml exec -T postgres psql -U chimera -d chimera_db -c "
 SELECT
     strategy,
-    COALESCE(SUM(CASE WHEN action = 'BUY' THEN amount_sol ELSE -amount_sol END), 0) as net_pnl_sol,
+    COALESCE(SUM(pnl_sol), 0) as net_pnl_sol,
     COUNT(*) as trade_count,
-    AVG(CASE WHEN action = 'BUY' THEN amount_sol ELSE -amount_sol END) as avg_pnl_per_trade
+    AVG(pnl_sol) as avg_pnl_per_trade
 FROM trade_history
 WHERE created_at > NOW() - INTERVAL '12 hours'
 GROUP BY strategy
@@ -50,11 +51,12 @@ SELECT
     wr.wqs_score,
     wr.roi_7d,
     COUNT(th.trade_uuid) as trade_count,
-    COALESCE(SUM(CASE WHEN th.action = 'BUY' THEN th.amount_sol ELSE -th.amount_sol END), 0) as wallet_pnl_sol,
+    COALESCE(SUM(th.pnl_sol), 0) as wallet_pnl_sol,
     MAX(th.created_at) as last_trade
 FROM wallet_roster wr
 LEFT JOIN trade_history th ON wr.address = th.wallet_address
-WHERE th.created_at > NOW() - INTERVAL '12 hours'
+  AND th.created_at > NOW() - INTERVAL '12 hours'
+WHERE true
 GROUP BY wr.address, wr.archetype, wr.wqs_score, wr.roi_7d
 ORDER BY wallet_pnl_sol DESC
 LIMIT 10;
@@ -82,7 +84,7 @@ echo "----------------------------------------"
 docker compose -f docker-compose.yml -f docker-compose-haproxy.yml exec -T postgres psql -U chimera -d chimera_db -c "
 SELECT
     source_wallet,
-    COALESCE(SUM(CASE WHEN trade_action = 'BUY' THEN amount_sol ELSE -amount_sol END), 0) as total_pnl_sol,
+    COALESCE(SUM(pnl_sol), 0) as total_pnl_sol,
     COUNT(*) as copied_trades,
     COUNT(DISTINCT trade_uuid) as unique_trades,
     MAX(created_at) as last_copy
@@ -107,8 +109,8 @@ SELECT
         ELSE 'Other'
     END as exit_strategy,
     COUNT(*) as trade_count,
-    ROUND(AVG(CASE WHEN exit_reason = 'PROFIT_TARGET' THEN pnl_sol ELSE 0 END), 4) as avg_profit_target_pnl,
-    ROUND(AVG(CASE WHEN exit_reason = 'STOP_LOSS' THEN pnl_sol ELSE 0 END), 4) as avg_stop_loss_pnl
+    ROUND(AVG(pnl_sol) FILTER (WHERE exit_reason = 'PROFIT_TARGET'), 4) as avg_profit_target_pnl,
+    ROUND(AVG(pnl_sol) FILTER (WHERE exit_reason = 'STOP_LOSS'), 4) as avg_stop_loss_pnl
 FROM trade_history
 WHERE created_at > NOW() - INTERVAL '12 hours' AND exit_reason IS NOT NULL
 GROUP BY exit_strategy
@@ -119,7 +121,7 @@ echo ""
 # 7. Total portfolio PnL
 echo "7. Total Portfolio PnL (Last 12 Hours)..."
 echo "----------------------------------------"
-TOTAL_PNL=$(docker compose -f docker-compose.yml -f docker-compose-haproxy.yml exec -T postgres psql -U chimera -d chimera_db -t -c "SELECT COALESCE(SUM(CASE WHEN action = 'BUY' THEN amount_sol ELSE -amount_sol END), 0) FROM trade_history WHERE created_at > NOW() - INTERVAL '12 hours';" 2>&1 | tr -d ' ')
+TOTAL_PNL=$(docker compose -f docker-compose.yml -f docker-compose-haproxy.yml exec -T postgres psql -U chimera -d chimera_db -t -c "SELECT COALESCE(SUM(pnl_sol), 0) FROM trade_history WHERE created_at > NOW() - INTERVAL '12 hours';" 2>&1 | tr -d ' ')
 echo "Total PnL: $TOTAL_PNL SOL"
 echo ""
 
@@ -128,7 +130,7 @@ echo "8. Profitability Metrics..."
 echo "----------------------------------------"
 WALLET_COUNT=$(docker compose -f docker-compose.yml -f docker-compose-haproxy.yml exec -T postgres psql -U chimera -d chimera_db -t -c "SELECT COUNT(*) FROM wallet_roster WHERE status = 'ACTIVE';" 2>&1 | tr -d ' ')
 if [ "$WALLET_COUNT" -gt 0 ]; then
-    AVG_PER_WALLET=$(docker compose -f docker-compose.yml -f docker-compose-haproxy.yml exec -T postgres psql -U chimera -d chimera_db -t -c "SELECT COALESCE(AVG(CASE WHEN action = 'BUY' THEN amount_sol ELSE -amount_sol END), 0) FROM trade_history WHERE created_at > NOW() - INTERVAL '12 hours';" 2>&1 | tr -d ' ')
+    AVG_PER_WALLET=$(docker compose -f docker-compose.yml -f docker-compose-haproxy.yml exec -T postgres psql -U chimera -d chimera_db -t -c "SELECT COALESCE(SUM(pnl_sol) / NULLIF(COUNT(DISTINCT wallet_address), 0), 0) FROM trade_history WHERE created_at > NOW() - INTERVAL '12 hours';" 2>&1 | tr -d ' ')
     echo "Active wallets: $WALLET_COUNT"
     echo "Average PnL per wallet: $AVG_PER_WALLET SOL"
     echo "Trades per active wallet: $(echo "scale=2; $TOTAL_TRADES / $WALLET_COUNT" | bc)"
@@ -146,9 +148,9 @@ echo "- Total PnL: $TOTAL_PNL SOL"
 echo "- Total trades: $TOTAL_TRADES"
 echo ""
 
-if [ "$TOTAL_PNL" -gt 0 ]; then
+if [ "$(echo "$TOTAL_PNL > 0" | bc)" -eq 1 ]; then
     echo "✅ PROFITABLE - System is generating positive returns"
-elif [ "$TOTAL_PNL" -lt 0 ]; then
+elif [ "$(echo "$TOTAL_PNL < 0" | bc)" -eq 1 ]; then
     echo "❌ LOSING - System is losing money"
 else
     echo "⚠️  BREAK-EVEN - No profit or loss"

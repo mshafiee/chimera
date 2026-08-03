@@ -5,13 +5,16 @@
 //! - Consensus query failure silently falls back to no stop widening
 //! - Volatility multiplier boundary correctness
 //! - Hard stop overrides wider dynamic threshold
-//! - Portfolio-level stop bypass on DB error
-//! - Portfolio stop minimum-exposure floor
-//! - Portfolio stop trigger at 5% daily loss
 //! - Fail-open when price cache is unavailable
+//!
+//! NOTE: the effective stop threshold is the dynamic (WQS × volatility)
+//! threshold clamped to [max_stop_loss_distance, -5%] and the absolute -25%
+//! floor. With the DEFAULT max_stop_loss_distance (-5.0) every dynamic
+//! threshold collapses to -5%; tests that exercise dynamic thresholds use an
+//! explicit wide distance (e.g. -50.0).
 
 use chimera_operator::config::ProfitManagementConfig;
-use chimera_operator::db_abstraction::{create_database, Database, DatabaseConfig, DbPool};
+use chimera_operator::db_abstraction::{Database, DbPool};
 use chimera_operator::engine::stop_loss::{StopLossAction, StopLossManager};
 use chimera_operator::price_cache::{PriceCache, PriceSource};
 use rust_decimal::Decimal;
@@ -19,13 +22,15 @@ use sqlx::Pool;
 use sqlx::Postgres;
 use std::str::FromStr;
 use std::sync::Arc;
-use tempfile::TempDir;
+
+#[path = "../common/mod.rs"]
+mod common;
 
 fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
-    match db.pool() {
-        DbPool::PostgreSQL(pool) => pool,
-        _ => panic!("test requires PostgreSQL backend"),
-    }
+    // DbPool is PostgreSQL-only (single variant): irrefutable destructure, no
+    // fallback panic arm (which would be unreachable).
+    let DbPool::PostgreSQL(pool) = db.pool();
+    pool
 }
 
 /// Returns an entry_time sufficiently in the past to clear the 10-second wick-protection
@@ -36,21 +41,21 @@ fn past_entry() -> chrono::DateTime<chrono::Utc> {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
-    let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
-    let db = create_database(&config).await.unwrap();
-    db.run_migrations().await.unwrap();
-    (db, temp_dir)
+/// Each test gets its own isolated database (dropped on teardown), so the
+/// fixed wallet addresses below never collide across parallel tests.
+async fn create_test_db() -> (Arc<dyn Database>, common::TestDbGuard) {
+    common::create_test_pg_db().await
 }
 
 fn default_config() -> Arc<ProfitManagementConfig> {
     Arc::new(ProfitManagementConfig::default())
 }
 
-fn config_with_hard_stop(hard_stop_positive: &str) -> Arc<ProfitManagementConfig> {
+/// A config with an explicit `max_stop_loss_distance` (negative; the config
+/// validator rejects positive values).
+fn config_with_stop_distance(stop_distance: &str) -> Arc<ProfitManagementConfig> {
     Arc::new(ProfitManagementConfig {
-        max_stop_loss_distance: Decimal::from_str(hard_stop_positive).unwrap(),
+        max_stop_loss_distance: Decimal::from_str(stop_distance).unwrap(),
         ..ProfitManagementConfig::default()
     })
 }
@@ -77,99 +82,6 @@ async fn insert_consensus_signal(pool: &Pool<Postgres>, token: &str, wallet: &st
     )
     .bind(token)
     .bind(wallet)
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
-/// Insert a closed position to build up daily PnL.
-/// Also inserts a SELL exit trade with net_pnl_sol so the portfolio-stop query
-/// (which reads trades.net_pnl_sol for accuracy) returns the correct value.
-#[allow(dead_code)]
-async fn insert_closed_position(
-    pool: &Pool<Postgres>,
-    trade_uuid: &str,
-    wallet: &str,
-    token: &str,
-    entry_amount: f64,
-    realized_pnl: f64,
-) {
-    // Entry BUY trade (FK anchor for position)
-    sqlx::query(
-        "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status) \
-         VALUES ($1, $2, $3, 'SHIELD', 'BUY', $4, 'CLOSED')"
-    )
-    .bind(trade_uuid)
-    .bind(wallet)
-    .bind(token)
-    .bind(entry_amount)
-    .execute(pool)
-    .await
-    .unwrap();
-
-    // Exit SELL trade with net_pnl_sol — this is what check_portfolio_stop now reads
-    let exit_uuid = format!("{}-exit", trade_uuid);
-    sqlx::query(
-        "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, \
-         status, net_pnl_sol, updated_at) \
-         VALUES ($1, $2, $3, 'SHIELD', 'SELL', $4, 'CLOSED', $5, CURRENT_TIMESTAMP)"
-    )
-    .bind(&exit_uuid)
-    .bind(wallet)
-    .bind(token)
-    .bind(entry_amount)
-    .bind(realized_pnl)
-    .execute(pool)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        "INSERT INTO positions \
-         (trade_uuid, wallet_address, token_address, strategy, entry_amount_sol, entry_price, \
-          entry_tx_signature, state, realized_pnl_sol, closed_at) \
-         VALUES ($1, $2, $3, 'SHIELD', $4, 1.0, 'sig', 'CLOSED', $5, CURRENT_TIMESTAMP)",
-    )
-    .bind(trade_uuid)
-    .bind(wallet)
-    .bind(token)
-    .bind(entry_amount)
-    .bind(realized_pnl)
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
-/// Insert an active position so exposure is > 0.
-#[allow(dead_code)]
-async fn insert_active_position(
-    pool: &Pool<Postgres>,
-    trade_uuid: &str,
-    wallet: &str,
-    token: &str,
-    entry_amount: f64,
-) {
-    sqlx::query(
-        "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status) \
-         VALUES ($1, $2, $3, 'SHIELD', 'BUY', $4, 'ACTIVE')"
-    )
-    .bind(trade_uuid)
-    .bind(wallet)
-    .bind(token)
-    .bind(entry_amount)
-    .execute(pool)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        "INSERT INTO positions \
-         (trade_uuid, wallet_address, token_address, strategy, entry_amount_sol, entry_price, \
-          entry_tx_signature, state) \
-         VALUES ($1, $2, $3, 'SHIELD', $4, 1.0, 'sig', 'ACTIVE')",
-    )
-    .bind(trade_uuid)
-    .bind(wallet)
-    .bind(token)
-    .bind(entry_amount)
     .execute(pool)
     .await
     .unwrap();
@@ -215,9 +127,6 @@ async fn test_consensus_query_failure_no_stop_widening() {
     // When the signal_aggregation table query fails (DB error), is_consensus defaults to false.
     // This means stop-loss does NOT widen by 5% for what should be a consensus signal.
     // Effect: a -17% loss exits early when the widened (-20%) threshold shouldn't have triggered.
-    //
-    // This test uses hard_stop_loss=-100 to isolate dynamic threshold behavior from the
-    // hard-stop sign-convention bug (where hard_stop_loss=15.0 would fire on ALL losses).
 
     let (db, _tmp) = create_test_db().await;
     let pool = pg_pool(&db);
@@ -234,11 +143,10 @@ async fn test_consensus_query_failure_no_stop_widening() {
         PriceSource::Jupiter, Some(9),
     );
 
-    // We insert no signal_aggregation rows → query returns 0 → is_consensus = false
-    // The stop-loss threshold stays at -20% (not widened to -25%)
-    // -17% > -20% → should NOT exit
-    // Use hard_stop=-100 to prevent the buggy hard_stop sign convention from interfering
-    let mgr = StopLossManager::new(db, config_with_hard_stop("-100.0"), price_cache);
+    // No signal_aggregation rows → query returns 0 → is_consensus = false.
+    // Two-point history → volatility 0 → ×0.9 → effective threshold ≈ -18%.
+    // -17% > -18% → should NOT exit.
+    let mgr = StopLossManager::new(db, config_with_stop_distance("-100.0"), price_cache);
 
     let action = mgr
         .check_stop_loss(
@@ -253,18 +161,15 @@ async fn test_consensus_query_failure_no_stop_widening() {
     assert_eq!(
         action,
         StopLossAction::None,
-        "At -17% with high-WQS -20% threshold and no consensus: should not exit yet"
+        "At -17% with high-WQS ≈-18% threshold and no consensus: should not exit yet"
     );
 }
 
 #[tokio::test]
 async fn test_consensus_widens_stop_for_high_wqs_wallet() {
-    // With 2+ wallets buying the same token, is_consensus=true adds -5% widening.
-    // High WQS (-20%) + consensus (-5%) = -25% threshold.
-    // A -22% loss should NOT exit (above widened -25% threshold).
-    //
-    // Uses hard_stop=-100 to isolate dynamic threshold behavior (the sign-convention
-    // bug in hard_stop_loss would otherwise fire for every negative loss_percent).
+    // With 2+ wallets buying the same token, is_consensus=true widens the stop.
+    // High WQS (-20%) × 0.9 volatility × 1.25 consensus ≈ -22.5% threshold.
+    // A -22% loss should NOT exit.
 
     let (db, _tmp) = create_test_db().await;
     let pool = pg_pool(&db);
@@ -285,7 +190,7 @@ async fn test_consensus_widens_stop_for_high_wqs_wallet() {
         PriceSource::Jupiter, Some(9),
     );
 
-    let mgr = StopLossManager::new(db, config_with_hard_stop("-100.0"), price_cache);
+    let mgr = StopLossManager::new(db, config_with_stop_distance("-100.0"), price_cache);
 
     let action = mgr
         .check_stop_loss(
@@ -300,7 +205,7 @@ async fn test_consensus_widens_stop_for_high_wqs_wallet() {
     assert_eq!(
         action,
         StopLossAction::None,
-        "At -22% with consensus+high-WQS threshold -25%: should not exit"
+        "At -22% with consensus-widened ≈-22.5% threshold: should not exit"
     );
 }
 
@@ -309,8 +214,8 @@ async fn test_consensus_widens_stop_for_high_wqs_wallet() {
 #[tokio::test]
 async fn test_high_wqs_high_volatility_widens_to_40pct() {
     // WQS ≥ 70 → base stop = -20%.  Volatility > 30% → multiplier = 2.0.
-    // -20% × 2.0 = -40%, clamped to [-35%, -5%] → clamps to -35% (tightened from -50%).
-    // -34% loss → None. -36% loss → Exit.
+    // -20% × 2.0 = -40%, clamped to the -25% absolute floor (widest allowed).
+    // -24% loss → None. -26% loss → Exit.
 
     let (db, _tmp) = create_test_db().await;
     let pool = pg_pool(&db);
@@ -320,7 +225,6 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
     let price_cache = Arc::new(PriceCache::new().unwrap());
 
     // Push enough price history to compute volatility > 30%.
-    // Base price: $1.00.  Push 10 points alternating ±35% swings → high std dev.
     let prices = [
         1.00, 1.35, 0.90, 1.30, 0.88, 1.40, 0.87, 1.35, 0.86, 1.30_f64,
     ];
@@ -332,7 +236,6 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
         );
     }
 
-    // Verify volatility is detected as > 30%
     let vol = price_cache.calculate_volatility(TOKEN);
     assert!(vol.is_some(), "Volatility must be calculable");
     assert!(
@@ -341,8 +244,7 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
         vol.unwrap()
     );
 
-    // At -24%: entry $1.00, current $0.76 → -24% → None
-    // Use max_stop_loss_distance=-25 so widest_stop=-25 applies the clamp (M5 fix).
+    // At -24%: entry $1.00, current $0.76 → -24% → None (threshold clamped to -25%)
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("0.76").unwrap(),
@@ -350,7 +252,7 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
     );
     let mgr = StopLossManager::new(
         db.clone(),
-        config_with_hard_stop("-25.0"),
+        config_with_stop_distance("-25.0"),
         price_cache.clone(),
     );
     let action_near = mgr
@@ -365,7 +267,7 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
     assert_eq!(
         action_near,
         StopLossAction::None,
-        "-24% loss with -25% (clamped) threshold should not exit (M5 fix: wick protection)"
+        "-24% loss with -25% (clamped) threshold should not exit"
     );
 
     // At -26%: current $0.74 → Exit (past the -25% clamp)
@@ -374,7 +276,7 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
         Decimal::from_str("0.74").unwrap(),
         PriceSource::Jupiter, Some(9),
     );
-    let mgr2 = StopLossManager::new(db, config_with_hard_stop("-25.0"), price_cache);
+    let mgr2 = StopLossManager::new(db, config_with_stop_distance("-25.0"), price_cache);
     let action_over = mgr2
         .check_stop_loss(
             "uuid-vol-over",
@@ -387,7 +289,7 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
     assert_eq!(
         action_over,
         StopLossAction::Exit,
-        "-26% loss with -25% (clamped) threshold must exit (M5 fix: wick protection)"
+        "-26% loss with -25% (clamped) threshold must exit"
     );
 }
 
@@ -396,9 +298,12 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
 #[tokio::test]
 async fn test_low_wqs_low_volatility_tightens_to_9pct() {
     // WQS < 40 → base stop = -10%.  Volatility < 10% → multiplier = 0.9.
-    // -10% × 0.9 = -9%.  Clamp range [-50%, -5%]: -9% is within range, stays -9%.
+    // -10% × 0.9 = -9%.
     // A -6% loss must NOT exit (< 9% threshold).
     // A -10% loss MUST exit (exceeds -9% threshold).
+    //
+    // Uses a wide max_stop_loss_distance (-50) so the -9% threshold is
+    // effective (with the DEFAULT -5.0 it would collapse to -5%).
 
     let (db, _tmp) = create_test_db().await;
     let pool = pg_pool(&db);
@@ -426,7 +331,7 @@ async fn test_low_wqs_low_volatility_tightens_to_9pct() {
         assert!(v < 10.0, "Test setup requires low volatility, got {}", v);
     }
 
-    let mgr = StopLossManager::new(db.clone(), default_config(), price_cache.clone());
+    let mgr = StopLossManager::new(db.clone(), config_with_stop_distance("-50.0"), price_cache.clone());
 
     // -6% loss: below the -9% threshold → must NOT exit
     price_cache.set_price(
@@ -476,8 +381,8 @@ async fn test_low_wqs_low_volatility_tightens_to_9pct() {
 #[tokio::test]
 async fn test_consensus_plus_high_volatility_widens_further() {
     // WQS ≥ 70 (-20%) × 2.0 (>30% volatility) = -40%, then ×1.25 consensus = -50%,
-    // clamped to widest_stop -35%.  Effective threshold: -35%.
-    // -34% loss → None. -36% loss → Exit.
+    // clamped to the -25% absolute floor. Effective threshold: -25%.
+    // -24% loss → None. -26% loss → Exit.
 
     let (db, _tmp) = create_test_db().await;
     let pool = pg_pool(&db);
@@ -503,7 +408,6 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     insert_consensus_signal(&pool, TOKEN, "wallet_other").await;
 
     // -24% loss: $0.76 from $1.00 — within -25% threshold → None
-    // Use max_stop_loss_distance=-25 so the -25% widening cap applies (M5 fix: wick protection).
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("0.76").unwrap(),
@@ -511,7 +415,7 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     );
     let mgr = StopLossManager::new(
         db.clone(),
-        config_with_hard_stop("-25.0"),
+        config_with_stop_distance("-25.0"),
         price_cache.clone(),
     );
     let none = mgr
@@ -526,7 +430,7 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     assert_eq!(
         none,
         StopLossAction::None,
-        "-24% should not exit when threshold is -25% (vol×2.0 × consensus×1.25 clamped, M5 fix)"
+        "-24% should not exit when threshold is -25% (vol×2.0 × consensus×1.25 clamped)"
     );
 
     // -26% loss: $0.74 from $1.00 — exceeds -25% threshold → Exit
@@ -535,7 +439,7 @@ async fn test_consensus_plus_high_volatility_widens_further() {
         Decimal::from_str("0.74").unwrap(),
         PriceSource::Jupiter, Some(9),
     );
-    let mgr2 = StopLossManager::new(db, config_with_hard_stop("-25.0"), price_cache);
+    let mgr2 = StopLossManager::new(db, config_with_stop_distance("-25.0"), price_cache);
     let exit = mgr2
         .check_stop_loss(
             "uuid-cv-2",
@@ -548,7 +452,7 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     assert_eq!(
         exit,
         StopLossAction::Exit,
-        "-26% must exit when threshold is -25% (vol×2.0 × consensus×1.25 clamped, M5 fix)"
+        "-26% must exit when threshold is -25% (vol×2.0 × consensus×1.25 clamped)"
     );
 }
 
@@ -556,10 +460,11 @@ async fn test_consensus_plus_high_volatility_widens_further() {
 
 #[tokio::test]
 async fn test_hard_stop_overrides_wider_dynamic_threshold() {
-    // High WQS (≥70) sets dynamic threshold = -20%.
-    // Config hard_stop_loss = 12.0 (positive magnitude; comparison: loss_percent <= 12.0).
-    // At -13% loss: dynamic check -13 <= -20 = FALSE; hard stop -13 <= 12.0 = TRUE → Exit.
-    // This confirms the hard stop fires before the dynamic -20% threshold is reached.
+    // High WQS (≥70) sets a dynamic threshold near -20% (×0.9 vol ≈ -18%).
+    // Config max_stop_loss_distance = -12.0 clamps the effective threshold to
+    // -12% (the operator-configured floor is tighter than the dynamic stop).
+    // At -13% loss: -13 <= -12 → Exit — the configured floor fires before the
+    // dynamic -18% threshold is reached.
 
     let (db, _tmp) = create_test_db().await;
     let pool = pg_pool(&db);
@@ -574,7 +479,7 @@ async fn test_hard_stop_overrides_wider_dynamic_threshold() {
         PriceSource::Jupiter, Some(9),
     );
 
-    let cfg = config_with_hard_stop("12.0");
+    let cfg = config_with_stop_distance("-12.0");
     let mgr = StopLossManager::new(db, cfg, price_cache);
 
     let action = mgr
@@ -590,7 +495,7 @@ async fn test_hard_stop_overrides_wider_dynamic_threshold() {
     assert_eq!(
         action,
         StopLossAction::Exit,
-        "Hard stop (12.0) must fire at -13% even though dynamic threshold is -20%"
+        "Configured floor (-12.0) must fire at -13% even though the dynamic threshold is ≈-18%"
     );
 }
 
@@ -631,8 +536,9 @@ async fn test_stop_loss_price_cache_unavailable_returns_none() {
 
 #[tokio::test]
 async fn test_medium_wqs_standard_stop_at_15pct() {
-    // WQS 40–70 → dynamic threshold = -15%.
-    // -14% → None. -15% → Exit.
+    // WQS 40–70 → dynamic threshold = -15%, ×0.9 (two-point history, vol ≈ 0)
+    // → effective ≈ -13.5%.
+    // -10% → None. -15% → Exit.
 
     let (db, _tmp) = create_test_db().await;
     let pool = pg_pool(&db);
@@ -641,13 +547,13 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
     const TOKEN: &str = "token_med_wqs";
     let price_cache = Arc::new(PriceCache::new().unwrap());
 
-    // -14%: entry $1.00, current $0.86 → None
+    // -10%: entry $1.00, current $0.90 → None (well above ≈-13.5% threshold)
     price_cache.set_price(
         TOKEN,
-        Decimal::from_str("0.86").unwrap(),
+        Decimal::from_str("0.90").unwrap(),
         PriceSource::Jupiter, Some(9),
     );
-    let mgr = StopLossManager::new(db.clone(), default_config(), price_cache.clone());
+    let mgr = StopLossManager::new(db.clone(), config_with_stop_distance("-100.0"), price_cache.clone());
     let none = mgr
         .check_stop_loss(
             "uuid-med-1",
@@ -657,11 +563,11 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
             past_entry(),
         )
         .await;
-
-    // Note: hard_stop_loss default = 15.0 (positive). -14 <= 15.0 = TRUE → also triggers hard stop.
-    // The following assertion uses the ACTUAL code behavior.
-    // If hard_stop is later fixed to use -15.0 semantics, re-evaluate this assertion.
-    let _ = none; // behavior documented below
+    assert_eq!(
+        none,
+        StopLossAction::None,
+        "-10% must NOT exit for a medium-WQS wallet (threshold ≈ -13.5%)"
+    );
 
     // -15%: current $0.85 → Exit
     price_cache.set_price(
@@ -669,7 +575,7 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
         Decimal::from_str("0.85").unwrap(),
         PriceSource::Jupiter, Some(9),
     );
-    let mgr2 = StopLossManager::new(db, default_config(), price_cache);
+    let mgr2 = StopLossManager::new(db, config_with_stop_distance("-100.0"), price_cache);
     let exit = mgr2
         .check_stop_loss(
             "uuid-med-2",

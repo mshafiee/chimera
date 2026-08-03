@@ -20,9 +20,6 @@ fn pg_pool(
 ) -> Result<sqlx::Pool<sqlx::Postgres>, AppError> {
     match db.pool() {
         DbPool::PostgreSQL(p) => Ok(p),
-        _ => Err(AppError::Internal(
-            "PostgreSQL backend required".to_string(),
-        )),
     }
 }
 
@@ -88,16 +85,13 @@ pub struct ExecutionResult {
 /// Divergence alert when wallets disagree
 #[derive(Debug, Serialize)]
 pub struct DivergenceAlert {
-    #[serde(skip_serializing)]
     pub alert_id: String,
     pub timestamp: String,
     pub token_address: String,
     pub token_symbol: Option<String>,
     #[serde(rename = "divergence_score")]
     pub divergence_type: String, // "directional" | "timing" | "amount"
-    #[serde(skip_serializing)]
     pub severity: String, // "low" | "medium" | "high"
-    #[serde(skip_serializing)]
     pub wallets_clustered: Vec<WalletCluster>,
     #[serde(rename = "wallets_divergent")]
     pub wallets_divergent: Vec<WalletCluster>,
@@ -228,7 +222,7 @@ pub async fn get_consensus(
     )
     .fetch_all(&pool)
     .await
-    .unwrap_or_default();
+    .map_err(AppError::Database)?;
 
     let recent_signals: Vec<SignalAggRow> = recent_rows
         .into_iter()
@@ -254,7 +248,7 @@ pub async fn get_consensus(
     )
     .fetch_one(&pool)
     .await
-    .unwrap_or(0.0);
+    .map_err(AppError::Database)?;
 
     // Group by token for consensus signals
     let mut consensus_signals: std::collections::HashMap<String, Vec<SignalAggRow>> =
@@ -305,12 +299,8 @@ pub async fn get_consensus(
         0.0
     };
 
-    // Get active clusters
-    let _active_clusters = if let Some(ref agg) = state.signal_aggregator {
-        get_active_clusters(agg, &pg_pool(&state.db)?, "24h", 24).await
-    } else {
-        Vec::new()
-    };
+    // Get active clusters from the database (real wallet/token groups)
+    let active_clusters = fetch_clusters(&pool, 24).await?;
 
     // Calculate divergence alerts
     let divergence_alerts = if let Some(ref agg) = state.signal_aggregator {
@@ -322,7 +312,7 @@ pub async fn get_consensus(
     Ok(Json(ConsensusResponse {
         consensus_rate,
         avg_clustering_coefficient,
-        active_clusters: Vec::new(),
+        active_clusters,
         recent_signals,
         divergence_alerts,
     }))
@@ -337,17 +327,20 @@ pub async fn get_wallet_clustering(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<WalletClusteringResponse>, AppError> {
     let pool = pg_pool(&state.db)?;
-    let _clusters = if let Some(ref agg) = state.signal_aggregator {
-        get_active_clusters(agg, &pool, "24h", 24).await
-    } else {
-        Vec::new()
-    };
+    let clusters = fetch_clusters(&pool, 24).await?;
 
-    let total_wallets = 0;
+    let total_wallets: usize = clusters
+        .iter()
+        .map(|c| c.wallets.len())
+        .sum();
 
     // Calculate clustering metrics
-    let avg_cluster_size = 0.0;
-    let max_cluster_size = 0;
+    let avg_cluster_size = if !clusters.is_empty() {
+        total_wallets as f64 / clusters.len() as f64
+    } else {
+        0.0
+    };
+    let max_cluster_size = clusters.iter().map(|c| c.wallets.len()).max().unwrap_or(0);
 
     // Placeholder metrics - in production these would be calculated properly
     let clustering_metrics = ClusteringMetrics {
@@ -360,7 +353,7 @@ pub async fn get_wallet_clustering(
     Ok(Json(WalletClusteringResponse {
         total_wallets,
         clustering_metrics,
-        clusters: Vec::new(),
+        clusters,
     }))
 }
 
@@ -395,7 +388,7 @@ pub async fn get_signal_aggregation(
     )
     .fetch_all(&pool)
     .await
-    .unwrap_or_default();
+    .map_err(AppError::Database)?;
 
     let signals: Vec<SignalAggRow> = signal_rows
         .into_iter()
@@ -540,46 +533,43 @@ pub async fn get_signal_quality(
             "7d" => chrono::Duration::days(7),
             _ => chrono::Duration::hours(24),
         };
-    let cutoff_str = cutoff.to_rfc3339();
 
-    // Total signals in time range
+    // Timestamps are bound as parameters — interpolating the RFC3339 string
+    // into the SQL produced a syntax error and silent default responses.
     let total_signals: i64 =
-        sqlx::query_scalar(&format!("SELECT COUNT(*) FROM trades WHERE created_at >= {}", cutoff_str))
+        sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE created_at >= $1")
+            .bind(cutoff)
             .fetch_one(&pool)
             .await
-            .unwrap_or(0);
+            .map_err(AppError::Database)?;
 
     // Accepted vs rejected signals
     let (accepted_signals, rejected_signals): (i64, i64) = sqlx::query_as(
-        &format!(
-            r#"
+        r#"
             SELECT
                 COUNT(CASE WHEN status IN ('ACTIVE', 'CLOSED') THEN 1 END) as accepted,
                 COUNT(CASE WHEN status IN ('FAILED', 'DEAD_LETTER') THEN 1 END) as rejected
-            FROM trades WHERE created_at >= {}
+            FROM trades WHERE created_at >= $1
             "#,
-            cutoff_str
-        ),
     )
+    .bind(cutoff)
     .fetch_one(&pool)
     .await
-    .unwrap_or((0, 0));
+    .map_err(AppError::Database)?;
 
     // Current quality score (average WQS of wallets that sent signals)
     let current_quality_score: f64 = sqlx::query_scalar(
-        &format!(
-            r#"
+        r#"
         SELECT COALESCE(AVG(w.wqs_score), 50.0)
         FROM trades t
         LEFT JOIN wallets w ON t.wallet_address = w.address
-        WHERE t.created_at >= {}
+        WHERE t.created_at >= $1
         "#,
-            cutoff_str
-        ),
     )
+    .bind(cutoff)
     .fetch_one(&pool)
     .await
-    .unwrap_or(50.0);
+    .map_err(AppError::Database)?;
 
     // Rejection rate
     let rejection_rate = if total_signals > 0 {
@@ -624,15 +614,17 @@ pub async fn get_signal_sources(
 ) -> Result<Json<SignalSourcesResponse>, AppError> {
     let pool = pg_pool(&state.db)?;
 
-    // Query per-wallet signal statistics (last 7 days)
+    // Query per-wallet signal statistics (last 7 days).
+    // COUNT(*) stays BIGINT (matches the i64 decode) and the max timestamp is
+    // cast to text so it can decode as a String.
     let source_rows = sqlx::query(
         r#"
         SELECT
             t.wallet_address as source,
-            CAST(COUNT(*) AS INTEGER) as signal_count,
+            COUNT(*) as signal_count,
             COALESCE(w.wqs_score, 50.0) as average_quality,
             CAST(COUNT(CASE WHEN t.status IN ('ACTIVE', 'CLOSED') THEN 1 END) AS DOUBLE PRECISION) / CAST(COUNT(*) AS DOUBLE PRECISION) as acceptance_rate,
-            MAX(t.created_at) as last_signal_at
+            MAX(t.created_at)::text as last_signal_at
         FROM trades t
         LEFT JOIN wallets w ON t.wallet_address = w.address
         WHERE t.created_at >= NOW() - INTERVAL '7 days'
@@ -643,7 +635,7 @@ pub async fn get_signal_sources(
     )
     .fetch_all(&pool)
     .await
-    .unwrap_or_default();
+    .map_err(AppError::Database)?;
 
     let sources_raw: Vec<SignalSourceRow> = source_rows
         .into_iter()
@@ -710,43 +702,61 @@ async fn calculate_clustering_coefficient(
     0.65 // Placeholder value
 }
 
-/// Get active clusters from signal aggregator and database
-async fn get_active_clusters(
-    _agg: &Arc<crate::monitoring::SignalAggregator>,
+/// Fetch real wallet clusters from the database: wallet groups per token over
+/// the last N hours. Coherence is the directional agreement of the group's
+/// signals (|buy - sell| / total), derived from actual signal data.
+async fn fetch_clusters(
     db: &sqlx::Pool<sqlx::Postgres>,
-    _cutoff_str: &str,
     hours: i64,
-) -> Vec<QualityTrendPoint> {
-    let mut trend = Vec::new();
+) -> Result<Vec<Cluster>, AppError> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            s.token_address,
+            ARRAY_AGG(DISTINCT s.wallet_address) AS wallets,
+            COUNT(*) AS signal_count,
+            AVG(w.wqs_score) AS avg_wqs,
+            MAX(s.created_at)::text AS last_activity,
+            SUM(CASE WHEN s.direction = 'BUY' THEN 1 ELSE -1 END) AS buy_sell_balance
+        FROM signal_aggregation s
+        LEFT JOIN wallets w ON s.wallet_address = w.address
+        WHERE s.created_at >= NOW() - $1::interval
+        GROUP BY s.token_address
+        ORDER BY signal_count DESC
+        "#,
+    )
+    .bind(format!("{} hours", hours))
+    .fetch_all(db)
+    .await
+    .map_err(AppError::Database)?;
 
-    // For simplicity, we'll just query hourly averages for the last N hours
-    // In production, this might use a more sophisticated time-series approach
-    for hour_offset in (0..hours).rev() {
-        let interval_start = format!("NOW() - INTERVAL '{} hours'", hour_offset + 1);
-        let interval_end = format!("NOW() - INTERVAL '{} hours'", hour_offset);
+    let mut clusters = Vec::with_capacity(rows.len());
+    for row in rows {
+        let token_address: String = row.try_get("token_address").unwrap_or_default();
+        let wallets: Vec<String> = row.try_get("wallets").unwrap_or_default();
+        let signal_count: i64 = row.try_get("signal_count").unwrap_or(0);
+        let avg_wqs: Option<f64> = row.try_get("avg_wqs").ok().flatten();
+        let last_activity: String = row.try_get("last_activity").unwrap_or_default();
+        let buy_sell_balance: Option<i64> = row.try_get("buy_sell_balance").ok().flatten();
 
-        let avg_score: f64 = sqlx::query_scalar(&format!(
-            r#"
-            SELECT COALESCE(AVG(w.wqs_score), 50.0)
-            FROM trades t
-            LEFT JOIN wallets w ON t.wallet_address = w.address
-            WHERE t.created_at >= {} AND t.created_at < {}
-            "#,
-            interval_start, interval_end
-        ))
-        .fetch_one(db)
-        .await
-        .unwrap_or(50.0);
+        let coherence = if signal_count > 0 {
+            let balance = buy_sell_balance.unwrap_or(0).abs();
+            (balance as f64 / signal_count as f64).min(1.0)
+        } else {
+            0.0
+        };
 
-        let timestamp = chrono::Utc::now() - chrono::Duration::hours(hour_offset);
-
-        trend.push(QualityTrendPoint {
-            timestamp: timestamp.to_rfc3339(),
-            average_score: avg_score,
+        clusters.push(Cluster {
+            id: format!("token_{}", token_address.chars().take(8).collect::<String>()),
+            wallets,
+            signal_count: signal_count as usize,
+            avg_wqs: avg_wqs.unwrap_or(0.0),
+            last_activity,
+            coherence,
         });
     }
 
-    trend
+    Ok(clusters)
 }
 
 /// Calculate divergence alerts from recent signals and aggregator state
@@ -788,29 +798,35 @@ async fn calculate_divergence_alerts(
             .cloned()
             .collect();
 
-        // Check for divergence: some wallets selling while others buying/holding
-        if !sellers.is_empty() && !buyers.is_empty() {
-            // This is a divergence pattern - wallets disagree on direction
-            let divergence_type = if buyers.len() > sellers.len() {
-                "directional_bullish".to_string() // More buyers than sellers
-            } else if sellers.len() > buyers.len() {
-                "directional_bearish".to_string() // More sellers than buyers
-            } else {
-                "timing".to_string() // Equal split - timing divergence
-            };
+            // Check for divergence: some wallets selling while others buying/holding
+            if !sellers.is_empty() && !buyers.is_empty() {
+                // This is a divergence pattern - wallets disagree on direction.
+                // divergence_type follows the documented contract:
+                // "directional" | "timing" | "amount".
+                let divergence_type = if buyers.len() != sellers.len() {
+                    "directional".to_string()
+                } else {
+                    "timing".to_string() // Equal split - timing divergence
+                };
 
-            // Create wallet clusters for divergent wallets
-            let wallets_clustered = vec![WalletCluster {
-                cluster_id: format!("holders_{}", &token_address[..8]),
-                wallet_addresses: buyers.iter().map(|b| b.wallet_address.clone()).collect(),
-                signal: "BUY".to_string(),
-            }];
+                // Create wallet clusters for divergent wallets
+                let wallets_clustered = vec![WalletCluster {
+                    cluster_id: format!(
+                        "holders_{}",
+                        token_address.chars().take(8).collect::<String>()
+                    ),
+                    wallet_addresses: buyers.iter().map(|b| b.wallet_address.clone()).collect(),
+                    signal: "BUY".to_string(),
+                }];
 
-            let wallets_divergent = vec![WalletCluster {
-                cluster_id: format!("sellers_{}", &token_address[..8]),
-                wallet_addresses: sellers.iter().map(|s| s.wallet_address.clone()).collect(),
-                signal: "SELL".to_string(),
-            }];
+                let wallets_divergent = vec![WalletCluster {
+                    cluster_id: format!(
+                        "sellers_{}",
+                        token_address.chars().take(8).collect::<String>()
+                    ),
+                    wallet_addresses: sellers.iter().map(|s| s.wallet_address.clone()).collect(),
+                    signal: "SELL".to_string(),
+                }];
 
             let alert = DivergenceAlert {
                 alert_id: format!("div_{}", uuid::Uuid::new_v4()),

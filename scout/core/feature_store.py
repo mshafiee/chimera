@@ -74,7 +74,7 @@ class FeatureStore:
             Path to the written CSV file
         """
         if run_timestamp is None:
-            run_timestamp = datetime.utcnow()
+            run_timestamp = datetime.now().astimezone()
         ts_str = run_timestamp.isoformat() if isinstance(run_timestamp, datetime) else str(run_timestamp)
 
         csv_path = self.output_dir / "wallet_features.csv"
@@ -136,7 +136,12 @@ class FeatureStore:
             reader = csv.DictReader(f)
             for row in reader:
                 for key in row:
-                    if key not in ("run_timestamp", "wallet_address", "status", "archetype"):
+                    if key in ("is_fresh_wallet", "uses_limit_orders", "uses_mev_protection"):
+                        # csv.DictWriter serializes bools as 'True'/'False' —
+                        # normalize to 1.0/0.0 so the column is numeric like
+                        # the rest of the feature matrix
+                        row[key] = 1.0 if str(row[key]).lower() in ("true", "1", "yes") else 0.0
+                    elif key not in ("run_timestamp", "wallet_address", "status", "archetype"):
                         try:
                             row[key] = float(row[key]) if row[key] else None
                         except (ValueError, TypeError):

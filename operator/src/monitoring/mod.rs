@@ -157,11 +157,6 @@ impl MonitoringState {
         }
         let pre_validator = Arc::new(pv);
         let exit_detector = Arc::new(ExitDetector::new().with_db(db.clone()));
-        let auto_demote_enabled = config
-            .monitoring
-            .as_ref()
-            .map(|m| m.auto_demote_wallets)
-            .unwrap_or(false);
         let wallet_performance = Arc::new(WalletPerformanceTracker::new_with_config(
             db.clone(),
             config.clone(),

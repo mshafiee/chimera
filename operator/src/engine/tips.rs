@@ -34,7 +34,7 @@ fn cold_start_multiplier() -> Decimal {
 /// Pure helper (no DB / TipManager dependency) so the percentile selection —
 /// the mechanism that makes seeded paper-mode tips escape cold-start — is
 /// directly unit-testable.
-fn percentile_tip_from_history(tips: &mut Vec<Decimal>, strategy: Strategy, config: &JitoConfig) -> Decimal {
+fn percentile_tip_from_history(tips: &mut [Decimal], strategy: Strategy, config: &JitoConfig) -> Decimal {
     // Sort ascending for percentile indexing
     tips.sort();
 
@@ -44,6 +44,12 @@ fn percentile_tip_from_history(tips: &mut Vec<Decimal>, strategy: Strategy, conf
         Strategy::Spear => config.tip_percentile as usize, // Configured percentile (default 50)
         Strategy::Exit => 75, // Higher: 75th percentile for exits
     };
+
+    // Guard: an empty sample set would underflow `len() - 1` (panic in debug,
+    // wrap in release). Fall back to the configured floor.
+    if tips.is_empty() {
+        return config.tip_floor_sol;
+    }
 
     let index = (tips.len() * percentile / 100).min(tips.len() - 1);
     let percentile_tip = tips[index];
@@ -147,7 +153,12 @@ impl TipManager {
     /// tips), so the percentile data is never polluted.
     pub async fn seed_paper_history_if_empty(&self) -> AppResult<()> {
         let count = self.db.get_jito_tip_count().await?;
-        if count >= MIN_SAMPLES_FOR_PERCENTILE {
+        // Only seed a COMPLETELY empty history. Seeding when 1-9 real tips
+        // already exist would permanently persist fake seeds into
+        // `jito_tip_history` with no distinguishing filter, and later live
+        // runs would blend them into percentile calculations — polluting
+        // live data exactly as the docs say it won't.
+        if count > 0 {
             return Ok(());
         }
 
@@ -250,7 +261,9 @@ impl TipManager {
     pub async fn get_tip_success_rate(&self, tip_amount_sol: Decimal) -> AppResult<f64> {
         let total = self.db.get_jito_tip_count().await?;
         if total == 0 {
-            return Ok(1.0);
+            // No evidence of landing success — do NOT assume 1.0 (which would
+            // wrongly suppress fallback/retry behavior).
+            return Ok(0.0);
         }
         let min_tip = tip_amount_sol * Decimal::from_str("0.9").unwrap_or(Decimal::ZERO);
         let max_tip = tip_amount_sol * Decimal::from_str("1.1").unwrap_or(Decimal::ZERO);
@@ -263,7 +276,7 @@ impl TipManager {
             .filter(|t| **t >= min_tip && **t <= max_tip)
             .count();
         if recent_tips.is_empty() {
-            return Ok(1.0);
+            return Ok(0.0); // No evidence of landing success — don't assume 1.0
         }
         Ok(in_range as f64 / recent_tips.len() as f64)
     }
@@ -326,7 +339,13 @@ impl TipManager {
         let history = self.history.read();
 
         if history.is_empty() {
-            return TipStats::default();
+            // Report the REAL cold-start flag instead of the default
+            // (is_cold_start: false) — cold start is exactly when the history
+            // tends to be empty, and misreporting it misleads operators.
+            return TipStats {
+                is_cold_start: *self.cold_start.read(),
+                ..TipStats::default()
+            };
         }
 
         let tips: Vec<Decimal> = history.iter().map(|e| e.amount_sol).collect();
@@ -372,14 +391,16 @@ impl TipManager {
             return Ok(0.0); // No history = assume 0% failure
         }
 
-        // Count recent successful tips (last 100 tips)
+        // Both counts come from the same source (successful tips only), so this
+        // is really 'fraction of history inside the recent window'. Using the
+        // all-time `total` on one side and the 100-row window on the other
+        // would converge the estimate to 1.0 as history grows; clamp to the
+        // window on both sides instead.
         let recent_tips = self.db.get_recent_jito_tips(100).await?;
-        let success_count = recent_tips.len() as f64;
-
-        // Estimate failure rate from historical success patterns
-        // This is a heuristic since DB trait doesn't expose raw success/fail counts
-        let failure_rate = 1.0 - (success_count / total as f64);
-        Ok(failure_rate)
+        let recent_count = recent_tips.len() as f64;
+        let window_total = total.min(100) as f64;
+        let failure_rate = 1.0 - (recent_count / window_total.max(1.0));
+        Ok(failure_rate.clamp(0.0, 1.0))
     }
 
     /// Check if in cold start mode

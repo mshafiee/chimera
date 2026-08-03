@@ -62,7 +62,7 @@ pub fn spawn_nav_snapshot_task(
                     }
 
                     tick = tick.saturating_add(1);
-                    if tick % PURGE_EVERY_N_TICKS == 0 {
+                    if tick.is_multiple_of(PURGE_EVERY_N_TICKS) {
                         match db.delete_portfolio_snapshots_before(RETENTION_DAYS).await {
                             Ok(n) if n > 0 => {
                                 tracing::debug!(purged = n, "Purged old NAV snapshots");

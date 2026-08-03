@@ -18,7 +18,7 @@ Each approach runs independently and contributes to the final wallet ranking.
 import time
 import asyncio
 import logging
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Any
 from dataclasses import dataclass, field
 from collections import defaultdict
 from enum import Enum
@@ -48,18 +48,6 @@ class MLApproach(Enum):
     GRADIENT_BOOST = "gradient_boost"
     NEURAL_NETWORK = "neural_network"
     RULE_BASED = "rule_based"
-
-
-@dataclass
-class ApproachPrediction:
-    """Prediction from a single ML approach."""
-    approach: MLApproach
-    wallet_address: str
-    predicted_profitability: float
-    predicted_wqs: float
-    confidence: float
-    inference_time_ms: float
-    timestamp: float = field(default_factory=time.time)
 
 
 @dataclass
@@ -166,23 +154,29 @@ class ParallelMLFilter:
         tasks = []
         for approach in self._approaches.keys():
             task = self._run_approach(approach, wallets, wallet_metrics)
-            tasks.append(task)
+            tasks.append((approach, task))
 
         # Execute all approaches concurrently
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*[t for _, t in tasks], return_exceptions=True)
 
         # Process results
-        for result in results:
+        for approach, task in tasks:
+            result = results[tasks.index((approach, task))]
             if isinstance(result, Exception):
-                logger.error(f"Approach failed: {result}")
+                logger.error("Approach %s failed: %s", approach.value, result)
+                # Record the failure explicitly so it's visible in rankings
+                approach_rankings[approach] = []
+                approach_scores[approach] = 0.0
                 continue
 
-            approach, ranked_wallets = result
+            ranked_wallets = result
             approach_rankings[approach] = ranked_wallets
             approach_scores[approach] = self._calculate_approach_score(approach, ranked_wallets)
 
         # Calculate consensus wallets (wallets ranked highly by multiple approaches)
-        consensus_wallets = self._calculate_consensus(approach_rankings, top_n=len(wallets) // 2)
+        consensus_wallets = self._calculate_consensus(
+            approach_rankings, top_n=max(1, len(wallets) // 2)
+        )
 
         # Select final filtered wallets based on consensus and top ratio
         final_wallets = self._select_final_wallets(
@@ -211,31 +205,51 @@ class ParallelMLFilter:
         approach: MLApproach,
         wallets: List[str],
         wallet_metrics: Dict[str, Any]
-    ) -> Tuple[MLApproach, List[str]]:
-        """Run a single ML approach and return ranked wallets."""
-        try:
-            approach_obj = self._approaches[approach]
-            start_time = time.time()
+    ) -> List[str]:
+        """Run a single ML approach and return ranked wallets.
 
-            # Get predictions from this approach
-            predictions = await approach_obj.predict_wallets(wallets, wallet_metrics)
+        Exceptions propagate to the caller (which records them explicitly),
+        so a crashed approach is never silently reported as an empty ranking.
+        """
+        approach_obj = self._approaches[approach]
+        start_time = time.time()
 
-            # Sort wallets by predicted profitability
-            ranked_wallets = sorted(
-                predictions,
-                key=lambda w: predictions[w].get('predicted_profitability', 0),
-                reverse=True
-            )
+        # Get predictions from this approach. The archive predictors expose
+        # predict_profitability(features) per wallet, not predict_wallets().
+        predictions: Dict[str, Dict[str, Any]] = {}
+        for wallet in wallets:
+            features = wallet_metrics.get(wallet, {})
+            if hasattr(approach_obj, 'predict_profitability'):
+                result = approach_obj.predict_profitability(features)
+                if isinstance(result, dict):
+                    predictions[wallet] = result
+                elif hasattr(result, 'predicted_pnl'):
+                    # EnsemblePrediction dataclass
+                    predictions[wallet] = {
+                        'predicted_profitability': result.predicted_pnl,
+                        'confidence': result.confidence,
+                    }
+            elif hasattr(approach_obj, 'predict_wallets'):
+                result = await approach_obj.predict_wallets([wallet], wallet_metrics)
+                if isinstance(result, dict) and wallet in result:
+                    predictions[wallet] = result[wallet]
 
-            inference_time_ms = (time.time() - start_time) * 1000
-            logger.info(f"{approach.value} completed in {inference_time_ms:.1f}ms")
+        # Keep raw predictions for outcome-based performance tracking
+        if not hasattr(self, '_last_predictions'):
+            self._last_predictions = {}
+        self._last_predictions[approach] = predictions
 
-            return (approach, ranked_wallets)
+        # Sort wallets by predicted profitability
+        ranked_wallets = sorted(
+            predictions,
+            key=lambda w: predictions[w].get('predicted_profitability', 0),
+            reverse=True
+        )
 
-        except Exception as e:
-            logger.error(f"{approach.value} failed: {e}")
-            # Return empty ranking for failed approach
-            return (approach, [])
+        inference_time_ms = (time.time() - start_time) * 1000
+        logger.info("%s completed in %.1fms", approach.value, inference_time_ms)
+
+        return ranked_wallets
 
     def _calculate_approach_score(self, approach: MLApproach, ranked_wallets: List[str]) -> float:
         """Calculate a performance score for an approach."""
@@ -293,13 +307,35 @@ class ParallelMLFilter:
 
     async def _update_performance_tracking(self, result: ParallelFilterResult):
         """Update performance tracking for all approaches."""
-        # This would be implemented with actual performance data
-        # For now, we track basic metrics
         current_time = time.time()
+
+        # Refresh counters from the latest rankings on every call
+        for approach, performance in self._performance.items():
+            predictions = getattr(self, '_last_predictions', {}).get(approach, {})
+            if predictions:
+                performance.predictions_made += len(predictions)
+                confidences = [p.get('confidence', 0.5) for p in predictions.values()]
+                performance.avg_confidence = sum(confidences) / len(confidences)
+                performance.last_updated = current_time
 
         if current_time - self._last_performance_check > self._performance_check_interval:
             await self._evaluate_and_kill_underperformers()
             self._last_performance_check = current_time
+
+    def record_outcome(self, wallet: str, was_profitable: bool) -> None:
+        """
+        Record a known-good outcome for a wallet so per-approach accuracy
+        (and the kill-underperformers logic) reflects real results.
+        """
+        for approach, predictions in getattr(self, '_last_predictions', {}).items():
+            performance = self._performance.get(approach)
+            if performance is None or wallet not in predictions:
+                continue
+            predicted_profitable = predictions[wallet].get('predicted_profitability', 0) > 0
+            performance.predictions_made += 1
+            performance.correct_predictions += 1 if predicted_profitable == was_profitable else 0
+            performance.accuracy = performance.correct_predictions / max(1, performance.predictions_made)
+            performance.last_updated = time.time()
 
     async def _evaluate_and_kill_underperformers(self):
         """Evaluate approach performance and remove underperformers."""
@@ -307,7 +343,9 @@ class ParallelMLFilter:
         # Primary approach (ensemble) must maintain 2x+ improvement vs baseline
         # Backup approaches must maintain 1.5x+ improvement
 
-        for approach, performance in self._performance.items():
+        # Iterate a snapshot so killing approaches doesn't mutate the dict
+        # being iterated
+        for approach, performance in list(self._performance.items()):
             if performance.predictions_made < 10:
                 continue  # Not enough data yet
 

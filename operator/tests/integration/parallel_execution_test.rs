@@ -160,21 +160,28 @@ async fn test_five_concurrent_signals_process_in_parallel() {
     );
     worker_pool.start().await;
 
+    // Poll (with a bound) until the queue drains AND the workers go idle —
+    // a fixed sleep is flaky when the shared Postgres is under parallel load.
     let start = Instant::now();
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let stats = worker_pool.stats();
+            if stats.queue_depth == 0 && stats.active_workers == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("worker pool did not drain in time");
     let elapsed = start.elapsed();
 
     cancel_token.cancel();
     let stats = worker_pool.stats();
-
-    assert_eq!(
-        stats.queue_depth, 0,
-        "All 5 signals should be dequeued, took {:?}",
-        elapsed
-    );
+    assert_eq!(stats.queue_depth, 0, "All 5 signals should be dequeued");
     assert!(
-        elapsed < std::time::Duration::from_secs(5),
-        "5 signals should process in under 5s with 4 workers (took {:?})",
+        elapsed < std::time::Duration::from_secs(10),
+        "5 signals should process in under 10s with 4 workers (took {:?})",
         elapsed
     );
 }
@@ -277,7 +284,6 @@ async fn test_rpc_semaphore_limits_concurrency() {
     let worker_config = WorkerPoolConfig {
         num_workers: 4,
         max_concurrent_rpc: 2,
-        rpc_rate_limit: 10,
     };
 
     let cancel_token = CancellationToken::new();

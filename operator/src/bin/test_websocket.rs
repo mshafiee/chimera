@@ -20,7 +20,8 @@ async fn main() -> Result<()> {
     );
 
     println!("🔌 Connecting to Helius WebSocket...");
-    println!("   URL: {}", &websocket_url[..40]);
+    let redacted_url = websocket_url.replace(&api_key, "***");
+    println!("   URL: {}", redacted_url);
 
     // Connect to WebSocket
     let (ws_stream, response) = tokio_tungstenite::connect_async(&websocket_url).await?;
@@ -35,9 +36,16 @@ async fn main() -> Result<()> {
 
     let pong_received = timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(Ok(message)) = ws_receiver.next().await {
-                if matches!(message, tokio_tungstenite::tungstenite::Message::Pong(_)) {
-                    return true;
+            match ws_receiver.next().await {
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Pong(_))) => return true,
+                Some(Ok(_)) => {}
+                Some(Err(e)) => {
+                    println!("   ❌ Error: {}", e);
+                    return false;
+                }
+                None => {
+                    println!("   ❌ Stream closed");
+                    return false;
                 }
             }
         }

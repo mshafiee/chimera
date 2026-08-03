@@ -39,11 +39,11 @@ log_section "System Degradation Diagnosis"
 
 # Check service status
 log_section "1. Service Status"
-docker ps --format "table {{.Names}}\t{{.Status}}" | grep chimera
+docker ps --format "table {{.Names}}\t{{.Status}}" | grep chimera || log_warning "No chimera containers found"
 
 # Check operator health
 log_section "2. Operator Health"
-HEALTH=$(curl -s http://localhost:8080/api/v1/health 2>&1)
+HEALTH=$(curl -s --connect-timeout 3 --max-time 5 http://localhost:8080/api/v1/health 2>&1 || true)
 if echo "$HEALTH" | grep -q '"status".*"healthy"'; then
     log_success "Operator is healthy"
     echo "$HEALTH" | python3 -m json.tool 2>/dev/null | head -20
@@ -54,7 +54,7 @@ fi
 
 # Check for errors
 log_section "3. Recent Errors"
-ERRORS=$(docker logs chimera-operator --tail 100 2>&1 | grep -iE "error|fail" | tail -10)
+ERRORS=$(docker logs chimera-operator --tail 100 2>&1 | grep -iE "error|fail" | tail -10 || true)
 if [ -n "$ERRORS" ]; then
     log_warning "Found errors in operator logs:"
     echo "$ERRORS"
@@ -68,27 +68,29 @@ ALERTMANAGER_STATUS=$(docker inspect chimera-alertmanager --format='{{.State.Sta
 if [ "$ALERTMANAGER_STATUS" = "restarting" ]; then
     log_error "Alertmanager is restarting"
     log_info "Recent logs:"
-    docker logs chimera-alertmanager --tail 20 2>&1 | tail -10
+    docker logs chimera-alertmanager --tail 20 2>&1 | tail -10 || true
 else
     log_success "Alertmanager status: $ALERTMANAGER_STATUS"
 fi
 
 # Check resource usage
 log_section "5. Resource Usage"
-docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" | grep chimera
+docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" | grep chimera || log_warning "No chimera containers found"
 
 # Check Prometheus targets
 log_section "6. Prometheus Targets"
-TARGETS=$(curl -s http://localhost:9090/api/v1/targets 2>&1)
-if echo "$TARGETS" | grep -q '"health".*"up"'; then
+TARGETS=$(curl -s --connect-timeout 3 --max-time 5 http://localhost:9090/api/v1/targets 2>&1 || true)
+UP=$(echo "$TARGETS" | python3 -c 'import json,sys; print(sum(1 for t in json.load(sys.stdin)["data"]["activeTargets"] if t["health"]=="up"))' 2>/dev/null || echo 0)
+DOWN=$(echo "$TARGETS" | python3 -c 'import json,sys; print(sum(1 for t in json.load(sys.stdin)["data"]["activeTargets"] if t["health"]!="up"))' 2>/dev/null || echo 0)
+if [ "$DOWN" -eq 0 ]; then
     log_success "Prometheus targets are up"
 else
-    log_warning "Some Prometheus targets may be down"
+    log_warning "Some Prometheus targets may be down ($DOWN down, $UP up)"
 fi
 
 # Check web dashboard
 log_section "7. Web Dashboard"
-WEB_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 2>&1)
+WEB_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 5 http://localhost:3000 2>&1 || true)
 if [ "$WEB_STATUS" = "200" ]; then
     log_success "Web dashboard is accessible"
 else
@@ -98,11 +100,29 @@ fi
 # Summary
 log_section "Diagnosis Summary"
 echo "Issues found:"
-echo "  1. Alertmanager: Restarting (checking logs...)"
-echo "  2. Jupiter Price API: Connection failures (non-critical)"
-echo "  3. Web Dashboard: Health check issue (but dashboard works)"
+ISSUE_COUNT=0
+if [ "$ALERTMANAGER_STATUS" = "restarting" ]; then
+    ISSUE_COUNT=$((ISSUE_COUNT + 1))
+    echo "  $ISSUE_COUNT. Alertmanager is restarting"
+fi
+if [ -n "$ERRORS" ]; then
+    ISSUE_COUNT=$((ISSUE_COUNT + 1))
+    echo "  $ISSUE_COUNT. Errors found in operator logs"
+fi
+if [ "$DOWN" -gt 0 ]; then
+    ISSUE_COUNT=$((ISSUE_COUNT + 1))
+    echo "  $ISSUE_COUNT. Prometheus targets down: $DOWN"
+fi
+if [ "$WEB_STATUS" != "200" ]; then
+    ISSUE_COUNT=$((ISSUE_COUNT + 1))
+    echo "  $ISSUE_COUNT. Web dashboard returned: $WEB_STATUS"
+fi
+if [ "$ISSUE_COUNT" -eq 0 ]; then
+    echo "  None"
+fi
 echo ""
 echo "Recommendations:"
-echo "  - Restart alertmanager: ./docker/docker-compose.sh restart mainnet-paper alertmanager"
-echo "  - Monitor Jupiter API: Price cache errors are non-critical but should be monitored"
-echo "  - Check network connectivity for external APIs"
+[ "$ALERTMANAGER_STATUS" = "restarting" ] && echo "  - Restart alertmanager: ./docker/docker-compose.sh restart mainnet-paper alertmanager"
+[ -n "$ERRORS" ] && echo "  - Check operator logs above for errors"
+[ "$DOWN" -gt 0 ] && echo "  - Check Prometheus targets and their exporters"
+[ "$WEB_STATUS" != "200" ] && echo "  - Check the web dashboard service"

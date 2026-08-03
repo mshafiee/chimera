@@ -65,16 +65,13 @@ impl std::fmt::Display for Action {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SignalPayload {
     /// Trading strategy
-    #[serde(default)]
     pub strategy: Strategy,
     /// Token symbol (e.g., "BONK")
-    #[serde(default = "default_token")]
     pub token: String,
     /// Token mint address (Solana pubkey)
     #[serde(default)]
     pub token_address: Option<String>,
     /// Trade action
-    #[serde(default)]
     pub action: Action,
     /// Amount in SOL
     #[serde(default = "default_amount")]
@@ -90,10 +87,6 @@ pub struct SignalPayload {
     pub exit_fraction: Option<Decimal>,
 }
 
-fn default_token() -> String {
-    "UNKNOWN".to_string()
-}
-
 fn default_amount() -> Decimal {
     Decimal::ZERO
 }
@@ -107,7 +100,7 @@ impl SignalPayload {
     ///
     /// Does NOT include the request timestamp so that webhook retries (same payload,
     /// later timestamp) produce the SAME UUID and are caught by the DB dedup check.
-    /// Hash: SHA256(wallet_address || token || action || amount_sol).
+    /// Hash: SHA256(wallet || token || action || amount || strategy || token_address || exit_fraction).
     pub fn generate_trade_uuid(&self, _timestamp: i64) -> String {
         if let Some(ref uuid) = self.trade_uuid {
             return uuid.clone();
@@ -121,6 +114,13 @@ impl SignalPayload {
         hasher.update(self.action.to_string().as_bytes());
         hasher.update(b"|");
         hasher.update(self.amount_sol.to_string().as_bytes());
+        hasher.update(b"|");
+        hasher.update(self.strategy.to_string().as_bytes());
+        hasher.update(b"|");
+        hasher.update(self.token_address.as_deref().unwrap_or("").as_bytes());
+        hasher.update(b"|");
+        hasher
+            .update(self.exit_fraction.map(|f| f.to_string()).unwrap_or_default().as_bytes());
 
         let result = hasher.finalize();
         hex::encode(&result[..16]) // Use first 16 bytes for shorter UUID
@@ -131,6 +131,12 @@ impl SignalPayload {
         // Check token is not empty
         if self.token.trim().is_empty() {
             return Err("Token symbol cannot be empty".to_string());
+        }
+
+        // Reject the legacy "UNKNOWN" sentinel — a malformed payload that omits
+        // the token must not be accepted as a legitimate trade.
+        if self.token == "UNKNOWN" {
+            return Err("Token symbol is missing (got placeholder \"UNKNOWN\")".to_string());
         }
 
         // Check wallet address looks valid (basic check)
@@ -145,6 +151,13 @@ impl SignalPayload {
 
         if self.amount_sol > Decimal::from(100) {
             return Err("Amount exceeds maximum (100 SOL)".to_string());
+        }
+
+        // Exit fraction must be in (0, 1]
+        if let Some(f) = self.exit_fraction {
+            if f <= Decimal::ZERO || f > Decimal::ONE {
+                return Err("exit_fraction must be greater than 0 and at most 1".to_string());
+            }
         }
 
         // Exit signals must be SELL
@@ -196,12 +209,13 @@ impl Signal {
         }
     }
 
-    /// Get the token address, falling back to symbol if not provided
-    pub fn token_address(&self) -> &str {
-        self.payload
-            .token_address
-            .as_deref()
-            .unwrap_or(&self.payload.token)
+    /// Get the token mint address.
+    ///
+    /// Returns `None` when the signal has no token address; the symbol is NOT
+    /// substituted here so downstream code (Pubkey parsing, cache keys) never
+    /// mistakes a symbol for a mint address.
+    pub fn token_address(&self) -> Option<&str> {
+        self.payload.token_address.as_deref()
     }
 }
 

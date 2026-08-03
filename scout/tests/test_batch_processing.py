@@ -7,13 +7,14 @@ throughput.
 
 import pytest
 import asyncio
+import pytest_asyncio
 from unittest.mock import AsyncMock, patch
 
 from core.analyzer import WalletAnalyzer
 from core.wqs import WalletMetrics
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def analyzer():
     """Create a WalletAnalyzer instance for testing."""
     with patch("core.analyzer.HeliusClient"):
@@ -69,27 +70,25 @@ class TestBatchProcessing:
         """Test that batch_size parameter controls batching."""
         addresses = [f"wallet_{i}" for i in range(10)]
 
-        async def mock_get_metrics(address):
-            await asyncio.sleep(0.01)  # Simulate work
-            return WalletMetrics(
-                address=address,
-                roi_7d=5.0,
-                roi_30d=15.0,
-                trade_count_30d=5,
-                win_rate=0.5,
-                max_drawdown_30d=3.0,
-            )
+        # Spy on _process_batch to verify the actual address partitioning
+        captured = []
 
-        analyzer.get_wallet_metrics = AsyncMock(side_effect=mock_get_metrics)
+        async def spy_process_batch(batch_addresses, concurrency=5):
+            captured.append(list(batch_addresses))
+            return {}
+
+        analyzer._process_batch = spy_process_batch
 
         # Process with batch_size=3 (should create 4 batches: 3,3,3,1)
-        results = await analyzer.analyze_wallets_batch(
+        await analyzer.analyze_wallets_batch(
             addresses,
             batch_size=3,
             concurrency_per_batch=2,
         )
 
-        assert len(results) == 10
+        # Verify the partitioning is exactly 3/3/3/1
+        assert [len(b) for b in captured] == [3, 3, 3, 1]
+        assert sum(captured, []) == addresses
 
     @pytest.mark.asyncio
     async def test_concurrency_parameter_accepted(self, analyzer):
@@ -237,13 +236,12 @@ class TestBatchOptimization:
         assert analyzer._get_wallet_creation_time_cached.call_count == len(addresses)
 
     @pytest.mark.asyncio
-    async def test_memory_efficiency_batching(self, analyzer):
-        """Test that batching improves memory efficiency."""
+    async def test_large_batch_processing_completes(self, analyzer):
+        """Test that large batches are processed completely (throughput/plumbing)."""
         # Large list of addresses
         addresses = [f"wallet_{i}" for i in range(100)]
 
         async def mock_get_metrics(address):
-            # Simulate some memory usage
             return WalletMetrics(
                 address=address,
                 roi_7d=5.0,
@@ -264,6 +262,7 @@ class TestBatchOptimization:
 
         # All wallets should be processed
         assert len(results) == 100
+        assert all(address in results for address in addresses)
 
 
 class TestPerformanceMetrics:
@@ -287,22 +286,30 @@ class TestPerformanceMetrics:
 
         analyzer.get_wallet_metrics = AsyncMock(side_effect=mock_get_metrics)
 
+        loop = asyncio.get_running_loop()
+
+        # Measure the sequential baseline for a fair relative comparison
+        # (awaited one at a time - asyncio.gather would run them concurrently)
+        start = loop.time()
+        for a in addresses:
+            await mock_get_metrics(a)
+        sequential_time = loop.time() - start
+
         # Measure batch processing time
-        start = asyncio.get_event_loop().time()
+        start = loop.time()
         results = await analyzer.analyze_wallets_batch(
             addresses,
             batch_size=10,
             concurrency_per_batch=5,
         )
-        batch_time = asyncio.get_event_loop().time() - start
+        batch_time = loop.time() - start
 
         # Verify all processed
         assert len(results) == 20
 
-        # Batch processing with concurrency should be significantly faster
-        # than sequential (20 * 0.01s = 0.2s sequential vs ~0.04s with concurrency)
-        # We'll just verify it completed in reasonable time
-        assert batch_time < 0.15  # Should complete faster than sequential
+        # Batch processing with concurrency should be faster than the
+        # measured sequential baseline (relative, so machine load cannot flip it)
+        assert batch_time < sequential_time
 
 
 if __name__ == "__main__":

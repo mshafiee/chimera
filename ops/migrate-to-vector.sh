@@ -11,7 +11,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-BACKUP_DATE=$(date +%Y%m%d)
+BACKUP_DATE=$(date +%Y%m%d-%H%M%S)
 
 echo -e "${BLUE}=========================================="
 echo "Vector Migration for Chimera Evaluation"
@@ -49,8 +49,10 @@ echo -e "${YELLOW}[1/5] Backing up existing configuration...${NC}"
 cp docker-compose.evaluation.yml docker-compose.evaluation.yml.backup-${BACKUP_DATE}
 echo -e "${GREEN}✓ Docker Compose backed up${NC}"
 
+ENV_BACKED_UP=0
 if [ -f "docker/env.evaluation" ]; then
     cp docker/env.evaluation docker/env.evaluation.backup-${BACKUP_DATE}
+    ENV_BACKED_UP=1
     echo -e "${GREEN}✓ Environment variables backed up${NC}"
 fi
 
@@ -66,25 +68,11 @@ else
     exit 1
 fi
 
-# Step 3: Stop Fluentd (if running)
+# Step 3: Start Vector (before removing Fluentd, keeping it as fallback)
 echo ""
-echo -e "${YELLOW}[3/5] Checking for existing log aggregation...${NC}"
+echo -e "${YELLOW}[3/5] Starting Vector...${NC}"
 
-if docker ps | grep -q "chimera-fluentd"; then
-    docker-compose -f docker-compose.evaluation.yml stop fluentd
-    docker-compose -f docker-compose.evaluation.yml rm -f fluentd
-    echo -e "${GREEN}✓ Legacy Fluentd stopped${NC}"
-else
-    echo -e "${YELLOW}⚠ No legacy log aggregation running${NC}"
-fi
-
-# Step 4: Start Vector
-echo ""
-echo -e "${YELLOW}[4/5] Starting Vector...${NC}"
-
-docker-compose -f docker-compose.evaluation.yml --profile evaluation up -d vector
-
-if [ $? -eq 0 ]; then
+if docker-compose -f docker-compose.evaluation.yml --profile evaluation up -d vector; then
     echo -e "${GREEN}✓ Vector started${NC}"
 else
     echo -e "${RED}✗ Vector failed to start${NC}"
@@ -92,37 +80,45 @@ else
     exit 1
 fi
 
-# Wait for Vector to be healthy
-echo ""
-echo -e "${YELLOW}[5/5] Waiting for Vector to be healthy...${NC}"
-sleep 10
-
-# Step 5: Verify operation
-echo ""
-echo -e "${YELLOW}[Verification]${NC}"
-
-# Check health endpoint
-if curl -sf http://localhost:8383/health > /dev/null 2>&1; then
-    echo -e "${GREEN}✓ Vector health check passed${NC}"
-else
-    echo -e "${RED}✗ Vector health check failed${NC}"
-    echo "Check logs with: docker-compose logs vector"
-    exit 1
-fi
+# Wait for Vector to be healthy (poll, up to 60s)
+echo -e "${YELLOW}[4/5] Waiting for Vector to be healthy...${NC}"
+for i in $(seq 1 30); do
+    if curl -sf --max-time 3 http://localhost:8383/health > /dev/null 2>&1; then
+        echo -e "${GREEN}✓ Vector health check passed${NC}"
+        break
+    fi
+    if [ "$i" -eq 30 ]; then
+        echo -e "${RED}✗ Vector did not become healthy in time${NC}"
+        echo "Check logs with: docker-compose logs vector"
+        exit 1
+    fi
+    sleep 2
+done
 
 # Check metrics endpoint
-if curl -sf http://localhost:8383/metrics > /dev/null 2>&1; then
+if curl -sf --max-time 3 http://localhost:8383/metrics > /dev/null 2>&1; then
     echo -e "${GREEN}✓ Vector metrics endpoint available${NC}"
 else
     echo -e "${YELLOW}⚠ Vector metrics endpoint not available${NC}"
 fi
 
-# Check container status
-if docker ps | grep -q "chimera-vector"; then
+# Check container status (exact name match)
+if [ -n "$(docker ps -q --filter name=^/chimera-vector$)" ]; then
     echo -e "${GREEN}✓ Vector container running${NC}"
 else
     echo -e "${RED}✗ Vector container not running${NC}"
     exit 1
+fi
+
+# Step 5: Stop and remove legacy Fluentd (only now that Vector is verified)
+echo ""
+echo -e "${YELLOW}[5/5] Removing legacy Fluentd...${NC}"
+
+if [ -n "$(docker ps -aq --filter name=^/chimera-fluentd$)" ]; then
+    docker rm -f chimera-fluentd
+    echo -e "${GREEN}✓ Legacy Fluentd removed${NC}"
+else
+    echo -e "${YELLOW}⚠ No legacy Fluentd container running${NC}"
 fi
 
 # Create log directories
@@ -144,6 +140,8 @@ echo "  4. Run integration tests: ./ops/test-vector-integration.sh"
 echo ""
 echo "Backup files created:"
 echo "  - docker-compose.evaluation.yml.backup-${BACKUP_DATE}"
-echo "  - docker/env.evaluation.backup-${BACKUP_DATE}"
+if [ "$ENV_BACKED_UP" -eq 1 ]; then
+    echo "  - docker/env.evaluation.backup-${BACKUP_DATE}"
+fi
 echo ""
 echo "🎉 Migration successful! You're now using Vector for log aggregation."

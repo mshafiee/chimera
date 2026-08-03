@@ -211,6 +211,8 @@ class HeliusClient:
                 print(f"[Helius] Warning: Failed to initialize activity cache: {e}")
 
             return None
+
+    @staticmethod
     def _redact_api_key(s: str) -> str:
         """
         Redact api-key query parameter values to avoid leaking secrets in logs.
@@ -1114,10 +1116,10 @@ class HeliusClient:
             if not address or len(address) < 32 or len(address) > 44:
                 return False
 
-            # Check for base58 characters only
-            import base58
-            base58.alphabet = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
-            if not all(c in base58.alphabet for c in address):
+            # Check for base58 characters only (module-local constant — never
+            # mutate the base58 library's global alphabet)
+            _BASE58_CHARS = frozenset("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+            if not all(c in _BASE58_CHARS for c in address):
                 return False
 
             # Additional check: common system program addresses
@@ -1474,7 +1476,7 @@ class HeliusClient:
                     if CACHE_AVAILABLE:
                         cache = get_cache()
                         cache_key = f"{wallet_address}:{min_trades}:{days_back}"
-                        cache.set("wallet_validation", wallet_address, cache_key, result,
+                        cache.set("wallet_validation", wallet_address, result, cache_key,
                                  category=CacheCategory.WALLET_METRICS)
                     return result
 
@@ -1489,7 +1491,7 @@ class HeliusClient:
                         if CACHE_AVAILABLE:
                             cache = get_cache()
                             cache_key = f"{wallet_address}:{min_trades}:{days_back}"
-                            cache.set("wallet_validation", wallet_address, cache_key, result,
+                            cache.set("wallet_validation", wallet_address, result, cache_key,
                                      category=CacheCategory.WALLET_METRICS)
                         return result
                 except Exception:
@@ -1527,7 +1529,7 @@ class HeliusClient:
             if CACHE_AVAILABLE:
                 cache = get_cache()
                 cache_key = f"{wallet_address}:{min_trades}:{days_back}"
-                cache.set("wallet_validation", wallet_address, cache_key, result,
+                cache.set("wallet_validation", wallet_address, result, cache_key,
                          category=CacheCategory.WALLET_METRICS)
             return result
 
@@ -1538,7 +1540,7 @@ class HeliusClient:
             if CACHE_AVAILABLE:
                 cache = get_cache()
                 cache_key = f"{wallet_address}:{min_trades}:{days_back}"
-                cache.set("wallet_validation", wallet_address, cache_key, result,
+                cache.set("wallet_validation", wallet_address, result, cache_key,
                          category=CacheCategory.WALLET_METRICS)
             return result
 
@@ -2332,9 +2334,13 @@ class HeliusClient:
                             success=True
                         )
 
-                    if "result" in data and "data" in data["result"]:
-                        transactions = data["result"]["data"]
-                    
+                    # Safe default: error envelopes / unexpected shapes must
+                    # not leave `transactions` unbound
+                    transactions = (
+                        data.get("result", {}).get("data", [])
+                        if isinstance(data.get("result"), dict) else []
+                    )
+
                     for tx in transactions:
                         wallets = self._extract_wallets_from_transaction(tx)
                         for wallet in wallets:
@@ -2407,7 +2413,7 @@ class HeliusClient:
             List of discovered wallet addresses
         """
         # Check if Strategy 1 already ran and cached active token results
-        if hasattr(self, '_cached_active_token_wallets'):
+        if self._cached_active_token_wallets is not None:
             print("[Helius] Using cached active token results (Strategy 5 reusing Strategy 1 data)")
             wallet_counts = self._cached_active_token_wallets
         else:
@@ -2495,8 +2501,7 @@ class HeliusClient:
         self._api_calls_made = 0
 
         if not self.api_key:
-            logger = logging.getLogger(__name__)
-            logger.error(
+            self.logger.error(
                 "[Helius] No API key configured. Wallet discovery cannot proceed.\n"
                 "[Helius]   Remediation:\n"
                 "[Helius]     1. Set HELIUS_API_KEY environment variable, or\n"
@@ -2514,7 +2519,7 @@ class HeliusClient:
             tracker = get_credit_tracker()
             snapshot = tracker.get_snapshot()
             if snapshot.credits_remaining <= 0:
-                logger.warning(
+                self.logger.warning(
                     "[Helius] Monthly credit cap reached. Skipping wallet discovery..."
                 )
                 return []
@@ -2699,8 +2704,10 @@ class HeliusClient:
             # Re-sort remaining by trade count after dedup
             candidate_wallets.sort(key=lambda w: wallet_counts[w], reverse=True)
 
-        # Cache results in Redis + in-memory (Item 3)
-        self._set_discovery_cache(candidate_wallets, hours_back, max_wallets)
+        # Cache results in Redis + in-memory (Item 3). Only cache a non-empty
+        # result: caching "[]" would suppress re-discovery for the whole TTL.
+        if candidate_wallets:
+            self._set_discovery_cache(candidate_wallets, hours_back, max_wallets)
 
         # Mark discovered wallets as seen for future dedup
         self._mark_wallets_seen(candidate_wallets)
@@ -2754,11 +2761,10 @@ class HeliusClient:
         if not self.api_key:
             return []
 
-        # Normalize cache parameters to canonical buckets to ensure cache hits
-        # across discovery/analysis/validation phases which use different days/limit values.
-        # Canonical window: 30 days (dominant analysis window)
-        # Canonical limit: round up to nearest 100
-        canonical_days = 30  # Standardized time window for all phases
+        # Normalize the limit to canonical buckets to ensure cache hits across
+        # phases. The time window honors the caller's `days` (rounding it to a
+        # canonical bucket for cache consistency).
+        canonical_days = max(1, ((days + 6) // 7) * 7)  # Round up to nearest week
         canonical_limit = ((limit + 99) // 100) * 100  # Round up to nearest 100
 
         # Check monthly hard cap (safety valve)
@@ -2904,8 +2910,6 @@ class HeliusClient:
         if CACHE_AVAILABLE and result:
             cache = get_cache()
             cache_key = f"{wallet_address}:{canonical_days}:{canonical_limit}"
-            # Use shortest-phase TTL (300s) to avoid stale data across phases
-            shortest_phase_ttl = ScoutConfig.get_cache_ttl_wallet_metrics()  # 300 seconds
             cache.set("wallet_txs", wallet_address, result, cache_key,
                      category=CacheCategory.WALLET_TXS)
 
@@ -3012,9 +3016,6 @@ class HeliusClient:
         if not isinstance(tx, dict):
             return None
 
-        signature = tx.get("signature", "")
-        timestamp = tx.get("timestamp", int(utcnow().timestamp()))
-
         # REQUIRE wallet address for accurate parsing
         if not wallet_address:
             return None
@@ -3045,7 +3046,7 @@ class HeliusClient:
             if result:
                 return result
         except Exception as e:
-            logger.debug("Strategy 3 account-data parser failed: %s", e)
+            HeliusClient.logger.debug("Strategy 3 account-data parser failed: %s", e)
 
         return None
 
@@ -3300,7 +3301,12 @@ class HeliusClient:
                     from_acc = tr.get("fromUserAccount")
                     to_acc = tr.get("toUserAccount")
                     user_acc = tr.get("userAccount")
-                    
+
+                    # Recompute involvement for THIS transfer (the loop above
+                    # only ran over tokenTransfers, not all_non_sol_transfers)
+                    wallet_involved_from = from_acc == wallet_address or (user_acc == wallet_address)
+                    wallet_involved_to = to_acc == wallet_address or (user_acc == wallet_address)
+
                     if wallet_involved_from:
                         primary_delta = -primary_amount
                     elif wallet_involved_to:
@@ -3683,74 +3689,11 @@ class HeliusClient:
             if instruction_result:
                 return instruction_result
 
-        # Could not value without SOL, stable, or clear token pair
-            return None
-
-        # IMPROVED: Direction Logic
-        # Explicitly handle cases where SOL delta might be slightly noisy due to rent
-        # or where wrapping/unwrapping makes native SOL delta zero but wSOL moved
-        
-        # Threshold for considering a SOL movement "real" (0.001 SOL)
-        SIGNIFICANT_SOL = 0.001
-
-        if primary_delta > 0:
-            # We received tokens. Did we spend SOL or Stables?
-            if sol_delta < -SIGNIFICANT_SOL:
-                direction = "BUY"  # Spent SOL
-                token_amount = primary_delta
-                sol_amount = abs(sol_delta)
-            elif any(token_deltas[s] < 0 for s in stable_mints):
-                direction = "BUY"  # Spent Stables
-                token_amount = primary_delta
-                sol_amount = 0  # Will be derived from price
-            else:
-                # Ambiguous (maybe an airdrop or transfer?)
-                return None
-                
-        elif primary_delta < 0:
-            # We sent tokens. Did we receive SOL or Stables?
-            if sol_delta > SIGNIFICANT_SOL:
-                direction = "SELL"  # Received SOL
-                token_amount = abs(primary_delta)
-                sol_amount = sol_delta
-            elif any(token_deltas[s] > 0 for s in stable_mints):
-                direction = "SELL"  # Received Stables
-                token_amount = abs(primary_delta)
-                sol_amount = 0  # Will be derived
-            else:
-                return None
-        else:
-            return None
-
-        # When the primary token is a stablecoin, the direction is inverted in
-        # base-quote terms: "buying USDC with SOL" = SELL (you sold the base asset).
-        if primary_mint in stable_mints:
-            direction = "SELL" if direction == "BUY" else "BUY"
-
-        price_sol = (sol_amount / token_amount) if token_amount > 0 else 0.0
-
-        result = {
-            "signature": signature,
-            "timestamp": timestamp,
-            "wallet": wallet_address,
-            "token_mint": primary_mint,
-            "token_amount": token_amount,
-            "sol_amount": sol_amount,
-            "direction": direction,
-            "price_sol": price_sol,
-            "price_usd": None,
-            "usd_amount": None,
-            "quote_mint": sol_mint,
-            "net_sol_delta": sol_delta,
-            "net_token_delta": primary_delta,
-        }
-
-        # PUMP_FUN edge case: Reject pure SOL-in/SOL-out transactions (no token movement)
-        # This can happen with fee-only transactions or wrapping/unwrapping
-        if abs(result["net_sol_delta"]) < SIGNIFICANT_SOL and abs(result["net_token_delta"]) < 1e-9:
-            return None
-
-        return result
+        # Could not value without SOL, stable, or clear token pair.
+        # NOTE: the former "IMPROVED: Direction Logic" block below this point
+        # was unreachable (every path above either returns or falls through
+        # here) and has been removed.
+        return None
 
     def _parse_from_instruction_level(
         self,

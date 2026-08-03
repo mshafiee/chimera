@@ -6,18 +6,12 @@ with the Helius API client and provides accurate forecasting and optimization.
 """
 
 import pytest
-import time
-from unittest.mock import Mock, AsyncMock, MagicMock, patch
-from datetime import datetime, timedelta
 
 from core.predictive_budget_manager import (
     PredictiveBudgetManager,
     BudgetManagerConfig,
     BudgetCategory,
     CreditAlertLevel,
-    CreditSnapshot,
-    CreditForecast,
-    OptimizationAction,
     CategoryPerformance
 )
 from core.analyzer import WalletAnalyzer
@@ -247,14 +241,15 @@ class TestBudgetIntegration:
         # Create analyzer with budget manager
         analyzer = WalletAnalyzer(budget_manager=budget_manager)
 
-        # Verify budget manager is accessible
+        # Verify budget manager is accessible and budget checks work
         assert analyzer._budget_manager is not None
-        assert analyzer.get_budget_summary() is not None
+        can_proceed, reason = analyzer.can_spend_budget(estimated_credits=100)
+        assert can_proceed is True
 
     def test_budget_aware_operations(self):
         """Test that analyzer respects budget constraints."""
         budget_manager = PredictiveBudgetManager(
-            config=BudgetManagerConfig(total_monthly_credits=1_000_000)
+            config=BudgetManagerConfig(MONTHLY_CREDITS=1_000_000)
         )
         analyzer = WalletAnalyzer(budget_manager=budget_manager)
 
@@ -262,8 +257,8 @@ class TestBudgetIntegration:
         can_proceed, reason = analyzer.can_spend_budget(estimated_credits=100)
         assert can_proceed is True
 
-        # Use most of the budget
-        budget_manager._credits_used = 950_000
+        # Use most of the budget (snapshot recomputes credits_used from category usage)
+        budget_manager.record_category_usage(BudgetCategory.ANALYSIS, 950_000)
 
         # Check if we can spend more budget
         can_proceed, reason = analyzer.can_spend_budget(estimated_credits=100_000)
@@ -290,12 +285,12 @@ class TestBudgetIntegration:
         analyzer.record_credit_usage(credits=1000, category="analysis", value=10)
         analyzer.record_credit_usage(credits=500, category="discovery", value=5)
 
-        # Get summary
-        summary = analyzer.get_budget_summary()
-        assert summary is not None
-        assert 'credits_used' in summary
-        assert 'credits_remaining' in summary
-        assert 'usage_percentage' in summary
+        # Verify the recorded usage is reflected in the budget snapshot
+        # (the full daily summary nests these fields under 'snapshot')
+        snapshot = budget_manager.get_realtime_snapshot()
+        assert snapshot.credits_used == 1500
+        assert snapshot.credits_remaining == budget_manager._config.MONTHLY_CREDITS - 1500
+        assert snapshot.get_usage_percentage() > 0.0
 
 
 @pytest.mark.asyncio
@@ -320,8 +315,8 @@ class TestBudgetForecasting:
         forecast = manager.forecast_credit_needs(horizon_hours=168)  # 7 days
         assert forecast is not None
         # Should predict roughly daily_usage * 7
-        assert forecast.projected_credits > daily_usage * 6
-        assert forecast.projected_credits < daily_usage * 8  # Allow some variance
+        assert forecast.projected_usage > daily_usage * 6
+        assert forecast.projected_usage < daily_usage * 8  # Allow some variance
 
     async def test_seasonal_pattern_detection(self):
         """Test detection of usage patterns."""
@@ -349,16 +344,10 @@ class TestBudgetForecasting:
         manager = PredictiveBudgetManager()
 
         # Create usage patterns that might need optimization
-        # High discovery, low success rate
+        # High discovery usage with low ROI
         for i in range(10):
             manager.record_category_usage(BudgetCategory.DISCOVERY, 100_000)
-            manager._category_performance[BudgetCategory.DISCOVERY] = CategoryPerformance(
-                category=BudgetCategory.DISCOVERY,
-                credits_invested=1_000_000,
-                wallets_discovered=10,  # Low success
-                total_wqs_score=500.0,
-                success_rate=0.1
-            )
+            manager._performance[BudgetCategory.DISCOVERY].roi_score = 0.1  # Low success
 
         # Get optimization suggestions
         suggestions = manager.suggest_credit_optimization()
@@ -366,7 +355,7 @@ class TestBudgetForecasting:
 
         # Check that suggestions are actionable
         for suggestion in suggestions:
-            assert suggestion.action_type is not None
+            assert suggestion.action is not None
             assert suggestion.expected_savings >= 0
 
 
@@ -412,33 +401,35 @@ class TestBudgetOptimization:
         manager = PredictiveBudgetManager()
 
         # Set up initial allocations
-        manager.allocate_budget_category(BudgetCategory.DISCOVERY, 200_000)
-        manager.allocate_budget_category(BudgetCategory.ANALYSIS, 100_000)
+        manager.allocate_budget_category(BudgetCategory.DISCOVERY, 0.1)
+        manager.allocate_budget_category(BudgetCategory.ANALYSIS, 0.5)
 
         # Create performance data showing discovery is inefficient
-        manager._category_performance = {
+        # (suggest_credit_optimization only emits suggestions when
+        #  operations_count >= 10 and roi_score < 0.3)
+        manager._performance = {
             BudgetCategory.DISCOVERY: CategoryPerformance(
                 category=BudgetCategory.DISCOVERY,
-                credits_invested=200_000,
-                wallets_discovered=10,
-                total_wqs_score=500.0,
-                success_rate=0.2
+                credits_consumed=200_000,
+                value_generated=10_000.0,
+                roi_score=0.05,
+                operations_count=10
             ),
             BudgetCategory.ANALYSIS: CategoryPerformance(
                 category=BudgetCategory.ANALYSIS,
-                credits_invested=100_000,
-                wallets_discovered=50,
-                total_wqs_score=3500.0,
-                success_rate=0.8
+                credits_consumed=100_000,
+                value_generated=80_000.0,
+                roi_score=0.8,
+                operations_count=10
             )
         }
 
         # Get optimization suggestions
         suggestions = manager.suggest_credit_optimization()
 
-        # Should suggest reallocating from discovery to analysis
-        reallocation_actions = [s for s in suggestions if "reallocate" in s.action_type.lower()]
-        assert len(reallocation_actions) > 0
+        # Should suggest reducing discovery (the inefficient category)
+        reduction_actions = [s for s in suggestions if s.action == "reduce_discovery"]
+        assert len(reduction_actions) > 0
 
     def test_efficiency_improvement_suggestions(self):
         """Test efficiency improvement suggestions."""
@@ -455,8 +446,7 @@ class TestBudgetOptimization:
         assert len(suggestions) > 0
 
         # Check for efficiency-related suggestions
-        efficiency_actions = [s for s in suggestions if "efficiency" in s.action_type.lower() or "optimize" in s.action_type.lower()]
-        # May or may not have efficiency actions depending on the algorithm
+        assert any("optimize" in s.action.lower() or "reduce" in s.action.lower() for s in suggestions)
 
 
 class TestBudgetPersistence:
@@ -475,7 +465,7 @@ class TestBudgetPersistence:
         manager.record_daily_usage(daily_credits, breakdown)
 
         # Check that usage was recorded
-        assert len(manager._daily_usage_history) > 0
+        assert len(manager._usage_history) > 0
 
     def test_usage_history_analysis(self):
         """Test analysis of usage history."""
@@ -491,5 +481,5 @@ class TestBudgetPersistence:
         forecast = manager.forecast_credit_needs(horizon_hours=24)
         assert forecast is not None
         # Should predict somewhere in the range of historical usage
-        assert forecast.projected_credits > min(usages) * 0.8
-        assert forecast.projected_credits < max(usages) * 1.2
+        assert forecast.projected_usage > min(usages) * 0.8
+        assert forecast.projected_usage < max(usages) * 1.2

@@ -84,38 +84,80 @@ fn test_signal_trade_uuid_differs_for_different_wallets() {
 }
 
 #[test]
-fn test_signal_exit_action_is_valid() {
-    let exit = make_payload(Action::Sell, Strategy::Shield, "1.0");
-    let buy = make_payload(Action::Buy, Strategy::Shield, "1.0");
-    assert_eq!(exit.action, Action::Sell);
-    assert_eq!(buy.action, Action::Buy);
+fn test_signal_trade_uuid_differs_for_different_tokens() {
+    // The dedup key includes the token symbol/address.
+    let payload1 = make_payload(Action::Buy, Strategy::Shield, "1.0");
+    let mut payload2 = make_payload(Action::Buy, Strategy::Shield, "1.0");
+    payload2.token = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string();
+    payload2.token_address = Some("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string());
+    let signal1 = make_signal(payload1, 1700000000);
+    let signal2 = make_signal(payload2, 1700000000);
+    assert_ne!(
+        signal1.trade_uuid, signal2.trade_uuid,
+        "Different tokens should produce different UUIDs"
+    );
 }
 
 #[test]
-fn test_signal_strategy_preserved() {
-    let spear = make_payload(Action::Buy, Strategy::Spear, "0.5");
-    let shield = make_payload(Action::Buy, Strategy::Shield, "1.0");
-    assert_eq!(spear.strategy, Strategy::Spear);
-    assert_eq!(shield.strategy, Strategy::Shield);
+fn test_signal_trade_uuid_differs_for_different_strategies() {
+    // The dedup key includes the strategy, so a Shield vs Spear buy of the
+    // same wallet/token/amount produces different UUIDs.
+    let payload1 = make_payload(Action::Buy, Strategy::Shield, "1.0");
+    let payload2 = make_payload(Action::Buy, Strategy::Spear, "1.0");
+    let signal1 = make_signal(payload1, 1700000000);
+    let signal2 = make_signal(payload2, 1700000000);
+    assert_ne!(
+        signal1.trade_uuid, signal2.trade_uuid,
+        "Different strategies should produce different UUIDs"
+    );
 }
 
 #[test]
-fn test_signal_positive_amount() {
+fn test_signal_trade_uuid_preserves_provided_uuid() {
+    // A provider-supplied trade_uuid is preserved verbatim.
+    let mut payload = make_payload(Action::Buy, Strategy::Shield, "1.0");
+    payload.trade_uuid = Some("custom-uuid-123".to_string());
+    let signal = make_signal(payload, 1700000000);
+    assert_eq!(signal.trade_uuid, "custom-uuid-123");
+}
+
+#[test]
+fn test_exit_signal_validation() {
+    // Exit strategy must have SELL action (models/signal.rs validate()).
+    let exit = make_payload(Action::Sell, Strategy::Exit, "1.0");
+    assert!(exit.validate().is_ok(), "SELL + Exit must validate");
+    let invalid_exit = make_payload(Action::Buy, Strategy::Exit, "1.0");
+    assert!(
+        invalid_exit.validate().is_err(),
+        "BUY + Exit must be rejected by validate()"
+    );
+}
+
+#[test]
+fn test_signal_amount_zero_rejected_by_validation() {
+    // SignalPayload::validate() rejects amount_sol <= 0 — a zero amount is
+    // NOT an acceptable signal.
+    let payload = make_payload(Action::Buy, Strategy::Shield, "0.0");
+    assert!(
+        payload.validate().is_err(),
+        "Zero amount must be rejected by validate()"
+    );
+}
+
+#[test]
+fn test_signal_positive_amount_validates() {
     let payload = make_payload(Action::Buy, Strategy::Shield, "1.5");
     assert!(
-        payload.amount_sol > Decimal::ZERO,
-        "Signal amount must be positive"
+        payload.validate().is_ok(),
+        "Positive amount within limits must validate"
     );
 }
 
 #[test]
-fn test_signal_amount_zero() {
-    let payload = make_payload(Action::Buy, Strategy::Shield, "0.0");
-    assert_eq!(
-        payload.amount_sol,
-        Decimal::ZERO,
-        "Signal amount can be zero"
-    );
+fn test_strategy_priority_ordering() {
+    // EXIT > SHIELD > SPEAR (lower priority() value = higher priority)
+    assert!(Strategy::Exit.priority() < Strategy::Shield.priority());
+    assert!(Strategy::Shield.priority() < Strategy::Spear.priority());
 }
 
 #[test]

@@ -5,35 +5,24 @@
 //! the legacy `f64_to_decimal` / `decimal_to_f64` bridge helpers could NOT provide: an
 //! f64 has only ~15-17 significant digits, so `Decimal -> f64 -> Decimal` would corrupt
 //! `0.123456789012345678` into `0.12345678901234568`. After Phase 2 the data path is
-//! `Decimal -> NUMERIC -> Decimal` (lossless) on Postgres and `Decimal -> TEXT -> Decimal`
-//! (lossless) on SQLite, so these values must survive unchanged on BOTH backends.
+//! `Decimal -> NUMERIC -> Decimal` (lossless) on Postgres, so these values must survive
+//! unchanged.
 //!
-//! Run against SQLite (default):
-//!   cargo test --test precision_regression_tests
-//!
-//! Run against Postgres (requires a live instance):
+//! The shared harness (`tests/common/mod.rs`) is PostgreSQL-only — SQLite was
+//! decommissioned. Requires a live Postgres instance:
 //!   TEST_DATABASE_URL="postgresql://user:pass@localhost:5432/postgres" \
-//!     cargo test --test precision_regression_tests --features postgres
+//!     cargo test --test precision_regression_tests
 
 mod common;
 
 use chimera_operator::db_abstraction::InsertTrade;
-use chimera_operator::db_abstraction::{create_database, Database, DatabaseConfig, DbPool};
+use chimera_operator::db_abstraction::{Database, DbPool};
 use rust_decimal::prelude::*;
-use sqlx::Pool;
-use sqlx::Postgres;
 
-fn pg_pool(db: &std::sync::Arc<dyn Database>) -> Pool<Postgres> {
-    match db.pool() {
-        DbPool::PostgreSQL(pool) => pool,
-        _ => panic!("test requires PostgreSQL backend"),
-    }
-}
-
-/// Round-trip a single 18-digit Decimal through insert + read on the active backend.
+/// Round-trip a single 18-digit Decimal through insert + read.
 #[tokio::test]
 async fn test_high_precision_amount_round_trip() {
-    let (db, _temp_dir, backend) = common::create_test_db_from_env().await;
+    let (db, _guard) = common::create_test_db().await;
 
     // 18 fractional digits — beyond f64 precision (~15-17 sig digits).
     let precise_amount = Decimal::from_str("0.123456789012345678").unwrap();
@@ -60,19 +49,18 @@ async fn test_high_precision_amount_round_trip() {
     let trade = trades
         .iter()
         .find(|t| t.trade_uuid == trade_uuid)
-        .unwrap_or_else(|| panic!("inserted trade not found on {} backend", backend));
+        .unwrap_or_else(|| panic!("inserted trade not found"));
 
     assert_eq!(
         trade.amount_sol, precise_amount,
-        "amount_sol must round-trip with EXACT precision on {} backend (would fail under f64 bridge)",
-        backend
+        "amount_sol must round-trip with EXACT precision (would fail under f64 bridge)"
     );
 }
 
 /// Round-trip a high-precision realized PnL through update + read.
 #[tokio::test]
 async fn test_high_precision_net_pnl_round_trip() {
-    let (db, _temp_dir, backend) = common::create_test_db_from_env().await;
+    let (db, _guard) = common::create_test_db().await;
 
     // Negative 18-digit value — also beyond f64 precision.
     let precise_pnl = Decimal::from_str("-0.987654321098765432").unwrap();
@@ -91,7 +79,10 @@ async fn test_high_precision_net_pnl_round_trip() {
     .await
     .expect("insert_trade should succeed");
 
-    let pool = pg_pool(&db);
+    // The net_pnl_sol update is schema-level (raw SQL against the concrete
+    // Postgres schema); the Database trait has no net_pnl setter.
+    // DbPool is PostgreSQL-only (single variant): irrefutable destructure.
+    let DbPool::PostgreSQL(pool) = db.pool();
     sqlx::query("UPDATE trades SET net_pnl_sol = $1 WHERE trade_uuid = $2")
         .bind(precise_pnl)
         .bind(trade_uuid)
@@ -107,13 +98,12 @@ async fn test_high_precision_net_pnl_round_trip() {
     let trade = trades
         .iter()
         .find(|t| t.trade_uuid == trade_uuid)
-        .unwrap_or_else(|| panic!("inserted trade not found on {} backend", backend));
+        .unwrap_or_else(|| panic!("inserted trade not found"));
 
     assert_eq!(
         trade.net_pnl_sol,
         Some(precise_pnl),
-        "net_pnl_sol must round-trip with EXACT precision on {} backend (would fail under f64 bridge)",
-        backend
+        "net_pnl_sol must round-trip with EXACT precision (would fail under f64 bridge)"
     );
 }
 

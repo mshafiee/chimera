@@ -67,21 +67,17 @@ Timestamp: $TIMESTAMP"
 log_success "Message created"
 echo ""
 
-# Step 2: Sign message
+# Step 2: Sign message (exactly once)
 log_info "Signing message with Solana CLI..."
 log_warning "You may be prompted to confirm the signature"
 
-# Sign the message
-SIGNATURE_RAW=$(echo -e "$MESSAGE" | solana message sign --keypair "$KEYPAIR_PATH" 2>&1)
-
-if [ $? -ne 0 ]; then
+SIGNATURE_RAW=$(echo -e "$MESSAGE" | solana message sign --keypair "$KEYPAIR_PATH" 2>/dev/null) || {
     log_error "Failed to sign message"
-    echo "$SIGNATURE_RAW"
     exit 1
-fi
+}
 
 # Encode signature to base64
-SIGNATURE_B64=$(echo -e "$MESSAGE" | solana message sign --keypair "$KEYPAIR_PATH" | base64)
+SIGNATURE_B64=$(printf '%s' "$SIGNATURE_RAW" | base64 | tr -d '\n')
 
 if [ -z "$SIGNATURE_B64" ]; then
     log_error "Failed to generate signature"
@@ -94,25 +90,33 @@ echo ""
 # Step 3: Authenticate
 log_info "Authenticating with Chimera API..."
 
-AUTH_RESPONSE=$(curl -s -X POST "$API_URL/api/v1/auth/wallet" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"wallet_address\": \"$WALLET_ADDRESS\",
-    \"message\": \"$MESSAGE\",
-    \"signature\": \"$SIGNATURE_B64\"
-  }")
+# Build the JSON payload with a serializer so the wallet address is escaped
+# and the multi-line message becomes valid JSON.
+AUTH_JSON=$(python3 -c '
+import json, sys
+print(json.dumps({
+    "wallet_address": sys.argv[1],
+    "message": sys.argv[2],
+    "signature": sys.argv[3]
+}))' "$WALLET_ADDRESS" "$MESSAGE" "$SIGNATURE_B64")
 
-# Check for errors
-if echo "$AUTH_RESPONSE" | grep -q "error\|Error\|rejected"; then
-    log_error "Authentication failed!"
+AUTH_TMP=$(mktemp)
+AUTH_CODE=$(curl -s -o "$AUTH_TMP" -w "%{http_code}" -X POST "$API_URL/api/v1/auth/wallet" \
+  -H "Content-Type: application/json" \
+  -d "$AUTH_JSON" || true)
+AUTH_RESPONSE=$(cat "$AUTH_TMP")
+rm -f "$AUTH_TMP"
+
+if [ "$AUTH_CODE" != "200" ]; then
+    log_error "Authentication failed (HTTP $AUTH_CODE)!"
     echo "$AUTH_RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$AUTH_RESPONSE"
     exit 1
 fi
 
-# Extract token
-TOKEN=$(echo "$AUTH_RESPONSE" | python3 -c "import sys, json; print(json.load(sys.stdin).get('token', ''))" 2>/dev/null)
+# Extract token (both missing and null tokens yield an empty string)
+TOKEN=$(echo "$AUTH_RESPONSE" | python3 -c "import sys, json; print(json.load(sys.stdin).get('token') or '')" 2>/dev/null)
 
-if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+if [ -z "$TOKEN" ]; then
     log_error "Failed to extract token from response"
     echo "$AUTH_RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$AUTH_RESPONSE"
     exit 1
@@ -122,35 +126,31 @@ ROLE=$(echo "$AUTH_RESPONSE" | python3 -c "import sys, json; print(json.load(sys
 
 log_success "Authenticated successfully!"
 log_info "Role: $ROLE"
-log_info "Token: ${TOKEN:0:50}..."
 echo ""
 
 # Step 4: Merge roster
 log_info "Merging roster..."
 
-MERGE_RESPONSE=$(curl -s -X POST "$API_URL/api/v1/roster/merge" \
+MERGE_TMP=$(mktemp)
+MERGE_CODE=$(curl -s -o "$MERGE_TMP" -w "%{http_code}" -X POST "$API_URL/api/v1/roster/merge" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{}')
+  -d '{}' || true)
+MERGE_RESPONSE=$(cat "$MERGE_TMP")
+rm -f "$MERGE_TMP"
 
-# Check merge result
-if echo "$MERGE_RESPONSE" | grep -q "success.*true"; then
+# Check merge result: verify HTTP status and parse `success` as a boolean
+if [ "$MERGE_CODE" = "200" ] && echo "$MERGE_RESPONSE" | python3 -c "import sys, json; sys.exit(0 if json.load(sys.stdin).get('success') else 1)" 2>/dev/null; then
     WALLETS_MERGED=$(echo "$MERGE_RESPONSE" | python3 -c "import sys, json; print(json.load(sys.stdin).get('wallets_merged', 0))" 2>/dev/null)
     log_success "Roster merged successfully!"
     log_info "Wallets merged: $WALLETS_MERGED"
     echo ""
     echo "$MERGE_RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$MERGE_RESPONSE"
 else
-    log_error "Roster merge failed!"
+    log_error "Roster merge failed (HTTP $MERGE_CODE)!"
     echo "$MERGE_RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$MERGE_RESPONSE"
     exit 1
 fi
 
 echo ""
 log_success "All done! Wallets are now available in the system."
-
-
-
-
-
-

@@ -64,7 +64,8 @@ async def check_rpc_latency(session: aiohttp.ClientSession, base_url: str) -> Op
     Check RPC latency by calling the health endpoint and measuring response time.
 
     Returns:
-        dict with keys: latency_ms, rpc_healthy, rpc_primary, latency_history
+        dict with keys: latency_ms, rpc_healthy, rpc_latency_ms, queue_depth,
+        circuit_breaker, fallback_duration
         or None if the check fails
     """
     try:
@@ -127,25 +128,34 @@ async def get_rpc_metrics(session: aiohttp.ClientSession, base_url: str) -> Opti
                 "health": None,
             }
 
+            # Histogram bucket lines are cumulative counters (samples with
+            # latency <= le); compute real percentiles by interpolating across
+            # the buckets instead of treating the counts as latencies.
+            import re as _re
+
+            bucket_counts = {}
+            total_count = 0.0
             for line in metrics_text.split('\n'):
-                if line.startswith('chimera_rpc_latency_ms_bucket'):
-                    # Parse histogram buckets
-                    if 'le="5"' in line:
-                        parts = line.split(' ')
-                        if len(parts) >= 2:
-                            metrics["p50"] = float(parts[-1])
-                    elif 'le="50"' in line:
-                        parts = line.split(' ')
-                        if len(parts) >= 2:
-                            metrics["p95"] = float(parts[-1])
-                    elif 'le="100"' in line:
-                        parts = line.split(' ')
-                        if len(parts) >= 2:
-                            metrics["p99"] = float(parts[-1])
+                bucket_match = _re.match(r'^chimera_rpc_latency_ms_bucket\{le="([^"]+)"\}\s+([0-9.eE+-]+)$', line)
+                if bucket_match:
+                    bucket_counts[float(bucket_match.group(1))] = float(bucket_match.group(2))
+                    continue
+                if line.startswith('chimera_rpc_latency_ms_count'):
+                    parts = line.split(' ')
+                    if len(parts) >= 2:
+                        total_count = float(parts[-1])
                 elif line.startswith('chimera_rpc_health'):
                     parts = line.split(' ')
                     if len(parts) >= 2:
                         metrics["health"] = float(parts[-1])
+
+            if total_count > 0:
+                for key, p in (("p50", 0.50), ("p95", 0.95), ("p99", 0.99)):
+                    target = total_count * p
+                    for le in sorted(bucket_counts):
+                        if bucket_counts[le] >= target:
+                            metrics[key] = le
+                            break
 
             return metrics
 
@@ -154,14 +164,14 @@ async def get_rpc_metrics(session: aiohttp.ClientSession, base_url: str) -> Opti
         return None
 
 
-def print_header(warning_ms: float, critical_ms: float):
+def print_header(warning_ms: float, critical_ms: float, interval_seconds: int = CHECK_INTERVAL_SECONDS):
     """Print the monitoring header."""
     print(f"\n{'='*70}")
     print(f"RPC Latency Monitor")
     print(f"{'='*70}")
     print(f"WARNING Threshold: {warning_ms}ms")
     print(f"CRITICAL Threshold: {critical_ms}ms")
-    print(f"Check Interval: {CHECK_INTERVAL_SECONDS} seconds")
+    print(f"Check Interval: {interval_seconds} seconds")
     print(f"Press Ctrl+C to stop")
     print(f"{'='*70}\n")
 
@@ -181,8 +191,11 @@ def print_status_row(check_num: int, latency_ms: float, warning_ms: float, criti
 
     # Add additional info if available
     if check_data:
-        if check_data.get("rpc_latency_ms"):
+        if check_data.get("rpc_latency_ms") is not None:
             status_line += f" | RPC: {check_data['rpc_latency_ms']:.1f}ms"
+        if check_data.get("rpc_healthy") is not None:
+            health_emoji = "✅" if check_data["rpc_healthy"] else "❌"
+            status_line += f" | RPC-Health: {health_emoji}"
         if check_data.get("queue_depth") is not None:
             qd = check_data["queue_depth"]
             qd_color = Colors.GREEN if qd < 800 else Colors.YELLOW if qd < 900 else Colors.RED
@@ -191,7 +204,7 @@ def print_status_row(check_num: int, latency_ms: float, warning_ms: float, criti
             cb = check_data["circuit_breaker"]
             cb_color = Colors.GREEN if cb == "ACTIVE" else Colors.RED
             status_line += f" | CB: {cb_color}{cb}{Colors.RESET}"
-        if check_data.get("fallback_duration"):
+        if check_data.get("fallback_duration") is not None:
             fd = check_data["fallback_duration"]
             status_line += f" | Fallback: {fd}s"
 
@@ -242,7 +255,12 @@ async def main():
 
     args = parser.parse_args()
 
-    print_header(args.warning, args.critical)
+    if args.warning >= args.critical:
+        parser.error(
+            f"--warning ({args.warning}ms) must be less than --critical ({args.critical}ms)"
+        )
+
+    print_header(args.warning, args.critical, args.interval)
 
     check_count = 0
     consecutive_critical = 0

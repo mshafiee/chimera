@@ -242,7 +242,11 @@ class MetaLearner:
         X = np.array(features).reshape(1, -1)
 
         try:
-            prediction = self.meta_model.predict(X)[0]
+            if hasattr(self.meta_model, 'predict_proba'):
+                # Logistic meta-learner: use probabilities, not class labels
+                prediction = self.meta_model.predict_proba(X)[:, 1][0]
+            else:
+                prediction = self.meta_model.predict(X)[0]
             return float(prediction)
         except Exception as e:
             logger.warning(f"Meta-model prediction failed: {e}")
@@ -354,15 +358,17 @@ class MetaLearner:
 
             # Get predictions from all base models
             base_predictions = {}
+            any_failed = False
             for name, model_info in self.base_models.items():
                 try:
                     pred = model_info['predict_func'](model_info['model'], features)
                     base_predictions[name] = float(pred)
                 except Exception as e:
                     logger.debug(f"Base model {name} prediction failed: {e}")
-                    base_predictions[name] = 0.0
+                    any_failed = True
+                    break
 
-            if base_predictions:
+            if base_predictions and not any_failed:
                 X_meta.append(base_predictions)
                 y_true.append(float(true_value))
 
@@ -404,9 +410,16 @@ class MetaLearner:
         best_model = min(metrics.keys(), key=lambda k: metrics[k].get('val_rmse', float('inf')))
 
         if best_model == 'ridge' and SKLEARN_AVAILABLE:
-            self.meta_model = self._train_ridge_meta(X_meta, y_true, X_meta, y_true)['model']
+            retrained = self._train_ridge_meta(X_meta, y_true, X_meta, y_true)
+            self.meta_model = retrained.get('model') if retrained.get('status') != 'failed' else None
         elif best_model == 'logistic' and SKLEARN_AVAILABLE:
-            self.meta_model = self._train_logistic_meta(X_meta, y_true, X_meta, y_true)['model']
+            retrained = self._train_logistic_meta(X_meta, y_true, X_meta, y_true)
+            self.meta_model = retrained.get('model') if retrained.get('status') != 'failed' else None
+        else:
+            # simple_average won: drop any stale meta-model so predictions
+            # don't keep using a previously trained model
+            self.meta_model = None
+            self.meta_feature_names = []
 
         # Calculate base model weights
         self._calculate_base_model_weights(X_meta, y_true)
@@ -489,6 +502,7 @@ class MetaLearner:
 
             # Get predictions from all base models
             base_predictions = {}
+            any_failed = False
             for name, model_info in self.base_models.items():
                 try:
                     # Use gradient boost predictor's predict method
@@ -502,9 +516,10 @@ class MetaLearner:
                         base_predictions[name] = 0.0
                 except Exception as e:
                     logger.debug(f"Base model {name} prediction failed: {e}")
-                    base_predictions[name] = 0.0
+                    any_failed = True
+                    break
 
-            if base_predictions:
+            if base_predictions and not any_failed:
                 X_meta.append(base_predictions)
                 y_meta.append(float(y_all[i]))
 
@@ -546,9 +561,15 @@ class MetaLearner:
         best_model = min(metrics.keys(), key=lambda k: metrics[k].get('val_rmse', float('inf')))
 
         if best_model == 'ridge' and SKLEARN_AVAILABLE:
-            self.meta_model = self._train_ridge_meta(X_meta, y_meta, X_meta, y_meta)['model']
+            retrained = self._train_ridge_meta(X_meta, y_meta, X_meta, y_meta)
+            self.meta_model = retrained.get('model') if retrained.get('status') != 'failed' else None
         elif best_model == 'logistic' and SKLEARN_AVAILABLE:
-            self.meta_model = self._train_logistic_meta(X_meta, y_meta, X_meta, y_meta)['model']
+            retrained = self._train_logistic_meta(X_meta, y_meta, X_meta, y_meta)
+            self.meta_model = retrained.get('model') if retrained.get('status') != 'failed' else None
+        else:
+            # simple_average won: drop any stale meta-model
+            self.meta_model = None
+            self.meta_feature_names = []
 
         # Calculate base model weights
         self._calculate_base_model_weights(X_meta, y_meta)
@@ -577,6 +598,10 @@ class MetaLearner:
     ) -> Dict[str, Any]:
         """Train Ridge regression meta-model."""
         try:
+            # Empty validation split: score against the training set instead
+            if len(X_val) == 0:
+                X_val, y_val = X_train, y_train
+
             # Try multiple alpha values
             best_alpha = 1.0
             best_score = float('inf')
@@ -622,6 +647,10 @@ class MetaLearner:
     ) -> Dict[str, Any]:
         """Train logistic regression meta-model (for relative weighting)."""
         try:
+            # Empty validation split: score against the training set instead
+            if len(X_val) == 0:
+                X_val, y_val = X_train, y_train
+
             # Convert to binary classification: profitable vs not
             y_train_binary = (y_train > 0).astype(int)
             y_val_binary = (y_val > 0).astype(int)
@@ -633,13 +662,16 @@ class MetaLearner:
             )
             model.fit(X_train, y_train_binary)
 
-            model.predict_proba(X_train)[:, 1]
-            model.predict_proba(X_val)[:, 1]
+            # Probabilities are the meta-feature blend; report RMSE of the
+            # probability against actual PnL so selection compares like-for-like
+            val_probs = model.predict_proba(X_val)[:, 1]
+            val_rmse = np.sqrt(mean_squared_error(y_val, val_probs))
 
             return {
                 'model': model,
                 'train_accuracy': model.score(X_train, y_train_binary),
                 'val_accuracy': model.score(X_val, y_val_binary),
+                'val_rmse': float(val_rmse),
                 'feature_weights': dict(zip(self.meta_feature_names, model.coef_[0].tolist())),
             }
 
@@ -654,6 +686,11 @@ class MetaLearner:
     ) -> Dict[str, Any]:
         """Evaluate simple average baseline."""
         try:
+            if len(X_val) == 0:
+                # No validation split: nothing to score. Return a dict without
+                # val_rmse so this candidate is never selected as best.
+                return {'status': 'skipped_empty_val'}
+
             # Simple average of all predictions
             avg_preds = np.mean(X_val, axis=1)
 
@@ -744,22 +781,31 @@ class MetaLearner:
 
             # Track recent errors
             perf = self.base_model_performance[name]
-            perf['recent_errors'].append(error)
+            recent_errors = perf.setdefault('recent_errors', [])
+            recent_errors.append(error)
 
             # Keep only recent window
             window = self.config['performance_window']
-            if len(perf['recent_errors']) > window:
-                perf['recent_errors'] = perf['recent_errors'][-window:]
+            if len(recent_errors) > window:
+                recent_errors = recent_errors[-window:]
+                perf['recent_errors'] = recent_errors
 
             # Update average error
-            perf['avg_error'] = np.mean(perf['recent_errors'])
+            perf['avg_error'] = np.mean(recent_errors)
 
-        # Recalculate weights
+        # Recalculate weights (handle zero-error models and normalize over all models)
         total_inverse_error = 0.0
         for name, perf in self.base_model_performance.items():
-            if 'avg_error' in perf and perf['avg_error'] > 0:
-                self.base_model_weights[name] = 1.0 / perf['avg_error']
-                total_inverse_error += self.base_model_weights[name]
+            avg_error = perf.get('avg_error')
+            if avg_error is None:
+                avg_error = perf.get('rmse', 1.0)
+            if avg_error > 0:
+                weight = 1.0 / avg_error
+            else:
+                # Perfect model: bounded high weight instead of being skipped
+                weight = 1e6
+            self.base_model_weights[name] = weight
+            total_inverse_error += weight
 
         # Normalize
         if total_inverse_error > 0:

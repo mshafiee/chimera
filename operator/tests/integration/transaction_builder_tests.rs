@@ -1,6 +1,9 @@
 //! Integration tests for transaction builder
 //!
-//! Tests Jupiter Swap API integration, transaction building, and signing
+//! Tests the keypair loading formats (hex / base58 / Solana CLI JSON array)
+//! through the PUBLIC `load_wallet_keypair` API. NOTE: these intentionally
+//! mirror the in-module unit tests in `transaction_builder.rs` — the
+//! duplication is kept because public-API coverage is the goal here.
 
 use chimera_operator::{
     engine::transaction_builder::load_wallet_keypair,
@@ -10,14 +13,6 @@ use chimera_operator::{
 use rust_decimal::Decimal;
 use solana_sdk::signature::{Keypair, Signer};
 use std::str::FromStr;
-
-/// Test transaction builder initialization — requires real config, skip in CI
-#[tokio::test]
-#[ignore]
-async fn test_transaction_builder_init() {
-    // Requires a real AppConfig loaded from environment or config file
-    // Run manually with: cargo test -- --ignored test_transaction_builder_init
-}
 
 /// Test wallet keypair loading from vault
 #[test]
@@ -76,18 +71,32 @@ fn test_load_wallet_keypair_json_array() {
     assert_eq!(loaded.pubkey(), test_keypair.pubkey());
 }
 
-/// Test wallet keypair loading fails with invalid key
+/// Test wallet keypair loading fails with invalid key material
 #[test]
 fn test_load_wallet_keypair_invalid() {
-    let secrets = VaultSecrets {
-        webhook_secret: "test".to_string(),
-        webhook_secret_previous: None,
-        wallet_private_key: Some("not-valid-hex".to_string()),
-        rpc_api_key: None,
-        fallback_rpc_api_key: None,
-    };
+    // Malformed hex, malformed base58, malformed JSON array, and a
+    // correctly-encoded but wrong-length key must ALL be rejected.
+    let malformed_inputs = vec![
+        "not-valid-hex".to_string(),
+        "!!!!not-base58!!!!".to_string(),
+        "[1, 2, 3".to_string(), // truncated JSON array
+        "{not json}".to_string(),
+        hex::encode([7u8; 31]), // valid hex but wrong length (31 bytes)
+    ];
 
-    assert!(load_wallet_keypair(&secrets).is_err());
+    for input in malformed_inputs {
+        let secrets = VaultSecrets {
+            webhook_secret: "test".to_string(),
+            webhook_secret_previous: None,
+            wallet_private_key: Some(input.clone()),
+            rpc_api_key: None,
+            fallback_rpc_api_key: None,
+        };
+        assert!(
+            load_wallet_keypair(&secrets).is_err(),
+            "key material must be rejected: {input}"
+        );
+    }
 }
 
 /// Test wallet keypair loading fails when key missing

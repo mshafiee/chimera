@@ -163,16 +163,15 @@ class TestROICalculation:
                 price_at_trade=13.0,  # Sell at $13
                 timestamp=datetime.utcnow() - timedelta(days=3),
                 tx_signature="tx3",
-                pnl_sol=2.0,  # (13 - 11) * 2 = 4, but using PnL
+                pnl_sol=4.0,  # (13 - 11) * 2 = 4 (proceeds 26 - FIFO cost 22)
             ),
         ]
         
         roi = analyzer._calculate_roi_from_trades(trades)
         
         # Average entry: (10 + 12) / 2 = 11
-        # Expected: (13 - 11) * 2 / (10 + 12) * 100 = 18.18%
-        # But using PnL: 2.0 / (10 + 12) * 100 = 9.09%
-        assert roi >= 0.0  # Should be positive
+        # Expected: 4.0 / (10 + 12) * 100 = 18.18%
+        assert abs(roi - 18.18) < 0.1
 
 
 class TestWinRateCalculation:
@@ -245,7 +244,7 @@ class TestWinRateCalculation:
         assert abs(win_rate - 0.5) < 0.01
     
     def test_win_rate_ignores_buy_trades(self, analyzer):
-        """Test that win rate only counts SELL trades."""
+        """Test that win rate only counts SELL trades (not missing PnL)."""
         trades = [
             HistoricalTrade(
                 token_address="token1",
@@ -255,7 +254,7 @@ class TestWinRateCalculation:
                 price_at_trade=10.0,
                 timestamp=datetime.utcnow() - timedelta(days=i),
                 tx_signature=f"tx{i}",
-                pnl_sol=None,
+                pnl_sol=2.0,  # Non-None PnL proves BUY is filtered by action, not missing PnL
             )
             for i in range(5, 0, -1)
         ]
@@ -361,9 +360,9 @@ class TestWinStreakConsistency:
         ]
         
         consistency = analyzer._calculate_win_streak_consistency(trades)
-        
-        # All wins should have high consistency
-        assert consistency > 0.7
+
+        # All wins: streak_component = 1.0, win_rate = 1.0 => consistency = 1.0
+        assert abs(consistency - 1.0) < 1e-9
     
     def test_consistency_alternating(self, analyzer):
         """Test consistency with alternating wins/losses (should be lower)."""
@@ -382,9 +381,9 @@ class TestWinStreakConsistency:
         ]
         
         consistency = analyzer._calculate_win_streak_consistency(trades)
-        
-        # Alternating pattern should have lower consistency
-        assert consistency < 0.6
+
+        # Alternating: mean_streak=1, n=10, win_rate=0.5 => consistency = 0.22
+        assert abs(consistency - 0.22) < 0.01
     
     def test_consistency_insufficient_trades(self, analyzer):
         """Test consistency with insufficient trades (< 5)."""

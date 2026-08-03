@@ -39,6 +39,14 @@ pub enum TipInlineError {
     InvalidAccountIndex { index: usize, len: usize },
     #[error("empty message: no account keys")]
     EmptyAccountKeys,
+    #[error("message header violates Solana account layout invariants")]
+    InvalidHeader,
+    #[error("swap transaction carries a pre-existing signature that would be dropped")]
+    PreExistingSignature,
+    #[error("recompiled message signer set differs from the original message")]
+    SignerSetChanged,
+    #[error("recompiled message changes an account's writable flag")]
+    WritabilityChanged,
 }
 
 /// Decompile a legacy [`Message`] back into its constituent [`Instruction`]s.
@@ -49,7 +57,10 @@ pub enum TipInlineError {
 ///   - among signers, `[0, num_signers - num_readonly_signed)` are writable;
 ///   - among non-signers, `[num_signers, N - num_readonly_unsigned)` are writable.
 ///
-/// This is deterministic for legacy messages (no ALTs) and round-trip exact.
+/// This is deterministic for legacy messages (no ALTs) and round-trip exact for
+/// the *instruction list*; header-only signers (not referenced by any
+/// instruction) are NOT representable and are validated against in
+/// [`inline_jito_tip`].
 pub fn decompile_legacy_message(message: &Message) -> Result<Vec<Instruction>, TipInlineError> {
     let account_keys = &message.account_keys;
     if account_keys.is_empty() {
@@ -61,6 +72,18 @@ pub fn decompile_legacy_message(message: &Message) -> Result<Vec<Instruction>, T
     let num_readonly_signed = header.num_readonly_signed_accounts as usize;
     let num_readonly_unsigned = header.num_readonly_unsigned_accounts as usize;
     let num_accounts = account_keys.len();
+
+    // Validate the header against the actual account layout BEFORE deriving
+    // metas: `saturating_sub` would silently clamp an inconsistent header
+    // (e.g. more readonly-signers than signers) into wrong signer/writable
+    // flags, and recompilation would happily ship a transaction with wrong
+    // account semantics.
+    if num_signers > num_accounts
+        || num_readonly_signed > num_signers
+        || num_readonly_unsigned > num_accounts.saturating_sub(num_signers)
+    {
+        return Err(TipInlineError::InvalidHeader);
+    }
 
     let meta_for = |idx: u8| -> Result<AccountMeta, TipInlineError> {
         let i = idx as usize;
@@ -108,6 +131,14 @@ pub fn decompile_legacy_message(message: &Message) -> Result<Vec<Instruction>, T
 ///
 /// The tip is appended last so the swap logic executes first; atomicity at the
 /// transaction level guarantees the tip is only paid if the whole tx lands.
+///
+/// # Round-trip safety checks
+/// Decompilation only emits accounts referenced by instructions, so header-only
+/// signers (e.g. multisig cosigners) cannot be preserved by recompilation, and
+/// a pre-existing signature on `swap_tx` would be silently dropped by the
+/// caller's re-sign. Both are rejected with a typed [`TipInlineError`], as is
+/// any change to a shared account's writable flag (programs may branch on
+/// writability).
 pub fn inline_jito_tip(
     swap_tx: &Transaction,
     payer: &Pubkey,
@@ -115,6 +146,18 @@ pub fn inline_jito_tip(
     tip_lamports: u64,
     blockhash: solana_sdk::hash::Hash,
 ) -> Result<Transaction, TipInlineError> {
+    // Reject transactions that already carry a signature: `inline_and_serialize_tip`
+    // re-signs with the wallet keypair only, so any additional required signature
+    // (e.g. a cosigner's) would be silently dropped — the swap could land without
+    // the cosigner's approval.
+    if swap_tx
+        .signatures
+        .iter()
+        .any(|s| *s != solana_sdk::signature::Signature::default())
+    {
+        return Err(TipInlineError::PreExistingSignature);
+    }
+
     let mut instructions = decompile_legacy_message(&swap_tx.message)?;
 
     // System program transfer: payer -> tip_account.
@@ -128,7 +171,62 @@ pub fn inline_jito_tip(
     // Stamp the real blockhash before signing (new_with_payer compiles against a
     // default blockhash — same pattern as the builder / tip-tx construction).
     tx.message.recent_blockhash = blockhash;
+
+    // Round-trip safety: verify the signer set survived recompilation. Header-only
+    // signers are dropped by decompilation, silently shrinking the authorization
+    // set of the rebuilt transaction vs the signed swap.
+    let original_signers: std::collections::HashSet<&Pubkey> = swap_tx
+        .message
+        .account_keys
+        .iter()
+        .take(swap_tx.message.header.num_required_signatures as usize)
+        .collect();
+    let rebuilt_signers: std::collections::HashSet<&Pubkey> = tx
+        .message
+        .account_keys
+        .iter()
+        .take(tx.message.header.num_required_signatures as usize)
+        .collect();
+    if original_signers != rebuilt_signers {
+        return Err(TipInlineError::SignerSetChanged);
+    }
+
+    // Writability can change for accounts shared between the swap and the tip
+    // transfer (e.g. a read-only payer becomes writable because the tip
+    // transfer writes to it). Programs that branch on account writability
+    // would execute the original swap instructions with a different view.
+    let original_writable = message_writable_flags(&swap_tx.message);
+    let rebuilt_writable = message_writable_flags(&tx.message);
+    for (key, writable) in &original_writable {
+        if let Some(rebuilt) = rebuilt_writable.get(key) {
+            if rebuilt != writable {
+                return Err(TipInlineError::WritabilityChanged);
+            }
+        }
+    }
+
     Ok(tx)
+}
+
+/// Per-account writable flags derived from a legacy message's header layout.
+fn message_writable_flags(message: &Message) -> std::collections::HashMap<Pubkey, bool> {
+    let num_signers = message.header.num_required_signatures as usize;
+    let num_readonly_signed = message.header.num_readonly_signed_accounts as usize;
+    let num_readonly_unsigned = message.header.num_readonly_unsigned_accounts as usize;
+    let num_accounts = message.account_keys.len();
+    message
+        .account_keys
+        .iter()
+        .enumerate()
+        .map(|(i, key)| {
+            let writable = if i < num_signers {
+                i < num_signers.saturating_sub(num_readonly_signed)
+            } else {
+                i < num_accounts.saturating_sub(num_readonly_unsigned)
+            };
+            (*key, writable)
+        })
+        .collect()
 }
 
 #[cfg(test)]

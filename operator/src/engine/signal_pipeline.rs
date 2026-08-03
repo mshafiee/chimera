@@ -148,7 +148,7 @@ impl SignalProcessor {
         tracing::info!(
             trade_uuid = %trade_uuid,
             token = %signal.payload.token,
-            token_address = %signal.token_address(),
+            token_address = %signal.token_address().unwrap_or(""),
             wallet = %signal.payload.wallet_address,
             strategy = %signal.payload.strategy,
             side = %signal.payload.action,
@@ -209,7 +209,7 @@ impl SignalProcessor {
             tracing::info!(
                 trade_uuid = %trade_uuid,
                 wallet = %signal.payload.wallet_address,
-                token = %signal.token_address(),
+                token = %signal.token_address().unwrap_or(""),
                 "Wallet SELL signal skipped (copy_wallet_sells=false) — position managed by exit system"
             );
             return;
@@ -636,7 +636,7 @@ impl SignalProcessor {
 
         // Duplicate-token guard
         if signal.payload.action == Action::Buy && signal.payload.strategy != Strategy::Exit {
-            let token_address = signal.token_address();
+            let token_address = signal.token_address().unwrap_or("");
             let existing: i64 = if let Some(ref registry) = self.state_registry {
                 // Fast path: check in-memory registry
                 registry.has_active_position_for_token(token_address) as i64
@@ -722,7 +722,7 @@ impl SignalProcessor {
             if signal.payload.action == Action::Buy {
                 Some(
                     self.admission_locks
-                        .entry(signal.token_address().to_string())
+                        .entry(signal.token_address().unwrap_or("").to_string())
                         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                         .value()
                         .clone(),
@@ -734,11 +734,73 @@ impl SignalProcessor {
         let _admission_guard = if let Some(ref lock) = admission_lock {
             let guard = lock.lock().await;
 
+            // Pre-check both an existing ACTIVE/EXITING position AND any
+            // unresolved trade (PENDING/QUEUED/EXECUTING/PENDING_CONFIRMATION).
+            // An unconfirmed BUY never inserts a position row, so the
+            // position-only check is blind to an in-flight first BUY for the
+            // same wallet/token — without the trade check a second concurrent
+            // BUY would pass and submit another on-chain order.
+            match self
+                .db
+                .get_unresolved_trade_by_wallet_token(
+                    &signal.payload.wallet_address,
+                    signal.token_address().unwrap_or(""),
+                )
+                .await
+            {
+                Ok(Some(existing_uuid)) => {
+                    tracing::warn!(
+                        trade_uuid = %trade_uuid,
+                        existing_trade_uuid = %existing_uuid,
+                        wallet = %signal.payload.wallet_address,
+                        token = %signal.payload.token,
+                        token_address = %signal.token_address().unwrap_or(""),
+                        "BUY rejected at pre-execution admission: unresolved trade already exists for wallet/token"
+                    );
+                    if let Err(e) = self
+                        .db
+                        .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
+                            trade_uuid: trade_uuid.clone(),
+                            status: "REJECTED".to_string(),
+                            tx_signature: None,
+                            error_message: Some(
+                                "Duplicate admission: unresolved trade already exists for wallet/token"
+                                    .to_string(),
+                            ),
+                            network_fee_sol: None,
+                        })
+                        .await
+                    {
+                        tracing::error!(error = %e, "Failed to mark duplicate BUY as REJECTED");
+                    }
+                    return;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    // Fail-closed: an unresolved-trade lookup error must not
+                    // let a duplicate BUY through.
+                    tracing::warn!(
+                        error = %e,
+                        trade_uuid = %trade_uuid,
+                        "Admission unresolved-trade pre-check failed; rejecting signal (fail-safe)"
+                    );
+                    let _ = self
+                        .db
+                        .mark_trade_dead_letter(
+                            &trade_uuid,
+                            &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                            &format!("Admission pre-check failed: {}", e),
+                        )
+                        .await;
+                    return;
+                }
+            }
+
             match self
                 .db
                 .get_active_position_by_wallet_token(
                     &signal.payload.wallet_address,
-                    signal.token_address(),
+                    signal.token_address().unwrap_or(""),
                 )
                 .await
             {
@@ -747,7 +809,7 @@ impl SignalProcessor {
                         trade_uuid = %trade_uuid,
                         wallet = %signal.payload.wallet_address,
                         token = %signal.payload.token,
-                        token_address = %signal.token_address(),
+                        token_address = %signal.token_address().unwrap_or(""),
                         "BUY rejected at pre-execution admission: active position already exists for wallet/token"
                     );
                     if let Err(e) = self
@@ -773,7 +835,7 @@ impl SignalProcessor {
                         trade_uuid = %trade_uuid,
                         wallet = %signal.payload.wallet_address,
                         token = %signal.payload.token,
-                        "Admission pre-check passed: no active position for wallet/token"
+                        "Admission pre-check passed: no active position or unresolved trade for wallet/token"
                     );
                 }
                 Err(e) => {
@@ -784,7 +846,11 @@ impl SignalProcessor {
                     );
                 }
             }
-            Some(guard)
+            Some(AdmissionGuard::new(
+                &self.admission_locks,
+                signal.token_address().unwrap_or("").to_string(),
+                guard,
+            ))
         } else {
             None
         };
@@ -958,7 +1024,7 @@ impl SignalProcessor {
                     let token_price_usd = self
                         .price_cache
                         .as_ref()
-                        .and_then(|c| c.get_price_usd(signal.token_address()))
+                        .and_then(|c| c.get_price_usd(signal.token_address().unwrap_or("")))
                         .unwrap_or(Decimal::ZERO);
 
                     let entry_price = if let Some(fps) = fill_price_sol {
@@ -989,7 +1055,7 @@ impl SignalProcessor {
                         .atomic_portfolio_heat_check_and_open_position(
                             &trade_uuid,
                             &signal.payload.wallet_address,
-                            signal.token_address(),
+                            signal.token_address().unwrap_or(""),
                             Some(&signal.payload.token),
                             &signal.payload.strategy.to_string(),
                             signal.payload.amount_sol,
@@ -1016,14 +1082,14 @@ impl SignalProcessor {
                             // Without this, stop-loss/profit-target/time-exit checks
                             // silently no-op because get_price_usd returns None.
                             if let Some(ref pc) = self.price_cache {
-                                pc.track_token(signal.token_address());
+                                pc.track_token(signal.token_address().unwrap_or(""));
                                 // Eagerly prime a live price so the position monitor
                                 // sees current data on its very next 5s tick. Without
                                 // this the first price can arrive 15-60s late — by
                                 // then pump tokens are already 5-8% below entry and
                                 // stop-loss/momentum exits fire at a guaranteed loss.
                                 let pc_fetch = pc.clone();
-                                let token_fetch = signal.token_address().to_string();
+                                let token_fetch = signal.token_address().unwrap_or("").to_string();
                                 tokio::spawn(async move {
                                     pc_fetch.eager_fetch_token(&token_fetch).await;
                                 });
@@ -1034,7 +1100,7 @@ impl SignalProcessor {
                                 let position_state = crate::state::registry::PositionState {
                                     trade_uuid: trade_uuid.clone(),
                                     wallet_address: signal.payload.wallet_address.clone(),
-                                    token_address: signal.token_address().to_string(),
+                                    token_address: signal.token_address().unwrap_or("").to_string(),
                                     token_symbol: Some(signal.payload.token.clone()),
                                     state: "ACTIVE".to_string(),
                                     strategy: signal.payload.strategy.to_string(),
@@ -1072,7 +1138,7 @@ impl SignalProcessor {
                                 // failures every few seconds.
                                 tracing::warn!(
                                     trade_uuid = %trade_uuid,
-                                    token = %signal.token_address(),
+                                    token = %signal.token_address().unwrap_or(""),
                                     "outcome.token_amount is None after BUY — force-closing orphaned position to free slot"
                                 );
                                 if let Err(e) = self
@@ -1154,13 +1220,13 @@ impl SignalProcessor {
                         } else {
                             self.price_cache
                                 .as_ref()
-                                .and_then(|c| c.get_price_usd(signal.token_address()))
+                                .and_then(|c| c.get_price_usd(signal.token_address().unwrap_or("")))
                                 .unwrap_or(Decimal::ZERO)
                         }
                     } else {
                         self.price_cache
                             .as_ref()
-                            .and_then(|c| c.get_price_usd(signal.token_address()))
+                            .and_then(|c| c.get_price_usd(signal.token_address().unwrap_or("")))
                             .unwrap_or(Decimal::ZERO)
                     };
 
@@ -1217,7 +1283,7 @@ impl SignalProcessor {
                         .close_position_full(
                             &trade_uuid,
                             &signal.payload.wallet_address,
-                            signal.token_address(),
+                            signal.token_address().unwrap_or(""),
                             exit_price,
                             &outcome.signature,
                             sol_price_usd_opt,
@@ -1315,15 +1381,14 @@ impl SignalProcessor {
                                             );
                                             // Persist immediately on detection
                                             use crate::db_abstraction::DbPool;
-                                            if let DbPool::PostgreSQL(pool) = self.db.pool() {
-                                                let run_id = format!(
-                                                    "v{}",
-                                                    env!("CARGO_PKG_VERSION")
-                                                );
-                                                let _ = td
-                                                    .persist_to_database(&pool, &run_id)
-                                                    .await;
-                                            }
+                                            let DbPool::PostgreSQL(pool) = self.db.pool();
+                                            let run_id = format!(
+                                                "v{}",
+                                                env!("CARGO_PKG_VERSION")
+                                            );
+                                            let _ = td
+                                                .persist_to_database(&pool, &run_id)
+                                                .await;
                                         }
                                         Err(e) => {
                                             tracing::warn!(
@@ -1365,6 +1430,9 @@ impl SignalProcessor {
                     {
                         tracing::error!(error = %db_err, "Failed to revert trade status to PENDING");
                     }
+                    if let Some(ref registry) = self.state_registry {
+                        let _ = registry.update_trade_status(&trade_uuid, TradeStatus::Pending);
+                    }
                 } else {
                     tracing::error!(
                         trade_uuid = %trade_uuid,
@@ -1386,6 +1454,9 @@ impl SignalProcessor {
                     {
                         tracing::error!(error = %db_err, "Failed to update exit trade status to FAILED");
                     }
+                    if let Some(ref registry) = self.state_registry {
+                        let _ = registry.update_trade_status(&trade_uuid, TradeStatus::Failed);
+                    }
                 }
             }
             Err(ExecutorError::ExecutionCostTooHigh {
@@ -1406,6 +1477,31 @@ impl SignalProcessor {
                     "Trade rejected due to cost efficiency"
                 );
 
+                if signal.payload.action == Action::Sell {
+                    // For a SELL the on-chain exit was never submitted —
+                    // dead-lettering would abandon the exit and leave the
+                    // position ACTIVE with no retry. Mark FAILED so the
+                    // position monitor re-attempts the exit (same distinction
+                    // as the MarketConditionsUnfavorable arm).
+                    if let Err(db_err) = self
+                        .db
+                        .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
+                            trade_uuid: trade_uuid.clone(),
+                            status: "FAILED".to_string(),
+                            tx_signature: None,
+                            error_message: Some(reason.clone()),
+                            network_fee_sol: None,
+                        })
+                        .await
+                    {
+                        tracing::error!(error = %db_err, "Failed to mark exit trade as FAILED");
+                    }
+                    if let Some(ref registry) = self.state_registry {
+                        let _ = registry.update_trade_status(&trade_uuid, TradeStatus::Failed);
+                    }
+                    return;
+                }
+
                 let _ = self
                     .db
                     .mark_trade_dead_letter(
@@ -1414,6 +1510,10 @@ impl SignalProcessor {
                         &reason,
                     )
                     .await;
+
+                if let Some(ref registry) = self.state_registry {
+                    let _ = registry.update_trade_status(&trade_uuid, TradeStatus::DeadLetter);
+                }
 
                 if let Some(ref ws) = self.ws_state {
                     ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
@@ -1446,6 +1546,56 @@ impl SignalProcessor {
                 {
                     tracing::error!(error = %db_err, "Failed to update trade status to FAILED");
                 }
+                // Keep the in-memory registry in sync with the DB status.
+                if let Some(ref registry) = self.state_registry {
+                    let _ = registry.update_trade_status(&trade_uuid, TradeStatus::Failed);
+                }
+            }
+        }
+    }
+}
+
+/// RAII guard for the per-token BUY admission lock.
+///
+/// Also bounds `admission_locks` growth: when the guard drops and no other
+/// worker holds or waits on the token's mutex (the map entry is then the only
+/// remaining reference besides the caller's), the entry is removed so memory
+/// does not grow with the number of distinct tokens ever traded.
+struct AdmissionGuard<'a> {
+    locks: &'a dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    key: String,
+    _guard: Option<tokio::sync::MutexGuard<'a, ()>>,
+}
+
+impl<'a> AdmissionGuard<'a> {
+    fn new(
+        locks: &'a dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>,
+        key: String,
+        guard: tokio::sync::MutexGuard<'a, ()>,
+    ) -> Self {
+        Self {
+            locks,
+            key,
+            _guard: Some(guard),
+        }
+    }
+}
+
+impl Drop for AdmissionGuard<'_> {
+    fn drop(&mut self) {
+        // Release the mutex before the reference-count check (try_lock while
+        // holding would always fail).
+        drop(self._guard.take());
+        // Map entry (1) + the caller's Arc clone (1) = 2 references when
+        // nobody else holds or waits on this mutex. A queued worker holds
+        // another clone, so the entry is kept for it — it removes the entry
+        // when it finishes.
+        let entry = self.locks.get(&self.key);
+        if let Some(entry) = entry {
+            let keep = Arc::strong_count(entry.value()) > 2;
+            drop(entry);
+            if !keep {
+                self.locks.remove(&self.key);
             }
         }
     }

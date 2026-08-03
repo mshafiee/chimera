@@ -185,7 +185,7 @@ class CostEstimator:
             return None
 
         cache_key = "raw_fees"
-        now = time.monotonic()
+        now = time.time()
         if cache_key in self._cache:
             cached_ts, cached_value = self._cache[cache_key]
             if now - cached_ts < CACHE_TTL_SECONDS:
@@ -214,6 +214,11 @@ class CostEstimator:
             async with session.post(self._rpc_url, json=payload, params=self._get_rpc_params()) as resp:
                 if resp.status != 200:
                     logger.warning("getPriorityFeeEstimate HTTP %d", resp.status)
+                    # RPC is down: fall back to the last-known persisted fees
+                    # (even if stale) instead of static defaults.
+                    cached = self._cache.get(cache_key)
+                    if isinstance(cached, tuple) and isinstance(cached[1], (list, tuple)):
+                        return list(cached[1])
                     return None
                 data = await resp.json()
                 levels = self._parse_fee_response(data)
@@ -223,6 +228,10 @@ class CostEstimator:
                 return levels
         except Exception as exc:
             logger.warning("getPriorityFeeEstimate failed: %s", self._redact(str(exc)))
+            # Last-known fees beat static defaults on Helius outages
+            cached = self._cache.get(cache_key)
+            if isinstance(cached, tuple) and isinstance(cached[1], (list, tuple)):
+                return list(cached[1])
             return None
 
     @staticmethod
@@ -241,15 +250,16 @@ class CostEstimator:
             # Newer format: {"percentiles": {pct: fee, ...}} or {"priorityFeeLevels": {...}}
             levels = result.get("priorityFeeLevels") or result.get("percentiles")
             if levels:
-                fees = [float(v) for v in levels.values() if v is not None]
+                # Helius returns lamports; convert to SOL before storing
+                fees = [float(v) / 1e9 for v in levels.values() if v is not None]
                 return sorted(fees) if fees else None
-            # Single estimate: {"priorityFeeEstimate": 1234}
+            # Single estimate: {"priorityFeeEstimate": 1234} (lamports)
             est = result.get("priorityFeeEstimate")
             if est is not None:
-                return [float(est)]
+                return [float(est) / 1e9]
             return None
         if isinstance(result, (int, float)):
-            return [float(result)]
+            return [float(result) / 1e9]
         return None
 
     @staticmethod

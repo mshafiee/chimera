@@ -101,23 +101,59 @@ pub struct RentScavengerMetrics {
 }
 
 impl RentScavengerMetrics {
-    /// Create new rent scavenger metrics
-    pub fn new() -> Self {
-        Self {
-            rent_reclaimed_total: IntCounter::with_opts(
-                Opts::new("chimera_rent_scavenger_reclaimed_lamports", "Total rent reclaimed in lamports")
-            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
-            accounts_closed_total: IntCounter::with_opts(
-                Opts::new("chimera_rent_scavenger_accounts_closed", "Total token accounts closed")
-            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
-            errors_total: IntCounter::with_opts(
-                Opts::new("chimera_rent_scavenger_errors", "Total rent scavenger errors")
-            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
-            run_duration: Histogram::with_opts(HistogramOpts::new(
+    /// Create new rent scavenger metrics and register them with `registry` so
+    /// the recorded values are actually scraped at /metrics.
+    pub fn new(registry: &Registry) -> Self {
+        let metrics = Self {
+            rent_reclaimed_total: Self::counter(
+                "chimera_rent_scavenger_reclaimed_lamports",
+                "Total rent reclaimed in lamports",
+            ),
+            accounts_closed_total: Self::counter(
+                "chimera_rent_scavenger_accounts_closed",
+                "Total token accounts closed",
+            ),
+            errors_total: Self::counter(
+                "chimera_rent_scavenger_errors",
+                "Total rent scavenger errors",
+            ),
+            run_duration: Self::histogram(
                 "chimera_rent_scavenger_run_duration_seconds",
-                "Rent scavenger run duration in seconds"
-            )).unwrap_or_else(|_| Histogram::with_opts(HistogramOpts::new("dummy", "dummy")).unwrap()),
+                "Rent scavenger run duration in seconds",
+            ),
+        };
+
+        // Registration failure (e.g. a name collision) must be surfaced, not
+        // silently swallowed — otherwise operators see no data at all.
+        let collectors: Vec<Box<dyn prometheus::core::Collector>> = vec![
+            Box::new(metrics.rent_reclaimed_total.clone()),
+            Box::new(metrics.accounts_closed_total.clone()),
+            Box::new(metrics.errors_total.clone()),
+            Box::new(metrics.run_duration.clone()),
+        ];
+        for collector in collectors {
+            if let Err(e) = registry.register(collector) {
+                tracing::error!(error = %e, "Failed to register rent scavenger metric");
+            }
         }
+
+        metrics
+    }
+
+    fn counter(name: &str, help: &str) -> prometheus::IntCounter {
+        IntCounter::with_opts(Opts::new(name, help)).unwrap_or_else(|e| {
+            tracing::error!(error = %e, metric = %name, "Failed to create counter metric");
+            IntCounter::with_opts(Opts::new(name, help))
+                .expect("hardcoded metric descriptor is valid")
+        })
+    }
+
+    fn histogram(name: &str, help: &str) -> Histogram {
+        Histogram::with_opts(HistogramOpts::new(name, help)).unwrap_or_else(|e| {
+            tracing::error!(error = %e, metric = %name, "Failed to create histogram metric");
+            Histogram::with_opts(HistogramOpts::new(name, help))
+                .expect("hardcoded metric descriptor is valid")
+        })
     }
 
     /// Increment rent reclaimed counter
@@ -142,36 +178,79 @@ impl RentScavengerMetrics {
 }
 
 impl ExecutionLockMetrics {
-    /// Create new execution lock metrics (minimal stub for now)
-    pub fn new() -> Self {
-        Self {
-            acquire_success: IntCounter::with_opts(
-                Opts::new("chimera_execution_lock_acquire_success", "Successful lock acquisitions")
-            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
-            acquire_failed: IntCounter::with_opts(
-                Opts::new("chimera_execution_lock_acquire_failed", "Failed lock acquisitions")
-            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
-            acquire_disabled: IntCounter::with_opts(
-                Opts::new("chimera_execution_lock_acquire_disabled", "Disabled lock acquisitions")
-            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
-            released: IntCounter::with_opts(
-                Opts::new("chimera_execution_lock_released", "Lock releases")
-            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
-            force_released: IntCounter::with_opts(
-                Opts::new("chimera_execution_lock_force_released", "Force lock releases")
-            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
-            expired_reclaimed: IntCounter::with_opts(
-                Opts::new("chimera_execution_lock_expired_reclaimed", "Expired locks reclaimed")
-            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
-            expired_cleaned: IntCounter::with_opts(
-                Opts::new("chimera_execution_lock_expired_cleaned", "Expired locks cleaned up")
-            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
-            held_duration: Histogram::with_opts(HistogramOpts::new(
+    /// Create new execution lock metrics and register them with `registry` so
+    /// the recorded values are actually scraped at /metrics.
+    pub fn new(registry: &Registry) -> Self {
+        let metrics = Self {
+            acquire_success: Self::counter(
+                "chimera_execution_lock_acquire_success",
+                "Successful lock acquisitions",
+            ),
+            acquire_failed: Self::counter(
+                "chimera_execution_lock_acquire_failed",
+                "Failed lock acquisitions",
+            ),
+            acquire_disabled: Self::counter(
+                "chimera_execution_lock_acquire_disabled",
+                "Disabled lock acquisitions",
+            ),
+            released: Self::counter(
+                "chimera_execution_lock_released",
+                "Lock releases",
+            ),
+            force_released: Self::counter(
+                "chimera_execution_lock_force_released",
+                "Force lock releases",
+            ),
+            expired_reclaimed: Self::counter(
+                "chimera_execution_lock_expired_reclaimed",
+                "Expired locks reclaimed",
+            ),
+            expired_cleaned: Self::counter(
+                "chimera_execution_lock_expired_cleaned",
+                "Expired locks cleaned up",
+            ),
+            held_duration: Self::histogram(
                 "chimera_execution_lock_held_duration_seconds",
                 "Duration in seconds that locks are held",
-            ))
-            .unwrap_or_else(|_| Histogram::with_opts(HistogramOpts::new("dummy", "dummy")).unwrap()),
+            ),
+        };
+
+        // Registration failure must be surfaced, not silently swallowed —
+        // otherwise operators see no execution-lock data at all.
+        let collectors: Vec<Box<dyn prometheus::core::Collector>> = vec![
+            Box::new(metrics.acquire_success.clone()),
+            Box::new(metrics.acquire_failed.clone()),
+            Box::new(metrics.acquire_disabled.clone()),
+            Box::new(metrics.released.clone()),
+            Box::new(metrics.force_released.clone()),
+            Box::new(metrics.expired_reclaimed.clone()),
+            Box::new(metrics.expired_cleaned.clone()),
+            Box::new(metrics.held_duration.clone()),
+        ];
+        for collector in collectors {
+            if let Err(e) = registry.register(collector) {
+                tracing::error!(error = %e, "Failed to register execution lock metric");
+            }
         }
+
+        metrics
+    }
+
+    fn counter(name: &str, help: &str) -> prometheus::IntCounter {
+        IntCounter::with_opts(Opts::new(name, help)).unwrap_or_else(|e| {
+            tracing::error!(error = %e, metric = %name, "Failed to create counter metric");
+            IntCounter::with_opts(Opts::new(name, help))
+                .expect("hardcoded metric descriptor is valid")
+        })
+    }
+
+    fn histogram(name: &str, help: &str) -> Histogram {
+        Histogram::with_opts(HistogramOpts::new(name, help)).unwrap_or_else(|e| {
+            tracing::error!(error = %e, metric = %name, "Failed to create histogram metric");
+            Histogram::with_opts(HistogramOpts::new(name, help))
+                .expect("hardcoded metric descriptor is valid")
+        })
     }
 
     /// Increment successful lock acquisition counter
@@ -254,10 +333,10 @@ impl MetricsState {
             .register(Box::new(rpc_health.clone()))
             .map_err(|e| format!("Failed to register rpc_health: {}", e))?;
 
-        // Circuit breaker state gauge
+        // Circuit breaker state gauge (2 = active, 1 = cooldown, 0 = tripped)
         let circuit_breaker_state = IntGauge::with_opts(Opts::new(
             "chimera_circuit_breaker_state",
-            "Circuit breaker state (1 = active, 0 = tripped)",
+            "Circuit breaker state (2 = active, 1 = cooldown, 0 = tripped)",
         ))
         .map_err(|e| format!("Failed to create circuit_breaker_state gauge: {}", e))?;
         registry
@@ -333,9 +412,10 @@ impl MetricsState {
             .register(Box::new(reconciliation_discrepancies.clone()))
             .map_err(|e| format!("Failed to register reconciliation_discrepancies: {}", e))?;
 
-        // Reconciliation unresolved gauge
+        // Reconciliation unresolved gauge (a gauge describes "currently
+        // unresolved", so no _total suffix — that is reserved for counters)
         let reconciliation_unresolved = IntGauge::with_opts(Opts::new(
-            "chimera_reconciliation_unresolved_total",
+            "chimera_reconciliation_unresolved",
             "Number of unresolved reconciliation discrepancies",
         ))
         .map_err(|e| format!("Failed to create reconciliation_unresolved gauge: {}", e))?;
@@ -418,11 +498,17 @@ impl MetricsState {
             .register(Box::new(webhook_rate_limiter_usage.clone()))
             .map_err(|e| format!("Failed to register webhook_rate_limiter_usage: {}", e))?;
 
-        // Database query latency histogram
-        let db_query_latency = Histogram::with_opts(HistogramOpts::new(
-            "chimera_db_query_latency_ms",
-            "Database query execution latency in milliseconds",
-        ))
+        // Database query latency histogram (millisecond-scale buckets: the
+        // library default's largest finite bound is 10, which would dump every
+        // real query into the +Inf bucket and make slow-query/percentile logic
+        // useless)
+        let db_query_latency = Histogram::with_opts(
+            HistogramOpts::new(
+                "chimera_db_query_latency_ms",
+                "Database query execution latency in milliseconds",
+            )
+            .buckets(vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]),
+        )
         .map_err(|e| format!("Failed to create db_query_latency histogram: {}", e))?;
         registry
             .register(Box::new(db_query_latency.clone()))
@@ -531,6 +617,8 @@ impl MetricsState {
         let mut sample_count = 0u32;
         let mut sum_ms = 0.0;
         let mut slow_queries_count = 0u32;
+        let mut p95_ms = 0.0;
+        let mut p99_ms = 0.0;
         const SLOW_QUERY_THRESHOLD_MS: f64 = 100.0; // Queries > 100ms considered slow
 
         for metric_family in metric_families {
@@ -541,24 +629,31 @@ impl MetricsState {
                         sample_count = histogram.get_sample_count() as u32;
                         sum_ms = histogram.get_sample_sum();
 
-                        // Count slow queries (> 100ms) from histogram buckets
-                        for bucket in histogram.bucket.iter() {
-                            if bucket.upper_bound() >= SLOW_QUERY_THRESHOLD_MS {
-                                slow_queries_count += bucket.cumulative_count() as u32;
-                                break; // This gives us count of queries >= threshold
-                            }
-                        }
+                        // Count slow queries (> threshold): total minus the
+                        // cumulative count of the last bucket below the threshold.
+                        // (Taking the cumulative count of the first bucket at/above
+                        // the threshold would include every faster query too.)
+                        let below_slow = histogram
+                            .bucket
+                            .iter()
+                            .take_while(|b| b.upper_bound() < SLOW_QUERY_THRESHOLD_MS)
+                            .last()
+                            .map(|b| b.cumulative_count() as u32)
+                            .unwrap_or(0);
+                        slow_queries_count = sample_count.saturating_sub(below_slow);
+
+                        // Real percentiles from the histogram buckets (the
+                        // standard histogram_quantile algorithm) instead of
+                        // fabricated multiples of the mean.
+                        p95_ms = histogram_quantile(histogram, 0.95);
+                        p99_ms = histogram_quantile(histogram, 0.99);
                     }
                 }
             }
         }
 
-        // Calculate approximate percentiles from the histogram buckets
+        // Average from the sample sum/count (percentiles come from the buckets above)
         let avg_ms = if sample_count > 0 { sum_ms / sample_count as f64 } else { 0.0 };
-
-        // For now, use estimated percentiles based on avg (this could be improved with proper percentile calculation)
-        let p95_ms = if sample_count > 0 { avg_ms * 3.0 } else { 0.0 };
-        let p99_ms = if sample_count > 0 { avg_ms * 5.0 } else { 0.0 };
 
         QueryLatencyStats {
             avg_ms,
@@ -567,14 +662,6 @@ impl MetricsState {
             slow_queries_count,
             total_queries_count: sample_count,
         }
-    }
-}
-
-impl Default for MetricsState {
-    fn default() -> Self {
-        // In production code, MetricsState::new() should be called and its Result handled.
-        // For Default trait (used in tests), we panic on failure to maintain the trait contract.
-        Self::new().expect("Failed to create MetricsState - metrics system initialization failed")
     }
 }
 

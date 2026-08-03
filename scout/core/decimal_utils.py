@@ -6,6 +6,8 @@ at appropriate boundaries (database, JSON, API responses), following the same
 pattern as the Rust codebase.
 """
 
+import decimal
+
 from decimal import Decimal
 from typing import Optional, Union
 
@@ -31,14 +33,14 @@ def float_to_decimal(value: Optional[Union[float, str, int]]) -> Decimal:
     if isinstance(value, str):
         try:
             return Decimal(value)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, decimal.InvalidOperation):
             return Decimal('0')
     
     if isinstance(value, (int, float)):
         try:
             # Use string conversion to avoid floating point precision issues
             return Decimal(str(value))
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, decimal.InvalidOperation):
             return Decimal('0')
     
     return Decimal('0')

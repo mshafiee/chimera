@@ -179,9 +179,10 @@ class OptimizedWalletAnalyzer:
 
     async def clear_wallet_cache(self, address: str):
         """Clear cached data for a specific wallet."""
-        # Clear base analyzer cache
+        # Clear base analyzer cache (await: the base method is async and
+        # acquires its own cache locks)
         if hasattr(self._analyzer, 'clear_wallet_cache'):
-            self._analyzer.clear_wallet_cache(address)
+            await self._analyzer.clear_wallet_cache(address)
 
         # Clear optimization cache
         if self._optimization_enabled and self._optimizer:
@@ -203,12 +204,12 @@ class OptimizedWalletAnalyzer:
             except Exception as e:
                 print(f"[Optimized] Cache invalidation failed: {e}")
 
-    def close(self):
+    async def close(self):
         """Close resources (HTTP sessions, etc.)."""
         if hasattr(self._analyzer, 'close'):
-            # Close base analyzer resources
-            if hasattr(self._analyzer, 'helius_client') and self._analyzer.helius_client:
-                return self._analyzer.helius_client.close()
+            # Delegate to the base analyzer so ALL resources (including the
+            # liquidity provider) are released, not just the helius session
+            await self._analyzer.close()
 
     @property
     def rugcheck_client(self):

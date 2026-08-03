@@ -20,7 +20,13 @@ impl DatabaseBackend {
             .as_str()
         {
             "postgres" | "postgresql" => DatabaseBackend::PostgreSQL,
-            _ => DatabaseBackend::PostgreSQL,
+            other => {
+                tracing::warn!(
+                    mode = other,
+                    "Unknown CHIMERA_DB_MODE value — defaulting to PostgreSQL"
+                );
+                DatabaseBackend::PostgreSQL
+            }
         }
     }
 
@@ -43,12 +49,32 @@ impl Display for DatabaseBackend {
 pub type PostgresPool = Pool<Postgres>;
 
 /// Database configuration
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DatabaseConfig {
     pub backend: DatabaseBackend,
     pub url: Option<String>,
     pub max_connections: u32,
     pub acquire_timeout_seconds: u64,
+}
+
+impl fmt::Debug for DatabaseConfig {
+    /// `DATABASE_URL` conventionally embeds credentials (postgres://user:pass@host),
+    /// so the URL is redacted before it can reach any log/output path.
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let redacted_url = self.url.as_ref().map(|u| match u.split_once('@') {
+            Some((creds, rest)) => {
+                let user = creds.rsplit_once(':').map(|(u, _)| u).unwrap_or(creds);
+                format!("{}:***@{}", user, rest)
+            }
+            None => u.clone(),
+        });
+        f.debug_struct("DatabaseConfig")
+            .field("backend", &self.backend)
+            .field("url", &redacted_url)
+            .field("max_connections", &self.max_connections)
+            .field("acquire_timeout_seconds", &self.acquire_timeout_seconds)
+            .finish()
+    }
 }
 
 impl Default for DatabaseConfig {
@@ -93,6 +119,12 @@ impl DbPool {
     pub fn num_idle(&self) -> u32 {
         match self {
             DbPool::PostgreSQL(pool) => pool.num_idle() as u32,
+        }
+    }
+
+    pub fn max_connections(&self) -> u32 {
+        match self {
+            DbPool::PostgreSQL(pool) => pool.options().get_max_connections(),
         }
     }
 
@@ -273,10 +305,10 @@ pub struct WalletCopyPerformance {
 pub struct WalletMonitoring {
     pub wallet_address: String,
     pub helius_webhook_id: Option<String>,
-    pub rpc_polling_active: i32,
+    pub rpc_polling_active: bool,
     pub last_transaction_signature: Option<String>,
     pub last_monitored_at: Option<String>,
-    pub monitoring_enabled: i32,
+    pub monitoring_enabled: bool,
     pub created_at: String,
     pub updated_at: String,
     pub webhook_status: Option<String>,
@@ -295,7 +327,7 @@ pub struct WalletMonitoring {
 pub struct WalletMonitoringExtended {
     pub wallet_address: String,
     pub helius_webhook_id: Option<String>,
-    pub monitoring_enabled: i32,
+    pub monitoring_enabled: bool,
     pub webhook_status: String,
     pub webhook_registered_at: Option<String>,
     pub webhook_last_health_check: Option<String>,
@@ -380,6 +412,8 @@ pub struct TradeDetail {
     pub updated_at: String,
 }
 
+/// Used via `#[serde(default = ...)]` — referenced by name, so rustc sees it as dead.
+#[allow(dead_code)]
 fn default_pnl_data_valid() -> bool {
     true
 }
@@ -587,7 +621,7 @@ impl From<Trade> for TradeDetail {
             slippage_cost_sol: Some(t.slippage_cost_sol),
             total_cost_sol: Some(t.total_cost_sol),
             net_pnl_sol: t.net_pnl_sol,
-            pnl_data_valid: true,
+            pnl_data_valid: t.pnl_data_valid,
             created_at: t.created_at.to_rfc3339(),
             updated_at: t.updated_at.to_rfc3339(),
         }

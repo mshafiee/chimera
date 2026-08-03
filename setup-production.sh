@@ -47,11 +47,17 @@ check_file() {
 
 log_section "Chimera Production Setup Checklist"
 
+ENV_FILE="docker/env.mainnet-prod"
+if [ ! -f "$ENV_FILE" ]; then
+    log_error "$ENV_FILE not found - run this script from the repo root"
+    exit 1
+fi
+
 log_section "1. Secure Secrets Configuration"
 
 # Check webhook secret
 log_info "Checking webhook secret..."
-if grep -q "REQUIRED_CHANGE_THIS" docker/env.mainnet-prod 2>/dev/null; then
+if grep -q "REQUIRED_CHANGE_THIS" "$ENV_FILE"; then
     log_warning "Webhook secret needs to be changed in docker/env.mainnet-prod"
     log_info "Generate with: openssl rand -hex 32"
 else
@@ -60,7 +66,7 @@ fi
 
 # Check Grafana password
 log_info "Checking Grafana password..."
-if grep -q "REQUIRED_CHANGE_THIS\|change-me" docker/env.mainnet-prod 2>/dev/null; then
+if grep -q "REQUIRED_CHANGE_THIS\|change-me" "$ENV_FILE"; then
     log_warning "Grafana password needs to be changed in docker/env.mainnet-prod"
 else
     log_success "Grafana password appears configured"
@@ -70,7 +76,7 @@ log_section "2. RPC Configuration"
 
 # Check Helius API key
 log_info "Checking RPC endpoints..."
-if grep -q "YOUR_HELIUS_API_KEY" docker/env.mainnet-prod 2>/dev/null; then
+if grep -q "YOUR_HELIUS_API_KEY" "$ENV_FILE"; then
     log_warning "Helius API key needs to be configured in docker/env.mainnet-prod"
     log_info "Get your key from: https://www.helius.dev/"
 else
@@ -81,42 +87,55 @@ log_section "3. Wallet Configuration"
 
 # Check wallet private key
 log_info "Checking wallet configuration..."
-if grep -q "CHIMERA_WALLET__PRIVATE_KEY_ENCRYPTED=$" docker/env.mainnet-prod 2>/dev/null; then
+if grep -qE "^[[:space:]]*CHIMERA_WALLET__PRIVATE_KEY_ENCRYPTED=[^[:space:]]" "$ENV_FILE"; then
+    log_success "Wallet appears configured"
+else
     log_warning "Wallet private key needs to be encrypted and configured"
     log_info "Use the vault encryption system to store this securely"
-else
-    log_success "Wallet appears configured"
 fi
 
 log_section "4. Notifications Setup"
 
 # Check Telegram
 log_info "Checking Telegram notifications..."
-if grep -q "your-telegram-bot-token\|^TELEGRAM_BOT_TOKEN=$" docker/env.mainnet-prod 2>/dev/null; then
+if grep -qE "^[[:space:]]*TELEGRAM_BOT_TOKEN=[^[:space:]]" "$ENV_FILE"; then
+    if grep -q "your-telegram-bot-token" "$ENV_FILE"; then
+        log_warning "Telegram notifications not configured (placeholder still present)"
+        log_info "Get bot token from @BotFather on Telegram"
+    else
+        log_success "Telegram notifications configured"
+    fi
+else
     log_warning "Telegram notifications not configured (optional but recommended)"
     log_info "Get bot token from @BotFather on Telegram"
-else
-    log_success "Telegram notifications configured"
 fi
 
 # Check Discord
 log_info "Checking Discord notifications..."
-if grep -q "your-discord-webhook-url\|^DISCORD_WEBHOOK_URL=$" docker/env.mainnet-prod 2>/dev/null; then
-    log_warning "Discord notifications not configured (optional)"
+if grep -qE "^[[:space:]]*DISCORD_WEBHOOK_URL=[^[:space:]]" "$ENV_FILE"; then
+    if grep -q "your-discord-webhook-url" "$ENV_FILE"; then
+        log_warning "Discord notifications not configured (placeholder still present)"
+    else
+        log_success "Discord notifications configured"
+    fi
 else
-    log_success "Discord notifications configured"
+    log_warning "Discord notifications not configured (optional)"
 fi
 
 log_section "5. Circuit Breaker Settings"
 
 log_info "Review circuit breaker thresholds:"
-grep -A 4 "CIRCUIT_BREAKERS" docker/env.mainnet-prod | head -5
+if grep -q "CIRCUIT_BREAKERS" "$ENV_FILE"; then
+    grep -A 4 "CIRCUIT_BREAKERS" "$ENV_FILE" | head -5
+else
+    echo "No CIRCUIT_BREAKERS configuration found in $ENV_FILE"
+fi
 echo ""
 
 log_section "6. Jito Configuration"
 
 log_info "Jito settings:"
-if grep -q "CHIMERA_JITO__ENABLED=true" docker/env.mainnet-prod; then
+if grep -q "CHIMERA_JITO__ENABLED=true" "$ENV_FILE"; then
     log_success "Jito is enabled for MEV protection"
 else
     log_warning "Jito is disabled - consider enabling for mainnet"

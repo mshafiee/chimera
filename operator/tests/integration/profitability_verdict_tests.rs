@@ -120,10 +120,13 @@ async fn seed_outcome(
 ) -> (String, String) {
     let decision_id = uid("dec", run_id);
     let trade_uuid = uid("trd", run_id);
-    let trade_strategy = match strategy {
-        "SHIELD" | "SPEAR" | "EXIT" => strategy,
-        _ => "SHIELD",
-    };
+    // Fail loudly on bad fixtures instead of silently normalizing them — a
+    // silent rewrite would mask a decision↔trade strategy mismatch.
+    assert!(
+        matches!(strategy, "SHIELD" | "SPEAR" | "EXIT"),
+        "unexpected strategy in seed_outcome: {strategy}"
+    );
+    let trade_strategy = strategy;
     insert_decision(
         pool,
         &decision_id,
@@ -189,6 +192,7 @@ async fn seed_n_outcomes(
     strategy: &str,
     pnl_each: &str,
     start_offset: i64,
+    batch: u64,
 ) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for i in 0..n {
@@ -196,8 +200,10 @@ async fn seed_n_outcomes(
             seed_outcome(
                 pool,
                 run_id,
-                &format!("w{i}"),
-                &format!("tok{i}"),
+                // Per-batch prefix keeps wallet/token names unique across
+                // multiple seed_n_outcomes calls in one test run.
+                &format!("b{batch}-w{i}"),
+                &format!("b{batch}-tok{i}"),
                 strategy,
                 "1.0",
                 pnl_each,
@@ -238,7 +244,7 @@ async fn run_verdict(
 async fn sample_size_below_60_is_inconclusive() {
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
-    seed_n_outcomes(&pool, RUN, 59, "SHIELD", "0.01", 0).await;
+    seed_n_outcomes(&pool, RUN, 59, "SHIELD", "0.01", 0, 0).await;
 
     let (gates, verdict) = run_verdict(&pool, RUN, 1.0, true, CAPITAL_SOL).await;
     assert_eq!(verdict, "INCONCLUSIVE");
@@ -250,7 +256,7 @@ async fn sample_size_below_60_is_inconclusive() {
 async fn sample_size_at_60_passes_gate() {
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
-    seed_n_outcomes(&pool, RUN, 60, "SHIELD", "0.01", 0).await;
+    seed_n_outcomes(&pool, RUN, 60, "SHIELD", "0.01", 0, 1).await;
 
     let (gates, _verdict) = run_verdict(&pool, RUN, 1.0, true, CAPITAL_SOL).await;
     assert_eq!(gates.sample_size.status, "PASS");
@@ -263,7 +269,7 @@ async fn sample_size_at_60_passes_gate() {
 async fn net_return_positive_ci_passes() {
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
-    seed_n_outcomes(&pool, RUN, 100, "SHIELD", "0.01", 0).await;
+    seed_n_outcomes(&pool, RUN, 100, "SHIELD", "0.01", 0, 2).await;
 
     let (gates, _verdict) = run_verdict(&pool, RUN, 1.0, true, CAPITAL_SOL).await;
     assert_eq!(gates.net_return.status, "PASS");
@@ -271,15 +277,17 @@ async fn net_return_positive_ci_passes() {
 }
 
 #[tokio::test]
-async fn net_return_negative_mean_is_inconclusive() {
+async fn net_return_clearly_negative_mean_fails() {
+    // 100 × -0.5%: the mean is clearly negative and the upper CI stays below
+    // 0 → net FAIL → STOP. (INCONCLUSIVE is reserved for CIs that straddle 0.)
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
-    seed_n_outcomes(&pool, RUN, 100, "SHIELD", "-0.005", 0).await;
+    seed_n_outcomes(&pool, RUN, 100, "SHIELD", "-0.005", 0, 3).await;
 
     let (gates, verdict) = run_verdict(&pool, RUN, 1.0, true, CAPITAL_SOL).await;
-    assert_eq!(gates.net_return.status, "INCONCLUSIVE");
+    assert_eq!(gates.net_return.status, "FAIL");
     assert!(gates.net_return.upper_95_ci < 0.0);
-    assert_eq!(verdict, "INCONCLUSIVE");
+    assert_eq!(verdict, "STOP");
 }
 
 #[tokio::test]
@@ -316,8 +324,8 @@ async fn net_return_ci_crossing_zero_is_inconclusive() {
 async fn cohort_all_positive_passes() {
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
-    seed_n_outcomes(&pool, RUN, 12, "SHIELD", "0.1", 0).await;
-    seed_n_outcomes(&pool, RUN, 12, "SPEAR", "0.05", 100).await;
+    seed_n_outcomes(&pool, RUN, 12, "SHIELD", "0.1", 0, 4).await;
+    seed_n_outcomes(&pool, RUN, 12, "SPEAR", "0.05", 100, 5).await;
 
     let (gates, _verdict) = run_verdict(&pool, RUN, 1.0, true, CAPITAL_SOL).await;
     assert_eq!(gates.cohort_positivity.status, "PASS");
@@ -329,8 +337,8 @@ async fn cohort_all_positive_passes() {
 async fn cohort_one_negative_fails() {
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
-    seed_n_outcomes(&pool, RUN, 12, "SHIELD", "0.1", 0).await;
-    seed_n_outcomes(&pool, RUN, 12, "SPEAR", "-0.01", 100).await;
+    seed_n_outcomes(&pool, RUN, 12, "SHIELD", "0.1", 0, 6).await;
+    seed_n_outcomes(&pool, RUN, 12, "SPEAR", "-0.01", 100, 7).await;
 
     let (gates, verdict) = run_verdict(&pool, RUN, 1.0, true, CAPITAL_SOL).await;
     assert_eq!(gates.cohort_positivity.status, "FAIL");
@@ -341,7 +349,7 @@ async fn cohort_one_negative_fails() {
 async fn cohort_below_min_count_skipped() {
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
-    seed_n_outcomes(&pool, RUN, 5, "SHIELD", "0.1", 0).await;
+    seed_n_outcomes(&pool, RUN, 5, "SHIELD", "0.1", 0, 8).await;
 
     let (gates, _verdict) = run_verdict(&pool, RUN, 1.0, true, CAPITAL_SOL).await;
     assert_eq!(gates.cohort_positivity.status, "INCONCLUSIVE");
@@ -401,13 +409,16 @@ async fn bias_exceeds_threshold_fails() {
 }
 
 #[tokio::test]
-async fn bias_null_values_treated_as_zero() {
+async fn bias_null_values_reported_inconclusive() {
+    // Missing bias data (NULL price_impact_pct) must NOT read as zero bias:
+    // the gate reports INCONCLUSIVE so "no data" is distinguishable from
+    // "no bias".
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
-    seed_n_outcomes(&pool, RUN, 60, "SHIELD", "0.01", 0).await; // price_impact_pct = NULL
+    seed_n_outcomes(&pool, RUN, 60, "SHIELD", "0.01", 0, 9).await;
 
     let (gates, _verdict) = run_verdict(&pool, RUN, 1.0, true, CAPITAL_SOL).await;
-    assert_eq!(gates.paper_live_bias.status, "PASS");
+    assert_eq!(gates.paper_live_bias.status, "INCONCLUSIVE");
     assert_eq!(gates.paper_live_bias.declared_bias, 0.0);
 }
 
@@ -417,7 +428,7 @@ async fn bias_null_values_treated_as_zero() {
 async fn single_loss_within_10pct_passes() {
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
-    seed_n_outcomes(&pool, RUN, 59, "SHIELD", "0.01", 0).await;
+    seed_n_outcomes(&pool, RUN, 59, "SHIELD", "0.01", 0, 10).await;
     seed_outcome(
         &pool, RUN, "w-loss", "tok-loss", "SHIELD", "1.0", "-0.08", None, 999, true,
     )
@@ -432,7 +443,7 @@ async fn single_loss_within_10pct_passes() {
 async fn single_loss_exceeds_10pct_fails() {
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
-    seed_n_outcomes(&pool, RUN, 59, "SHIELD", "0.01", 0).await;
+    seed_n_outcomes(&pool, RUN, 59, "SHIELD", "0.01", 0, 11).await;
     seed_outcome(
         &pool, RUN, "w-loss", "tok-loss", "SHIELD", "1.0", "-0.15", None, 999, true,
     )
@@ -451,9 +462,9 @@ async fn drawdown_within_20pct_passes() {
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
     // +0.01 ×30 (peak 0.30), −0.05 ×3 (drop to 0.15 → dd 0.15), +0.01 ×27.
-    seed_n_outcomes(&pool, RUN, 30, "SHIELD", "0.01", 0).await;
-    seed_n_outcomes(&pool, RUN, 3, "SHIELD", "-0.05", 30).await;
-    seed_n_outcomes(&pool, RUN, 27, "SHIELD", "0.01", 33).await;
+    seed_n_outcomes(&pool, RUN, 30, "SHIELD", "0.01", 0, 12).await;
+    seed_n_outcomes(&pool, RUN, 3, "SHIELD", "-0.05", 30, 13).await;
+    seed_n_outcomes(&pool, RUN, 27, "SHIELD", "0.01", 33, 14).await;
 
     let (gates, _verdict) = run_verdict(&pool, RUN, 1.0, true, CAPITAL_SOL).await;
     assert_eq!(gates.max_drawdown.status, "PASS");
@@ -465,9 +476,9 @@ async fn drawdown_exceeds_20pct_fails() {
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
     // +0.02 ×40 (peak 0.80), −0.09 ×3 (drop to 0.53 → dd 0.27), +0.02 ×17.
-    seed_n_outcomes(&pool, RUN, 40, "SHIELD", "0.02", 0).await;
-    seed_n_outcomes(&pool, RUN, 3, "SHIELD", "-0.09", 40).await;
-    seed_n_outcomes(&pool, RUN, 17, "SHIELD", "0.02", 43).await;
+    seed_n_outcomes(&pool, RUN, 40, "SHIELD", "0.02", 0, 15).await;
+    seed_n_outcomes(&pool, RUN, 3, "SHIELD", "-0.09", 40, 16).await;
+    seed_n_outcomes(&pool, RUN, 17, "SHIELD", "0.02", 43, 17).await;
 
     let (gates, verdict) = run_verdict(&pool, RUN, 1.0, true, CAPITAL_SOL).await;
     assert_eq!(gates.max_drawdown.status, "FAIL");
@@ -481,7 +492,7 @@ async fn drawdown_exceeds_20pct_fails() {
 async fn missing_outcome_triggers_stop() {
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
-    seed_n_outcomes(&pool, RUN, 60, "SHIELD", "0.01", 0).await;
+    seed_n_outcomes(&pool, RUN, 60, "SHIELD", "0.01", 0, 18).await;
     seed_missing_outcome(&pool, RUN, "w-miss", "tok-miss").await;
 
     let (gates, verdict) = run_verdict(&pool, RUN, 1.0, true, CAPITAL_SOL).await;
@@ -494,7 +505,7 @@ async fn missing_outcome_triggers_stop() {
 async fn invalid_pnl_triggers_stop() {
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
-    seed_n_outcomes(&pool, RUN, 60, "SHIELD", "0.01", 0).await;
+    seed_n_outcomes(&pool, RUN, 60, "SHIELD", "0.01", 0, 19).await;
     seed_outcome(
         &pool, RUN, "w-bad", "tok-bad", "SHIELD", "1.0", "0.01", None, 999, false,
     )
@@ -511,7 +522,7 @@ async fn integrity_failure_overrides_good_gates() {
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
     // All numeric gates would pass, but an admitted BUY with no outcome → STOP.
-    seed_n_outcomes(&pool, RUN, 60, "SHIELD", "0.01", 0).await;
+    seed_n_outcomes(&pool, RUN, 60, "SHIELD", "0.01", 0, 20).await;
     seed_missing_outcome(&pool, RUN, "w-miss", "tok-miss").await;
 
     let (gates, verdict) = run_verdict(&pool, RUN, 1.0, true, CAPITAL_SOL).await;
@@ -526,7 +537,7 @@ async fn integrity_failure_overrides_good_gates() {
 async fn completeness_below_99pct_triggers_stop() {
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
-    seed_n_outcomes(&pool, RUN, 60, "SHIELD", "0.01", 0).await;
+    seed_n_outcomes(&pool, RUN, 60, "SHIELD", "0.01", 0, 21).await;
 
     let (gates, verdict) = run_verdict(&pool, RUN, 0.98, false, CAPITAL_SOL).await;
     assert_eq!(verdict, "STOP");
@@ -538,7 +549,7 @@ async fn completeness_below_99pct_triggers_stop() {
 async fn completeness_above_99pct_passes() {
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
-    seed_n_outcomes(&pool, RUN, 60, "SHIELD", "0.01", 0).await;
+    seed_n_outcomes(&pool, RUN, 60, "SHIELD", "0.01", 0, 22).await;
 
     let (gates, _verdict) = run_verdict(&pool, RUN, 1.0, true, CAPITAL_SOL).await;
     assert_eq!(gates.completeness.status, "PASS");
@@ -588,7 +599,15 @@ async fn inconclusive_beats_go() {
 async fn all_gates_pass_yields_go() {
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
-    seed_n_outcomes(&pool, RUN, 60, "SHIELD", "0.01", 0).await;
+    seed_n_outcomes(&pool, RUN, 60, "SHIELD", "0.01", 0, 23).await;
+
+    // The bias gate needs evidence: NULL price_impact now reports
+    // INCONCLUSIVE (and blocks GO), so seed a small declared bias.
+    sqlx::query("UPDATE decision_records SET price_impact_pct = 0.05 WHERE run_id = $1")
+        .bind(RUN)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let (gates, verdict) = run_verdict(&pool, RUN, 1.0, true, CAPITAL_SOL).await;
     assert_eq!(verdict, "GO");
@@ -736,8 +755,8 @@ async fn outcome_join_filters_invalid_pnl() {
 async fn run_id_filtering() {
     let (db, _tmp) = common::create_test_pg_db().await;
     let pool = common::pg_pool(&db);
-    seed_n_outcomes(&pool, "runA", 3, "SHIELD", "0.01", 0).await;
-    seed_n_outcomes(&pool, "runB", 2, "SPEAR", "0.01", 0).await;
+    seed_n_outcomes(&pool, "runA", 3, "SHIELD", "0.01", 0, 100).await;
+    seed_n_outcomes(&pool, "runB", 2, "SPEAR", "0.01", 0, 101).await;
 
     let a = fetch_outcomes(&pool, "runA").await.unwrap();
     let b = fetch_outcomes(&pool, "runB").await.unwrap();

@@ -1,6 +1,8 @@
 #!/bin/bash
-# 24-hour shake-down test for forward test experiment
-# Validates all experiment components before starting the real 21-day test
+# Shake-down test for forward test experiment
+# Validates all experiment components before starting the real 21-day test.
+# Phase 3 runs the operator against a short-duration config for a bounded
+# period; it does NOT run the full 24-hour test.
 
 set -e
 
@@ -8,24 +10,6 @@ PROJECT_ROOT="/Users/mohammad/Documents/GitHub/chimera"
 OPERATOR="${PROJECT_ROOT}/operator/target/release/chimera_operator"
 CONFIG="${PROJECT_ROOT}/config/experiment.yaml"
 DB_PATH="${PROJECT_ROOT}/operator/data/chimera.db"
-
-# Test configuration
-TEST_DURATION_HOURS=24
-TEST_MIN_TRADES=5  # Lower threshold for shake-down
-EXPECTED_COMPONENTS=(
-    "experiment_trades table"
-    "experiment_manifest table"
-    "toxic_wallets table"
-    "experiment_credits table"
-    "tracer module"
-    "controls module"
-    "ledger module"
-    "verdict module"
-    "toxic flow detector"
-    "T0 selector"
-    "experiment metrics"
-    "abort handler"
-)
 
 # Logging
 log() {
@@ -105,21 +89,53 @@ test_experiment_config() {
         return 1
     fi
     
-    # Parse key config values
-    local tracer_enabled=$(grep "tracer_enabled" "$CONFIG" | awk '{print $2}' | tr -d '":')
-    local tracer_cap=$(grep "tracer_cap" "$CONFIG" | awk '{print $2}' | tr -d '":')
-    local experiment_days=$(grep "experiment_days" "$CONFIG" | awk '{print $2}' | tr -d '":')
+    # Parse config with a real YAML parser; missing/malformed keys are failures
+    local parsed
+    if ! parsed=$(python3 - "$CONFIG" <<'PYEOF'
+import sys
+try:
+    import yaml
+except ImportError:
+    print("ERROR=PyYAML not available", file=sys.stderr)
+    sys.exit(1)
+try:
+    cfg = yaml.safe_load(open(sys.argv[1]))
+except Exception as e:
+    print(f"ERROR={e}", file=sys.stderr)
+    sys.exit(1)
+exp = cfg.get('experiment') or {}
+for key in ('tracer_enabled', 'tracer_cap', 'experiment_days', 'min_trades'):
+    print(f"{key}={exp.get(key)}")
+PYEOF
+    ); then
+        log_error "✗ Failed to parse config YAML: $CONFIG"
+        return 1
+    fi
+
+    local tracer_enabled=$(echo "$parsed" | sed -n 's/^tracer_enabled=//p')
+    local tracer_cap=$(echo "$parsed" | sed -n 's/^tracer_cap=//p')
+    local experiment_days=$(echo "$parsed" | sed -n 's/^experiment_days=//p')
+    local min_trades=$(echo "$parsed" | sed -n 's/^min_trades=//p')
     
-    log_info "Config: tracer_enabled=$tracer_enabled, tracer_cap=$tracer_cap, experiment_days=$experiment_days"
+    log_info "Config: tracer_enabled=$tracer_enabled, tracer_cap=$tracer_cap, experiment_days=$experiment_days, min_trades=$min_trades"
     
     if [ "$tracer_enabled" != "true" ]; then
         log_warning "tracer_enabled is not true"
     fi
     
-    # Convert tracer_cap to integer safely
-    tracer_cap=$(echo "$tracer_cap" | tr -d 'false')
-    if [[ "$tracer_cap" =~ ^[0-9]+$ ]] && [ "$tracer_cap" -lt 1 ]; then
-        log_warning "tracer_cap seems too low: $tracer_cap"
+    if ! [[ "$tracer_cap" =~ ^[0-9]+$ ]] || [ "$tracer_cap" -lt 1 ]; then
+        log_error "✗ tracer_cap missing or non-numeric: '$tracer_cap'"
+        return 1
+    fi
+    
+    if ! [[ "$experiment_days" =~ ^[0-9]+$ ]] || [ "$experiment_days" -lt 1 ]; then
+        log_error "✗ experiment_days missing or invalid: '$experiment_days'"
+        return 1
+    fi
+    
+    if ! [[ "$min_trades" =~ ^[0-9]+$ ]] || [ "$min_trades" -lt 1 ]; then
+        log_error "✗ min_trades missing or invalid: '$min_trades'"
+        return 1
     fi
     
     log_success "✓ Configuration file is valid"
@@ -160,9 +176,12 @@ test_verdict_script() {
         return 1
     fi
     
-    # Test with dry run
-    if ! python3 "$verdict_script" --db-path "$DB_PATH" 2>/dev/null | grep -q "verdict"; then
-        log_warning "Verdict script might not work correctly with empty database"
+    # Test with dry run - check python3's real exit code, keep stderr
+    local verdict_out
+    if ! verdict_out=$(python3 "$verdict_script" --db-path "$DB_PATH" 2>&1); then
+        log_warning "Verdict script exited non-zero with empty/invalid database"
+    elif ! echo "$verdict_out" | grep -q "verdict"; then
+        log_warning "Verdict script output missing 'verdict' key"
     fi
     
     log_success "✓ Verdict script is valid"
@@ -232,7 +251,7 @@ test_credit_tracking() {
 
 # Run short experiment test
 run_short_experiment_test() {
-    log_info "Running short experiment test (5 minutes)..."
+    log_info "Running short experiment test (bounded operator smoke test)..."
     
     # Create temporary test config
     local test_config="${PROJECT_ROOT}/config/shakedown_test.yaml"
@@ -243,12 +262,54 @@ run_short_experiment_test() {
     sed -i '' 's/min_trades: 50/min_trades: 3/' "$test_config"
     sed -i '' 's/tracer_cap: 60/tracer_cap: 3/' "$test_config"
     
-    log_info "Starting operator with test config for 5 minutes..."
-    log_info "Note: Skipping operator startup test due to vault requirements"
-    log_info "The shake-down test validates components and database structure"
+    # Verify each substitution actually matched
+    local missing=""
+    grep -q "experiment_days: 1" "$test_config" || missing="$missing experiment_days"
+    grep -q "min_trades: 3" "$test_config" || missing="$missing min_trades"
+    grep -q "tracer_cap: 3" "$test_config" || missing="$missing tracer_cap"
+    if [ -n "$missing" ]; then
+        log_error "✗ Config substitution did not match:$missing - test config invalid"
+        rm -f "$test_config"
+        return 1
+    fi
+    log_success "✓ Test config created with short-duration settings"
     
-    log_success "✓ Short experiment test skipped (requires valid vault setup)"
-    log_success "✓ Database and components validated successfully"
+    if [ ! -x "$OPERATOR" ]; then
+        log_error "✗ Operator binary not found: $OPERATOR"
+        log_error "Short experiment test cannot run - failing instead of claiming success"
+        rm -f "$test_config"
+        return 1
+    fi
+    
+    # Launch the operator against the test config for a bounded period
+    local log_file=/tmp/shakedown_test.log
+    rm -f "$log_file"
+    "$OPERATOR" --config "$test_config" --mode paper --experiment-enabled >"$log_file" 2>&1 &
+    local op_pid=$!
+    
+    # Give it up to 30s to start; fail if it exits immediately with an error
+    local waited=0
+    while kill -0 "$op_pid" 2>/dev/null && [ $waited -lt 30 ]; do
+        sleep 2
+        waited=$((waited + 2))
+    done
+    
+    if ! kill -0 "$op_pid" 2>/dev/null; then
+        log_error "✗ Operator exited during short experiment test"
+        log_error "Log tail:"
+        tail -20 "$log_file" 2>/dev/null | sed 's/^/    /'
+        rm -f "$test_config" "$log_file"
+        return 1
+    fi
+    
+    kill "$op_pid" 2>/dev/null || true
+    wait "$op_pid" 2>/dev/null || true
+    
+    # Check that the operator ran (trades table may still be empty early on)
+    local trade_count
+    trade_count=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM experiment_trades;" 2>/dev/null || echo 0)
+    log_info "Trades recorded during test: $trade_count"
+    log_success "✓ Operator ran under test config without crashing"
     
     # Cleanup
     rm -f "$test_config"
@@ -260,6 +321,7 @@ validate_experiment_components() {
     log_info "Validating experiment components..."
     
     local all_found=true
+    local missing=0
     
     # Check for database tables via SQL
     if sqlite3 "$DB_PATH" "SELECT name FROM sqlite_master WHERE type='table' AND name='experiment_trades';" 2>/dev/null | grep -q "experiment_trades"; then
@@ -267,6 +329,7 @@ validate_experiment_components() {
     else
         log_warning "✗ Not found: experiment_trades table"
         all_found=false
+        missing=$((missing + 1))
     fi
     
     if sqlite3 "$DB_PATH" "SELECT name FROM sqlite_master WHERE type='table' AND name='experiment_manifest';" 2>/dev/null | grep -q "experiment_manifest"; then
@@ -274,6 +337,7 @@ validate_experiment_components() {
     else
         log_warning "✗ Not found: experiment_manifest table"
         all_found=false
+        missing=$((missing + 1))
     fi
     
     if sqlite3 "$DB_PATH" "SELECT name FROM sqlite_master WHERE type='table' AND name='toxic_wallets';" 2>/dev/null | grep -q "toxic_wallets"; then
@@ -281,6 +345,7 @@ validate_experiment_components() {
     else
         log_warning "✗ Not found: toxic_wallets table"
         all_found=false
+        missing=$((missing + 1))
     fi
     
     if sqlite3 "$DB_PATH" "SELECT name FROM sqlite_master WHERE type='table' AND name='experiment_credits';" 2>/dev/null | grep -q "experiment_credits"; then
@@ -288,6 +353,7 @@ validate_experiment_components() {
     else
         log_warning "✗ Not found: experiment_credits table"
         all_found=false
+        missing=$((missing + 1))
     fi
     
     # Check for Rust modules
@@ -298,6 +364,7 @@ validate_experiment_components() {
         else
             log_warning "✗ Not found: ${module} module"
             all_found=false
+            missing=$((missing + 1))
         fi
     done
     
@@ -307,6 +374,7 @@ validate_experiment_components() {
     else
         log_warning "✗ Not found: T0 selector"
         all_found=false
+        missing=$((missing + 1))
     fi
     
     if [ -f "${PROJECT_ROOT}/ops/grafana/experiment-dashboard.json" ]; then
@@ -314,18 +382,20 @@ validate_experiment_components() {
     else
         log_warning "✗ Not found: Grafana dashboard"
         all_found=false
+        missing=$((missing + 1))
     fi
     
     if [ "$all_found" = true ]; then
         log_success "All expected experiment components found"
     else
         log_warning "Some experiment components may be missing"
+        return 1
     fi
 }
 
 # Main test sequence
 main() {
-    log_info "Starting 24-hour shake-down test for forward test experiment"
+    log_info "Starting shake-down test for forward test experiment"
     log_info "=========================================================="
     
     local failed=0

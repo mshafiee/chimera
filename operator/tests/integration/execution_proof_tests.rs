@@ -26,7 +26,7 @@ fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
+async fn create_test_db() -> (Arc<dyn Database>, crate::common::TestDbGuard) {
     crate::common::create_test_pg_db().await
 }
 

@@ -7,7 +7,6 @@ are working correctly together. Tests component interactions and end-to-end work
 """
 
 import sys
-import os
 from pathlib import Path
 
 # Add Scout directory to path
@@ -24,13 +23,16 @@ def test_sprint_1_integration():
     # Test Validation Reporter
     print("\n1. Validation Reporter Integration...")
     try:
-        from core.validation_reporter import ValidationReporter, AlertConfig
+        from core.validation_reporter import AlertConfig
         from config import ScoutConfig
 
         # Verify configuration methods exist
-        assert hasattr(ScoutConfig, 'get_validation_enabled')
-        assert hasattr(ScoutConfig, 'get_alert_webhook_url')
-        assert hasattr(ScoutConfig, 'get_alert_drift_threshold')
+        if not (hasattr(ScoutConfig, 'get_validation_enabled')):
+            raise AssertionError()
+        if not (hasattr(ScoutConfig, 'get_alert_webhook_url')):
+            raise AssertionError()
+        if not (hasattr(ScoutConfig, 'get_alert_drift_threshold')):
+            raise AssertionError()
 
         # Verify basic initialization
         alert_config = AlertConfig(
@@ -38,6 +40,8 @@ def test_sprint_1_integration():
             high_error_threshold=0.5,
             drift_threshold=0.15
         )
+        if not (alert_config.webhook_url == "https://test.webhook.com"):
+            raise AssertionError("AlertConfig construction failed")
         print("✓ Validation Reporter integration verified")
         results.append(True)
     except Exception as e:
@@ -47,13 +51,15 @@ def test_sprint_1_integration():
     # Test State Persistence
     print("\n2. State Persistence Integration...")
     try:
-        from core.state_persistence import StatePersistence
         from config import ScoutConfig
 
         # Verify configuration methods exist
-        assert hasattr(ScoutConfig, 'get_state_persistence_enabled')
-        assert hasattr(ScoutConfig, 'get_state_persistence_db_path')
-        assert hasattr(ScoutConfig, 'get_state_persistence_max_days')
+        if not (hasattr(ScoutConfig, 'get_state_persistence_enabled')):
+            raise AssertionError()
+        if not (hasattr(ScoutConfig, 'get_state_persistence_db_path')):
+            raise AssertionError()
+        if not (hasattr(ScoutConfig, 'get_state_persistence_max_days')):
+            raise AssertionError()
 
         print("✓ State Persistence integration verified")
         results.append(True)
@@ -61,10 +67,27 @@ def test_sprint_1_integration():
         print(f"✗ State Persistence integration failed: {e}")
         results.append(False)
 
-    # Volume Cache is Operator-side, verify config exists
+    # Volume Cache is Operator-side, verify the integration actually exists
     print("\n3. Volume Cache (Operator)...")
-    print("✓ Volume Cache initialized in operator/src/main.rs")
-    results.append(True)
+    try:
+        operator_main = Path(__file__).parent.parent / "operator" / "src" / "main.rs"
+        if not operator_main.exists():
+            print("✗ operator/src/main.rs not found - cannot verify Volume Cache integration")
+            results.append(False)
+        else:
+            content = operator_main.read_text()
+            has_volume_cache = ("volume_cache" in content.lower()
+                                or "volume cache" in content.lower()
+                                or "VolumeCache" in content)
+            if has_volume_cache:
+                print("✓ Volume Cache integration referenced in operator/src/main.rs")
+                results.append(True)
+            else:
+                print("✗ Volume Cache not referenced in operator/src/main.rs")
+                results.append(False)
+    except Exception as e:
+        print(f"✗ Volume Cache verification failed: {e}")
+        results.append(False)
 
     return all(results)
 
@@ -84,14 +107,19 @@ def test_sprint_2_integration():
         from config import ScoutConfig
 
         # Verify configuration methods exist
-        assert hasattr(ScoutConfig, 'get_advanced_cache_enabled')
-        assert hasattr(ScoutConfig, 'get_cache_l1_enabled')
-        assert hasattr(ScoutConfig, 'get_cache_l2_enabled')
-        assert hasattr(ScoutConfig, 'get_cache_l3_enabled')
+        if not (hasattr(ScoutConfig, 'get_advanced_cache_enabled')):
+            raise AssertionError()
+        if not (hasattr(ScoutConfig, 'get_cache_l1_enabled')):
+            raise AssertionError()
+        if not (hasattr(ScoutConfig, 'get_cache_l2_enabled')):
+            raise AssertionError()
+        if not (hasattr(ScoutConfig, 'get_cache_l3_enabled')):
+            raise AssertionError()
 
         # Verify cache initialization
         cache = AdvancedCache()
-        assert cache is not None
+        if not (cache is not None):
+            raise AssertionError()
 
         print("✓ Advanced Cache System integration verified")
         results.append(True)
@@ -106,9 +134,12 @@ def test_sprint_2_integration():
         from config import ScoutConfig
 
         # Verify configuration methods exist
-        assert hasattr(ScoutConfig, 'get_stop_loss_optimizer_enabled')
-        assert hasattr(ScoutConfig, 'get_atr_period_default')
-        assert hasattr(ScoutConfig, 'get_bull_regime_multiplier')
+        if not (hasattr(ScoutConfig, 'get_stop_loss_optimizer_enabled')):
+            raise AssertionError()
+        if not (hasattr(ScoutConfig, 'get_atr_period_default')):
+            raise AssertionError()
+        if not (hasattr(ScoutConfig, 'get_bull_regime_multiplier')):
+            raise AssertionError()
 
         print("✓ Stop-Loss Optimizer integration verified")
         results.append(True)
@@ -125,7 +156,8 @@ def test_sprint_2_integration():
         # Verify integration between components
         optimizer = StopLossOptimizer()
         position_manager = PositionManager(optimizer)
-        assert position_manager is not None
+        if not (position_manager is not None):
+            raise AssertionError()
 
         print("✓ Position Manager integration verified")
         results.append(True)
@@ -147,18 +179,23 @@ def test_sprint_3_integration():
     # Test Signal Quality Filter
     print("\n1. Signal Quality Filter Integration...")
     try:
-        from core.signal_quality_filter import SignalQualityFilter, FilterConfig, TradingSignal
+        from core.signal_quality_filter import SignalQualityFilter, TradingSignal
         from config import ScoutConfig
 
         # Verify configuration methods exist
-        assert hasattr(ScoutConfig, 'get_signal_quality_filter_enabled')
-        assert hasattr(ScoutConfig, 'get_wqs_weight')
-        assert hasattr(ScoutConfig, 'get_timing_weight')
-        assert hasattr(ScoutConfig, 'get_top_percentile_target')
+        if not (hasattr(ScoutConfig, 'get_signal_quality_filter_enabled')):
+            raise AssertionError()
+        if not (hasattr(ScoutConfig, 'get_wqs_weight')):
+            raise AssertionError()
+        if not (hasattr(ScoutConfig, 'get_timing_weight')):
+            raise AssertionError()
+        if not (hasattr(ScoutConfig, 'get_top_percentile_target')):
+            raise AssertionError()
 
         # Verify filter initialization
         filter = SignalQualityFilter()
-        assert filter is not None
+        if not (filter is not None):
+            raise AssertionError()
 
         # Verify signal processing
         signal = TradingSignal(
@@ -173,7 +210,8 @@ def test_sprint_3_integration():
         )
 
         decision = filter.should_execute_signal(signal)
-        assert decision is not None
+        if not (decision is not None):
+            raise AssertionError()
 
         print("✓ Signal Quality Filter integration verified")
         results.append(True)
@@ -197,15 +235,26 @@ def test_cross_component_integration():
     print("\n1. Testing Advanced Cache + State Persistence synergy...")
     try:
         from core.advanced_cache import AdvancedCache
-        from core.state_persistence import StatePersistence
+        from core.state_persistence import StatePersistence, PersistenceConfig
+        from config import ScoutConfig
 
-        # Both components can coexist
+        # Both components can be imported and configured (StatePersistence
+        # instantiation needs a live database, so verify its API surface here)
         cache = AdvancedCache()
-        persistence = StatePersistence()
+        if not (cache is not None):
+            raise AssertionError()
+
+        if not (hasattr(StatePersistence, 'save_credit_history')):
+            raise AssertionError()
+        if not (hasattr(PersistenceConfig, 'db_path')):
+            raise AssertionError()
+        if not (hasattr(ScoutConfig, 'get_state_persistence_enabled')):
+            raise AssertionError()
 
         # Cache statistics could be stored in persistence
         cache_stats = cache.get_stats()
-        assert cache_stats is not None
+        if not (cache_stats is not None):
+            raise AssertionError()
 
         print("✓ Cache + Persistence synergy verified")
         results.append(True)
@@ -216,7 +265,7 @@ def test_cross_component_integration():
     print("\n2. Testing Stop-Loss + Position Manager integration...")
     try:
         from core.stop_loss_optimizer import StopLossOptimizer
-        from core.position_manager import PositionManager
+        from core.position_manager import PositionManager, PositionSide
 
         # Create optimizer
         optimizer = StopLossOptimizer()
@@ -224,8 +273,22 @@ def test_cross_component_integration():
         # Create position manager with optimizer
         position_manager = PositionManager(optimizer)
 
-        # Verify they work together (note: attribute is private _stop_loss_optimizer)
-        assert position_manager._stop_loss_optimizer is not None
+        # Exercise the public stop-loss computation path
+        position = position_manager.create_position(
+            position_id="verify_pos_1",
+            wallet_address="test_wallet",
+            token_address="test_token",
+            token_symbol="TEST",
+            entry_price=100.0,
+            position_size_sol=1.0,
+            position_value_usd=100.0,
+            side=PositionSide.LONG,
+            strategy="SHIELD",
+            wqs_score=75.0,
+        )
+        position = position_manager.calculate_stop_for_position(position)
+        if not (position.stop_loss_price is not None and position.stop_loss_price < position.entry_price):
+            raise AssertionError(f"Stop-loss price invalid: {position.stop_loss_price}")
 
         print("✓ Stop-Loss + Position Manager integration verified")
         results.append(True)
@@ -255,7 +318,8 @@ def test_cross_component_integration():
         )
 
         decision = filter.should_execute_signal(signal)
-        assert decision is not None
+        if not (decision is not None):
+            raise AssertionError()
 
         print("✓ Signal Quality + Cache interaction verified")
         results.append(True)
@@ -316,7 +380,8 @@ def test_configuration_integration():
 
         # Verify all methods exist
         for method_name in config_methods:
-            assert hasattr(ScoutConfig, method_name), f"Missing method: {method_name}"
+            if not (hasattr(ScoutConfig, method_name)):
+                raise AssertionError(f"Missing method: {method_name}")
 
         print(f"✓ All {len(config_methods)} configuration methods verified")
         results.append(True)

@@ -9,6 +9,7 @@
 use crate::config::PositionSizingConfig;
 use crate::db_abstraction::Database;
 use crate::engine::kelly_sizer::KellySizer;
+use crate::error::AppResult;
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use std::sync::Arc;
@@ -72,7 +73,7 @@ impl PositionSizer {
     /// Multipliers applied (all multiplicative): confidence (1×–1.5×), performance (0.8×–1.1×),
     /// token_age (0.5×–1×), slippage (0.7×–1×), quality (0.7×–1.3×), volatility (0.5×–1×),
     /// regime (0.5×–2×). Total range: ~0.06× to ~4.4×. Min/max caps prevent extreme sizes.
-    pub async fn calculate_size(&self, factors: SizingFactors) -> Decimal {
+    pub async fn calculate_size(&self, factors: SizingFactors) -> AppResult<Decimal> {
         // Kelly Criterion override: derive base size from historical win/loss ratio.
         // Falls back to WQS-scaled sizing when Kelly can't compute (< 10 trades).
         //
@@ -138,8 +139,7 @@ impl PositionSizer {
                     let trade_count = self
                         .db
                         .get_closed_trade_count_for_wallet(&factors.wallet_address)
-                        .await
-                        .unwrap_or(0);
+                        .await?;
                     let confidence = if trade_count >= 15 {
                         Decimal::from_f64_retain((trade_count as f64 / 15.0).clamp(0.05, 1.0))
                             .unwrap_or(dec!(0.05))
@@ -179,8 +179,7 @@ impl PositionSizer {
             let trade_count = self
                 .db
                 .get_closed_trade_count_for_wallet(&factors.wallet_address)
-                .await
-                .unwrap_or(0);
+                .await?;
             let confidence = if trade_count >= 15 {
                 Decimal::from_f64_retain((trade_count as f64 / 15.0).clamp(0.05, 1.0))
                     .unwrap_or(dec!(0.05))
@@ -300,12 +299,18 @@ impl PositionSizer {
             quality_mult.max(Decimal::ONE)          // quality boost: 1.0x - 1.3x
         ) / dec!(3.0);  // Average boosts (1.0x - 1.3x range)
 
-        // Penalty multipliers (≤ 1.0x) - risk adjustment factors
+        // Penalty multipliers (≤ 1.0x) - risk adjustment factors.
+        // performance_mult (0.8x for success rate < 0.4) and quality_mult
+        // (0.7x for low quality) are penalties too — without them the boost
+        // average would clamp them back to 1.0x and underperforming wallets /
+        // low-quality signals would never be de-sized.
         let penalty_multiplier = (
             token_age_mult.min(Decimal::ONE) +       // age penalty: 0.5x - 1.0x
             slippage_mult.min(Decimal::ONE) +       // slippage penalty: 0.5x - 1.0x
-            volatility_mult.min(Decimal::ONE)        // volatility penalty: 0.5x - 1.0x
-        ) / dec!(3.0);  // Average penalties (0.5x - 1.0x range)
+            volatility_mult.min(Decimal::ONE) +      // volatility penalty: 0.5x - 1.0x
+            performance_mult.min(Decimal::ONE) +     // performance penalty: 0.8x - 1.0x
+            quality_mult.min(Decimal::ONE)           // quality penalty: 0.7x - 1.0x
+        ) / dec!(5.0);  // Average penalties (0.5x - 1.0x range)
 
         // Apply hybrid sizing with regime multiplicative (special case - market conditions)
         size = size * boost_multiplier * penalty_multiplier * factors.regime_multiplier;
@@ -325,7 +330,7 @@ impl PositionSizer {
                     min_size_sol = %self.config.min_size_sol,
                     "Kelly cap is below min_size_sol (negative EV or insufficient allocation) — rejecting trade"
                 );
-                return Decimal::ZERO;
+                return Ok(Decimal::ZERO);
             }
             if size > cap {
                 tracing::debug!(
@@ -355,15 +360,23 @@ impl PositionSizer {
                 min_size_sol = %self.config.min_size_sol,
                 "Rejecting trade: strategy_max is below min_size_sol — would produce unviable dust trade; check config"
             );
-            return Decimal::ZERO;
+            return Ok(Decimal::ZERO);
         }
 
         size = size.max(self.config.min_size_sol).min(strategy_max);
 
         // WQS-based micro-position cap for low-conviction wallets.
         // Applied after strategy max to ensure unproven wallets trade small.
+        // A cap below min_size_sol would be overridden by the hard floor below
+        // (a pointless, silently-ineffective cap) — skip it explicitly.
         if let Some(wqs_cap) = factors.wqs_capped_max_size {
-            if size > wqs_cap {
+            if wqs_cap < self.config.min_size_sol {
+                tracing::warn!(
+                    wqs_cap = %wqs_cap,
+                    min_size_sol = %self.config.min_size_sol,
+                    "WQS cap below min_size_sol — skipping cap to avoid dust trade"
+                );
+            } else if size > wqs_cap {
                 tracing::debug!(
                     wallet_wqs = %factors.wallet_wqs,
                     original_size = %size,
@@ -382,7 +395,7 @@ impl PositionSizer {
         // (Kelly zero-cap / dust checks) and never reach this point.
         size = size.max(self.config.min_size_sol);
 
-        size
+        Ok(size)
     }
 
     /// Get sizing factors for a wallet
@@ -402,26 +415,31 @@ impl PositionSizer {
         token_address: Option<&str>,
         helius_client: Option<&crate::monitoring::HeliusClient>,
         total_capital_sol: Decimal,
-    ) -> SizingFactors {
+    ) -> AppResult<SizingFactors> {
         // Get wallet from database
-        let wallet_opt = self.db.get_wallet(wallet_address).await;
+        let wallet_opt = self.db.get_wallet(wallet_address).await?;
+        // Neutral WQS default is 50: a missing score must NOT collapse to 0
+        // (wqs_factor = 0 → base size 0 → clamped up to min_size_sol, minting
+        // a minimum-size order for an unproven wallet).
         let wqs = match &wallet_opt {
-            Ok(Some(w)) => w.wqs_score.unwrap_or(Default::default()),
-            _ => Default::default(),
+            Some(w) => w.wqs_score.unwrap_or(dec!(50)).to_f64().unwrap_or(50.0),
+            None => 50.0,
         };
-        let wqs = wqs.to_f64().unwrap_or(50.0);
         let wqs_confidence = match &wallet_opt {
-            Ok(Some(w)) => w.wqs_confidence.and_then(|d| d.to_f64()),
-            _ => None,
+            Some(w) => w.wqs_confidence.and_then(|d| d.to_f64()),
+            None => None,
         };
 
         // Get wallet performance metrics from database
         // Convert success rate percentage to Decimal (0.0-1.0)
+        // Default to 0.4 for unproven/stale wallets — produces a 0.8× performance
+        // penalty rather than neutral 1.0×, reflecting the uncertainty of no data.
+        // A DB failure propagates (fail-safe) instead of silently trading on
+        // stale/absent data at a default.
         let success_rate = match self.db.get_wallet_copy_performance(wallet_address).await {
             Ok(Some(metrics)) => metrics.signal_success_rate / rust_decimal::Decimal::from(100),
-            // Default to 0.4 for unproven/stale wallets — produces a 0.8× performance
-            // penalty rather than neutral 1.0×, reflecting the uncertainty of no data.
-            _ => rust_decimal::Decimal::from_str("0.4").unwrap_or(rust_decimal::Decimal::ZERO),
+            Ok(None) => rust_decimal::Decimal::from_str("0.4").unwrap_or(rust_decimal::Decimal::ZERO),
+            Err(e) => return Err(e),
         };
 
         // Get token age if token address and Helius client are provided
@@ -442,7 +460,7 @@ impl PositionSizer {
                 None
             };
 
-        SizingFactors {
+        Ok(SizingFactors {
             is_consensus,
             wallet_wqs: wqs,
             wqs_confidence,
@@ -457,7 +475,7 @@ impl PositionSizer {
             consensus_wallet_count: None,
             regime_multiplier: Decimal::ONE,
             wqs_capped_max_size: None,
-        }
+        })
     }
 
     /// Check if we can open a new position (portfolio limits)

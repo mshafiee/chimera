@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { X, AlertTriangle, TrendingUp, Shield, Activity } from 'lucide-react'
 import { clsx } from 'clsx'
+import { DASHBOARD_UPDATE_EVENT } from '../../hooks/useDashboardWebSocket'
 
 interface Alert {
   id: string
@@ -34,10 +35,10 @@ export function RealTimeAlerts({ maxAlerts = 5, className = '' }: RealTimeAlerts
       setAlerts(prev => [newAlert, ...prev].slice(0, maxAlerts))
     }
 
-    window.addEventListener('dashboard:update', handleDashboardUpdate as any)
+    window.addEventListener(DASHBOARD_UPDATE_EVENT, handleDashboardUpdate as EventListener)
 
     return () => {
-      window.removeEventListener('dashboard:update', handleDashboardUpdate as any)
+      window.removeEventListener(DASHBOARD_UPDATE_EVENT, handleDashboardUpdate as EventListener)
     }
   }, [maxAlerts])
 

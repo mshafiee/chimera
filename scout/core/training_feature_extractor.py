@@ -84,6 +84,7 @@ class TrainingFeatureExtractor:
             Dictionary combining all feature types
         """
         features = {}
+        extraction_ok = True
 
         # Start with base wallet metrics
         if wallet_metrics:
@@ -96,6 +97,7 @@ class TrainingFeatureExtractor:
                 features.update(ts_features)
             except Exception as e:
                 logger.warning(f"Time-series feature extraction failed: {e}")
+                extraction_ok = False
 
         # Market context features
         if self.market_extractor and sol_price_history:
@@ -108,6 +110,7 @@ class TrainingFeatureExtractor:
                 features.update(market_features)
             except Exception as e:
                 logger.warning(f"Market context feature extraction failed: {e}")
+                extraction_ok = False
 
         # Network features
         if self.network_extractor:
@@ -121,6 +124,7 @@ class TrainingFeatureExtractor:
                 features.update(network_features)
             except Exception as e:
                 logger.warning(f"Network feature extraction failed: {e}")
+                extraction_ok = False
 
         # Advanced risk features
         if self.risk_extractor and trade_history:
@@ -129,6 +133,11 @@ class TrainingFeatureExtractor:
                 features.update(risk_features)
             except Exception as e:
                 logger.warning(f"Advanced risk feature extraction failed: {e}")
+                extraction_ok = False
+
+        # Completeness marker: lets training-data consumers detect truncated
+        # feature vectors instead of silently training on partial rows
+        features['feature_extraction_complete'] = extraction_ok
 
         return features
 
@@ -154,8 +163,17 @@ class TrainingFeatureExtractor:
 
         for field in metric_fields:
             value = wallet_metrics.get(field)
-            if value is not None and not np.isnan(value):
-                features[field] = float(value)
+            if value is None:
+                continue
+            # Non-numeric values (strings, Decimals from the DB) must not
+            # abort the whole extraction — skip unparseable fields
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if np.isnan(value):
+                continue
+            features[field] = value
 
         # Categorical features (one-hot encode)
         status = wallet_metrics.get('status')
@@ -249,10 +267,18 @@ class TrainingFeatureExtractor:
                 importances = model.feature_importances_
                 return dict(zip(feature_names, importances))
             elif hasattr(model, 'get_booster'):
-                # XGBoost
+                # XGBoost: align by the booster's OWN feature names when
+                # present — f{i} keys are only valid if the booster was
+                # trained without feature names in exactly this order
                 booster = model.get_booster()
-                importance_dict = booster.get_score(importance_type='weight')
-                # Normalize to feature_names
+                importance_dict = booster.get_score(importance_type='gain')
+                booster_names = getattr(booster, 'feature_names', None) or list(importance_dict.keys())
+                if booster_names and all(k in importance_dict for k in booster_names):
+                    return {
+                        name: float(importance_dict.get(fname, 0.0))
+                        for name, fname in zip(feature_names, booster_names)
+                    }
+                # Fallback: positional f{i} mapping
                 normalized = {}
                 for i, name in enumerate(feature_names):
                     key = f'f{i}'
@@ -304,8 +330,14 @@ class FeatureEnricher:
             sol_price_history=sol_price_history
         )
 
-        # Merge with original metrics
-        enriched.update(wallet_metrics)
+        # Merge with original metrics WITHOUT overwriting the cleaned feature
+        # values (the raw dict may carry None/NaN where the extractor
+        # deliberately filtered)
+        for key, value in wallet_metrics.items():
+            if key in enriched:
+                continue
+            if value is not None:
+                enriched[key] = value
 
         return enriched
 

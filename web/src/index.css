@@ -5,8 +5,10 @@
 @layer base {
   html {
     font-family: 'Inter', system-ui, sans-serif;
+    scrollbar-width: thin;
+    scrollbar-color: theme(colors.border) theme(colors.background);
   }
-  
+
   body {
     @apply bg-background text-text;
   }
@@ -33,7 +35,7 @@
 @layer components {
   /* Monospace numbers */
   .font-mono-numbers {
-    font-family: 'JetBrains Mono', monospace;
+    @apply font-mono;
     font-variant-numeric: tabular-nums;
   }
 
@@ -44,41 +46,33 @@
 
   .status-dot-healthy {
     @apply bg-profit;
-    box-shadow: 0 0 8px rgba(0, 255, 136, 0.5);
+    box-shadow: 0 0 8px color-mix(in srgb, theme(colors.profit) 50%, transparent);
   }
 
   .status-dot-degraded {
     @apply bg-spear;
-    box-shadow: 0 0 8px rgba(255, 136, 0, 0.5);
+    box-shadow: 0 0 8px color-mix(in srgb, theme(colors.spear) 50%, transparent);
   }
 
   .status-dot-unhealthy {
     @apply bg-loss;
-    box-shadow: 0 0 8px rgba(255, 68, 68, 0.5);
+    box-shadow: 0 0 8px color-mix(in srgb, theme(colors.loss) 50%, transparent);
   }
 }
 
 @layer utilities {
-  /* Profit/Loss text colors */
-  .text-profit {
-    @apply text-[#00FF88];
-  }
-
-  .text-loss {
-    @apply text-[#FF4444];
-  }
-
   /* Glow effects */
   .glow-shield {
-    box-shadow: 0 0 20px rgba(0, 212, 255, 0.3);
+    box-shadow: 0 0 20px color-mix(in srgb, theme(colors.shield) 30%, transparent);
   }
 
   .glow-spear {
-    box-shadow: 0 0 20px rgba(255, 136, 0, 0.3);
+    box-shadow: 0 0 20px color-mix(in srgb, theme(colors.spear) 30%, transparent);
   }
 
   /* Safe area for mobile bottom navigation (notch handling) */
   .safe-area-bottom {
+    padding-bottom: constant(safe-area-inset-bottom);
     padding-bottom: env(safe-area-inset-bottom);
   }
 

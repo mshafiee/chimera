@@ -1,9 +1,9 @@
 //! Verdict evaluator for forward test
 //!
 //! Evaluates 21-day experiment data and emits GO/KILL decision
-//! using BCa bootstrap confidence intervals.
+//! using percentile bootstrap confidence intervals.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use rust_decimal::prelude::*;
 use serde::{Deserialize, Serialize};
 use rand::prelude::*;
@@ -155,6 +155,19 @@ impl VerdictEvaluator {
         experiment_start: DateTime<Utc>,
         experiment_end: DateTime<Utc>,
     ) -> VerdictResult {
+        // Validate time ordering before casting: a negative duration would wrap
+        // `num_days() as u32` into a huge value and bypass the min-days guard.
+        if experiment_end < experiment_start {
+            return VerdictResult {
+                verdict: Verdict::Inconclusive,
+                experiment_days: 0,
+                total_trades: pnl_values.len(),
+                experiment_start,
+                experiment_end,
+                verdict_reasons: vec!["Experiment end precedes start — invalid time range".to_string()],
+                ..Default::default()
+            };
+        }
         let duration_days = (experiment_end - experiment_start).num_days() as u32;
         let total_trades = pnl_values.len();
         let mut reasons = Vec::new();
@@ -171,8 +184,13 @@ impl VerdictEvaluator {
             };
         }
 
-        // Calculate expectancy with BCa bootstrap CI
-        let (expectancy_mean, ci_lower, ci_upper) = self.calculate_bootstrap_ci(pnl_values);
+        // Calculate expectancy with percentile bootstrap CI. Conversion
+        // failures (PnL outside f64 range) fail the run rather than silently
+        // substituting zeros that could flip the verdict.
+        let (expectancy_mean, ci_lower, ci_upper) = match self.calculate_bootstrap_ci(pnl_values) {
+            Ok(v) => v,
+            Err(e) => return self.inconclusive(duration_days, total_trades, experiment_start, experiment_end, e),
+        };
 
         // Calculate profit factor
         let (profit_factor, profit_factor_lb) = self.calculate_profit_factor(pnl_values);
@@ -187,8 +205,14 @@ impl VerdictEvaluator {
         let (avg_gap, gap_p95) = self.calculate_execution_gap_stats(execution_gaps);
 
         // Compare with controls
-        let vs_random = self.compare_with_control(pnl_values, control_random_pnl);
-        let vs_sol = self.compare_with_control(pnl_values, control_sol_pnl);
+        let vs_random = match self.compare_with_control(pnl_values, control_random_pnl) {
+            Ok(v) => v,
+            Err(e) => return self.inconclusive(duration_days, total_trades, experiment_start, experiment_end, e),
+        };
+        let vs_sol = match self.compare_with_control(pnl_values, control_sol_pnl) {
+            Ok(v) => v,
+            Err(e) => return self.inconclusive(duration_days, total_trades, experiment_start, experiment_end, e),
+        };
 
         // Calculate toxic wallet rate
         let toxic_wallet_rate = if total_wallets > 0 {
@@ -278,28 +302,56 @@ impl VerdictEvaluator {
         }
     }
 
-    /// Calculate BCa bootstrap confidence interval for mean
-    fn calculate_bootstrap_ci(&self, values: &[Decimal]) -> (Decimal, Decimal, Decimal) {
+    /// Build an Inconclusive result with a reason (data failure path)
+    fn inconclusive(
+        &self,
+        duration_days: u32,
+        total_trades: usize,
+        experiment_start: DateTime<Utc>,
+        experiment_end: DateTime<Utc>,
+        reason: String,
+    ) -> VerdictResult {
+        VerdictResult {
+            verdict: Verdict::Inconclusive,
+            experiment_days: duration_days,
+            total_trades,
+            experiment_start,
+            experiment_end,
+            verdict_reasons: vec![reason],
+            ..Default::default()
+        }
+    }
+
+    /// Calculate percentile bootstrap confidence interval for mean
+    fn calculate_bootstrap_ci(
+        &self,
+        values: &[Decimal],
+    ) -> Result<(Decimal, Decimal, Decimal), String> {
         if values.is_empty() {
-            return (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
+            return Ok((Decimal::ZERO, Decimal::ZERO, Decimal::ZERO));
         }
 
         let n = values.len();
-        
-        let mut rng = rand::thread_rng();
 
-        // Convert to f64 for bootstrap
-        let float_values: Vec<f64> = values.iter()
-            .map(|d| d.to_f64().unwrap_or(0.0))
-            .collect();
+        let mut rng = rand::rng();
 
-        // Bootstrap resampling
+        // Convert to f64 for bootstrap. A PnL value that cannot be represented
+        // as f64 is a data error — fail rather than silently substituting 0.
+        let float_values: Vec<f64> = values
+            .iter()
+            .map(|d| {
+                d.to_f64()
+                    .ok_or_else(|| format!("PnL value {} cannot be converted to f64 for bootstrap", d))
+            })
+            .collect::<Result<_, _>>()?;
+
+        // Bootstrap resampling WITH replacement — without replacement every
+        // resample is just a permutation and the CI collapses to a point.
         let mut bootstrap_means: Vec<f64> = Vec::with_capacity(self.bootstrap_resamples);
 
         for _ in 0..self.bootstrap_resamples {
-            let sample: Vec<f64> = float_values
-                .choose_multiple(&mut rng, n)
-                .copied()
+            let sample: Vec<f64> = (0..n)
+                .map(|_| *float_values.choose(&mut rng).unwrap_or(&0.0))
                 .collect();
 
             let mean: f64 = sample.iter().sum::<f64>() / n as f64;
@@ -316,14 +368,18 @@ impl VerdictEvaluator {
         let ci_lower = bootstrap_means.get(lower_idx).unwrap_or(&mean);
         let ci_upper = bootstrap_means.get(upper_idx).unwrap_or(&mean);
 
-        (
-            Decimal::from_f64_retain(mean).unwrap_or(Decimal::ZERO),
-            Decimal::from_f64_retain(*ci_lower).unwrap_or(Decimal::ZERO),
-            Decimal::from_f64_retain(*ci_upper).unwrap_or(Decimal::ZERO),
-        )
+        Ok((
+            Decimal::from_f64_retain(mean).ok_or_else(|| format!("Mean {} cannot be represented as Decimal", mean))?,
+            Decimal::from_f64_retain(*ci_lower).ok_or_else(|| format!("CI lower {} cannot be represented as Decimal", ci_lower))?,
+            Decimal::from_f64_retain(*ci_upper).ok_or_else(|| format!("CI upper {} cannot be represented as Decimal", ci_upper))?,
+        ))
     }
 
     /// Calculate profit factor and Wilson lower bound
+    ///
+    /// NOTE: this is an ad-hoc heuristic — the Wilson score interval bounds
+    /// the win rate, not the profit-factor ratio, so `profit_factor_lb` is not
+    /// a statistically valid confidence bound for the PF.
     fn calculate_profit_factor(&self, values: &[Decimal]) -> (Decimal, Decimal) {
         let gross_profit: Decimal = values.iter()
             .filter(|v| **v > Decimal::ZERO)
@@ -334,10 +390,12 @@ impl VerdictEvaluator {
             .map(|v| v.abs())
             .sum();
 
+        // A strategy with no losing trades has unbounded profit factor —
+        // substituting gross_profit (or 0) would wrongly trigger the Kill rule.
         let profit_factor = if gross_loss > Decimal::ZERO {
             gross_profit / gross_loss
         } else {
-            gross_profit // Infinite PF when no losses
+            Decimal::MAX // Infinite PF when no losses
         };
 
         // Wilson score interval for proportion
@@ -352,7 +410,9 @@ impl VerdictEvaluator {
         let p_hat = wins as f64 / n as f64;
         let denominator = 1.0 + z * z / n as f64;
         let center = (p_hat + z * z / (2.0 * n as f64)) / denominator;
-        let margin = z * ((p_hat * (1.0 - p_hat) / n as f64) + (z * z / (4.0 * n as f64).powi(2))).sqrt() / denominator;
+        // Correct Wilson variance term: z²/(4n²) — the previous z²/(4n)²
+        // produced an interval that was too narrow.
+        let margin = z * ((p_hat * (1.0 - p_hat) / n as f64) + (z * z / (4.0 * (n as f64).powi(2)))).sqrt() / denominator;
 
         let lower_bound = (center - margin).max(0.0);
         let profit_factor_lb = profit_factor * Decimal::from_f64_retain(lower_bound).unwrap_or(Decimal::ZERO);
@@ -377,7 +437,9 @@ impl VerdictEvaluator {
             let drawdown = if peak > Decimal::ZERO {
                 (cumulative - peak) / peak * Decimal::from(100)
             } else {
-                Decimal::ZERO
+                // Peak never went positive — the strategy opened underwater.
+                // Report the drop relative to the starting equity instead of 0.
+                cumulative * Decimal::from(100)
             };
 
             max_drawdown = max_drawdown.min(drawdown);
@@ -414,34 +476,45 @@ impl VerdictEvaluator {
     }
 
     /// Compare strategy with control using two-sample bootstrap
-    fn compare_with_control(&self, strategy: &[Decimal], control: &[Decimal]) -> ControlComparison {
+    fn compare_with_control(
+        &self,
+        strategy: &[Decimal],
+        control: &[Decimal],
+    ) -> Result<ControlComparison, String> {
         if strategy.is_empty() || control.is_empty() {
-            return ControlComparison::default();
+            return Ok(ControlComparison::default());
         }
 
-        
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
-        let strategy_float: Vec<f64> = strategy.iter()
-            .map(|d| d.to_f64().unwrap_or(0.0))
-            .collect();
+        let strategy_float: Vec<f64> = strategy
+            .iter()
+            .map(|d| {
+                d.to_f64()
+                    .ok_or_else(|| format!("PnL value {} cannot be converted to f64", d))
+            })
+            .collect::<Result<_, _>>()?;
 
-        let control_float: Vec<f64> = control.iter()
-            .map(|d| d.to_f64().unwrap_or(0.0))
-            .collect();
+        let control_float: Vec<f64> = control
+            .iter()
+            .map(|d| {
+                d.to_f64()
+                    .ok_or_else(|| format!("Control PnL value {} cannot be converted to f64", d))
+            })
+            .collect::<Result<_, _>>()?;
 
-        // Bootstrap difference of means
+        // Bootstrap difference of means — resample WITH replacement.
+        // Without replacement every resample is a permutation and the CI
+        // collapses to the observed mean difference.
         let mut bootstrap_diffs: Vec<f64> = Vec::with_capacity(self.bootstrap_resamples);
 
         for _ in 0..self.bootstrap_resamples {
-            let strategy_sample: Vec<f64> = strategy_float
-                .choose_multiple(&mut rng, strategy.len())
-                .copied()
+            let strategy_sample: Vec<f64> = (0..strategy.len())
+                .map(|_| *strategy_float.choose(&mut rng).unwrap_or(&0.0))
                 .collect();
 
-            let control_sample: Vec<f64> = control_float
-                .choose_multiple(&mut rng, control.len())
-                .copied()
+            let control_sample: Vec<f64> = (0..control.len())
+                .map(|_| *control_float.choose(&mut rng).unwrap_or(&0.0))
                 .collect();
 
             let strategy_mean: f64 = strategy_sample.iter().sum::<f64>() / strategy_sample.len() as f64;
@@ -461,20 +534,29 @@ impl VerdictEvaluator {
         let ci_lower = bootstrap_diffs.get(lower_idx).unwrap_or(&mean_diff);
         let ci_upper = bootstrap_diffs.get(upper_idx).unwrap_or(&mean_diff);
 
-        // Calculate p-value (proportion of bootstrap diffs <= 0)
-        let p_value = bootstrap_diffs.iter()
-            .filter(|d| **d <= 0.0)
-            .count() as f64 / bootstrap_diffs.len() as f64;
+        // Two-sided bootstrap p-value for the difference of means, with the
+        // standard +1/(B+1) correction (a raw one-sided proportion compared to
+        // 0.05 would over-reject the null).
+        let count_leq_zero = bootstrap_diffs.iter().filter(|d| **d <= 0.0).count();
+        let b = bootstrap_diffs.len();
+        let p_value = if b > 0 {
+            (2.0 * count_leq_zero.min(b - count_leq_zero) as f64 + 1.0) / (b as f64 + 1.0)
+        } else {
+            1.0
+        };
 
         let beats_control = ci_lower > &0.0 && p_value < 0.05;
 
-        ControlComparison {
-            difference: Decimal::from_f64_retain(mean_diff).unwrap_or(Decimal::ZERO),
-            ci_lower: Decimal::from_f64_retain(*ci_lower).unwrap_or(Decimal::ZERO),
-            ci_upper: Decimal::from_f64_retain(*ci_upper).unwrap_or(Decimal::ZERO),
+        Ok(ControlComparison {
+            difference: Decimal::from_f64_retain(mean_diff)
+                .ok_or_else(|| format!("Mean difference {} cannot be represented as Decimal", mean_diff))?,
+            ci_lower: Decimal::from_f64_retain(*ci_lower)
+                .ok_or_else(|| format!("CI lower {} cannot be represented as Decimal", ci_lower))?,
+            ci_upper: Decimal::from_f64_retain(*ci_upper)
+                .ok_or_else(|| format!("CI upper {} cannot be represented as Decimal", ci_upper))?,
             p_value,
             beats_control,
-        }
+        })
     }
 }
 
@@ -493,7 +575,7 @@ mod tests {
             &[],
             0,
             1,
-            Utc::now() - Duration::days(10),
+            Utc::now() - chrono::Duration::days(10),
             Utc::now(),
         );
 
@@ -517,7 +599,7 @@ mod tests {
             &control_sol,
             2,  // 2 toxic wallets out of 10
             10,
-            Utc::now() - Duration::days(21),
+            Utc::now() - chrono::Duration::days(21),
             Utc::now(),
         );
 
@@ -542,7 +624,7 @@ mod tests {
             &control_sol,
             8,  // 8 toxic wallets out of 10 (80% > 30% threshold)
             10,
-            Utc::now() - Duration::days(21),
+            Utc::now() - chrono::Duration::days(21),
             Utc::now(),
         );
 
@@ -558,13 +640,16 @@ mod tests {
             Decimal::from(12), Decimal::from(6), Decimal::from(3), Decimal::from(18), Decimal::from(4),
         ];
 
-        let (mean, lower, upper) = evaluator.calculate_bootstrap_ci(&values);
+        let (mean, lower, upper) = evaluator.calculate_bootstrap_ci(&values).unwrap();
 
         // Bootstrap CI should have reasonable bounds
         // The exact values depend on bootstrap sampling, so we just check they exist
-        assert!(lower >= Decimal::ZERO || lower < Decimal::ZERO); // Can be negative
+        assert!(upper >= lower); // May be negative for losing runs
         assert!(upper >= Decimal::ZERO);
         assert!(upper >= mean);
+        // With replacement, the CI must be strictly positive width for
+        // non-constant data (the old without-replacement bug collapsed it).
+        assert!(upper > lower);
     }
 
     #[test]

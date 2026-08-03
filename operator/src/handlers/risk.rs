@@ -188,7 +188,8 @@ pub struct PositionSizeAnalysisResponse {
     pub max_position_sol: f64,
     pub min_position_sol: f64,
     pub position_size_distribution: Vec<SizeBucket>,
-    pub kelly_criterion_usage: f64,
+    /// Kelly criterion usage; None while not computed.
+    pub kelly_criterion_usage: Option<f64>,
 }
 
 /// Size bucket for distribution
@@ -256,9 +257,6 @@ pub fn determine_heat_status(exposure: f64, threshold: f64) -> &'static str {
 fn pg_pool(db: &Arc<dyn Database>) -> AppResult<sqlx::Pool<sqlx::Postgres>> {
     match db.pool() {
         DbPool::PostgreSQL(p) => Ok(p),
-        _ => Err(AppError::Internal(
-            "PostgreSQL backend required".to_string(),
-        )),
     }
 }
 
@@ -367,12 +365,14 @@ async fn get_stop_loss_metrics_db(
     let pool = pg_pool(db)?;
     let interval = format!("{} days", days);
 
-    // Get total activations and loss prevented
+    // Get total activations and loss prevented. Each term is clamped with
+    // GREATEST so an exit slightly above the stop (within the 1% tolerance)
+    // cannot subtract from loss prevented by other positions.
     let total_result: (Option<i64>, Option<f64>) = sqlx::query_as(
         &format!(
             r#"
         SELECT COUNT(*) as total_activations,
-               COALESCE(SUM((et.stop_loss_price - p.exit_price) * p.entry_amount_sol / p.entry_price), 0.0)::float8 as loss_prevented_sol
+               COALESCE(SUM(GREATEST(et.stop_loss_price - p.exit_price, 0) * p.entry_amount_sol / p.entry_price), 0.0)::float8 as loss_prevented_sol
         FROM positions p
         JOIN exit_targets et ON p.trade_uuid = et.trade_uuid
         WHERE p.state = 'CLOSED'
@@ -402,7 +402,7 @@ async fn get_stop_loss_metrics_db(
             r#"
         SELECT p.strategy,
                COUNT(*) as activations,
-               COALESCE(SUM((et.stop_loss_price - p.exit_price) * p.entry_amount_sol / p.entry_price), 0.0)::float8 as loss_prevented
+               COALESCE(SUM(GREATEST(et.stop_loss_price - p.exit_price, 0) * p.entry_amount_sol / p.entry_price), 0.0)::float8 as loss_prevented
         FROM positions p
         JOIN exit_targets et ON p.trade_uuid = et.trade_uuid
         WHERE p.state = 'CLOSED'
@@ -438,13 +438,15 @@ async fn get_stop_loss_metrics_db(
             f64,
             f64,
             f64,
+            f64,
             String,
         ),
     >(
         &format!(
             r#"
         SELECT p.trade_uuid, p.token_symbol, p.closed_at,
-               p.entry_price::float8, et.stop_loss_price::float8, p.exit_price::float8, p.strategy
+               p.entry_price::float8, et.stop_loss_price::float8, p.exit_price::float8,
+               p.entry_amount_sol::float8, p.strategy
         FROM positions p
         JOIN exit_targets et ON p.trade_uuid = et.trade_uuid
         WHERE p.state = 'CLOSED'
@@ -464,8 +466,10 @@ async fn get_stop_loss_metrics_db(
 
     let recent_activations: Vec<StopLossActivation> = recent_rows
         .iter()
-        .map(|(uuid, symbol, closed_at, entry, stop, exit, strategy)| {
-            let loss_prevented = (stop - exit) * 0.01; // Approximate
+        .map(|(uuid, symbol, closed_at, entry, stop, exit, amount, strategy)| {
+            // Same formula as the aggregate query: (stop - exit) * amount / entry,
+            // clamped at 0 so an overshoot above the stop reports no loss prevented.
+            let loss_prevented = ((stop - exit).max(0.0)) * amount / entry.max(0.000001);
             StopLossActivation {
                 timestamp: closed_at.clone().unwrap_or_default(),
                 trade_uuid: uuid.clone(),
@@ -519,11 +523,12 @@ async fn get_profit_target_metrics_db(
     let interval = format!("{} days", days);
 
     // Get total hits (positions with targets_hit > 0)
-    let total_hits_result: (Option<i64>, Option<f64>) = sqlx::query_as(
+    let total_hits_result: (Option<i64>, Option<f64>, Option<i64>) = sqlx::query_as(
         &format!(
             r#"
         SELECT COUNT(*) as total_hits,
-               COALESCE(SUM(et.peak_profit_percent * p.entry_amount_sol / 100.0), 0.0)::float8 as total_gain_sol
+               COALESCE(SUM(et.peak_profit_percent * p.entry_amount_sol / 100.0), 0.0)::float8 as total_gain_sol,
+               COALESCE(SUM(jsonb_array_length(et.targets_hit)), 0) as total_targets
         FROM positions p
         JOIN exit_targets et ON p.trade_uuid = et.trade_uuid
         WHERE p.state = 'CLOSED'
@@ -539,6 +544,9 @@ async fn get_profit_target_metrics_db(
 
     let total_hits = total_hits_result.0.unwrap_or(0);
     let total_gain_sol = total_hits_result.1.unwrap_or(0.0);
+    // The actual number of profit targets hit in the period — NOT the count of
+    // closed positions.
+    let total_targets = total_hits_result.2.unwrap_or(0);
     let average_realized_gain_sol = if total_hits > 0 {
         total_gain_sol / total_hits as f64
     } else {
@@ -564,6 +572,24 @@ async fn get_profit_target_metrics_db(
 
     let trailing_stop_activations = trailing_result.0.unwrap_or(0);
 
+    // Per-strategy closed-position counts (denominator for the hit rate)
+    let closed_by_strategy_rows = sqlx::query_as::<_, (String, i64)>(
+        &format!(
+            r#"
+        SELECT strategy, COUNT(*)
+        FROM positions
+        WHERE state = 'CLOSED'
+          AND closed_at >= NOW() - INTERVAL '{}'
+        GROUP BY strategy
+        "#,
+            interval
+        ),
+    )
+    .fetch_all(&pool)
+    .await?;
+    let closed_by_strategy: HashMap<String, i64> =
+        closed_by_strategy_rows.into_iter().collect();
+
     // Get by strategy
     let by_strategy_rows = sqlx::query_as::<_, (String, i64, Option<f64>, Option<i64>)>(
         &format!(
@@ -588,11 +614,19 @@ async fn get_profit_target_metrics_db(
 
     let targets_by_strategy: Vec<StrategyProfitTargetData> = by_strategy_rows
         .iter()
-        .map(|(strategy, hits, avg_gain, _)| StrategyProfitTargetData {
-            strategy_name: strategy.clone(),
-            hit_rate: 100.0, // All rows are hits by definition
-            total_hits: *hits,
-            average_gain_sol: avg_gain.unwrap_or(0.0),
+        .map(|(strategy, hits, avg_gain, _)| {
+            let closed = closed_by_strategy.get(strategy).copied().unwrap_or(0);
+            let hit_rate = if closed > 0 {
+                (*hits as f64 / closed as f64) * 100.0
+            } else {
+                0.0
+            };
+            StrategyProfitTargetData {
+                strategy_name: strategy.clone(),
+                hit_rate,
+                total_hits: *hits,
+                average_gain_sol: avg_gain.unwrap_or(0.0),
+            }
         })
         .collect();
 
@@ -603,7 +637,7 @@ async fn get_profit_target_metrics_db(
             String,
             Option<String>,
             Option<String>,
-            Option<i64>,
+            Option<i32>,
             f64,
             String,
         ),
@@ -611,7 +645,7 @@ async fn get_profit_target_metrics_db(
         &format!(
             r#"
         SELECT p.trade_uuid, p.token_symbol, p.closed_at,
-               jsonb_array_length(et.targets_hit) as targets_count,
+               (SELECT MAX(x::int) FROM jsonb_array_elements_text(et.targets_hit) x) as max_target_level,
                (et.peak_profit_percent * p.entry_amount_sol / 100.0)::float8 as gain_sol,
                p.strategy
         FROM positions p
@@ -632,11 +666,11 @@ async fn get_profit_target_metrics_db(
     let recent_hits: Vec<ProfitTargetHit> = recent_rows
         .iter()
         .map(
-            |(uuid, symbol, closed_at, targets_count, gain, strategy)| ProfitTargetHit {
+            |(uuid, symbol, closed_at, max_target_level, gain, strategy)| ProfitTargetHit {
                 timestamp: closed_at.clone().unwrap_or_default(),
                 trade_uuid: uuid.clone(),
                 token_symbol: symbol.clone(),
-                target_level: targets_count.unwrap_or(1) as i32,
+                target_level: max_target_level.unwrap_or(1),
                 realized_gain_sol: *gain,
                 strategy_name: strategy.clone(),
             },
@@ -668,7 +702,7 @@ async fn get_profit_target_metrics_db(
     Ok(ProfitTargetMetricsResponse {
         hit_rate,
         total_hits,
-        total_targets: total_closed_count,
+        total_targets,
         trailing_stop_activations,
         average_realized_gain_sol,
         targets_by_strategy,
@@ -699,20 +733,17 @@ async fn get_position_size_analysis_db(
     let max_position_sol = stats.1.unwrap_or(0.0);
     let min_position_sol = stats.2.unwrap_or(0.0);
 
-    // Get median using OFFSET (handle empty case)
+    // Get median via percentile_cont — single pass and correct for even-sized
+    // populations (the old OFFSET trick returned only the upper middle value).
     let median_result: (Option<f64>,) = sqlx::query_as(
         r#"
-        SELECT entry_amount_sol::float8
+        SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY entry_amount_sol)::float8
         FROM positions
         WHERE state IN ('ACTIVE', 'EXITING')
-        ORDER BY entry_amount_sol
-        LIMIT 1
-        OFFSET (SELECT COUNT(*) / 2 FROM positions WHERE state IN ('ACTIVE', 'EXITING'))
         "#,
     )
-    .fetch_optional(&pool)
-    .await?
-    .unwrap_or((None,));
+    .fetch_one(&pool)
+    .await?;
 
     let median_position_sol = median_result.0.unwrap_or(0.0);
 
@@ -758,7 +789,7 @@ async fn get_position_size_analysis_db(
         max_position_sol,
         min_position_sol,
         position_size_distribution,
-        kelly_criterion_usage: 0.0, // Placeholder - not calculated yet
+        kelly_criterion_usage: None, // Not computed — null lets clients distinguish "not implemented" from a real zero
     })
 }
 
@@ -790,11 +821,17 @@ pub async fn get_portfolio_risk(
     // Get exposure
     let mut exposure = get_portfolio_exposure(&state.db).await?;
 
-    // Get drawdown
-    let current_drawdown = state.db.get_max_drawdown_percent(total_capital).await?;
+    // Get drawdown: (current, historical-worst) from the same DB call.
+    // The historical worst is reported as max_drawdown_percent — NOT the
+    // current value — so consumers see the real peak-to-trough drawdown.
+    let (current_drawdown, max_drawdown) = state
+        .db
+        .get_max_drawdown_percent(total_capital)
+        .await?;
     let current_drawdown_f64 = current_drawdown.to_f64().unwrap_or(0.0);
+    let max_drawdown_f64 = max_drawdown.to_f64().unwrap_or(0.0);
 
-    exposure.max_drawdown_percent = current_drawdown_f64.max(exposure.max_drawdown_percent);
+    exposure.max_drawdown_percent = max_drawdown_f64;
     exposure.current_drawdown_percent = current_drawdown_f64;
 
     // Calculate HHI
@@ -806,12 +843,10 @@ pub async fn get_portfolio_risk(
     // Drawdown data (simplified - duration and recovery not tracked in detail)
     let drawdown = DrawdownData {
         current_drawdown_percent: current_drawdown_f64,
-        max_drawdown_percent: exposure.max_drawdown_percent,
+        max_drawdown_percent: max_drawdown_f64,
         drawdown_duration_days: 0.0, // Would need timestamp tracking
         recovery_percent: if current_drawdown_f64 > 0.0 {
-            ((exposure.max_drawdown_percent - current_drawdown_f64)
-                / exposure.max_drawdown_percent.max(0.01))
-                * 100.0
+            ((max_drawdown_f64 - current_drawdown_f64) / max_drawdown_f64.max(0.01)) * 100.0
         } else {
             100.0
         },
@@ -825,11 +860,20 @@ pub async fn get_portfolio_risk(
 
     // Compute actual wallet balance:
     //   starting capital + cumulative realized PnL − capital in active positions
-    let realized_pnl = state.db.get_total_realized_pnl().await.unwrap_or(Decimal::ZERO);
+    // Errors must surface (503/500) rather than silently reporting a wrong
+    // balance as 200.
+    let realized_pnl = state.db.get_total_realized_pnl().await?;
     let wallet_balance = (total_capital + realized_pnl
-        - Decimal::try_from(exposure.total_exposure_sol).unwrap_or(Decimal::ZERO))
+        - Decimal::try_from(exposure.total_exposure_sol).map_err(|e| {
+            AppError::Internal(format!("Failed to convert exposure to Decimal: {}", e))
+        })?)
         .to_f64()
-        .unwrap_or(0.0);
+        .ok_or_else(|| {
+            AppError::Internal(format!(
+                "Failed to convert wallet balance {} to f64",
+                total_capital + realized_pnl
+            ))
+        })?;
 
     Ok(Json(PortfolioRiskResponse {
         portfolio_heat_percent: portfolio_heat_pct,

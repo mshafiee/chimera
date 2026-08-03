@@ -75,6 +75,55 @@ pub struct AuthenticatedUser {
     pub role: Role,
 }
 
+/// Stable non-secret alias for an API key, safe to write to logs/audit trails
+/// (mirrors the hashing used by the WebSocket auth path).
+fn token_short_hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    hex::encode(&hasher.finalize()[..8])
+}
+
+/// Percent-decode a single query value (`%XX` and `+` → space). Splitting on
+/// `&` happens before decoding, so an encoded `&` (`%26`) inside a value is
+/// preserved and decodes correctly.
+fn url_decode_value(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    let hex_val = |b: u8| match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    };
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                match (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                    (Some(h), Some(l)) => {
+                        out.push(h * 16 + l);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
 /// Authentication state
 #[derive(Clone)]
 pub struct AuthState {
@@ -129,10 +178,12 @@ impl AuthState {
     /// information and would allow any observer to spoof an admin session.
     /// All wallet-based sessions must go through /auth/wallet to obtain a JWT.
     pub async fn authenticate(&self, token: &str) -> Option<AuthenticatedUser> {
-        // First check in-memory API keys (high-entropy random strings, not wallet addresses)
+        // First check in-memory API keys (high-entropy random strings, not wallet addresses).
+        // The identifier must NOT embed the raw key — it is written to logs and
+        // audit trails, so only a non-secret hash alias is stored.
         if let Some(role) = self.check_api_key(token).await {
             return Some(AuthenticatedUser {
-                identifier: token.to_string(),
+                identifier: format!("api_key:{}", token_short_hash(token)),
                 role,
             });
         }
@@ -246,9 +297,17 @@ pub async fn bearer_auth(
     let token = if let Some(header) = headers.get(AUTHORIZATION) {
         match header.to_str() {
             Ok(s) => {
-                // Parse Bearer token from header
-                match s.strip_prefix("Bearer ") {
-                    Some(t) => Some(t.to_string()),
+                // RFC 7235: the auth scheme is a case-insensitive token
+                match s.split_once(' ') {
+                    Some((scheme, t)) if scheme.eq_ignore_ascii_case("bearer") => {
+                        Some(t.trim().to_string())
+                    }
+                    Some(_) => {
+                        return auth_error(
+                            StatusCode::BAD_REQUEST,
+                            "Authorization header must use Bearer scheme",
+                        )
+                    }
                     None => {
                         return auth_error(
                             StatusCode::BAD_REQUEST,
@@ -292,27 +351,24 @@ pub async fn bearer_auth(
         // 4. Monitor for log exposure incidents
         //
         // See function documentation for detailed security analysis and examples.
+        //
+        // NOTE: Never log the URI, query string, or extracted token — the token
+        // travels in the query string and logging it would defeat the mitigations
+        // above. At most log that query auth was attempted.
+        tracing::debug!("Query parameter authentication attempted");
 
-        let uri = request.uri();
-        tracing::info!("Checking query params for auth, URI: {}", uri);
-        tracing::info!("Query string: {:?}", uri.query());
-
-        let query_token = uri.query().and_then(|query_str| {
-            tracing::info!("Parsing query string: {}", query_str);
-            // Simple parsing: find "token=<value>" in query string
+        let query_token = request.uri().query().and_then(|query_str| {
+            // Values are percent-decoded; an encoded `&` inside a token is
+            // preserved because splitting happens before decoding.
             for pair in query_str.split('&') {
-                tracing::info!("Processing pair: {}", pair);
                 if let Some((key, value)) = pair.split_once('=') {
-                    tracing::info!("Key: {}, Value: {}", key, value);
                     if key == "token" {
-                        return Some(value.to_string());
+                        return Some(url_decode_value(value));
                     }
                 }
             }
             None
         });
-
-        tracing::info!("Extracted query token: {:?}", query_token);
 
         // SECURITY: Track if we're using query parameter auth (less secure)
         is_query_auth = query_token.is_some();
@@ -361,7 +417,7 @@ pub async fn bearer_auth(
         }
         None => {
             tracing::warn!(
-                token_prefix = %&token_str[..token_str.len().min(8)],
+                token_hash = %token_short_hash(token_str),
                 "Authentication failed - invalid token"
             );
             auth_error(StatusCode::UNAUTHORIZED, "Invalid or expired token")

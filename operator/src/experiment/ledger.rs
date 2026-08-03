@@ -1,11 +1,51 @@
 //! Experiment ledger for recording forward test data
 //!
 //! Records all paper trades, tracer executions, control arms, and
-//! execution gaps in the operator database for verdict evaluation.
+//! execution gaps for verdict evaluation.
+//!
+//! NOTE: this ledger is currently in-memory only — data is lost on restart.
+//! Persistence to the operator database is not yet implemented.
 
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::*;
 use serde::{Deserialize, Serialize};
+
+/// Signal side for a trade
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum SignalSide {
+    /// Long trade
+    Buy,
+    /// Short trade
+    Sell,
+}
+
+impl std::fmt::Display for SignalSide {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SignalSide::Buy => write!(f, "BUY"),
+            SignalSide::Sell => write!(f, "SELL"),
+        }
+    }
+}
+
+/// Experiment strategy type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExperimentStrategy {
+    /// Conservative strategy
+    Shield,
+    /// Aggressive strategy
+    Spear,
+}
+
+impl std::fmt::Display for ExperimentStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExperimentStrategy::Shield => write!(f, "Shield"),
+            ExperimentStrategy::Spear => write!(f, "Spear"),
+        }
+    }
+}
 
 /// Single trade record in the experiment ledger
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,14 +57,14 @@ pub struct ExperimentTrade {
     /// Token mint address
     pub token: String,
     /// Signal side (BUY/SELL)
-    pub signal_side: String,
+    pub signal_side: SignalSide,
     /// Paper fill price (per token)
     pub paper_fill_price: Option<Decimal>,
     /// Real fill price from tracer (per token)
     pub real_fill_price: Option<Decimal>,
-    /// Paper PnL (USD)
+    /// Paper PnL (percentage return, sign-aware for shorts)
     pub paper_pnl: Option<Decimal>,
-    /// Real PnL from tracer (USD)
+    /// Real PnL from tracer (percentage return, sign-aware for shorts)
     pub real_pnl: Option<Decimal>,
     /// Entry latency in milliseconds
     pub entry_latency_ms: Option<u64>,
@@ -47,7 +87,7 @@ pub struct ExperimentTrade {
     /// Exit timestamp (if closed)
     pub exit_time: Option<DateTime<Utc>>,
     /// Strategy type (Shield/Spear)
-    pub strategy: String,
+    pub strategy: ExperimentStrategy,
 }
 
 impl ExperimentTrade {
@@ -55,8 +95,8 @@ impl ExperimentTrade {
         trade_uuid: String,
         wallet: String,
         token: String,
-        signal_side: String,
-        strategy: String,
+        signal_side: SignalSide,
+        strategy: ExperimentStrategy,
     ) -> Self {
         Self {
             trade_uuid,
@@ -107,28 +147,46 @@ impl ExperimentTrade {
     }
 
     /// Close the trade and calculate PnL
+    ///
+    /// PnL is a sign-aware percentage return: shorts (SELL) profit when the
+    /// price falls, longs (BUY) profit when it rises. Duplicate closes are
+    /// rejected and `exit_time` is only committed after the PnL computation
+    /// succeeds, so a failed close never leaves the trade half-closed.
     pub fn close_trade(&mut self, exit_price: Decimal) -> Result<Decimal, String> {
-        if self.paper_fill_price.is_none() {
-            return Err("Cannot close trade without paper fill price".to_string());
+        if self.exit_time.is_some() {
+            return Err("Trade already closed".to_string());
+        }
+
+        let paper_entry = self
+            .paper_fill_price
+            .ok_or("Cannot close trade without paper fill price".to_string())?;
+        if paper_entry <= Decimal::ZERO {
+            return Err(format!("Invalid paper fill price: {}", paper_entry));
+        }
+
+        // Calculate paper PnL (sign-aware percentage return)
+        let paper_pnl = Self::pnl_percent(paper_entry, exit_price, self.signal_side);
+        self.paper_pnl = Some(paper_pnl);
+
+        // Calculate real PnL if tracer executed (sign-aware percentage return)
+        if let Some(real_entry) = self.real_fill_price {
+            if real_entry > Decimal::ZERO {
+                self.real_pnl = Some(Self::pnl_percent(real_entry, exit_price, self.signal_side));
+            }
         }
 
         self.exit_time = Some(Utc::now());
 
-        // Calculate paper PnL
-        if let Some(paper_entry) = self.paper_fill_price {
-            if paper_entry > Decimal::ZERO {
-                self.paper_pnl = Some((exit_price - paper_entry) / paper_entry * Decimal::from(100));
-            }
-        }
+        Ok(paper_pnl)
+    }
 
-        // Calculate real PnL if tracer executed
-        if let Some(real_entry) = self.real_fill_price {
-            if real_entry > Decimal::ZERO {
-                self.real_pnl = Some((exit_price - real_entry) / real_entry * Decimal::from(100));
-            }
-        }
-
-        self.paper_pnl.ok_or("Failed to calculate paper PnL".to_string())
+    /// Sign-aware percentage return for an entry/exit pair.
+    fn pnl_percent(entry: Decimal, exit: Decimal, side: SignalSide) -> Decimal {
+        let raw = match side {
+            SignalSide::Sell => (entry - exit) / entry,
+            SignalSide::Buy => (exit - entry) / entry,
+        };
+        raw * Decimal::from(100)
     }
 }
 
@@ -203,17 +261,20 @@ impl ExperimentLedger {
     }
 
     /// Calculate aggregate statistics
+    ///
+    /// All statistics are computed over a single well-defined population: the
+    /// closed trades. Zero-PnL trades are not counted as losses.
     pub fn calculate_statistics(&self) -> ExperimentStats {
         let closed_trades = self.get_closed_trades();
-        let tracer_trades = self.get_tracer_trades();
 
-        let total_trades = closed_trades.len();
-
-        if total_trades == 0 {
+        if closed_trades.is_empty() {
             return ExperimentStats::default();
         }
 
-        // Paper PnL statistics
+        let total_trades = closed_trades.len();
+        let tracer_count = closed_trades.iter().filter(|t| t.is_tracer).count();
+
+        // Paper PnL statistics (closed trades only)
         let paper_pnl_values: Vec<Decimal> = closed_trades.iter()
             .filter_map(|t| t.paper_pnl)
             .collect();
@@ -225,8 +286,9 @@ impl ExperimentLedger {
             Decimal::ZERO
         };
 
-        // Real PnL statistics (from tracers)
-        let real_pnl_values: Vec<Decimal> = tracer_trades.iter()
+        // Real PnL statistics (closed tracer trades only)
+        let real_pnl_values: Vec<Decimal> = closed_trades.iter()
+            .filter(|t| t.is_tracer)
             .filter_map(|t| t.real_pnl)
             .collect();
 
@@ -237,8 +299,9 @@ impl ExperimentLedger {
             Decimal::ZERO
         };
 
-        // Execution gap statistics
-        let execution_gaps: Vec<Decimal> = tracer_trades.iter()
+        // Execution gap statistics (closed tracer trades only)
+        let execution_gaps: Vec<Decimal> = closed_trades.iter()
+            .filter(|t| t.is_tracer)
             .filter_map(|t| t.execution_gap)
             .collect();
 
@@ -249,8 +312,11 @@ impl ExperimentLedger {
             Decimal::ZERO
         };
 
-        // Win rate
+        // Win rate over closed trades with a paper PnL; flat (zero-PnL) trades
+        // are neither wins nor losses.
         let wins = paper_pnl_values.iter().filter(|p| **p > Decimal::ZERO).count();
+        let flat = paper_pnl_values.iter().filter(|p| **p == Decimal::ZERO).count();
+        let losses = paper_pnl_values.len() - wins - flat;
         let win_rate = if !paper_pnl_values.is_empty() {
             (wins as f64) / (paper_pnl_values.len() as f64)
         } else {
@@ -259,7 +325,7 @@ impl ExperimentLedger {
 
         ExperimentStats {
             total_trades,
-            tracer_count: tracer_trades.len(),
+            tracer_count,
             total_paper_pnl,
             avg_paper_pnl,
             total_real_pnl,
@@ -267,7 +333,7 @@ impl ExperimentLedger {
             avg_execution_gap,
             win_rate,
             wins,
-            losses: paper_pnl_values.len() - wins,
+            losses,
         }
     }
 }
@@ -277,7 +343,7 @@ impl ExperimentLedger {
 pub struct ExperimentStats {
     /// Total number of closed trades
     pub total_trades: usize,
-    /// Number of tracer trades executed
+    /// Number of closed tracer trades
     pub tracer_count: usize,
     /// Total paper PnL
     pub total_paper_pnl: Decimal,
@@ -300,6 +366,7 @@ pub struct ExperimentStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn test_experiment_trade_creation() {
@@ -307,13 +374,13 @@ mod tests {
             "test_uuid".to_string(),
             "wallet_address".to_string(),
             "token_mint".to_string(),
-            "BUY".to_string(),
-            "Shield".to_string(),
+            SignalSide::Buy,
+            ExperimentStrategy::Shield,
         );
 
         assert_eq!(trade.trade_uuid, "test_uuid");
-        assert_eq!(trade.signal_side, "BUY");
-        assert_eq!(trade.strategy, "Shield");
+        assert_eq!(trade.signal_side.to_string(), "BUY");
+        assert_eq!(trade.strategy.to_string(), "Shield");
         assert!(!trade.is_tracer);
     }
 
@@ -323,8 +390,8 @@ mod tests {
             "test_uuid".to_string(),
             "wallet".to_string(),
             "token".to_string(),
-            "BUY".to_string(),
-            "Spear".to_string(),
+            SignalSide::Buy,
+            ExperimentStrategy::Spear,
         );
 
         trade.update_paper_result(Decimal::from_str("1.0").unwrap(), 250);
@@ -339,8 +406,8 @@ mod tests {
             "test_uuid".to_string(),
             "wallet".to_string(),
             "token".to_string(),
-            "BUY".to_string(),
-            "Shield".to_string(),
+            SignalSide::Buy,
+            ExperimentStrategy::Shield,
         );
 
         trade.update_paper_result(Decimal::from_str("1.0").unwrap(), 250);
@@ -350,6 +417,45 @@ mod tests {
         assert_eq!(pnl, Decimal::from_str("10.0").unwrap()); // 10% gain
         assert!(trade.exit_time.is_some());
         assert_eq!(trade.paper_pnl, Some(Decimal::from_str("10.0").unwrap()));
+
+        // Duplicate close is rejected
+        assert!(trade.close_trade(Decimal::from_str("1.20").unwrap()).is_err());
+    }
+
+    #[test]
+    fn test_trade_close_short() {
+        let mut trade = ExperimentTrade::new(
+            "test_uuid".to_string(),
+            "wallet".to_string(),
+            "token".to_string(),
+            SignalSide::Sell,
+            ExperimentStrategy::Shield,
+        );
+
+        trade.update_paper_result(Decimal::from_str("1.0").unwrap(), 250);
+
+        // Short entered at 1.0, exits at 0.90 → +10%
+        let pnl = trade.close_trade(Decimal::from_str("0.90").unwrap()).unwrap();
+
+        assert_eq!(pnl, Decimal::from_str("10.0").unwrap());
+        assert_eq!(trade.paper_pnl, Some(Decimal::from_str("10.0").unwrap()));
+    }
+
+    #[test]
+    fn test_trade_close_rejects_zero_entry() {
+        let mut trade = ExperimentTrade::new(
+            "test_uuid".to_string(),
+            "wallet".to_string(),
+            "token".to_string(),
+            SignalSide::Buy,
+            ExperimentStrategy::Shield,
+        );
+
+        trade.update_paper_result(Decimal::ZERO, 250);
+
+        assert!(trade.close_trade(Decimal::from_str("1.0").unwrap()).is_err());
+        // exit_time must not be committed on failure
+        assert!(trade.exit_time.is_none());
     }
 
     #[test]
@@ -362,8 +468,8 @@ mod tests {
                 format!("uuid_{}", i),
                 "wallet".to_string(),
                 "token".to_string(),
-                "BUY".to_string(),
-                "Shield".to_string(),
+                SignalSide::Buy,
+                ExperimentStrategy::Shield,
             );
 
             trade.update_paper_result(Decimal::from_str("1.0").unwrap(), 250);
@@ -383,6 +489,6 @@ mod tests {
         assert_eq!(stats.total_trades, 3);
         assert_eq!(stats.wins, 2);
         assert_eq!(stats.losses, 1);
-        assert_eq!(stats.total_paper_pnl, Decimal::from_str("15.0").unwrap()); // 5 + 5 - 5 (0.02 SOL each)
+        assert_eq!(stats.total_paper_pnl, Decimal::from_str("15.0").unwrap()); // 5 + 5 - 5
     }
 }

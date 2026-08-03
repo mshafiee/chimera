@@ -2,7 +2,7 @@
 # Comprehensive Devnet Testing Script for Chimera
 # Tests the entire application stack in devnet mode
 
-set -e
+set -euo pipefail
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -17,7 +17,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 DOCKER_SCRIPT="$PROJECT_ROOT/docker/docker-compose.sh"
 MAX_WAIT_TIME=120  # Maximum time to wait for services to be ready
-TEST_WEBHOOK_SECRET="devnet-webhook-secret-change-me-in-production"
+# Never use a hardcoded known secret; derive from the container or generate a random one
+TEST_WEBHOOK_SECRET="${CHIMERA_SECURITY__WEBHOOK_SECRET:-$(docker exec chimera-operator printenv CHIMERA_SECURITY__WEBHOOK_SECRET 2>/dev/null || true)}"
+TEST_WEBHOOK_SECRET="${TEST_WEBHOOK_SECRET:-$(openssl rand -hex 32)}"
 
 # Counters
 PASSED=0
@@ -148,7 +150,8 @@ build_images() {
     log_section "Building Docker Images"
     
     log_info "Building images for profile: $PROFILE"
-    if bash "$DOCKER_SCRIPT" build "$PROFILE" 2>&1 | tee /tmp/chimera-build.log; then
+    bash "$DOCKER_SCRIPT" build "$PROFILE" 2>&1 | tee /tmp/chimera-build.log
+    if [ ${PIPESTATUS[0]} -eq 0 ]; then
         log_success "Docker images built successfully"
     else
         log_error "Docker build failed. Check logs above."
@@ -199,15 +202,12 @@ test_health() {
     log_section "Testing Health Endpoint"
     
     local response
-    response=$(curl -sf http://localhost:8080/api/v1/health 2>&1)
-    
-    if [ $? -eq 0 ]; then
-        log_success "Health endpoint is accessible"
-        echo "Response: $response" | head -5
-    else
+    if ! response=$(curl -sf http://localhost:8080/api/v1/health 2>&1); then
         log_error "Health endpoint failed: $response"
         return 1
     fi
+    log_success "Health endpoint is accessible"
+    echo "Response: $response" | head -5
 }
 
 # Test webhook endpoint
@@ -260,16 +260,14 @@ test_metrics() {
     log_section "Testing Metrics Endpoint"
     
     local response
-    response=$(curl -sf http://localhost:8080/metrics 2>&1)
-    
-    if [ $? -eq 0 ]; then
-        log_success "Metrics endpoint is accessible"
-        local metric_count=$(echo "$response" | grep -c "^chimera_" || echo "0")
-        log_info "Found $metric_count Chimera metrics"
-    else
+    if ! response=$(curl -sf http://localhost:8080/metrics 2>&1); then
         log_error "Metrics endpoint failed: $response"
         return 1
     fi
+    log_success "Metrics endpoint is accessible"
+    local metric_count
+    metric_count=$(echo "$response" | grep -c "^chimera_" || true)
+    log_info "Found $metric_count Chimera metrics"
 }
 
 # Test web dashboard
@@ -277,14 +275,12 @@ test_web_dashboard() {
     log_section "Testing Web Dashboard"
     
     local response
-    response=$(curl -sf http://localhost:3000 2>&1)
-    
-    if [ $? -eq 0 ]; then
-        log_success "Web dashboard is accessible"
-    else
+    if ! response=$(curl -sf --max-time 5 http://localhost:3000 2>&1); then
         log_warning "Web dashboard not accessible: $response"
         log_info "This may be normal if the web service is still starting"
+        return 0
     fi
+    log_success "Web dashboard is accessible"
 }
 
 # Test Prometheus
@@ -319,12 +315,14 @@ test_grafana() {
 check_service_status() {
     log_section "Checking Service Status"
     
-    if bash "$DOCKER_SCRIPT" status "$PROFILE" | grep -q "Up"; then
+    local status_output
+    status_output=$(bash "$DOCKER_SCRIPT" status "$PROFILE")
+    if echo "$status_output" | grep -qE 'operator.*Up' && echo "$status_output" | grep -qE 'web.*Up' && ! echo "$status_output" | grep -qE 'Exit|Restarting|unhealthy'; then
         log_success "Services are running"
-        bash "$DOCKER_SCRIPT" status "$PROFILE"
+        echo "$status_output"
     else
         log_error "Some services are not running"
-        bash "$DOCKER_SCRIPT" status "$PROFILE"
+        echo "$status_output"
         return 1
     fi
 }
@@ -339,14 +337,16 @@ run_unit_tests() {
     fi
     
     log_info "Running operator unit tests..."
-    cd "$PROJECT_ROOT/operator"
-    if cargo test --lib 2>&1 | tee /tmp/chimera-unit-tests.log; then
+    cd "$PROJECT_ROOT/operator" || { log_error "operator directory not found"; return 1; }
+    cargo test --lib 2>&1 | tee /tmp/chimera-unit-tests.log
+    local unit_rc=${PIPESTATUS[0]}
+    cd "$PROJECT_ROOT" || true
+    if [ "$unit_rc" -eq 0 ]; then
         log_success "Unit tests passed"
     else
         log_error "Unit tests failed"
         return 1
     fi
-    cd "$PROJECT_ROOT"
 }
 
 # Run integration tests
@@ -359,13 +359,15 @@ run_integration_tests() {
     fi
     
     log_info "Running operator integration tests..."
-    cd "$PROJECT_ROOT/operator"
-    if cargo test --test '*' -- --test-threads=1 2>&1 | tee /tmp/chimera-integration-tests.log; then
+    cd "$PROJECT_ROOT/operator" || { log_error "operator directory not found"; return 1; }
+    cargo test --test '*' -- --test-threads=1 2>&1 | tee /tmp/chimera-integration-tests.log
+    local integration_rc=${PIPESTATUS[0]}
+    cd "$PROJECT_ROOT" || true
+    if [ "$integration_rc" -eq 0 ]; then
         log_success "Integration tests passed"
     else
         log_warning "Some integration tests may have failed (check logs)"
     fi
-    cd "$PROJECT_ROOT"
 }
 
 # Run scout tests
@@ -383,13 +385,15 @@ run_scout_tests() {
     fi
     
     log_info "Running scout tests..."
-    cd "$PROJECT_ROOT/scout"
-    if python3 -m pytest tests/ -v 2>&1 | tee /tmp/chimera-scout-tests.log; then
+    cd "$PROJECT_ROOT/scout" || { log_error "scout directory not found"; return 1; }
+    python3 -m pytest tests/ -v 2>&1 | tee /tmp/chimera-scout-tests.log
+    local scout_rc=${PIPESTATUS[0]}
+    cd "$PROJECT_ROOT" || true
+    if [ "$scout_rc" -eq 0 ]; then
         log_success "Scout tests passed"
     else
         log_warning "Some scout tests may have failed (check logs)"
     fi
-    cd "$PROJECT_ROOT"
 }
 
 # Test database connectivity
@@ -401,14 +405,11 @@ test_database() {
         
         # Check if we can query the database
         local table_count
-        table_count=$(sqlite3 "$PROJECT_ROOT/data/chimera.db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table';" 2>&1)
-        
-        if [ $? -eq 0 ]; then
-            log_success "Database is accessible (found $table_count tables)"
-        else
+        if ! table_count=$(sqlite3 "$PROJECT_ROOT/data/chimera.db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table';" 2>&1); then
             log_error "Database query failed"
             return 1
         fi
+        log_success "Database is accessible (found $table_count tables)"
     else
         log_error "Database file not found"
         return 1

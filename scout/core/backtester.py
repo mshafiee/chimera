@@ -184,8 +184,7 @@ class BacktestSimulator:
         _use_decay = getattr(self.config, 'backtest_time_decay_enabled', False)
         _decay_half_life = getattr(self.config, 'backtest_time_decay_half_life_days', 14)
         _now = _dt.now(_tz.utc)
-        _total_weight = Decimal('0')
-        
+
         for trade in sorted_trades:
             sim_trade, rejection_reason, is_low_confidence = self._simulate_trade_roundtrip(
                 trade, min_liquidity_decimal, sol_price_current, positions, _sol_price_hour_cache,
@@ -197,6 +196,21 @@ class BacktestSimulator:
             # trades from PnL totals entirely later in the loop.
             if is_low_confidence:
                 low_confidence_trades_count += 1
+
+            # Time-decay weight, applied consistently to both the original and
+            # simulated PnL sides (naive and aware timestamps both supported).
+            weight = Decimal('1.0')
+            if _use_decay:
+                try:
+                    if trade.timestamp.tzinfo is None:
+                        trade_age_seconds = (_now.replace(tzinfo=None) - trade.timestamp).total_seconds()
+                    else:
+                        trade_age_seconds = (_now - trade.timestamp).total_seconds()
+                    age_days = max(0.0, trade_age_seconds / 86400.0)
+                    weight = float_to_decimal(2.0 ** (-age_days / _decay_half_life))
+                except (TypeError, ValueError):
+                    weight = Decimal('1.0')
+
             if sim_trade.rejected:
                 rejected_count += 1
                 rejected_details.append(
@@ -205,25 +219,16 @@ class BacktestSimulator:
                 # Track original PnL even for rejected trades so that pnl_reduction accurately reflects
                 # profits we cannot replicate due to liquidity constraints.
                 if trade.action == TradeAction.SELL and trade.pnl_sol is not None:
-                    total_original_realized_pnl += float_to_decimal(trade.pnl_sol)
+                    total_original_realized_pnl += float_to_decimal(trade.pnl_sol) * weight
             elif is_low_confidence:
                 # Exclude low-confidence trades from BOTH PnL totals to prevent survivorship bias
                 # and avoid apples-to-oranges PnL reduction calculations.
                 # They still count toward total_trades for the rejection-rate denominator.
                 pass
             else:
-                # Calculate time-decay weight for this trade
-                weight = Decimal('1.0')
-                if _use_decay and trade.timestamp.tzinfo is None:
-                    trade_age_seconds = (_now.replace(tzinfo=None) - trade.timestamp).total_seconds()
-                    age_days = max(0.0, trade_age_seconds / 86400.0)
-                    weight_float = 2.0 ** (-age_days / _decay_half_life)
-                    weight = float_to_decimal(weight_float)
-                    _total_weight += weight
-
                 # Track original realized PnL for accepted trades
                 if trade.action == TradeAction.SELL and trade.pnl_sol is not None:
-                    total_original_realized_pnl += float_to_decimal(trade.pnl_sol)
+                    total_original_realized_pnl += float_to_decimal(trade.pnl_sol) * weight
 
                 # Track costs
                 total_slippage += sim_trade.slippage_cost_sol
@@ -430,7 +435,7 @@ class BacktestSimulator:
         if not train_result.passed:
             return SimulatedResult(
                 wallet_address=wallet_address,
-                total_trades=len(sorted_trades),
+                total_trades=train_result.total_trades,
                 simulated_trades=train_result.simulated_trades,
                 rejected_trades=train_result.rejected_trades,
                 original_pnl_sol=train_result.original_pnl_sol,
@@ -438,6 +443,8 @@ class BacktestSimulator:
                 pnl_difference_sol=train_result.pnl_difference_sol,
                 total_slippage_cost_sol=train_result.total_slippage_cost_sol,
                 total_fee_cost_sol=train_result.total_fee_cost_sol,
+                rejected_trade_details=train_result.rejected_trade_details,
+                trades=train_result.trades,
                 passed=False,
                 failure_reason=f"FAILED_IN_SAMPLE: {train_result.failure_reason}",
             )
@@ -450,7 +457,7 @@ class BacktestSimulator:
         if not test_result.passed:
             return SimulatedResult(
                 wallet_address=wallet_address,
-                total_trades=len(sorted_trades),
+                total_trades=train_result.total_trades + test_result.total_trades,
                 simulated_trades=train_result.simulated_trades + test_result.simulated_trades,
                 rejected_trades=train_result.rejected_trades + test_result.rejected_trades,
                 original_pnl_sol=train_result.original_pnl_sol + test_result.original_pnl_sol,
@@ -458,11 +465,30 @@ class BacktestSimulator:
                 pnl_difference_sol=train_result.pnl_difference_sol + test_result.pnl_difference_sol,
                 total_slippage_cost_sol=train_result.total_slippage_cost_sol + test_result.total_slippage_cost_sol,
                 total_fee_cost_sol=train_result.total_fee_cost_sol + test_result.total_fee_cost_sol,
+                rejected_trade_details=train_result.rejected_trade_details + test_result.rejected_trade_details,
+                trades=train_result.trades + test_result.trades,
                 passed=False,
                 failure_reason=f"FAILED_WALK_FORWARD_OOS: {test_result.failure_reason}",
             )
-            
-        return test_result
+
+        # Return combined totals on every path so field semantics stay consistent
+        return SimulatedResult(
+            wallet_address=wallet_address,
+            total_trades=train_result.total_trades + test_result.total_trades,
+            simulated_trades=train_result.simulated_trades + test_result.simulated_trades,
+            rejected_trades=train_result.rejected_trades + test_result.rejected_trades,
+            original_pnl_sol=train_result.original_pnl_sol + test_result.original_pnl_sol,
+            simulated_pnl_sol=train_result.simulated_pnl_sol + test_result.simulated_pnl_sol,
+            pnl_difference_sol=train_result.pnl_difference_sol + test_result.pnl_difference_sol,
+            total_slippage_cost_sol=train_result.total_slippage_cost_sol + test_result.total_slippage_cost_sol,
+            total_fee_cost_sol=train_result.total_fee_cost_sol + test_result.total_fee_cost_sol,
+            rejected_trade_details=train_result.rejected_trade_details + test_result.rejected_trade_details,
+            trades=train_result.trades + test_result.trades,
+            passed=test_result.passed,
+            failure_reason=test_result.failure_reason,
+            regime_risk=test_result.regime_risk,
+            final_positions=test_result.final_positions,
+        )
 
 
     def _simulate_trade_roundtrip(
@@ -747,9 +773,21 @@ class BacktestSimulator:
                 ), "Missing token quantity for SELL", is_low_confidence
             
             if position["qty"] <= Decimal('0'):
-                # Can't sell what we don't have - this is a data issue
+                # Can't sell what we don't have - this is a data issue.
+                # Reject instead of faking a zero-PnL trade so the round-trip
+                # validation is not defeated by untracked SELLs.
                 logger.warning(f"SELL trade without position for {token[:8]}...")
-                simulated_pnl = Decimal('0')
+                return SimulatedTrade(
+                    original_trade=trade,
+                    current_liquidity_usd=historical_liquidity,
+                    liquidity_sufficient=True,
+                    estimated_slippage_percent=slippage,
+                    slippage_cost_sol=slippage_cost,
+                    fee_cost_sol=fee_cost + execution_cost,
+                    simulated_pnl_sol=Decimal('0'),
+                    rejected=True,
+                    rejection_reason="SELL without tracked position",
+                ), "SELL without tracked position", is_low_confidence
             else:
                 # Calculate realized PnL
                 sell_qty = min(token_qty, position["qty"])
@@ -763,8 +801,11 @@ class BacktestSimulator:
                     )
                 avg_cost_per_token = safe_decimal_divide(position["cost_basis_sol"], position["qty"])
                 allocated_cost_basis = avg_cost_per_token * sell_qty
-                
-                # Realized PnL = proceeds - allocated cost basis
+
+                # Realized PnL = proceeds - allocated cost basis.
+                # Prorate proceeds to the matched qty so unmatched tokens don't
+                # contribute profit with zero cost basis.
+                net_sol_received = trade_size_sol * safe_decimal_divide(sell_qty, token_qty) - total_cost
                 simulated_pnl = net_sol_received - allocated_cost_basis
                 
                 # DIAGNOSTIC LOGGING FOR THE PROBLEMATIC WALLET

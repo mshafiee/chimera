@@ -1,6 +1,8 @@
 import { useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 
+export const DASHBOARD_UPDATE_EVENT = 'dashboard:update'
+
 interface DashboardWebSocketMessage {
   type: 'risk_update' | 'signal_update' | 'portfolio_heat_update' | 'consensus_alert' | 'quality_change'
   data: {
@@ -53,55 +55,78 @@ export function useDashboardWebSocket({
     if (!enabled) return
 
     const handleDashboardEvent = (event: CustomEvent<DashboardWebSocketMessage>) => {
-      const { type, data } = event.detail
+      const detail = event.detail
+      const type = detail?.type
+      const data = detail?.data
+      if (!type || !data) {
+        console.warn('[Dashboard WebSocket] Ignoring malformed event', event.detail)
+        return
+      }
 
-      console.log('[Dashboard WebSocket] Received event:', type, data)
+      if (import.meta.env.DEV) {
+        console.log('[Dashboard WebSocket] Received event:', type, data)
+      }
 
       // Invalidate relevant queries
       switch (type) {
         case 'risk_update':
-          queryClient.invalidateQueries({ queryKey: ['risk'] })
+          void queryClient.invalidateQueries({ queryKey: ['risk'] }).catch(() => {
+            console.error('[Dashboard WebSocket] Failed to refresh risk data')
+          })
           eventHandlerRef.current.onRiskUpdate?.(data)
           break
         case 'signal_update':
-          queryClient.invalidateQueries({ queryKey: ['signals'] })
+          void queryClient.invalidateQueries({ queryKey: ['signals'] }).catch(() => {
+            console.error('[Dashboard WebSocket] Failed to refresh signal data')
+          })
           eventHandlerRef.current.onSignalUpdate?.(data)
           break
         case 'portfolio_heat_update':
-          queryClient.invalidateQueries({ queryKey: ['risk', 'portfolio'] })
+          void queryClient.invalidateQueries({ queryKey: ['risk', 'portfolio'] }).catch(() => {
+            console.error('[Dashboard WebSocket] Failed to refresh portfolio heat data')
+          })
           eventHandlerRef.current.onHeatAlert?.(data)
           break
         case 'consensus_alert':
-          queryClient.invalidateQueries({ queryKey: ['signals', 'consensus'] })
+          void queryClient.invalidateQueries({ queryKey: ['signals', 'consensus'] }).catch(() => {
+            console.error('[Dashboard WebSocket] Failed to refresh consensus data')
+          })
           eventHandlerRef.current.onConsensusAlert?.(data)
           break
         case 'quality_change':
-          queryClient.invalidateQueries({ queryKey: ['signals', 'quality'] })
+          void queryClient.invalidateQueries({ queryKey: ['signals', 'quality'] }).catch(() => {
+            console.error('[Dashboard WebSocket] Failed to refresh quality data')
+          })
           eventHandlerRef.current.onQualityChange?.(data)
           break
+        default:
+          console.warn('[Dashboard WebSocket] Ignoring unknown event type:', type)
       }
     }
 
     // Listen for custom events from WebSocket hook
-    window.addEventListener('dashboard:update' as any, handleDashboardEvent as any)
+    window.addEventListener(DASHBOARD_UPDATE_EVENT, handleDashboardEvent as EventListener)
 
     return () => {
-      window.removeEventListener('dashboard:update' as any, handleDashboardEvent as any)
+      window.removeEventListener(DASHBOARD_UPDATE_EVENT, handleDashboardEvent as EventListener)
     }
   }, [enabled, queryClient])
 
   // Manual refresh trigger
   const refreshRiskData = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['risk'] })
+    void queryClient.invalidateQueries({ queryKey: ['risk'] })
   }, [queryClient])
 
   const refreshSignalData = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['signals'] })
+    void queryClient.invalidateQueries({ queryKey: ['signals'] })
   }, [queryClient])
 
   const refreshAllData = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['risk'] })
-    queryClient.invalidateQueries({ queryKey: ['signals'] })
+    void queryClient.invalidateQueries({ queryKey: ['risk'] })
+    void queryClient.invalidateQueries({ queryKey: ['signals'] })
+    void queryClient.invalidateQueries({ queryKey: ['risk', 'portfolio'] })
+    void queryClient.invalidateQueries({ queryKey: ['signals', 'consensus'] })
+    void queryClient.invalidateQueries({ queryKey: ['signals', 'quality'] })
   }, [queryClient])
 
   return {

@@ -24,20 +24,22 @@ fn test_market_regime_multipliers() {
 #[test]
 fn test_market_regime_parsing() {
     // Test that market regimes parse correctly from strings
-    assert_eq!(MarketRegime::from_str("BULL"), MarketRegime::Bull);
-    assert_eq!(MarketRegime::from_str("BEAR"), MarketRegime::Bear);
-    assert_eq!(MarketRegime::from_str("VOLATILE"), MarketRegime::Volatile);
-    assert_eq!(MarketRegime::from_str("NEUTRAL"), MarketRegime::Neutral);
-    assert_eq!(MarketRegime::from_str("bull"), MarketRegime::Bull);
-    assert_eq!(MarketRegime::from_str("bear"), MarketRegime::Bear);
-    assert_eq!(MarketRegime::from_str("unknown"), MarketRegime::Neutral);
+    assert_eq!(MarketRegime::parse_regime("BULL"), MarketRegime::Bull);
+    assert_eq!(MarketRegime::parse_regime("BEAR"), MarketRegime::Bear);
+    assert_eq!(MarketRegime::parse_regime("VOLATILE"), MarketRegime::Volatile);
+    assert_eq!(MarketRegime::parse_regime("NEUTRAL"), MarketRegime::Neutral);
+    assert_eq!(MarketRegime::parse_regime("bull"), MarketRegime::Bull);
+    assert_eq!(MarketRegime::parse_regime("bear"), MarketRegime::Bear);
+    // Production maps unknown strings to Neutral BUT logs an explicit warning
+    // (stop_loss.rs from_str), so misconfiguration is surfaced, not silent.
+    assert_eq!(MarketRegime::parse_regime("unknown"), MarketRegime::Neutral);
 
     println!("✓ Market regime parsing works");
 }
 
 #[test]
-fn test_market_regime_display() {
-    // Test market regime display and ordering
+fn test_market_regime_multiplier_ordering() {
+    // Test market regime multiplier uniqueness and ordering
     let regimes = vec![
         MarketRegime::Bull,
         MarketRegime::Bear,
@@ -72,7 +74,12 @@ fn test_market_regime_display() {
 
 #[test]
 fn test_atr_formula_logic() {
-    // Test ATR-based stop-loss formula logic without full setup
+    // Mirrors the production formula in StopLossManager::calculate_atr_stop_loss
+    // (stop_loss.rs): stop_price = entry_price - entry_price * atr_value *
+    // atr_multiplier * regime_multiplier / 100. The regime multiplier comes
+    // from the production MarketRegime::atr_multiplier(); the base multiplier
+    // is hardcoded here because the production path reads it from
+    // ProfitManagementConfig (unreachable without a Database-backed manager).
     let entry_price = dec!(100.0);
     let atr_value = dec!(5.0);
     let atr_multiplier = dec!(1.5);

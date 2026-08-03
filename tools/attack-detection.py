@@ -11,9 +11,8 @@ This service:
 5. Generates alerts for critical threats
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Response
+from fastapi import FastAPI, HTTPException, Response
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
-from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import redis
@@ -21,7 +20,6 @@ import uvicorn
 import logging
 from datetime import datetime, timedelta
 import re
-import json
 from collections import defaultdict
 from dataclasses import dataclass
 import asyncio
@@ -38,8 +36,6 @@ logger = logging.getLogger(__name__)
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 METRICS_PORT = int(os.getenv("METRICS_PORT", "8002"))
-ALERT_THRESHOLD = int(os.getenv("ALERT_THRESHOLD", "10"))  # Default 10 events
-
 # Detection thresholds
 BRUTE_FORCE_THRESHOLD = 100  # failed auths per minute per IP
 DDOS_MULTIPLIER = 10  # traffic multiplier for DDoS detection
@@ -52,9 +48,6 @@ app = FastAPI(
     description="Real-time attack pattern detection and threat analysis",
     version="1.0.0"
 )
-
-# Instrumentator for Prometheus metrics
-instrumentator = Instrumentator(app)
 
 # Redis connection for state tracking
 try:
@@ -76,14 +69,14 @@ except Exception as e:
 attacks_detected_total = Counter(
     "chimera_attacks_detected_total",
     "Total attacks detected by pattern type",
-    labelnames=["attack_type", "severity", "source_ip"]
+    labelnames=["attack_type", "severity"]
 )
 
 # Specific attack type metrics
 brute_force_attempts_total = Counter(
     "chimera_brute_force_attempts_total",
     "Brute force authentication attempts detected",
-    labelnames=["source_ip", "target"]
+    labelnames=["target"]
 )
 
 ddos_attacks_total = Counter(
@@ -101,7 +94,7 @@ webhook_attacks_total = Counter(
 injection_attempts_total = Counter(
     "chimera_injection_attempts_total",
     "SQL injection and path traversal attempts",
-    labelnames=["injection_type", "severity", "source_ip"]
+    labelnames=["injection_type", "severity"]
 )
 
 # Active threat tracking
@@ -128,7 +121,7 @@ class AttackPattern:
 attack_patterns = [
     AttackPattern(
         "sql_injection",
-        re.compile(r"(union|select|insert|update|delete|drop|create|alter|grant|revoke)\s+", re.IGNORECASE),
+        re.compile(r"\b(union|select|insert|update|delete|drop|create|alter|grant|revoke)\b\s+[^\s]*\s*('|--|;|/\*)", re.IGNORECASE),
         "high",
         "SQL injection attempt detected"
     ),
@@ -140,7 +133,7 @@ attack_patterns = [
     ),
     AttackPattern(
         "command_injection",
-        re.compile(r"(;|\||&|`|\$\()", re.IGNORECASE),
+        re.compile(r"(?:[;&|]\s*)(?:cat|id|whoami|rm|wget|curl|nc|bash|sh|cmd|powershell|exec|system)\b|`|\$\(", re.IGNORECASE),
         "critical",
         "Command injection attempt detected"
     ),
@@ -152,7 +145,7 @@ attack_patterns = [
     ),
     AttackPattern(
         "ldap_injection",
-        re.compile(r"(\*\)|\(|\|\||&)", re.IGNORECASE),
+        re.compile(r"(\*\)\(|\(\|\(|\(\&\(|\)\)\()", re.IGNORECASE),
         "medium",
         "LDAP injection attempt detected"
     ),
@@ -184,7 +177,7 @@ class AttackDetector:
             # Add to attack window for this IP
             try:
                 event_time = datetime.fromisoformat(timestamp)
-            except:
+            except (ValueError, TypeError):
                 event_time = datetime.now()
 
             self.attack_windows[source_ip]["auth_failures"].append(event_time)
@@ -195,6 +188,37 @@ class AttackDetector:
                 t for t in self.attack_windows[source_ip]["auth_failures"]
                 if t > cutoff_time
             ]
+            # Prune the key once its window is empty so memory stays bounded
+            if not self.attack_windows[source_ip]["auth_failures"]:
+                self.attack_windows[source_ip].pop("auth_failures", None)
+            if not self.attack_windows[source_ip]:
+                self.attack_windows.pop(source_ip, None)
+
+            # Track global failures for distributed brute-force detection
+            self.attack_windows["_global"]["auth_failures"].append(event_time)
+            self.attack_windows["_global"]["auth_failures"] = [
+                t for t in self.attack_windows["_global"]["auth_failures"]
+                if t > cutoff_time
+            ]
+            global_failures = len(self.attack_windows["_global"]["auth_failures"])
+            if not self.attack_windows["_global"]["auth_failures"]:
+                self.attack_windows["_global"].pop("auth_failures", None)
+            if not self.attack_windows["_global"]:
+                self.attack_windows.pop("_global", None)
+
+            if global_failures > DISTRIBUTED_BRUTE_FORCE_THRESHOLD:
+                distributed_threat = {
+                    "type": "distributed_brute_force",
+                    "severity": "critical",
+                    "source_ip": "distributed",
+                    "detection_time": event_time.isoformat(),
+                    "details": {
+                        "attempts": global_failures,
+                        "duration": "60s",
+                        "threshold": DISTRIBUTED_BRUTE_FORCE_THRESHOLD
+                    }
+                }
+                await self._register_threat(distributed_threat)
 
             # Check threshold
             recent_failures = len(self.attack_windows[source_ip]["auth_failures"])
@@ -213,7 +237,7 @@ class AttackDetector:
                 }
 
                 await self._register_threat(threat)
-                brute_force_attempts_total.labels(source_ip=source_ip, target="auth").inc()
+                brute_force_attempts_total.labels(target="auth").inc()
                 return threat
 
             return None
@@ -232,7 +256,7 @@ class AttackDetector:
             # Track request rates per endpoint
             try:
                 event_time = datetime.fromisoformat(timestamp)
-            except:
+            except (ValueError, TypeError):
                 event_time = datetime.now()
 
             # Add to baseline tracking
@@ -244,6 +268,11 @@ class AttackDetector:
                 t for t in self.attack_windows[endpoint]["requests"]
                 if t > cutoff_time
             ]
+            # Prune the key once its window is empty so memory stays bounded
+            if not self.attack_windows[endpoint]["requests"]:
+                self.attack_windows[endpoint].pop("requests", None)
+            if not self.attack_windows[endpoint]:
+                self.attack_windows.pop(endpoint, None)
 
             current_rate = len(self.attack_windows[endpoint]["requests"])
 
@@ -296,7 +325,7 @@ class AttackDetector:
             timestamp = event.get("timestamp", datetime.now().isoformat())
             try:
                 event_time = datetime.fromisoformat(timestamp)
-            except:
+            except (ValueError, TypeError):
                 event_time = datetime.now()
 
             # Track 429 responses (rate limit violations)
@@ -363,8 +392,7 @@ class AttackDetector:
                     await self._register_threat(threat)
                     injection_attempts_total.labels(
                         injection_type=pattern.name,
-                        severity=pattern.severity,
-                        source_ip=source_ip
+                        severity=pattern.severity
                     ).inc()
                     return threat
 
@@ -384,6 +412,10 @@ class AttackDetector:
             # Update gauge
             active_threats.labels(
                 threat_type=threat["type"],
+                severity=threat["severity"]
+            ).inc()
+            attacks_detected_total.labels(
+                attack_type=threat["type"],
                 severity=threat["severity"]
             ).inc()
 
@@ -459,7 +491,7 @@ async def health_check():
     """Health check endpoint"""
     try:
         if redis_client:
-            redis_client.ping()
+            await asyncio.to_thread(redis_client.ping)
         return {"status": "healthy", "detector_active": attack_detector.processing}
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Service unhealthy: {e}")
@@ -502,7 +534,7 @@ async def get_active_threats():
     try:
         # Clean up old threats (>1 hour)
         current_time = datetime.now()
-        active_threats = {}
+        active_now = {}
 
         for threat_id, threat_data in active_threats_store.items():
             try:
@@ -510,23 +542,29 @@ async def get_active_threats():
                 time_diff = (current_time - threat_time).total_seconds()
 
                 if time_diff < 3600:  # < 1 hour
-                    active_threats[threat_id] = threat_data
-            except:
+                    active_now[threat_id] = threat_data
+                else:
+                    # Expired: keep the gauge in sync
+                    active_threats.labels(
+                        threat_type=threat_data.get("type", "unknown"),
+                        severity=threat_data.get("severity", "unknown")
+                    ).dec()
+            except (ValueError, TypeError):
                 pass
 
         # Update store
         active_threats_store.clear()
-        active_threats_store.update(active_threats)
+        active_threats_store.update(active_now)
 
         # Count by type and severity
         threat_counts = defaultdict(lambda: defaultdict(int))
-        for threat in active_threats.values():
+        for threat in active_now.values():
             threat_counts[threat.get("type", "unknown")][threat.get("severity", "unknown")] += 1
 
         return {
-            "total_threats": len(active_threats),
+            "total_threats": len(active_now),
             "threats_by_type": {k: dict(v) for k, v in threat_counts.items()},
-            "recent_threats": list(active_threats.values())[-20:],
+            "recent_threats": list(active_now.values())[-20:],
             "last_update": current_time.isoformat()
         }
 
@@ -548,6 +586,7 @@ async def get_threat_history(limit: int = 100):
 async def clear_threats():
     """Clear all active threats (use with caution)"""
     try:
+        threats_cleared = len(active_threats_store)
         active_threats_store.clear()
 
         # Reset gauges
@@ -555,7 +594,7 @@ async def clear_threats():
             for severity in ["low", "medium", "high", "critical"]:
                 active_threats.labels(threat_type=threat_type, severity=severity).set(0)
 
-        return {"status": "cleared", "threats_cleared": len(active_threats_store)}
+        return {"status": "cleared", "threats_cleared": threats_cleared}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error clearing threats: {e}")
 
@@ -564,6 +603,7 @@ async def clear_threats():
 async def startup_event():
     """Initialize attack detection service on startup"""
     logger.info("Starting Chimera Attack Detection Service")
+    attack_detector.processing = True
     logger.info(f"Detection thresholds - Brute Force: {BRUTE_FORCE_THRESHOLD}, DDoS Multiplier: {DDOS_MULTIPLIER}")
     logger.info("Attack detection service started successfully")
 

@@ -11,7 +11,6 @@ from typing import Optional
 
 from .analyzer import WalletAnalyzer
 from .models import TradeAction
-from .utils import utcnow
 from .wqs import WalletMetrics
 
 
@@ -54,14 +53,16 @@ def compute_in_sample_metrics(
         / max(1, len(in_sample_trades))
     )
 
-    # Last trade timestamp from in-sample
-    last_trade = (
-        in_sample_trades[-1].timestamp.isoformat()
-        if in_sample_trades else None
-    )
+    # Trade sizes (in-sample only) for archetype adjustments
+    trade_sizes = [float(t.amount_sol) for t in in_sample_trades]
 
-    # ROI 7d from last 7 days of in-sample period
-    cutoff_7d = utcnow() - timedelta(days=7)
+    # Last trade timestamp from in-sample
+    last_trade = in_sample_trades[-1].timestamp.isoformat()
+
+    # ROI 7d from the LAST 7 DAYS OF THE IN-SAMPLE PERIOD. Anchoring to
+    # utcnow() is wrong: the in-sample window typically ended in the past, so
+    # the window would be empty (or misaligned) and roi_7d forced to 0.
+    cutoff_7d = in_sample_trades[-1].timestamp - timedelta(days=7)
     in_sample_7d = [t for t in in_sample_trades if t.timestamp >= cutoff_7d]
     roi_7d = (
         analyzer._calculate_roi_from_trades(in_sample_7d)
@@ -71,11 +72,32 @@ def compute_in_sample_metrics(
     # Win streak consistency from in-sample
     win_streak = analyzer._calculate_win_streak_consistency(in_sample_trades)
 
+    # Risk/behavior metrics recomputed from the in-sample window. The
+    # full-history versions include the holdout (newest 30%) trades, which
+    # would reintroduce look-ahead bias into the WQS score.
+    _, _, _, per_trade_pnl, _ = analyzer._replay_positions(in_sample_trades)
+    pnl_list = [float(v) for v in per_trade_pnl.values()]
+    realized_profit = sum(max(0.0, p) for p in pnl_list)
+    if len(pnl_list) >= 2:
+        mean_pnl = sum(pnl_list) / len(pnl_list)
+        volatility_30d = (sum((p - mean_pnl) ** 2 for p in pnl_list) / len(pnl_list)) ** 0.5
+        downsides = [p for p in pnl_list if p < 0]
+        downside_dev = (sum(p * p for p in downsides) / len(downsides)) ** 0.5 if downsides else 0.0
+        sortino_ratio = (mean_pnl / downside_dev) if downside_dev > 0 else 0.0
+    else:
+        volatility_30d = 0.0
+        sortino_ratio = 0.0
+
+    # Avg hold time from in-sample trades (seconds -> hours)
+    hold_seconds = analyzer._calculate_avg_hold_time(in_sample_trades)
+    avg_hold_time_hours = (hold_seconds / 3600.0) if hold_seconds is not None else None
+
     return WalletMetrics(
         address=full_metrics.address,
         # Recalculated from in-sample
         roi_7d=roi_7d,
         roi_30d=roi,  # in-sample spans ~21d — best available proxy for 30d
+        roi_90d=roi,  # same window; avoids full-history look-ahead
         trade_count_30d=trade_count,
         win_rate=win_rate,
         max_drawdown_30d=max_drawdown,
@@ -83,8 +105,19 @@ def compute_in_sample_metrics(
         last_trade_at=last_trade,
         profit_factor=profit_factor,
         win_streak_consistency=win_streak,
+        sortino_ratio=sortino_ratio,
+        volatility_30d=volatility_30d,
+        trade_sizes=trade_sizes,
+        avg_hold_time_hours=avg_hold_time_hours,
+        total_realized_profit_sol=realized_profit,
+        # Unrealized amounts excluded (marking open positions to market would
+        # use current prices — pure look-ahead in a historical window)
+        total_unrealized_loss_sol=None,
+        total_unrealized_gain_sol=None,
+        # Entry delay requires async token-creation lookups; excluded rather
+        # than leaking the full-history value
+        avg_entry_delay_seconds=None,
         # Carried from full metrics (structural, no future leakage)
-        roi_90d=full_metrics.roi_90d,
         is_fresh_wallet=full_metrics.is_fresh_wallet,
         is_unproven=full_metrics.is_unproven,
         parse_rate=full_metrics.parse_rate,
@@ -96,12 +129,4 @@ def compute_in_sample_metrics(
         unique_token_categories=full_metrics.unique_token_categories,
         archetype=full_metrics.archetype,
         trajectory=full_metrics.trajectory,
-        sortino_ratio=full_metrics.sortino_ratio,
-        avg_entry_delay_seconds=full_metrics.avg_entry_delay_seconds,
-        total_unrealized_loss_sol=full_metrics.total_unrealized_loss_sol,
-        total_realized_profit_sol=full_metrics.total_realized_profit_sol,
-        total_unrealized_gain_sol=full_metrics.total_unrealized_gain_sol,
-        volatility_30d=full_metrics.volatility_30d,
-        trade_sizes=full_metrics.trade_sizes,
-        avg_hold_time_hours=full_metrics.avg_hold_time_hours,
     )

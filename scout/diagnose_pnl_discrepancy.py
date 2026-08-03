@@ -57,14 +57,13 @@ async def diagnose_wallet(wallet_address: str):
     print("\n--- Analyzer ROI Calculation ---")
     analyzer = WalletAnalyzer(
         helius_api_key=helius_api_key,
-        discovery_hours=168,
-        wallet_tx_limit=500,
-        wallet_tx_max_pages=20,
+        max_wallets=50,
     )
 
-    # We need to create a simplified metrics object to test ROI calculation
-    # For now, let's just look at the trade data directly
-    print(f"\nTrade details (first 10 trades):")
+    analyzer_roi = analyzer._calculate_roi_from_trades(actual_trades)
+    print(f"✓ Analyzer ROI (FIFO replay of trades): {analyzer_roi:.2f}%")
+
+    print("\nTrade details (first 10 trades):")
     print(f"{'Idx':<4} {'Action':<6} {'Sol Amount':<12} {'Token Amount':<12} {'PnL SOL':<10} {'Liquidity':<15} {'Price SOL':<10}")
     print("-" * 90)
 
@@ -91,7 +90,7 @@ async def diagnose_wallet(wallet_address: str):
 
     # Now simulate using backtester
     print(f"\n{'='*80}")
-    print(f"--- Backtest Simulation ---")
+    print("--- Backtest Simulation ---")
     print(f"{'='*80}\n")
 
     # Initialize liquidity provider
@@ -125,19 +124,26 @@ async def diagnose_wallet(wallet_address: str):
     print(f"✓ Difference: ${result.pnl_difference_sol:.4f} SOL")
 
     if result.passed:
-        print(f"\n✅ Wallet PASSED backtest!")
+        print("\n✅ Wallet PASSED backtest!")
     else:
         print(f"\n❌ Wallet FAILED backtest: {result.failure_reason}")
 
+    # Compare the analyzer's ROI figure with the backtest outcome
+    print("\n--- Discrepancy Summary ---")
+    print(f"Analyzer ROI (FIFO replay): {analyzer_roi:.2f}%")
+    print(f"Backtest simulated PnL: {result.simulated_pnl_sol:.4f} SOL (original: {result.original_pnl_sol:.4f} SOL)")
+    print(f"Backtest rejected {result.rejected_trades} of {result.total_trades} trades")
+
     # Show rejected trades
     if result.rejected_trades > 0:
-        print(f"\nRejected trades (showing first 5):")
+        print("\nRejected trades (showing first 5):")
         rejected_count = 0
-        for sim_trade in result.simulated_trades:
+        for sim_trade in result.trades:
             if sim_trade.rejected:
                 print(f"\n  Trade {sim_trade.original_trade.token_symbol}:")
                 print(f"    Action: {sim_trade.original_trade.action.value}")
-                print(f"    Size: {float(sim_trade.original_trade.amount_sol) if sim_trade.original_trade.amount_sol else sim_trade.original_trade.sol_amount:.4f} SOL")
+                size = float(sim_trade.original_trade.amount_sol or sim_trade.original_trade.sol_amount or 0)
+                print(f"    Size: {size:.4f} SOL")
                 print(f"    Liquidity: ${sim_trade.current_liquidity_usd:.0f}")
                 print(f"    Reason: {sim_trade.rejection_reason}")
                 rejected_count += 1

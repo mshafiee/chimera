@@ -46,24 +46,54 @@ def compute_cluster_scores(
 
     cluster_metrics: Dict[str, Dict[str, float]] = {}
 
-    for cid, members in clusters.items():
-        n = max(1, len(members))
-        wqs_scores = [m.get("wqs_score", 0.0) or 0.0 for m in members]
-        roi_vals = [m.get("roi_30d", 0.0) or 0.0 for m in members]
-        pf_vals = [m.get("profit_factor", 0.0) or 0.0 for m in members]
+    for cid in list(clusters.keys()):
+        members = clusters[cid]
 
-        mean_wqs = sum(wqs_scores) / n if wqs_scores else 0.0
-        mean_roi = sum(roi_vals) / n if roi_vals else 0.0
-        mean_pf = sum(pf_vals) / n if pf_vals else 1.0
-        profitable = sum(1 for r in roi_vals if r > 0)
-        profit_rate = profitable / n if n > 0 else 0.0
+        # Size the cluster from cluster_data metadata (members list /
+        # cluster_size) so a filtered/partial record list can't mis-size it
+        declared_members: List[str] = []
+        declared_size: Optional[int] = None
+        for waddr, cinfo in cluster_data.items():
+            if cinfo.get("cluster_id", waddr) != cid:
+                continue
+            members_list = cinfo.get("members")
+            if isinstance(members_list, list) and members_list:
+                declared_members = members_list
+            size = cinfo.get("cluster_size")
+            if isinstance(size, (int, float)) and size > 0:
+                declared_size = max(declared_size or 0, int(size))
 
-        # Cluster risk score: high when members have correlated low performance
+        if declared_size is not None:
+            n = max(1, declared_size)
+        elif declared_members:
+            n = max(1, len(declared_members))
+        else:
+            n = max(1, len(members))
+
+        # Skip clusters with no actual member records — an all-zero summary
+        # would mislead consumers
+        if not members:
+            continue
+
+        # Aggregate metrics only over members that actually have the metric,
+        # so missing data doesn't masquerade as poor performance
+        wqs_members = [m for m in members if m.get("wqs_score") is not None]
+        roi_members = [m for m in members if m.get("roi_30d") is not None]
+        pf_members = [m for m in members if m.get("profit_factor") is not None]
+
+        mean_wqs = sum(m.get("wqs_score", 0.0) for m in wqs_members) / len(wqs_members) if wqs_members else 0.0
+        mean_roi = sum(m.get("roi_30d", 0.0) for m in roi_members) / len(roi_members) if roi_members else 0.0
+        mean_pf = sum(m.get("profit_factor", 0.0) for m in pf_members) / len(pf_members) if pf_members else 1.0
+        profitable = sum(1 for m in roi_members if m.get("roi_30d") > 0)
+        profit_rate = profitable / len(roi_members) if roi_members else 0.0
+
+        # Cluster risk score: high when members have correlated low performance.
+        # The mean-ROI / profit-factor adders only fire when real data exists.
         if n > 1:
             risk_score = 1.0 - profit_rate
-            if mean_roi < 0:
+            if roi_members and mean_roi < 0:
                 risk_score += 0.3  # Extra penalty for negative mean ROI
-            if mean_pf < 1.0:
+            if pf_members and mean_pf < 1.0:
                 risk_score += 0.2  # Losing cluster
         else:
             risk_score = 0.0  # Solo wallet has no cluster risk
@@ -121,12 +151,11 @@ def apply_cluster_adjustment(
     if n <= 1:
         return wqs_score  # No cluster data for solo wallets
 
-    # Bonus for high-quality clusters
+    # Bonus for high-quality clusters; mutually exclusive with the penalty so
+    # a profitable cluster is never penalized by the risk adders at the same time
     if profit_rate > 0.8 and cmetrics.get("mean_wqs", 0) > 60:
         wqs_score += 5.0
-
-    # Penalty for high-risk clusters
-    if risk_score > 0.5:
+    elif risk_score > 0.5:
         wqs_score -= risk_score * 15.0  # Up to -15 for max risk
 
     return max(0.0, min(100.0, wqs_score))

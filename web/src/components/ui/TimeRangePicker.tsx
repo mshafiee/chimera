@@ -66,8 +66,9 @@ export function DateRangePicker({
     <div className={clsx('flex items-center gap-2', className)}>
       <div className="flex items-center gap-2 bg-surface-light rounded-lg p-2">
         <div className="flex flex-col">
-          <label className="text-xs text-text-muted mb-1">From</label>
+          <label htmlFor="date-range-from" className="text-xs text-text-muted mb-1">From</label>
           <input
+            id="date-range-from"
             type="date"
             value={formatDate(startDate)}
             onChange={(e) => onStartChange(e.target.value ? new Date(e.target.value) : null)}
@@ -75,8 +76,9 @@ export function DateRangePicker({
           />
         </div>
         <div className="flex flex-col">
-          <label className="text-xs text-text-muted mb-1">To</label>
+          <label htmlFor="date-range-to" className="text-xs text-text-muted mb-1">To</label>
           <input
+            id="date-range-to"
             type="date"
             value={formatDate(endDate)}
             onChange={(e) => onEndChange(e.target.value ? new Date(e.target.value) : null)}

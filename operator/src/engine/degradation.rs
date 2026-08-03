@@ -11,7 +11,6 @@
 use crate::error::{AppError, AppResult};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::time::sleep;
 
 /// Initial backoff delay in milliseconds
 const INITIAL_BACKOFF_MS: u64 = 100;
@@ -31,7 +30,7 @@ static MEMORY_PRESSURE: AtomicBool = AtomicBool::new(false);
 /// Global RPC rate limit backoff multiplier
 static RPC_BACKOFF_MULTIPLIER: AtomicU64 = AtomicU64::new(1);
 
-/// Check memory pressure and return current usage percentage
+/// Check memory pressure and return the current usage **fraction** (0.0–1.0).
 pub async fn check_memory_pressure() -> AppResult<f64> {
     tokio::task::spawn_blocking(|| {
         let mut sys = sysinfo::System::new();
@@ -66,52 +65,14 @@ pub fn is_memory_pressure_high() -> bool {
     MEMORY_PRESSURE.load(Ordering::Relaxed)
 }
 
-/// Check disk space and return free space percentage (0.0–1.0)
+/// Check disk space and return free space percentage (0.0–1.0).
 pub async fn check_disk_space(path: &std::path::Path) -> AppResult<f64> {
     #[cfg(unix)]
     {
         let path_str = path.to_string_lossy().to_string();
-        tokio::task::spawn_blocking(move || -> AppResult<f64> {
-            let output = std::process::Command::new("df")
-                .arg("-k")
-                .arg(&path_str)
-                .output()
-                .map_err(|e| AppError::Internal(format!("df command failed: {}", e)))?;
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            // df -k output: header line + data line
-            // Columns: Filesystem  1K-blocks  Used  Available  Use%  Mountpoint
-            let line = stdout
-                .lines()
-                .nth(1)
-                .ok_or_else(|| AppError::Internal("df output missing data line".to_string()))?;
-
-            let cols: Vec<&str> = line.split_whitespace().collect();
-            if cols.len() < 5 {
-                return Err(AppError::Internal(format!(
-                    "Unexpected df output: {}",
-                    line
-                )));
-            }
-
-            let total: f64 = cols[1].parse().unwrap_or(1.0);
-            let avail: f64 = cols[3].parse().unwrap_or(0.0);
-
-            if total == 0.0 {
-                return Ok(0.0);
-            }
-
-            tracing::debug!(
-                path = path_str,
-                total_kb = total,
-                avail_kb = avail,
-                free_pct = avail / total,
-                "Disk space check"
-            );
-            Ok(avail / total)
-        })
-        .await
-        .map_err(|e| AppError::Internal(format!("spawn_blocking join error: {}", e)))?
+        tokio::task::spawn_blocking(move || df_free_fraction(&path_str))
+            .await
+            .map_err(|e| AppError::Internal(format!("spawn_blocking join error: {}", e)))?
     }
 
     #[cfg(not(unix))]
@@ -121,11 +82,73 @@ pub async fn check_disk_space(path: &std::path::Path) -> AppResult<f64> {
     }
 }
 
+/// Run `df -k` and parse the free-space fraction (0.0–1.0).
+///
+/// Fail-deadly: a failed `df` run, a non-zero exit status, or malformed output
+/// propagates as an `AppError` instead of being read as "0% free" (which would
+/// drive `prune_logs_if_needed` into aggressive deletion on a transient error).
+#[cfg(unix)]
+fn df_free_fraction(path: &str) -> AppResult<f64> {
+    let output = std::process::Command::new("df")
+        .arg("-k")
+        .arg(path)
+        .output()
+        .map_err(|e| AppError::Internal(format!("df command failed: {}", e)))?;
+
+    if !output.status.success() {
+        return Err(AppError::Internal(format!(
+            "df exited with status {}",
+            output.status
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // df -k output: header line + data line
+    // Columns: Filesystem  1K-blocks  Used  Available  Use%  Mountpoint
+    let line = stdout
+        .lines()
+        .nth(1)
+        .ok_or_else(|| AppError::Internal("df output missing data line".to_string()))?;
+
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    if cols.len() < 5 {
+        return Err(AppError::Internal(format!(
+            "Unexpected df output: {}",
+            line
+        )));
+    }
+
+    let total: f64 = cols[1]
+        .parse()
+        .map_err(|_| AppError::Internal(format!("Unparseable df total: {}", cols[1])))?;
+    let avail: f64 = cols[3]
+        .parse()
+        .map_err(|_| AppError::Internal(format!("Unparseable df available: {}", cols[3])))?;
+
+    if total == 0.0 {
+        return Ok(0.0);
+    }
+
+    tracing::debug!(
+        path = path,
+        total_kb = total,
+        avail_kb = avail,
+        free_pct = avail / total,
+        "Disk space check"
+    );
+    Ok(avail / total)
+}
+
 /// Handle RPC rate limit with exponential backoff
 ///
 /// Returns the delay to wait before retrying
 pub async fn handle_rpc_rate_limit() -> Duration {
-    let multiplier = RPC_BACKOFF_MULTIPLIER.load(Ordering::Relaxed);
+    // fetch_update makes the read-and-double one atomic operation, so two
+    // concurrent rate-limit hits cannot both read the same multiplier and
+    // both store the same doubled value (losing an increment).
+    let multiplier = RPC_BACKOFF_MULTIPLIER
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |m| Some((m * 2).min(64)))
+        .unwrap_or(1);
     let delay_ms = INITIAL_BACKOFF_MS * multiplier;
 
     // Cap at max backoff
@@ -136,10 +159,6 @@ pub async fn handle_rpc_rate_limit() -> Duration {
         delay_ms = capped_delay,
         "RPC rate limit hit, applying exponential backoff"
     );
-
-    // Increase multiplier for next time (with cap)
-    let new_multiplier = (multiplier * 2).min(64);
-    RPC_BACKOFF_MULTIPLIER.store(new_multiplier, Ordering::Relaxed);
 
     Duration::from_millis(capped_delay)
 }
@@ -157,45 +176,35 @@ pub fn get_rpc_backoff_multiplier() -> u64 {
 /// Disk space critical threshold (percentage free). Below this, pruning becomes aggressive.
 const DISK_SPACE_CRITICAL_THRESHOLD: f64 = 0.05;
 
-/// Check whether a path points at a log file (current, rotated, or compressed).
+/// Check whether a path points at one of OUR log files (active, rotated, or
+/// compressed). Restricted to the operator log naming (`operator.log`,
+/// `operator.log.*`, and their `.gz` forms) so unrelated `.log`/`.gz` archives
+/// are never touched. The active `operator.log` itself is matched here but
+/// excluded from pruning by the caller.
 fn is_log_file(path: &std::path::Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
-        .map(|n| n.starts_with("operator.log.") || n.ends_with(".log") || n.ends_with(".gz"))
+        .map(|n| {
+            n.starts_with("operator.log")
+                && (n == "operator.log" || n.starts_with("operator.log.") || n.ends_with(".gz"))
+        })
         .unwrap_or(false)
 }
 
+/// The active (currently open) log file — never pruned: writes after removal
+/// would go to an unlinked inode and be lost permanently.
+fn is_active_log_file(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == "operator.log")
+        .unwrap_or(false)
+}
+
+/// Synchronous free-space fraction, used between deletions inside the pruning
+/// loop (which runs in `spawn_blocking`).
 #[cfg(unix)]
 fn check_disk_space_sync(path: &std::path::Path) -> AppResult<f64> {
-    let path_str = path.to_string_lossy().to_string();
-    let output = std::process::Command::new("df")
-        .arg("-k")
-        .arg(&path_str)
-        .output()
-        .map_err(|e| AppError::Internal(format!("df command failed: {}", e)))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout
-        .lines()
-        .nth(1)
-        .ok_or_else(|| AppError::Internal("df output missing data line".to_string()))?;
-
-    let cols: Vec<&str> = line.split_whitespace().collect();
-    if cols.len() < 5 {
-        return Err(AppError::Internal(format!(
-            "Unexpected df output: {}",
-            line
-        )));
-    }
-
-    let total: f64 = cols[1].parse().unwrap_or(1.0);
-    let avail: f64 = cols[3].parse().unwrap_or(0.0);
-
-    if total == 0.0 {
-        return Ok(0.0);
-    }
-
-    Ok(avail / total)
+    df_free_fraction(&path.to_string_lossy())
 }
 
 #[cfg(not(unix))]
@@ -207,6 +216,7 @@ fn check_disk_space_sync(_path: &std::path::Path) -> AppResult<f64> {
 /// Deletes `.log`, rotated (`operator.log.*`) and compressed (`.gz`) files
 /// in `log_dir` older than `max_age_days`. Below the critical threshold,
 /// shortens max_age to 1 day and includes all rotated/compressed logs.
+/// The active `operator.log` is never pruned.
 pub async fn prune_logs_if_needed(log_dir: &std::path::Path, max_age_days: u32) -> AppResult<()> {
     let free_space = check_disk_space(log_dir).await?;
 
@@ -238,7 +248,7 @@ pub async fn prune_logs_if_needed(log_dir: &std::path::Path, max_age_days: u32) 
         let mut candidates: Vec<(std::time::SystemTime, u64, std::path::PathBuf)> = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
-            if !is_log_file(&path) {
+            if !is_log_file(&path) || is_active_log_file(&path) {
                 continue;
             }
             if let Ok(meta) = entry.metadata() {
@@ -259,22 +269,31 @@ pub async fn prune_logs_if_needed(log_dir: &std::path::Path, max_age_days: u32) 
             }
         }
 
-        // Phase 2: size-based capping — delete oldest remaining files until threshold met
-        let remaining_free = check_disk_space_sync(&log_dir_owned).unwrap_or(free_space);
+        // Phase 2: size-based capping — delete oldest remaining files until
+        // threshold met. Abort on a failed re-check (never read a parse failure
+        // as "still critically full"), and re-check at most every 5 deletions
+        // to avoid spawning a `df` subprocess per file.
+        let mut remaining_free = check_disk_space_sync(&log_dir_owned)?;
         if remaining_free < DISK_SPACE_WARNING_THRESHOLD {
             let mut remaining: Vec<_> = candidates
                 .iter()
                 .filter(|(_, _, path)| std::fs::metadata(path).is_ok())
                 .collect();
-            remaining.sort_by(|a, b| a.0.cmp(&b.0));
+            remaining.sort_by_key(|a| a.0);
 
+            let mut deletions_since_check = 0u32;
             for (_, size, path) in remaining {
                 if std::fs::remove_file(path).is_ok() {
                     pruned += 1;
                     bytes_freed += size;
                     tracing::debug!(file = ?path, "Pruned log file (size-based cap)");
-                    if check_disk_space_sync(&log_dir_owned).unwrap_or(0.0) >= DISK_SPACE_WARNING_THRESHOLD {
-                        break;
+                    deletions_since_check += 1;
+                    if deletions_since_check >= 5 {
+                        remaining_free = check_disk_space_sync(&log_dir_owned)?;
+                        if remaining_free >= DISK_SPACE_WARNING_THRESHOLD {
+                            break;
+                        }
+                        deletions_since_check = 0;
                     }
                 }
             }
@@ -314,8 +333,8 @@ mod tests {
             (PathBuf::from("operator.log"), true),
             (PathBuf::from("operator.log.1"), true),
             (PathBuf::from("operator.log.2.gz"), true),
-            (PathBuf::from("something.gz"), true),
-            (PathBuf::from("other.log"), true),
+            (PathBuf::from("something.gz"), false),
+            (PathBuf::from("other.log"), false),
             (PathBuf::from("config.yaml"), false),
             (PathBuf::from("backup.db"), false),
             (PathBuf::from("README.md"), false),

@@ -138,7 +138,6 @@ async fn test_worker_pool_config_from_app_config() {
 
     assert_eq!(worker_config.num_workers, 2);
     assert_eq!(worker_config.max_concurrent_rpc, 4);
-    assert!(worker_config.rpc_rate_limit > 0);
 }
 
 #[tokio::test]
@@ -189,7 +188,19 @@ async fn test_concurrent_signal_processing() {
 
     worker_pool.start().await;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    // Poll (with a bound) until the queue drains AND the workers go idle —
+    // a fixed sleep is flaky when the shared Postgres is under load.
+    tokio::time::timeout(tokio::time::Duration::from_secs(10), async {
+        loop {
+            let stats = worker_pool.stats();
+            if stats.queue_depth == 0 && stats.active_workers == 0 {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("worker pool did not drain in time");
 
     cancel_token.cancel();
 
@@ -241,7 +252,6 @@ async fn test_rate_limiting() {
     let worker_config = WorkerPoolConfig {
         num_workers: 4,
         max_concurrent_rpc: 2,
-        rpc_rate_limit: 10,
     };
 
     let cancel_token = CancellationToken::new();
@@ -262,7 +272,6 @@ async fn test_database_concurrency() {
     let worker_config = WorkerPoolConfig {
         num_workers: 4,
         max_concurrent_rpc: 8,
-        rpc_rate_limit: 40,
     };
 
     let cancel_token = CancellationToken::new();
@@ -288,7 +297,19 @@ async fn test_database_concurrency() {
             .expect("Failed to push signal");
     }
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    // Poll (with a bound) until the queue drains AND the workers go idle —
+    // a fixed sleep is flaky when the shared Postgres is under load.
+    tokio::time::timeout(tokio::time::Duration::from_secs(10), async {
+        loop {
+            let stats = worker_pool.stats();
+            if stats.queue_depth == 0 && stats.active_workers == 0 {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("worker pool did not drain in time");
 
     cancel_token.cancel();
 

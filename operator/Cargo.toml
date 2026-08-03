@@ -2,6 +2,8 @@
 name = "chimera_operator"
 version = "1.0.0"
 edition = "2021"
+description = "Chimera Solana trading operator: execution engine, signal pipeline, and risk controls"
+publish = false
 
 [dependencies]
 # Core Async Runtime
@@ -36,7 +38,7 @@ solana-sdk = "3"
 solana-client = "3"
 solana-transaction-status = "3"
 solana-account-decoder = "3"
-solana-system-interface = { version = "2.0", features = ["bincode"] }
+solana-system-interface = { version = "3", features = ["bincode"] }
 solana-program = "3"
 # Solana modular crates
 solana-commitment-config = "3"
@@ -55,7 +57,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # bincode 2.x serde API with config::legacy() reproduces the Solana wire format
 # (formerly bincode 1.x) — no separate bincode1 dependency needed.
-bincode = { version = "2.0.1", features = ["serde"] }
+# Pinned exactly to 2.0.1: the legacy() wire format was validated against this version.
+bincode = { version = "=2.0.1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 tracing = "0.1"
@@ -73,8 +76,6 @@ futures-util = "0.3"
 # HTTP Client for Telegram notifications and RPC
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 urlencoding = "2.1"
-hyper = { version = "0.14", features = ["full"] }
-hyper-rustls = "0.27"
 
 # WebSocket client for Helius LaserStream
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
@@ -101,7 +102,7 @@ bs58 = "0.5"
 clap = { version = "4", features = ["derive"] }
 
 # Distributed Caching (optional)
-redis = { version = "0.25", features = ["tokio-comp", "connection-manager", "aio", "connection-manager"], optional = true }
+redis = { version = "0.25", features = ["tokio-comp", "connection-manager", "aio"], optional = true }
 
 [features]
 postgres = []
@@ -137,6 +138,7 @@ mockall = "0.13"
 rstest = "0.21"
 async-trait = "0.1"
 futures = "0.3"
+url = "2"
 
 # Benchmarking
 criterion = { version = "0.5", features = ["async_tokio"] }

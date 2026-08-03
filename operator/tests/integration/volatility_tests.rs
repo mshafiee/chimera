@@ -2,12 +2,16 @@
 //!
 //! Tests that SOL price volatility is correctly calculated
 //! and used in market condition filtering.
+//!
+//! NOTE on the 24h window: `PriceCache::calculate_volatility` prunes entries
+//! older than 24h using wall-clock timestamps (`set_price` stamps `Utc::now()`
+//! internally), and the test-only `set_price_with_time` helper is not visible
+//! to integration tests. The window-eviction branch is therefore covered by
+//! the in-module unit tests; this file covers the metric itself.
 
 use chimera_operator::price_cache::{PriceCache, PriceSource};
 use rust_decimal::prelude::*;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::sleep;
 
 #[tokio::test]
 async fn test_volatility_calculation() {
@@ -23,12 +27,10 @@ async fn test_volatility_calculation() {
     for price in prices {
         cache.set_price(
             sol_mint,
-            Decimal::from_f64(price).unwrap_or_default(),
+            Decimal::from_f64(price).expect("test price must convert to Decimal"),
             PriceSource::Jupiter,
             None,
         );
-        // Small delay to ensure different timestamps
-        sleep(Duration::from_millis(10)).await;
     }
 
     // Calculate volatility
@@ -68,7 +70,6 @@ async fn test_volatility_24h_window() {
     for i in 0..10u32 {
         let price = Decimal::from(100u32) + Decimal::from(i) * Decimal::from_str("0.1").unwrap();
         cache.set_price(sol_mint, price, PriceSource::Jupiter, None);
-        sleep(Duration::from_millis(10)).await;
     }
 
     let volatility = cache.calculate_volatility(sol_mint);
@@ -88,11 +89,10 @@ async fn test_get_sol_volatility() {
     for price in prices {
         cache.set_price(
             sol_mint,
-            Decimal::from_f64(price).unwrap_or_default(),
+            Decimal::from_f64(price).expect("test price must convert to Decimal"),
             PriceSource::Jupiter,
             None,
         );
-        sleep(Duration::from_millis(10)).await;
     }
 
     let sol_volatility = cache.get_sol_volatility();
@@ -111,19 +111,34 @@ async fn test_volatility_high_volatility_detection() {
         100.0, 130.0, 70.0, 120.0, 80.0, 140.0, 60.0, 150.0, 50.0, 160.0,
     ];
 
-    for price in prices {
+    for price in &prices {
         cache.set_price(
             sol_mint,
-            Decimal::from_f64(price).unwrap_or_default(),
+            Decimal::from_f64(*price).expect("test price must convert to Decimal"),
             PriceSource::Jupiter,
             None,
         );
-        sleep(Duration::from_millis(10)).await;
     }
 
     let volatility = cache.calculate_volatility(sol_mint).unwrap();
-    println!("High volatility scenario: {:.2}%", volatility);
 
-    // Should detect high volatility (>30%)
-    assert!(volatility > 30.0, "Should detect high volatility scenario");
+    // The metric is the population std-dev of consecutive % changes
+    // (price_cache.rs calculate_volatility). Recompute it independently here
+    // so the assertion is tied to the metric's definition, not a magic 30%.
+    let changes: Vec<f64> = prices
+        .windows(2)
+        .map(|w| (w[1] - w[0]) / w[0] * 100.0)
+        .collect();
+    let mean = changes.iter().sum::<f64>() / changes.len() as f64;
+    let variance = changes.iter().map(|c| (c - mean).powi(2)).sum::<f64>() / changes.len() as f64;
+    let expected_vol = variance.sqrt();
+
+    assert!(
+        (volatility - expected_vol).abs() < 1e-6,
+        "Volatility must equal the std-dev of consecutive % changes: got {volatility}, expected {expected_vol}"
+    );
+    assert!(
+        volatility > 30.0,
+        "This scenario should register as high volatility (>30%), got {volatility}"
+    );
 }

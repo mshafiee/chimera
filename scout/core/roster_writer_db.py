@@ -1,9 +1,8 @@
 """
 Direct database writer for Scout roster output.
 
-Writes analyzed wallets directly to the shared database (PostgreSQL in production,
-SQLite locally) using ON CONFLICT upserts. Replaces the atomic file-based
-RosterWriter approach.
+Writes analyzed wallets directly to the shared PostgreSQL database using
+ON CONFLICT upserts. Replaces the atomic file-based RosterWriter approach.
 
 Pattern:
 1. Analyze wallets and collect metrics
@@ -45,17 +44,33 @@ class WalletRecord:
     avg_entry_delay_seconds: Optional[float] = None
 
 
+def _wallet_status(address: str) -> Optional[str]:
+    """Read the current status of a wallet (None if absent)."""
+    try:
+        from .db import execute_and_fetchone
+        row = execute_and_fetchone("SELECT status FROM wallets WHERE address = %s", (address,))
+        return row["status"] if row else None
+    except Exception as e:
+        logger.debug("Failed to read wallet status for %s: %s", address, e)
+        return None
+
+
 def write_wallet_to_db(wallet: WalletRecord) -> bool:
     """
     Write a single wallet record to the database using upsert.
-    
+
     Args:
         wallet: WalletRecord to write
-        
+
     Returns:
         True if successful, False otherwise
     """
     try:
+        previous_status = _wallet_status(wallet.address)
+        is_new_promotion = (
+            wallet.status == "ACTIVE" and previous_status != "ACTIVE"
+        )
+
         # PostgreSQL upsert query
         query = """
             INSERT INTO wallets (
@@ -83,8 +98,11 @@ def write_wallet_to_db(wallet: WalletRecord) -> bool:
                 profit_factor = EXCLUDED.profit_factor,
                 realized_pnl_30d_sol = EXCLUDED.realized_pnl_30d_sol,
                 last_trade_at = EXCLUDED.last_trade_at,
-                promoted_at = COALESCE(EXCLUDED.promoted_at, wallets.promoted_at),
-                ttl_expires_at = EXCLUDED.ttl_expires_at,
+                promoted_at = CASE
+                    WHEN wallets.promoted_at IS NULL THEN CURRENT_TIMESTAMP
+                    ELSE COALESCE(EXCLUDED.promoted_at, wallets.promoted_at)
+                END,
+                ttl_expires_at = COALESCE(EXCLUDED.ttl_expires_at, wallets.ttl_expires_at),
                 notes = EXCLUDED.notes,
                 archetype = EXCLUDED.archetype,
                 avg_entry_delay_seconds = EXCLUDED.avg_entry_delay_seconds,
@@ -115,10 +133,12 @@ def write_wallet_to_db(wallet: WalletRecord) -> bool:
         )
 
         execute_update(query, params)
-        logger.debug(f"Wrote wallet {wallet.address} to database")
-        
-        # Reset inactivity demotion count when wallet is promoted to ACTIVE
-        if wallet.status == "ACTIVE":
+        logger.debug("Wrote wallet %s to database", wallet.address)
+
+        # Reset inactivity demotion count ONLY on a genuine transition to
+        # ACTIVE — every-cycle rewrites of already-active wallets must not
+        # restart the operator's inactivity timer.
+        if is_new_promotion:
             try:
                 reset_query = """
                     UPDATE wallet_monitoring
@@ -126,10 +146,10 @@ def write_wallet_to_db(wallet: WalletRecord) -> bool:
                     WHERE wallet_address = %s
                 """
                 execute_update(reset_query, (wallet.address,))
-                logger.debug(f"Reset inactivity_demotion_count for promoted wallet {wallet.address}")
+                logger.debug("Reset inactivity_demotion_count for promoted wallet %s", wallet.address)
             except Exception as e:
                 logger.warning(f"Failed to reset inactivity_demotion_count for {wallet.address}: {e}")
-        
+
         return True
 
     except Exception as e:
@@ -177,10 +197,15 @@ def update_wallet_status(address: str, status: str) -> bool:
     """
     try:
         if status == "ACTIVE":
+            # Only re-anchor promoted_at on a genuine transition — refreshing
+            # an already-active wallet must not restart the inactivity timer
             query = """
                 UPDATE wallets
                 SET status = %s,
-                    promoted_at = CURRENT_TIMESTAMP,
+                    promoted_at = CASE
+                        WHEN status = 'ACTIVE' THEN promoted_at
+                        ELSE CURRENT_TIMESTAMP
+                    END,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE address = %s
             """
@@ -192,8 +217,10 @@ def update_wallet_status(address: str, status: str) -> bool:
             """
         execute_update(query, (status, address))
 
-        # Reset operator inactivity-demotion count when (re)promoting to ACTIVE
-        if status == "ACTIVE":
+        # Reset operator inactivity-demotion count only when (re)promoting a
+        # wallet that wasn't already ACTIVE (the WHERE guard keeps the timer
+        # intact for periodic refreshes)
+        if status == "ACTIVE" and _wallet_status(address) != "ACTIVE":
             try:
                 reset_query = """
                     UPDATE wallet_monitoring

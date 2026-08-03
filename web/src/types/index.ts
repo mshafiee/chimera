@@ -29,12 +29,12 @@ export interface Wallet {
   id: number
   address: string
   status: 'ACTIVE' | 'CANDIDATE' | 'REJECTED'
-  wqs_score: number | null
-  // NOTE: roi/max_drawdown/avg_trade_size are NUMERIC columns serialized as strings.
+  wqs_score: number | string | null
+  // NOTE: roi/max_drawdown/avg_trade_size/win_rate are NUMERIC columns serialized as strings.
   roi_7d: number | string | null
   roi_30d: number | string | null
   trade_count_30d: number | null
-  win_rate: number | null
+  win_rate: number | string | null
   max_drawdown_30d: number | string | null
   avg_trade_size_sol: number | string | null
   last_trade_at: string | null
@@ -51,6 +51,8 @@ export interface Trade {
   wallet_address: string
   token_address: string
   token_symbol: string | null
+  // Backend stores strategy as a string; EXIT trades are recorded under the
+  // SHIELD/SPEAR strategy that opened the position's exit leg.
   strategy: 'SHIELD' | 'SPEAR' | 'EXIT'
   side: 'BUY' | 'SELL'
   // NOTE: Decimal fields are serialized as strings by the API (Postgres NUMERIC).
@@ -81,7 +83,8 @@ export interface HealthResponse {
     message: string | null
   }
   circuit_breaker: {
-    state: string
+    // Backend serializes CircuitBreakerState as one of these values.
+    state: 'ACTIVE' | 'TRIPPED' | 'COOLDOWN'
     trading_allowed: boolean
     trip_reason: string | null
     cooldown_remaining_secs: number | null
@@ -115,17 +118,20 @@ export interface ConfigResponse {
   }
   jito_enabled: boolean
   rpc_status: {
+    // RPC endpoint URLs (e.g. "https://mainnet.helius-rpc.com/..."), not fixed enums.
     primary: string
     active: string
     fallback_triggered: boolean
   }
+  // monitoring is omitted by the backend when monitoring is not configured; all
+  // other sections are always present in the /config response.
   monitoring?: MonitoringConfig
-  profit_management?: ProfitManagementConfig
-  position_sizing?: PositionSizingConfig
-  mev_protection?: MevProtectionConfig
-  token_safety?: TokenSafetyConfig
-  notifications?: NotificationsConfig
-  queue?: QueueConfig
+  profit_management: ProfitManagementConfig
+  position_sizing: PositionSizingConfig
+  mev_protection: MevProtectionConfig
+  token_safety: TokenSafetyConfig
+  notifications: NotificationsConfig
+  queue: QueueConfig
 }
 
 export interface MonitoringConfig {

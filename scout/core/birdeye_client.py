@@ -2,6 +2,7 @@
 
 import os
 import asyncio
+import threading
 import time
 from datetime import datetime
 from typing import Optional, Dict, Any
@@ -24,30 +25,37 @@ class BirdeyeClient:
         self.base_url = "https://public-api.birdeye.so"
         self.rate_limit_delay = 1.0  # Seconds between requests to avoid rate limits
         self.last_request_time = 0.0
+        # threading.Lock so the delay is enforced across event loops/threads
+        self._rate_limit_lock = threading.Lock()
+        self._session_lock = threading.Lock()
         self._session = session
         self._own_session = False
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create aiohttp session."""
-        if self._session is None:
-            self._session = aiohttp.ClientSession()
-            self._own_session = True
+        """Get or create aiohttp session (single pooled session)."""
+        with self._session_lock:
+            if self._session is None:
+                self._session = aiohttp.ClientSession()
+                self._own_session = True
         return self._session
 
     async def _close_session(self):
         """Close session if we own it."""
-        if self._own_session and self._session:
-            await self._session.close()
-            self._session = None
-            self._own_session = False
+        with self._session_lock:
+            if self._own_session and self._session:
+                await self._session.close()
+                self._session = None
+                self._own_session = False
 
     async def _rate_limit(self):
         """Ensure we don't exceed rate limits."""
-        current_time = time.time()
-        time_since_last = current_time - self.last_request_time
-        if time_since_last < self.rate_limit_delay:
-            await asyncio.sleep(self.rate_limit_delay - time_since_last)
-        self.last_request_time = time.time()
+        with self._rate_limit_lock:
+            current_time = time.time()
+            time_since_last = current_time - self.last_request_time
+            if time_since_last < self.rate_limit_delay:
+                await asyncio.sleep(self.rate_limit_delay - time_since_last)
+            # Stamp BEFORE the sleep so concurrent callers reserve distinct slots
+            self.last_request_time = time.time()
 
     async def _make_request(self, endpoint: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -76,7 +84,7 @@ class BirdeyeClient:
         except aiohttp.ClientError as e:
             import logging
             logger = logging.getLogger(__name__)
-            logger.debug(f"Birdeye API request failed: {e}")
+            logger.debug("Birdeye API request failed: %s", e)
             return None
 
     async def get_historical_price(
@@ -103,13 +111,22 @@ class BirdeyeClient:
         if not data or "data" not in data:
             return None
 
-        # Extract price from response
-        # Birdeye response format may vary, adjust as needed
+        # Extract price from response. The typical /defi/history_price shape
+        # is {"data": {"items": {<timestamp>: {"value": ...}}}, ...} — handle
+        # dicts, dicts-with-items, and lists with element-type guards.
         price_data = data.get("data", {})
-        if isinstance(price_data, list) and len(price_data) > 0:
-            return price_data[0].get("value")
-        elif isinstance(price_data, dict):
-            return price_data.get("value")
+        if isinstance(price_data, dict):
+            items = price_data.get("items")
+            if isinstance(items, dict):
+                values = [v for v in items.values() if isinstance(v, dict)]
+                if values:
+                    first = values[0]
+                    return first.get("value") or first.get("price")
+            return price_data.get("value") or price_data.get("price")
+        elif isinstance(price_data, list) and len(price_data) > 0:
+            first = price_data[0]
+            if isinstance(first, dict):
+                return first.get("value") or first.get("price")
 
         return None
 
@@ -130,7 +147,7 @@ class BirdeyeClient:
         # We can derive from price and volume data, or use current liquidity
         # For now, try to get price and estimate liquidity
 
-        price = self.get_historical_price(token_address, timestamp)
+        price = await self.get_historical_price(token_address, timestamp)
         if price is None:
             return None
 
@@ -138,14 +155,15 @@ class BirdeyeClient:
         # In production, you might maintain your own historical liquidity database
         current_liq = await self.get_current_liquidity(token_address)
         if current_liq:
-            # Use current liquidity as approximation (not ideal, but better than nothing)
+            # Use current liquidity as approximation (not ideal, but better than nothing).
+            # Labeled as a proxy so consumers don't mistake it for genuine history.
             return LiquidityData(
                 token_address=token_address,
                 liquidity_usd=current_liq.liquidity_usd,
                 price_usd=price,
                 volume_24h_usd=current_liq.volume_24h_usd if current_liq else 0.0,
                 timestamp=timestamp,
-                source="birdeye_historical",
+                source="birdeye_historical_proxy",
             )
 
         return None
@@ -195,8 +213,11 @@ class BirdeyeClient:
         Returns:
             Dict containing creation info or None
         """
-        params = {"address": token_address}
-        
+        if not self.api_key:
+            return None
+
+        await self._rate_limit()
+
         try:
             url = f"{self.base_url}/defi/token_creation_info"
             headers = {
@@ -204,19 +225,21 @@ class BirdeyeClient:
                 "x-chain": "solana"
             }
             params = {"address": token_address}
-            
+
             session = await self._get_session()
             async with session.get(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=10)) as response:
                 if response.status == 429:
                     return None
-                    
+
                 response.raise_for_status()
                 data = await response.json()
-                
+
                 if data and "data" in data:
                     return data["data"]
                 return None
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).debug("Token creation info fetch failed: %s", e)
             return None
 
     async def get_token_metadata(self, token_address: str) -> Optional[Dict[str, Any]]:

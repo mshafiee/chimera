@@ -13,7 +13,6 @@ This service:
 
 from fastapi import FastAPI, HTTPException, Response
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
-from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 import redis
@@ -41,7 +40,6 @@ GEOIP_CITY_DB_PATH = os.getenv("GEOIP_CITY_DB_PATH", "/geoip/GeoLite2-City.mmdb"
 GEOIP_COUNTRY_DB_PATH = os.getenv("GEOIP_COUNTRY_DB_PATH", "/geoip/GeoLite2-Country.mmdb")
 GEOIP_ASN_DB_PATH = os.getenv("GEOIP_ASN_DB_PATH", "/geoip/GeoLite2-ASN.mmdb")
 CACHE_TTL = int(os.getenv("CACHE_TTL", "3600"))  # 1 hour default
-POLICY_CACHE_TTL = int(os.getenv("POLICY_CACHE_TTL", "300"))  # 5 minutes for policy decisions
 
 # FastAPI app
 app = FastAPI(
@@ -49,9 +47,6 @@ app = FastAPI(
     description="IP geolocation service with MaxMind GeoLite2 and Redis caching",
     version="1.0.0"
 )
-
-# Instrumentator for Prometheus metrics
-instrumentator = Instrumentator(app)
 
 # Redis connection for caching
 try:
@@ -165,7 +160,7 @@ async def lookup_city(ip_address: str) -> Dict[str, Any]:
         return {}
 
     try:
-        response = city_reader.city(ip_address)
+        response = await asyncio.to_thread(city_reader.city, ip_address)
         result = {
             "city": response.city.name if response.city.name else None,
             "subdivision": response.subdivisions.most_specific.name if response.subdivisions.most_specific else None,
@@ -194,7 +189,7 @@ async def lookup_country(ip_address: str) -> Dict[str, Any]:
         }
 
     try:
-        response = country_reader.country(ip_address)
+        response = await asyncio.to_thread(country_reader.country, ip_address)
         return {
             "country_code": response.country.iso_code,
             "country_name": response.country.name,
@@ -224,7 +219,7 @@ async def lookup_asn(ip_address: str) -> Dict[str, Any]:
         }
 
     try:
-        response = asn_reader.asn(ip_address)
+        response = await asyncio.to_thread(asn_reader.asn, ip_address)
         return {
             "asn": f"AS{response.autonomous_system_number}",
             "asn_organization": response.autonomous_system_organization
@@ -249,10 +244,14 @@ async def get_cached_geoip(ip_address: str) -> Optional[Dict[str, Any]]:
 
     try:
         cache_key = f"geoip:{ip_address}"
-        cached_data = redis_client.get(cache_key)
+        cached_data = await asyncio.to_thread(redis_client.get, cache_key)
         if cached_data:
             geoip_lookups_total.labels(cache_status="hit", db_type="combined").inc()
-            return json.loads(cached_data)
+            geoip_cache_hits.inc()
+            data = json.loads(cached_data)
+            # A cached response must not claim to be a miss
+            data["cache_status"] = "hit"
+            return data
     except Exception as e:
         logger.error(f"Error getting cached data: {e}")
 
@@ -265,7 +264,7 @@ async def set_cached_geoip(ip_address: str, data: Dict[str, Any]):
 
     try:
         cache_key = f"geoip:{ip_address}"
-        redis_client.setex(cache_key, CACHE_TTL, json.dumps(data))
+        await asyncio.to_thread(redis_client.setex, cache_key, CACHE_TTL, json.dumps(data))
     except Exception as e:
         logger.error(f"Error setting cached data: {e}")
 
@@ -324,8 +323,12 @@ async def perform_geoip_lookup(ip_address: str) -> Dict[str, Any]:
             "lookup_time": (datetime.now() - start_time).total_seconds()
         }
 
-    # Cache the result
-    await set_cached_geoip(ip_address, result)
+    geoip_lookup_duration.observe((datetime.now() - start_time).total_seconds())
+
+    # Cache the result — but never cache error sentinels (a transient lookup
+    # failure must not poison the cache for the whole TTL)
+    if "error" not in str(result.get("country_code", "")) and "error" not in str(result.get("asn", "")):
+        await set_cached_geoip(ip_address, result)
 
     return result
 
@@ -379,11 +382,11 @@ async def get_cache_stats():
         return {"error": "Redis not available"}
 
     try:
-        info = redis_client.info("stats")
+        info = await asyncio.to_thread(redis_client.info, "stats")
         return {
             "cache_hits": info.get("keyspace_hits", 0),
             "cache_misses": info.get("keyspace_misses", 0),
-            "total_keys": redis_client.dbsize()
+            "total_keys": await asyncio.to_thread(redis_client.dbsize)
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting cache stats: {e}")
@@ -396,9 +399,9 @@ async def clear_cache():
 
     try:
         # Delete all geoip keys
-        keys = redis_client.keys("geoip:*")
+        keys = await asyncio.to_thread(redis_client.keys, "geoip:*")
         if keys:
-            redis_client.delete(*keys)
+            await asyncio.to_thread(redis_client.delete, *keys)
 
         return {
             "status": "success",
@@ -522,14 +525,18 @@ async def startup_event():
     if asn_reader:
         logger.info("✓ ASN lookups available")
 
-    # Check database age
+    # Check database age (from the mmdb file mtime, in hours)
     try:
-        if city_reader:
-            geoip_database_age.labels(database_type="city").set(0)
-        if country_reader:
-            geoip_database_age.labels(database_type="country").set(0)
-        if asn_reader:
-            geoip_database_age.labels(database_type="asn").set(0)
+        import time as _time
+        now = _time.time()
+        for db_type, db_path in (
+            ("city", GEOIP_CITY_DB_PATH),
+            ("country", GEOIP_COUNTRY_DB_PATH),
+            ("asn", GEOIP_ASN_DB_PATH),
+        ):
+            if os.path.exists(db_path):
+                age_hours = max(0, (now - os.path.getmtime(db_path)) / 3600)
+                geoip_database_age.labels(database_type=db_type).set(age_hours)
     except Exception as e:
         logger.warning(f"Could not determine database age: {e}")
 

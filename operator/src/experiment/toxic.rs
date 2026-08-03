@@ -40,11 +40,18 @@ impl ToxicFlowDetector {
 
     pub async fn register_wallet_promotion(&self, wallet: String, selection_roi: f64) -> AppResult<()> {
         debug!("Registering wallet promotion: {} with ROI: {}", wallet, selection_roi);
-        
+
         let mut wallets = self.wallets.write().await;
-        wallets.insert(
-            wallet.clone(),
-            ToxicWallet {
+        // Preserve existing state on re-promotion: refresh ROI baselines but
+        // never silently clear accumulated counters or a previously-detected
+        // toxic flag (e.g. state loaded from the database on startup).
+        wallets
+            .entry(wallet.clone())
+            .and_modify(|w| {
+                w.selection_roi = selection_roi;
+                w.post_promotion_roi = selection_roi;
+            })
+            .or_insert(ToxicWallet {
                 address: wallet,
                 selection_roi,
                 post_promotion_roi: selection_roi,
@@ -53,9 +60,8 @@ impl ToxicFlowDetector {
                 is_toxic: false,
                 toxic_reason: None,
                 detected_at: None,
-            },
-        );
-        
+            });
+
         Ok(())
     }
 
@@ -98,7 +104,7 @@ impl ToxicFlowDetector {
         }
         
         // Check local-top squeeze (multiple entries at local top)
-        if wallet.local_top_entries >= 3 && wallet.local_top_entries >= (wallet.total_entries / 2) {
+        if wallet.local_top_entries >= 3 && wallet.local_top_entries * 2 >= wallet.total_entries {
             return true;
         }
         
@@ -112,7 +118,7 @@ impl ToxicFlowDetector {
             return ToxicReason::RoiDrop;
         }
         
-        if wallet.local_top_entries >= 3 && wallet.local_top_entries >= (wallet.total_entries / 2) {
+        if wallet.local_top_entries >= 3 && wallet.local_top_entries * 2 >= wallet.total_entries {
             return ToxicReason::LocalTopSqueeze;
         }
         
@@ -148,9 +154,15 @@ impl ToxicFlowDetector {
     }
 
     pub async fn persist_to_database(&self, pool: &sqlx::Pool<sqlx::Postgres>, run_id: &str) -> AppResult<()> {
-        let wallets = self.wallets.write().await;
+        // Snapshot under a short read lock, then perform the DB I/O without
+        // holding the write guard — otherwise every detector operation blocks
+        // for the whole batch of network round-trips.
+        let wallets: Vec<ToxicWallet> = {
+            let wallets = self.wallets.read().await;
+            wallets.values().cloned().collect()
+        };
 
-        for wallet in wallets.values() {
+        for wallet in &wallets {
             let toxic_reason_str = match wallet.toxic_reason {
                 Some(ToxicReason::RoiDrop) => Some("roi_drop".to_string()),
                 Some(ToxicReason::LocalTopSqueeze) => Some("local_top_squeeze".to_string()),
@@ -165,13 +177,14 @@ impl ToxicFlowDetector {
                     toxic_reason, detected_at, run_id
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9
-                ) ON CONFLICT(wallet_address) DO UPDATE SET
+                ) ON CONFLICT(run_id, wallet_address) DO UPDATE SET
                     post_promotion_roi = excluded.post_promotion_roi,
                     local_top_entries = excluded.local_top_entries,
                     total_entries = excluded.total_entries,
                     is_toxic = excluded.is_toxic,
                     toxic_reason = excluded.toxic_reason,
                     detected_at = excluded.detected_at,
+                    run_id = excluded.run_id,
                     updated_at = CURRENT_TIMESTAMP
                 "#
             )
@@ -276,6 +289,7 @@ struct ToxicWalletRow {
     post_promotion_roi: f64,
     local_top_entries: i64,
     total_entries: i64,
+    #[allow(dead_code)] // Selected by `WHERE is_toxic = TRUE`; value is not re-stored
     is_toxic: bool,
     toxic_reason: Option<String>,
     detected_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -284,13 +298,15 @@ struct ToxicWalletRow {
 impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ToxicWalletRow {
     fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
         use sqlx::Row;
+        // Propagate decode errors: swallowing them (e.g. is_toxic defaulting to
+        // false) could make a genuinely toxic wallet appear clean.
         Ok(Self {
             wallet_address: row.try_get("wallet_address")?,
-            selection_roi: row.try_get::<f64, _>("selection_roi").unwrap_or(0.0),
-            post_promotion_roi: row.try_get::<f64, _>("post_promotion_roi").unwrap_or(0.0),
-            local_top_entries: row.try_get::<i64, _>("local_top_entries").unwrap_or(0),
-            total_entries: row.try_get::<i64, _>("total_entries").unwrap_or(0),
-            is_toxic: row.try_get("is_toxic").unwrap_or(false),
+            selection_roi: row.try_get::<f64, _>("selection_roi")?,
+            post_promotion_roi: row.try_get::<f64, _>("post_promotion_roi")?,
+            local_top_entries: row.try_get::<i64, _>("local_top_entries")?,
+            total_entries: row.try_get::<i64, _>("total_entries")?,
+            is_toxic: row.try_get("is_toxic")?,
             toxic_reason: row.try_get("toxic_reason").ok().flatten(),
             detected_at: row.try_get("detected_at").ok().flatten(),
         })

@@ -32,9 +32,9 @@ export function RPCLatencyTable({ data }: RPCLatencyTableProps) {
         <div className="bg-surface-light rounded-lg p-4">
           <div className="text-xs text-text-muted mb-1">Error Rate</div>
           <div className={`text-xl font-semibold font-mono-numbers ${
-            data.error_rate < 0.01 ? 'text-profit' : data.error_rate < 0.05 ? 'text-spear' : 'text-loss'
+            data.error_rate < 1 ? 'text-profit' : data.error_rate < 5 ? 'text-spear' : 'text-loss'
           }`}>
-            {(data.error_rate * 100).toFixed(2)}%
+            {data.error_rate.toFixed(2)}%
           </div>
         </div>
       </div>
@@ -66,8 +66,8 @@ export function RPCLatencyTable({ data }: RPCLatencyTableProps) {
                 {endpoint.p99_latency_ms.toFixed(0)}ms
               </TableCell>
               <TableCell className="text-right">
-                <Badge variant={endpoint.error_rate < 0.01 ? 'success' : endpoint.error_rate < 0.05 ? 'warning' : 'danger'} size="sm">
-                  {(endpoint.error_rate * 100).toFixed(2)}%
+                <Badge variant={endpoint.error_rate < 1 ? 'success' : endpoint.error_rate < 5 ? 'warning' : 'danger'} size="sm">
+                  {endpoint.error_rate.toFixed(2)}%
                 </Badge>
               </TableCell>
               <TableCell mono className="text-sm text-right">

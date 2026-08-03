@@ -74,12 +74,14 @@ class RegimeClassifier:
         Returns:
             MarketRegime enum value
         """
-        # Add to history
-        self.price_history.append(current_price)
+        # Add to history ONLY when no explicit history is supplied, so a
+        # caller-provided series can't silently contaminate the internal buffer
+        if price_history is None:
+            self.price_history.append(current_price)
 
-        # Keep only recent history
-        if len(self.price_history) > self.window * 2:
-            self.price_history = self.price_history[-self.window * 2:]
+            # Keep only recent history
+            if len(self.price_history) > self.window * 2:
+                self.price_history = self.price_history[-self.window * 2:]
 
         # Use provided history if available
         if price_history:
@@ -214,8 +216,7 @@ class RegimeSpecificModels:
 
             if model_file.exists():
                 try:
-                    # Load model based on type
-                    # For now, store metadata and create placeholder
+                    # Load model metadata
                     metadata_file = self.model_dir / f"regime_{regime.value}_metadata.json"
 
                     if metadata_file.exists():
@@ -223,6 +224,13 @@ class RegimeSpecificModels:
                             metadata = json.load(f)
                         self.model_metadata[regime.value] = metadata
                         logger.info(f"Loaded {regime.value} regime model metadata")
+
+                    # Deserialize the actual XGBoost booster so predict() works
+                    # after a restart (metadata alone is not a usable model)
+                    import xgboost as xgb
+                    booster = xgb.Booster()
+                    booster.load_model(str(model_file))
+                    self.models[regime] = booster
                 except Exception as e:
                     logger.warning(f"Failed to load {regime.value} regime model: {e}")
 
@@ -283,13 +291,15 @@ class RegimeSpecificModels:
 
                 self.models[regime] = model
 
-                # Store metadata
+                # Store metadata (including feature_names so inference can
+                # rebuild the feature vector in training order)
                 metadata = {
                     'regime': regime.value,
                     'model_type': model_type,
                     'train_rmse': float(train_rmse),
                     'val_rmse': float(val_rmse),
                     'training_samples': len(X_train),
+                    'feature_names': list(feature_names),
                     'trained_at': datetime.utcnow().isoformat(),
                 }
 
@@ -375,19 +385,17 @@ class RegimeSpecificModels:
             }
 
     def _prepare_features(self, features: Dict[str, Any]) -> Optional[np.ndarray]:
-        """Prepare feature array."""
-        # Get feature names from first model's metadata
-        if self.model_metadata:
-            next(iter(self.model_metadata.keys()))
-            # Assume same features for all regimes
-            feature_names = list(features.keys())
-            X = [[float(features.get(name, 0.0)) for name in feature_names]]
-            return np.array(X)
-        else:
-            # Use provided features as-is
-            feature_names = list(features.keys())
-            X = [[float(features.get(name, 0.0)) for name in feature_names]]
-            return np.array(X)
+        """Prepare feature array.
+
+        Uses the persisted training feature order (XGBoost treats features
+        positionally), falling back to the caller's dict order only when no
+        metadata exists.
+        """
+        metadata = next(iter(self.model_metadata.values()), None)
+        persisted_names = metadata.get('feature_names') if metadata else None
+        feature_names = persisted_names or list(features.keys())
+        X = [[float(features.get(name, 0.0)) for name in feature_names]]
+        return np.array(X)
 
     def _get_regime_confidence(
         self,
@@ -454,5 +462,7 @@ def classify_regime(
     Returns:
         MarketRegime enum value
     """
-    classifier = RegimeClassifier()
-    return classifier.classify(current_price, price_history)
+    # Reuse the persistent classifier of the global instance so the internal
+    # price buffer accumulates across calls (a fresh classifier per call would
+    # always have < 5 samples and always return UNKNOWN).
+    return get_regime_models().classifier.classify(current_price, price_history)

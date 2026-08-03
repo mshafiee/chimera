@@ -86,6 +86,7 @@ class StreamSubscription:
     message_count: int = 0
     last_message_at: float = 0.0
     bytes_received: int = 0
+    task: Optional[asyncio.Task] = None
 
 
 @dataclass
@@ -117,7 +118,7 @@ class LaserStreamConfig:
     # Connection settings
     CONNECT_TIMEOUT: float = 10.0  # Connection timeout in seconds
     KEEPALIVE_TIMEOUT: float = 60.0  # Keepalive timeout
-    KEEPALIVE_PERMIT_WITHOUTCalls: int = 5  # Keepalive probes
+    KEEPALIVE_PERMIT_WITHOUT_CALLS: int = 5  # Keepalive probes
 
     # Stream settings
     MAX_RECEIVE_MESSAGE_LENGTH: int = 100 * 1024 * 1024  # 100MB
@@ -175,6 +176,9 @@ class LaserStreamClient:
         self._subscriptions: Dict[str, StreamSubscription] = {}
         self._stream_tasks: list[asyncio.Task] = []
 
+        # Reconnection guard (only one reconnect loop at a time)
+        self._is_reconnecting = False
+
         # Message queue
         self._message_queue: deque[StreamMessage] = deque(maxlen=self._config.MESSAGE_QUEUE_SIZE)
         self._queue_lock = threading.Lock()
@@ -209,8 +213,15 @@ class LaserStreamClient:
             else:
                 credentials = grpc.ssl_channel_credentials()
 
-            # Create channel with compression
+            # Create channel with compression (passed to the constructor —
+            # 'grpc.enable_compression' is not a valid channel option)
             compression = grpc.Compression.Gzip if self._config.ENABLE_COMPRESSION else grpc.Compression.NoCompression
+
+            # Preserve stats across reconnects (reconnection_count etc.)
+            if self._reconnect_attempts > 0 and hasattr(self, '_stats'):
+                existing_stats = self._stats
+            else:
+                existing_stats = None
 
             self._channel = aio.secure_channel(
                 endpoint,
@@ -218,10 +229,10 @@ class LaserStreamClient:
                 options=[
                     ('grpc.max_receive_message_length', self._config.MAX_RECEIVE_MESSAGE_LENGTH),
                     ('grpc.keepalive_timeout_ms', int(self._config.KEEPALIVE_TIMEOUT * 1000)),
-                    ('grpc.keepalive_permit_without_calls', self._config.KEEPALIVE_PERMIT_WITHOUTCalls),
-                    ('grpc.enable_compression', compression),
+                    ('grpc.keepalive_permit_without_calls', self._config.KEEPALIVE_PERMIT_WITHOUT_CALLS),
                     ('grpc.max_concurrent_streams', self._config.MAX_CONCURRENT_STREAMS),
-                ]
+                ],
+                compression=compression,
             )
 
             # Test connection with simple call
@@ -230,7 +241,12 @@ class LaserStreamClient:
 
             self._connected = True
             self._reconnect_attempts = 0
-            self._stats = ConnectionStats(connected_at=time.time())
+            if existing_stats is not None:
+                # Keep accumulated counters; only refresh the uptime anchor
+                existing_stats.connected_at = time.time()
+                self._stats = existing_stats
+            else:
+                self._stats = ConnectionStats(connected_at=time.time())
 
             logger.info("LaserStream gRPC connected successfully")
 
@@ -296,6 +312,7 @@ class LaserStreamClient:
             # Start streaming
             task = asyncio.create_task(self._stream_transactions(stream_id, filters or {}))
             self._stream_tasks.append(task)
+            self._subscriptions[stream_id].task = task
 
             logger.info(f"Subscribed to transaction streaming (ID: {stream_id})")
             return stream_id
@@ -335,6 +352,7 @@ class LaserStreamClient:
             # Start streaming
             task = asyncio.create_task(self._stream_dex_trades(stream_id, token_mints or []))
             self._stream_tasks.append(task)
+            self._subscriptions[stream_id].task = task
 
             logger.info(f"Subscribed to DEX trade streaming (ID: {stream_id})")
             return stream_id
@@ -374,6 +392,7 @@ class LaserStreamClient:
             # Start streaming
             task = asyncio.create_task(self._stream_prices(stream_id, token_mints))
             self._stream_tasks.append(task)
+            self._subscriptions[stream_id].task = task
 
             logger.info(f"Subscribed to price streaming (ID: {stream_id})")
             return stream_id
@@ -385,16 +404,16 @@ class LaserStreamClient:
             return None
 
     async def _stream_transactions(self, stream_id: str, filters: Dict[str, Any]):
-        """Stream transaction updates."""
+        """Stream transaction updates.
+
+        NOTE: The actual Helius LaserStream gRPC call requires the Helius
+        proto stubs (not present in this repo). Until those exist, the loop
+        keeps the subscription alive and delivers heartbeats so the queue /
+        stats / backpressure plumbing is exercised and observable.
+        """
         try:
-            # Placeholder for actual gRPC streaming implementation
-            # This would use the Helius-provided proto definitions
-
             logger.debug(f"Started transaction stream {stream_id}")
-
-            # Simulate streaming (replace with actual gRPC call)
-            while self._connected and stream_id in self._subscriptions:
-                await asyncio.sleep(1)  # Placeholder
+            await self._stream_keepalive_loop(stream_id, StreamType.TRANSACTIONS)
 
         except Exception as e:
             logger.error(f"Transaction stream error: {e}")
@@ -402,13 +421,10 @@ class LaserStreamClient:
                 await self._reconnect()
 
     async def _stream_dex_trades(self, stream_id: str, token_mints: List[str]):
-        """Stream DEX trade updates."""
+        """Stream DEX trade updates (placeholder until Helius proto stubs exist)."""
         try:
             logger.debug(f"Started DEX trades stream {stream_id}")
-
-            # Placeholder for actual gRPC streaming implementation
-            while self._connected and stream_id in self._subscriptions:
-                await asyncio.sleep(1)  # Placeholder
+            await self._stream_keepalive_loop(stream_id, StreamType.DEX_TRADES)
 
         except Exception as e:
             logger.error(f"DEX trades stream error: {e}")
@@ -416,18 +432,43 @@ class LaserStreamClient:
                 await self._reconnect()
 
     async def _stream_prices(self, stream_id: str, token_mints: List[str]):
-        """Stream price updates."""
+        """Stream price updates (placeholder until Helius proto stubs exist)."""
         try:
             logger.debug(f"Started price stream {stream_id}")
-
-            # Placeholder for actual gRPC streaming implementation
-            while self._connected and stream_id in self._subscriptions:
-                await asyncio.sleep(1)  # Placeholder
+            await self._stream_keepalive_loop(stream_id, StreamType.PRICES)
 
         except Exception as e:
             logger.error(f"Price stream error: {e}")
             if self._should_reconnect:
                 await self._reconnect()
+
+    async def _stream_keepalive_loop(self, stream_id: str, stream_type: StreamType):
+        """Keep a subscription alive while connected, delivering heartbeats.
+
+        This is the shared placeholder body for the gRPC stream coroutines.
+        The real implementation replaces the heartbeat loop with an actual
+        ``channel.unary_stream(...)`` iteration once the Helius proto stubs
+        are available.
+        """
+        subscription = self._subscriptions.get(stream_id)
+        while self._connected and stream_id in self._subscriptions:
+            await asyncio.sleep(30)  # Heartbeat interval
+            if stream_id not in self._subscriptions:
+                break
+            heartbeat = StreamMessage(
+                message_type=MessageType.HEARTBEAT,
+                stream_type=stream_type,
+                data={"stream_id": stream_id},
+                timestamp=time.time(),
+            )
+            with self._queue_lock:
+                self._message_queue.append(heartbeat)
+            self._stats.last_heartbeat_at = time.time()
+            if subscription is not None:
+                subscription.message_count += 1
+                subscription.last_message_at = time.time()
+            # Keep the stats visible even with no data stream
+            self._stats.messages_received += 1
 
     async def unsubscribe(self, stream_id: str) -> bool:
         """
@@ -444,6 +485,16 @@ class LaserStreamClient:
             return False
 
         try:
+            # Cancel the stream task if running (the task is stored on the
+            # subscription so unsubscribe actually stops it)
+            subscription = self._subscriptions[stream_id]
+            if subscription.task and not subscription.task.done():
+                subscription.task.cancel()
+                try:
+                    await subscription.task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
             # Cancel stream if active
             if stream_id in self._active_streams:
                 await self._active_streams[stream_id].cancel()
@@ -451,6 +502,9 @@ class LaserStreamClient:
 
             # Remove subscription
             del self._subscriptions[stream_id]
+
+            # Prune completed tasks so the registry doesn't grow unbounded
+            self._stream_tasks = [t for t in self._stream_tasks if not t.done()]
 
             logger.info(f"Unsubscribed from stream {stream_id}")
             return True
@@ -464,35 +518,60 @@ class LaserStreamClient:
         if not self._should_reconnect:
             return
 
-        delay = self._config.INITIAL_RECONNECT_DELAY
-        self._reconnect_attempts += 1
-        self._stats.reconnection_count += 1
+        # Single in-flight guard: stream tasks call this independently on
+        # error — only one reconnect loop may run at a time
+        if self._is_reconnecting:
+            logger.debug("Reconnection already in progress, skipping")
+            return
+        self._is_reconnecting = True
 
-        logger.info(f"LaserStream reconnecting... Attempt {self._reconnect_attempts}")
+        try:
+            delay = self._config.INITIAL_RECONNECT_DELAY
+            self._reconnect_attempts += 1
+            self._stats.reconnection_count += 1
 
-        # Exponential backoff
-        if self._reconnect_attempts > 1:
-            delay = min(
-                delay * (self._config.RECONNECT_MULTIPLIER ** (self._reconnect_attempts - 1)),
-                self._config.MAX_RECONNECT_DELAY
-            )
+            logger.info(f"LaserStream reconnecting... Attempt {self._reconnect_attempts}")
 
-        await asyncio.sleep(delay)
+            # Exponential backoff
+            if self._reconnect_attempts > 1:
+                delay = min(
+                    delay * (self._config.RECONNECT_MULTIPLIER ** (self._reconnect_attempts - 1)),
+                    self._config.MAX_RECONNECT_DELAY
+                )
 
-        # Try to reconnect
-        if await self.connect():
-            logger.info("LaserStream reconnection successful")
-            # Resubscribe to previous streams
-            await self._resubscribe_all()
-        elif self._reconnect_attempts < self._config.MAX_RECONNECT_ATTEMPTS:
-            await self._reconnect()
-        else:
-            logger.error("Max LaserStream reconnection attempts reached")
+            await asyncio.sleep(delay)
+
+            # Try to reconnect
+            if await self.connect():
+                logger.info("LaserStream reconnection successful")
+                # Resubscribe to previous streams
+                await self._resubscribe_all()
+            elif self._reconnect_attempts < self._config.MAX_RECONNECT_ATTEMPTS:
+                await self._reconnect()
+            else:
+                logger.error("Max LaserStream reconnection attempts reached")
+        finally:
+            self._is_reconnecting = False
 
     async def _resubscribe_all(self):
         """Resubscribe to all previous streams after reconnection."""
-        # This would resubscribe based on saved subscription state
-        logger.info(f"Resubscribing to {len(self._subscriptions)} streams")
+        subscriptions = list(self._subscriptions.items())
+        for stream_id, sub in subscriptions:
+            try:
+                if sub.stream_type == StreamType.TRANSACTIONS:
+                    task = asyncio.create_task(self._stream_transactions(stream_id, sub.filters))
+                elif sub.stream_type == StreamType.DEX_TRADES:
+                    task = asyncio.create_task(self._stream_dex_trades(stream_id, sub.filters.get("token_mints", [])))
+                elif sub.stream_type == StreamType.PRICES:
+                    task = asyncio.create_task(self._stream_prices(stream_id, sub.filters.get("token_mints", [])))
+                else:
+                    continue
+                self._stream_tasks.append(task)
+                sub.task = task
+                logger.info(f"Resubscribed to {sub.stream_type.value} stream {stream_id}")
+            except Exception as e:
+                logger.warning(f"Failed to resubscribe to {stream_id}: {e}")
+        logger.info(f"Resubscribed to {len(subscriptions)} streams")
 
     def _update_latency(self, latency_ms: float):
         """Update latency statistics."""
@@ -608,13 +687,30 @@ def get_laserstream_client(api_key: Optional[str] = None) -> LaserStreamClient:
 
 
 def reset_laserstream_client():
-    """Reset the global LaserStream client (mainly for testing)."""
+    """Reset the global LaserStream client (mainly for testing).
+
+    NOTE: use ``await shutdown_laserstream_client()`` for proper async
+    cleanup; this sync variant only drops the reference.
+    """
     global _client
 
     with _client_lock:
-        if _client:
-            # Note: This should be called from async context
-            _client = None
+        _client = None
+
+
+async def shutdown_laserstream_client():
+    """Shut the global client down cleanly (closes channel, cancels streams)."""
+    global _client
+
+    with _client_lock:
+        client = _client
+        _client = None
+
+    if client is not None:
+        try:
+            await client.shutdown()
+        except Exception as e:
+            logger.warning(f"LaserStream shutdown error: {e}")
 
 
 if __name__ == "__main__":

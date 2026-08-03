@@ -68,6 +68,8 @@ CREATE INDEX idx_eval_snapshots_financial ON evaluation_snapshots(total_pnl_sol,
 
 -- ===================================================================
 -- TRADE EXECUTION DETAILS - Detailed performance tracking
+-- NOTE: depends on the base schema (0001_full_schema.sql) having applied
+-- first — the FK below requires trades(trade_uuid) to exist and be UNIQUE.
 -- ===================================================================
 CREATE TABLE IF NOT EXISTS trade_execution_details (
     id SERIAL PRIMARY KEY,
@@ -125,7 +127,6 @@ CREATE TABLE IF NOT EXISTS trade_execution_details (
     CONSTRAINT fk_trade_uuid FOREIGN KEY (trade_uuid) REFERENCES trades(trade_uuid) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_trade_details_uuid ON trade_execution_details(trade_uuid);
 CREATE INDEX idx_trade_details_timeline ON trade_execution_details(signal_received_time, trade_active_time);
 CREATE INDEX idx_trade_details_performance ON trade_execution_details(total_execution_latency_us);
 CREATE INDEX idx_trade_details_costs ON trade_execution_details(total_cost_sol);
@@ -393,46 +394,52 @@ BEGIN
     ),
     previous_snapshots AS (
         SELECT * FROM evaluation_snapshots
-        WHERE snapshot_time < (SELECT snapshot_time FROM latest_snapshot)
-        ORDER BY snapshot_time DESC LIMIT days_lookback
+        WHERE snapshot_time >= (SELECT snapshot_time FROM latest_snapshot) - (days_lookback || ' days')::INTERVAL
+          AND snapshot_time < (SELECT snapshot_time FROM latest_snapshot)
     ),
     metrics AS (
         SELECT
             'avg_trade_latency_ms'::TEXT as metric_name,
             (SELECT avg_trade_latency_ms FROM latest_snapshot) as current_value,
-            (SELECT AVG(avg_trade_latency_ms) FROM previous_snapshots) as previous_value
+            (SELECT AVG(avg_trade_latency_ms)::REAL FROM previous_snapshots) as previous_value
 
         UNION ALL
 
         SELECT
             'total_pnl_sol'::TEXT,
             (SELECT total_pnl_sol FROM latest_snapshot),
-            (SELECT AVG(total_pnl_sol) FROM previous_snapshots)
+            (SELECT AVG(total_pnl_sol)::REAL FROM previous_snapshots)
 
         UNION ALL
 
         SELECT
             'memory_usage_percent'::TEXT,
             (SELECT memory_usage_percent FROM latest_snapshot),
-            (SELECT AVG(memory_usage_percent) FROM previous_snapshots)
+            (SELECT AVG(memory_usage_percent)::REAL FROM previous_snapshots)
 
         UNION ALL
 
         SELECT
             'rpc_latency_avg_ms'::TEXT,
             (SELECT rpc_latency_avg_ms FROM latest_snapshot),
-            (SELECT AVG(rpc_latency_avg_ms) FROM previous_snapshots)
+            (SELECT AVG(rpc_latency_avg_ms)::REAL FROM previous_snapshots)
     )
     SELECT
         m.metric_name,
         m.current_value,
         m.previous_value,
         CASE WHEN m.previous_value != 0
-            THEN ((m.current_value - m.previous_value) / m.previous_value) * 100
+            THEN (((m.current_value - m.previous_value) / m.previous_value) * 100)::REAL
             ELSE 0
         END as change_percent,
         CASE
             WHEN m.previous_value = 0 THEN 'STABLE'
+            WHEN m.metric_name IN ('avg_trade_latency_ms', 'memory_usage_percent', 'rpc_latency_avg_ms') THEN
+                CASE
+                    WHEN m.current_value > m.previous_value THEN 'DEGRADING'
+                    WHEN m.current_value < m.previous_value THEN 'IMPROVING'
+                    ELSE 'STABLE'
+                END
             WHEN m.current_value > m.previous_value THEN 'IMPROVING'
             WHEN m.current_value < m.previous_value THEN 'DEGRADING'
             ELSE 'STABLE'
@@ -456,19 +463,19 @@ BEGIN
     RETURN QUERY
     WITH baseline AS (
         SELECT
-            AVG(avg_trade_latency_ms) as baseline_latency,
-            AVG(memory_usage_percent) as baseline_memory,
-            AVG(cpu_usage_percent) as baseline_cpu,
-            AVG(rpc_latency_avg_ms) as baseline_rpc_latency
+            AVG(avg_trade_latency_ms)::REAL as baseline_latency,
+            AVG(memory_usage_percent)::REAL as baseline_memory,
+            AVG(cpu_usage_percent)::REAL as baseline_cpu,
+            AVG(rpc_latency_avg_ms)::REAL as baseline_rpc_latency
         FROM evaluation_snapshots
         WHERE snapshot_time >= start_time AND snapshot_time < start_time + INTERVAL '1 hour'
     ),
     current AS (
         SELECT
-            AVG(avg_trade_latency_ms) as current_latency,
-            AVG(memory_usage_percent) as current_memory,
-            AVG(cpu_usage_percent) as current_cpu,
-            AVG(rpc_latency_avg_ms) as current_rpc_latency
+            AVG(avg_trade_latency_ms)::REAL as current_latency,
+            AVG(memory_usage_percent)::REAL as current_memory,
+            AVG(cpu_usage_percent)::REAL as current_cpu,
+            AVG(rpc_latency_avg_ms)::REAL as current_rpc_latency
         FROM evaluation_snapshots
         WHERE snapshot_time >= end_time AND snapshot_time < end_time + INTERVAL '1 hour'
     )
@@ -478,14 +485,16 @@ BEGIN
         b.baseline_latency as baseline_value,
         c.current_latency as current_value,
         CASE WHEN b.baseline_latency > 0
-            THEN ((c.current_latency - b.baseline_latency) / b.baseline_latency) * 100
+            THEN (((c.current_latency - b.baseline_latency) / b.baseline_latency) * 100)::REAL
+            WHEN c.current_latency > 0 THEN 100.0
             ELSE 0
         END as degradation_percent,
         CASE
+            WHEN b.baseline_latency = 0 AND c.current_latency > 0 THEN 'CRITICAL'
             WHEN b.baseline_latency = 0 THEN 'UNKNOWN'
-            WHEN ((c.current_latency - b.baseline_latency) / b.baseline_latency) > 0.5 THEN 'CRITICAL'
-            WHEN ((c.current_latency - b.baseline_latency) / b.baseline_latency) > 0.2 THEN 'HIGH'
-            WHEN ((c.current_latency - b.baseline_latency) / b.baseline_latency) > 0.1 THEN 'MEDIUM'
+            WHEN ((c.current_latency - b.baseline_latency) / b.baseline_latency) * 100 > 50 THEN 'CRITICAL'
+            WHEN ((c.current_latency - b.baseline_latency) / b.baseline_latency) * 100 > 20 THEN 'HIGH'
+            WHEN ((c.current_latency - b.baseline_latency) / b.baseline_latency) * 100 > 10 THEN 'MEDIUM'
             ELSE 'LOW'
         END as severity
     FROM baseline b, current c
@@ -499,18 +508,43 @@ BEGIN
         b.baseline_memory,
         c.current_memory,
         CASE WHEN b.baseline_memory > 0
-            THEN ((c.current_memory - b.baseline_memory) / b.baseline_memory) * 100
+            THEN (((c.current_memory - b.baseline_memory) / b.baseline_memory) * 100)::REAL
+            WHEN c.current_memory > 0 THEN 100.0
             ELSE 0
         END,
         CASE
+            WHEN b.baseline_memory = 0 AND c.current_memory > 0 THEN 'CRITICAL'
             WHEN b.baseline_memory = 0 THEN 'UNKNOWN'
-            WHEN ((c.current_memory - b.baseline_memory) / b.baseline_memory) > 0.5 THEN 'CRITICAL'
-            WHEN ((c.current_memory - b.baseline_memory) / b.baseline_memory) > 0.2 THEN 'HIGH'
-            WHEN ((c.current_memory - b.baseline_memory) / b.baseline_memory) > 0.1 THEN 'MEDIUM'
+            WHEN ((c.current_memory - b.baseline_memory) / b.baseline_memory) * 100 > 50 THEN 'CRITICAL'
+            WHEN ((c.current_memory - b.baseline_memory) / b.baseline_memory) * 100 > 20 THEN 'HIGH'
+            WHEN ((c.current_memory - b.baseline_memory) / b.baseline_memory) * 100 > 10 THEN 'MEDIUM'
             ELSE 'LOW'
         END
     FROM baseline b, current c
     WHERE b.baseline_memory IS NOT NULL AND c.current_memory IS NOT NULL
+
+    UNION ALL
+
+    SELECT
+        'System Resources'::TEXT,
+        'CPU Degradation'::TEXT,
+        b.baseline_cpu,
+        c.current_cpu,
+        CASE WHEN b.baseline_cpu > 0
+            THEN (((c.current_cpu - b.baseline_cpu) / b.baseline_cpu) * 100)::REAL
+            WHEN c.current_cpu > 0 THEN 100.0
+            ELSE 0
+        END,
+        CASE
+            WHEN b.baseline_cpu = 0 AND c.current_cpu > 0 THEN 'CRITICAL'
+            WHEN b.baseline_cpu = 0 THEN 'UNKNOWN'
+            WHEN ((c.current_cpu - b.baseline_cpu) / b.baseline_cpu) * 100 > 50 THEN 'CRITICAL'
+            WHEN ((c.current_cpu - b.baseline_cpu) / b.baseline_cpu) * 100 > 20 THEN 'HIGH'
+            WHEN ((c.current_cpu - b.baseline_cpu) / b.baseline_cpu) * 100 > 10 THEN 'MEDIUM'
+            ELSE 'LOW'
+        END
+    FROM baseline b, current c
+    WHERE b.baseline_cpu IS NOT NULL AND c.current_cpu IS NOT NULL
 
     UNION ALL
 
@@ -520,14 +554,16 @@ BEGIN
         b.baseline_rpc_latency,
         c.current_rpc_latency,
         CASE WHEN b.baseline_rpc_latency > 0
-            THEN ((c.current_rpc_latency - b.baseline_rpc_latency) / b.baseline_rpc_latency) * 100
+            THEN (((c.current_rpc_latency - b.baseline_rpc_latency) / b.baseline_rpc_latency) * 100)::REAL
+            WHEN c.current_rpc_latency > 0 THEN 100.0
             ELSE 0
         END,
         CASE
+            WHEN b.baseline_rpc_latency = 0 AND c.current_rpc_latency > 0 THEN 'CRITICAL'
             WHEN b.baseline_rpc_latency = 0 THEN 'UNKNOWN'
-            WHEN ((c.current_rpc_latency - b.baseline_rpc_latency) / b.baseline_rpc_latency) > 0.5 THEN 'CRITICAL'
-            WHEN ((c.current_rpc_latency - b.baseline_rpc_latency) / b.baseline_rpc_latency) > 0.2 THEN 'HIGH'
-            WHEN ((c.current_rpc_latency - b.baseline_rpc_latency) / b.baseline_rpc_latency) > 0.1 THEN 'MEDIUM'
+            WHEN ((c.current_rpc_latency - b.baseline_rpc_latency) / b.baseline_rpc_latency) * 100 > 50 THEN 'CRITICAL'
+            WHEN ((c.current_rpc_latency - b.baseline_rpc_latency) / b.baseline_rpc_latency) * 100 > 20 THEN 'HIGH'
+            WHEN ((c.current_rpc_latency - b.baseline_rpc_latency) / b.baseline_rpc_latency) * 100 > 10 THEN 'MEDIUM'
             ELSE 'LOW'
         END
     FROM baseline b, current c
@@ -540,8 +576,15 @@ CREATE OR REPLACE FUNCTION generate_daily_summary(target_day INTEGER)
 RETURNS INTEGER AS $$
 DECLARE
     summary_count INTEGER;
+    day_start DATE;
 BEGIN
-    -- Calculate daily aggregates from hourly snapshots
+    SELECT MIN(DATE(snapshot_time)) INTO day_start
+    FROM evaluation_snapshots WHERE day_number = target_day;
+
+    -- Insert daily aggregates from hourly snapshots. The *_today counters and
+    -- total_pnl_sol/total_costs_sol are running daily totals captured at each
+    -- snapshot, so MAX() takes the latest (end-of-day) value instead of summing
+    -- them across the ~24 hourly snapshots.
     INSERT INTO daily_evaluation_summaries (
         day_number,
         summary_date,
@@ -558,34 +601,39 @@ BEGIN
         p99_trade_latency_ms,
         avg_rpc_latency_ms,
         max_drawdown_percent,
+        portfolio_volatility,
+        circuit_breaker_trips,
         avg_cpu_usage_percent,
         avg_memory_usage_percent,
         avg_disk_usage_percent,
         total_errors,
         total_warnings,
         avg_db_query_latency_ms,
+        db_lock_contentions,
         total_anomalies,
         critical_anomalies,
-        warning_anomalies
+        warning_anomalies,
+        signals_replayed,
+        replay_success_rate_percent
     )
     SELECT
         target_day,
-        (SELECT MIN(DATE(snapshot_time)) FROM evaluation_snapshots WHERE day_number = target_day),
-        SUM(total_trades_today),
-        SUM(successful_trades_today),
-        SUM(failed_trades_today),
-        CASE WHEN SUM(total_trades_today) > 0
-            THEN (SUM(successful_trades_today)::FLOAT / SUM(total_trades_today)) * 100
+        day_start,
+        MAX(total_trades_today),
+        MAX(successful_trades_today),
+        MAX(failed_trades_today),
+        CASE WHEN MAX(total_trades_today) > 0
+            THEN (MAX(successful_trades_today)::FLOAT / MAX(total_trades_today)) * 100
             ELSE 0
         END,
-        SUM(total_pnl_sol),
-        CASE WHEN SUM(total_trades_today) > 0
-            THEN SUM(total_pnl_sol) / SUM(total_trades_today)
+        MAX(total_pnl_sol),
+        CASE WHEN MAX(total_trades_today) > 0
+            THEN MAX(total_pnl_sol) / MAX(total_trades_today)
             ELSE 0
         END,
-        SUM(total_costs_sol),
-        CASE WHEN SUM(total_trades_today) > 0
-            THEN SUM(total_costs_sol) / SUM(total_trades_today)
+        MAX(total_costs_sol),
+        CASE WHEN MAX(total_trades_today) > 0
+            THEN MAX(total_costs_sol) / MAX(total_trades_today)
             ELSE 0
         END,
         AVG(avg_trade_latency_ms),
@@ -593,15 +641,24 @@ BEGIN
         MAX(p99_trade_latency_ms),
         AVG(rpc_latency_avg_ms),
         MAX(max_drawdown_percent),
+        STDDEV(total_pnl_sol + COALESCE(unrealized_pnl_sol, 0)),
+        SUM(CASE WHEN circuit_breaker_state > 0 THEN 1 ELSE 0 END),
         AVG(cpu_usage_percent),
         AVG(memory_usage_percent),
         AVG(disk_usage_percent),
-        SUM(error_count),
-        SUM(warning_count),
+        MAX(error_count),
+        MAX(warning_count),
         AVG(db_query_latency_avg_ms),
+        SUM(db_lock_contention),
         (SELECT COUNT(*) FROM evaluation_anomalies WHERE day_number = target_day),
         (SELECT COUNT(*) FROM evaluation_anomalies WHERE day_number = target_day AND severity = 'CRITICAL'),
-        (SELECT COUNT(*) FROM evaluation_anomalies WHERE day_number = target_day AND severity = 'WARNING')
+        (SELECT COUNT(*) FROM evaluation_anomalies WHERE day_number = target_day AND severity = 'WARNING'),
+        (SELECT COUNT(*) FROM signal_replay_log WHERE replay_time >= day_start AND replay_time < day_start + INTERVAL '1 day'),
+        (SELECT CASE WHEN COUNT(*) = 0 THEN NULL
+                     ELSE ROUND(100.0 * COUNT(*) FILTER (WHERE success) / COUNT(*), 2)
+                END
+         FROM signal_replay_log
+         WHERE replay_time >= day_start AND replay_time < day_start + INTERVAL '1 day')
     FROM evaluation_snapshots
     WHERE day_number = target_day
     ON CONFLICT (day_number) DO UPDATE SET
@@ -619,15 +676,20 @@ BEGIN
         p99_trade_latency_ms = EXCLUDED.p99_trade_latency_ms,
         avg_rpc_latency_ms = EXCLUDED.avg_rpc_latency_ms,
         max_drawdown_percent = EXCLUDED.max_drawdown_percent,
+        portfolio_volatility = EXCLUDED.portfolio_volatility,
+        circuit_breaker_trips = EXCLUDED.circuit_breaker_trips,
         avg_cpu_usage_percent = EXCLUDED.avg_cpu_usage_percent,
         avg_memory_usage_percent = EXCLUDED.avg_memory_usage_percent,
         avg_disk_usage_percent = EXCLUDED.avg_disk_usage_percent,
         total_errors = EXCLUDED.total_errors,
         total_warnings = EXCLUDED.total_warnings,
         avg_db_query_latency_ms = EXCLUDED.avg_db_query_latency_ms,
+        db_lock_contentions = EXCLUDED.db_lock_contentions,
         total_anomalies = EXCLUDED.total_anomalies,
         critical_anomalies = EXCLUDED.critical_anomalies,
         warning_anomalies = EXCLUDED.warning_anomalies,
+        signals_replayed = EXCLUDED.signals_replayed,
+        replay_success_rate_percent = EXCLUDED.replay_success_rate_percent,
         updated_at = CURRENT_TIMESTAMP;
 
     GET DIAGNOSTICS summary_count = ROW_COUNT;
@@ -687,16 +749,17 @@ FROM evaluation_snapshots s
 ORDER BY s.snapshot_time DESC
 LIMIT 1;
 
--- View for performance trends
+-- View for performance trends (daily totals are running counters captured at
+-- each hourly snapshot, so MAX() yields the end-of-day value)
 CREATE OR REPLACE VIEW v_performance_trends AS
 SELECT
     day_number,
     AVG(avg_trade_latency_ms) as avg_daily_latency,
     AVG(p95_trade_latency_ms) as avg_p95_latency,
     AVG(p99_trade_latency_ms) as avg_p99_latency,
-    SUM(total_trades_today) as daily_trades,
-    SUM(successful_trades_today) as daily_successful_trades,
-    SUM(total_pnl_sol) as daily_pnl
+    MAX(total_trades_today) as daily_trades,
+    MAX(successful_trades_today) as daily_successful_trades,
+    MAX(total_pnl_sol) as daily_pnl
 FROM evaluation_snapshots
 GROUP BY day_number
 ORDER BY day_number;
@@ -717,6 +780,15 @@ ORDER BY day_number, anomaly_type, severity;
 -- ===================================================================
 -- INITIAL DATA SETUP
 -- ===================================================================
+
+-- Evaluation periods (created here if the base schema does not provide it)
+CREATE TABLE IF NOT EXISTS evaluation_periods (
+    id SERIAL PRIMARY KEY,
+    day_number INTEGER NOT NULL UNIQUE,
+    start_time TIMESTAMP NOT NULL,
+    end_time TIMESTAMP NOT NULL,
+    status TEXT DEFAULT 'PENDING'
+);
 
 -- Create evaluation periods (10 days)
 INSERT INTO evaluation_periods (day_number, start_time, end_time, status)

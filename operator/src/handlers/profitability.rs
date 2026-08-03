@@ -10,7 +10,7 @@ use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::db_abstraction::{Database, DbPool};
+use crate::db_abstraction::DbPool;
 use crate::error::AppError;
 
 /// Optional query: evaluate a specific run (defaults to the current run).
@@ -118,6 +118,8 @@ pub struct Outcome {
     pub liquidity_usd: Option<f64>,
     pub price_impact_pct: Option<f64>,
     pub decided_at: chrono::DateTime<chrono::Utc>,
+    /// Trade close time — the point at which the PnL is actually realized.
+    pub closed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 const SAMPLE_THRESHOLD: i64 = 60;
@@ -133,14 +135,21 @@ pub async fn profitability_verdict(
     State(state): State<Arc<crate::handlers::ApiState>>,
     Query(params): Query<VerdictQuery>,
 ) -> Result<Json<VerdictResponse>, AppError> {
-    let pool = match state.db.pool() {
-        DbPool::PostgreSQL(p) => p,
-    };
+    let DbPool::PostgreSQL(pool) = state.db.pool();
 
-    let run_id = params
+    let run_id = match params
         .run_id
         .or_else(|| state.run_context.as_ref().map(|rc| rc.run_id.clone()))
-        .unwrap_or_default();
+    {
+        Some(id) if !id.is_empty() => id,
+        _ => {
+            // An empty run_id makes the SQL predicate `($1 = '' OR ...)` match
+            // EVERY run, silently mixing scopes — refuse instead.
+            return Err(AppError::Internal(
+                "Cannot resolve run_id: no run context available and no run_id provided".to_string(),
+            ));
+        }
+    };
 
     let total_capital_sol: f64 = state
         .config
@@ -160,12 +169,14 @@ pub async fn profitability_verdict(
     let invalid_pnl = count_invalid_pnl(&pool, &run_id).await?;
 
     // ── Completeness: DecisionRecorder counters (current run only) ──
+    // Failing closed: without a recorder there is no evidence of completeness,
+    // so the gate must not report PASS.
     let (completeness_rate, completeness_ok) = match &state.decision_recorder {
         Some(recorder) => {
             let rate = recorder.completeness();
             (rate, rate >= COMPLETENESS_THRESHOLD)
         }
-        None => (1.0, true), // no recorder → no evidence of loss
+        None => (0.0, false), // no recorder → no evidence of completeness
     };
 
     let (gates, verdict) = evaluate_gates(
@@ -223,19 +234,18 @@ pub fn evaluate_gates(
         cohort_positivity(&outcomes, COHORT_MIN_COUNT);
 
     // ── Paper/live bias: mean modeled slippage from price_impact_pct ──
+    // Missing bias data must not read as zero bias (fail-open) — report
+    // INCONCLUSIVE instead so consumers can distinguish "no data" from "no bias".
     let bias_vals: Vec<f64> = outcomes
         .iter()
         .filter_map(|o| o.price_impact_pct)
         .collect();
-    let declared_bias = if bias_vals.is_empty() {
-        0.0
+    let (declared_bias, bias_status) = if bias_vals.is_empty() {
+        (0.0, "INCONCLUSIVE")
     } else {
-        bias_vals.iter().sum::<f64>() / bias_vals.len() as f64
-    };
-    let bias_status = if declared_bias.abs() <= BIAS_THRESHOLD {
-        "PASS"
-    } else {
-        "FAIL"
+        let b = bias_vals.iter().sum::<f64>() / bias_vals.len() as f64;
+        let status = if b.abs() <= BIAS_THRESHOLD { "PASS" } else { "FAIL" };
+        (b, status)
     };
 
     // ── Max single loss (% of deployed capital) ──
@@ -265,11 +275,13 @@ pub fn evaluate_gates(
     let completeness_status = if completeness_ok { "PASS" } else { "FAIL" };
 
     // ── Overall verdict ──
-    let verdict = if integrity_fail || completeness_status == "FAIL" {
+    // A net FAIL (clearly and significantly negative returns) halts trading.
+    // Bias INCONCLUSIVE (no bias data) blocks GO — insufficient evidence.
+    let verdict = if integrity_fail || completeness_status == "FAIL" || net_status == "FAIL" {
         "STOP"
-    } else if sample_size < SAMPLE_THRESHOLD {
-        "INCONCLUSIVE"
-    } else if net_status == "INCONCLUSIVE"
+    } else if sample_size < SAMPLE_THRESHOLD
+        || net_status == "INCONCLUSIVE"
+        || bias_status == "INCONCLUSIVE"
         || cohort_status == "FAIL"
         || bias_status == "FAIL"
         || loss_status == "FAIL"
@@ -342,7 +354,8 @@ pub async fn fetch_outcomes(
             dr.strategy                           AS "strategy",
             dr.liquidity_usd::DOUBLE PRECISION    AS "liquidity_usd",
             dr.price_impact_pct::DOUBLE PRECISION AS "price_impact_pct",
-            dr.decided_at                         AS "decided_at"
+            dr.decided_at                         AS "decided_at",
+            t.closed_at                           AS "closed_at"
         FROM decision_records dr
         JOIN trades t ON t.trade_uuid = dr.trade_uuid
         WHERE dr.admitted = TRUE
@@ -367,6 +380,7 @@ pub async fn fetch_outcomes(
             liquidity_usd: r.liquidity_usd,
             price_impact_pct: r.price_impact_pct,
             decided_at: r.decided_at,
+            closed_at: r.closed_at,
         })
         .collect())
 }
@@ -379,20 +393,34 @@ struct OutcomeRow {
     liquidity_usd: Option<f64>,
     price_impact_pct: Option<f64>,
     decided_at: chrono::DateTime<chrono::Utc>,
+    closed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub async fn count_missing_outcomes(
     pool: &sqlx::Pool<sqlx::Postgres>,
     run_id: &str,
 ) -> Result<i64, AppError> {
+    // Count EVERY admitted BUY decision without a qualifying closed/valid SELL
+    // outcome — a NULL trade_uuid is only one of the ways an outcome can be
+    // missing (an OPEN/CANCELLED trade, a non-SELL close, or NULL pnl_data_valid
+    // all leave the decision without a usable outcome).
     let n: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*)
         FROM decision_records dr
         WHERE dr.admitted = TRUE
           AND dr.action = 'BUY'
-          AND dr.trade_uuid IS NULL
           AND ($1 = '' OR dr.run_id = $1)
+          AND (
+            dr.trade_uuid IS NULL
+            OR NOT EXISTS (
+                SELECT 1 FROM trades t
+                WHERE t.trade_uuid = dr.trade_uuid
+                  AND t.status = 'CLOSED'
+                  AND t.pnl_data_valid = TRUE
+                  AND t.side = 'SELL'
+            )
+          )
         "#,
     )
     .bind(run_id)
@@ -425,8 +453,9 @@ pub async fn count_invalid_pnl(
 }
 
 /// 95% confidence interval (normal approximation). Returns
-/// (mean, lower, upper, status). Status is INCONCLUSIVE when the lower bound
-/// crosses zero (or sample too small for a meaningful interval).
+/// (mean, lower, upper, status). Status is PASS when the lower bound clears the
+/// threshold, FAIL when the upper bound is below it (clearly negative), and
+/// INCONCLUSIVE when the interval straddles the threshold.
 fn confidence_interval(returns: &[f64]) -> (f64, f64, f64, &'static str) {
     let n = returns.len() as f64;
     if returns.is_empty() {
@@ -444,6 +473,8 @@ fn confidence_interval(returns: &[f64]) -> (f64, f64, f64, &'static str) {
     let upper = mean + margin;
     let status = if lower > NET_RETURN_THRESHOLD {
         "PASS"
+    } else if upper < NET_RETURN_THRESHOLD {
+        "FAIL"
     } else {
         "INCONCLUSIVE"
     };
@@ -485,9 +516,12 @@ fn cohort_positivity(outcomes: &[Outcome], min_count: i64) -> (i64, i64, &'stati
 }
 
 /// Peak-to-trough drawdown of cumulative PnL (absolute SOL).
+///
+/// Ordered by trade close time (when the PnL is actually realized) rather than
+/// decision time — execution lag can otherwise reorder PnL events.
 fn max_drawdown(outcomes: &[Outcome]) -> f64 {
     let mut sorted: Vec<&Outcome> = outcomes.iter().collect();
-    sorted.sort_by_key(|o| o.decided_at);
+    sorted.sort_by_key(|o| o.closed_at.unwrap_or(o.decided_at));
     let mut peak = 0.0_f64;
     let mut cumulative = 0.0_f64;
     let mut max_dd = 0.0_f64;
@@ -516,6 +550,7 @@ mod tests {
             liquidity_usd: None,
             price_impact_pct: None,
             decided_at: chrono::DateTime::from_timestamp(decided_at, 0).unwrap(),
+            closed_at: Some(chrono::DateTime::from_timestamp(decided_at, 0).unwrap()),
         }
     }
 
@@ -537,10 +572,10 @@ mod tests {
     }
 
     #[test]
-    fn confidence_interval_negative_mean_is_inconclusive() {
+    fn confidence_interval_negative_mean_fails() {
         let returns: Vec<f64> = (0..100).map(|_| -0.005).collect();
         let (_mean, _lo, hi, status) = confidence_interval(&returns);
-        assert_eq!(status, "INCONCLUSIVE");
+        assert_eq!(status, "FAIL");
         assert!(hi < 0.0);
     }
 
@@ -618,7 +653,10 @@ mod tests {
     fn evaluate_gates_go() {
         // 60 positive outcomes, single positive cohort, no bias/loss/drawdown,
         // integrity & completeness clean → GO.
-        let outcomes: Vec<Outcome> = (0..60).map(|i| outcome(0.01, i, Some("SHIELD"))).collect();
+        let mut outcomes: Vec<Outcome> = (0..60).map(|i| outcome(0.01, i, Some("SHIELD"))).collect();
+        for o in &mut outcomes {
+            o.price_impact_pct = Some(0.0); // bias data present and zero
+        }
         let (gates, verdict) = evaluate_gates(outcomes, 0, 0, 1.0, true, 1.0);
         assert_eq!(verdict, "GO");
         assert_eq!(gates.sample_size.status, "PASS");
@@ -626,6 +664,27 @@ mod tests {
         assert_eq!(gates.cohort_positivity.status, "PASS");
         assert_eq!(gates.integrity.status, "PASS");
         assert_eq!(gates.completeness.status, "PASS");
+    }
+
+    #[test]
+    fn evaluate_gates_net_fail_stops() {
+        // 60 clearly negative outcomes → upper CI below threshold → net FAIL → STOP.
+        let outcomes: Vec<Outcome> = (0..60).map(|i| outcome(-0.01, i, Some("SHIELD"))).collect();
+        let (gates, verdict) = evaluate_gates(outcomes, 0, 0, 1.0, true, 1.0);
+        assert_eq!(gates.net_return.status, "FAIL");
+        assert_eq!(verdict, "STOP");
+    }
+
+    #[test]
+    fn evaluate_gates_no_recorder_fails_closed() {
+        // No decision recorder → completeness FAIL → STOP even with clean data.
+        let mut outcomes: Vec<Outcome> = (0..60).map(|i| outcome(0.01, i, Some("SHIELD"))).collect();
+        for o in &mut outcomes {
+            o.price_impact_pct = Some(0.0);
+        }
+        let (gates, verdict) = evaluate_gates(outcomes, 0, 0, 0.0, false, 1.0);
+        assert_eq!(gates.completeness.status, "FAIL");
+        assert_eq!(verdict, "STOP");
     }
 }
 

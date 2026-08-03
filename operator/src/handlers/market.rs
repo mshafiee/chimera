@@ -3,7 +3,6 @@
 //! Provides endpoints for market regime detection and conditions analysis.
 
 use axum::{extract::State, Json};
-use chrono::Utc;
 use rust_decimal::prelude::ToPrimitive;
 use serde::Serialize;
 use std::sync::Arc;
@@ -20,14 +19,14 @@ use crate::handlers::ApiState;
 pub struct MarketRegimeResponse {
     /// Current market regime
     pub current_regime: String,
-    /// Confidence score (0-1)
-    pub confidence: f64,
-    /// Volatility index
-    pub volatility_index: f64,
-    /// Trend strength
-    pub trend_strength: f64,
-    /// ISO timestamp of last regime change
-    pub last_regime_change: String,
+    /// Confidence score (0-1); None while analytics are not computed
+    pub confidence: Option<f64>,
+    /// Volatility index; None when there is insufficient price data
+    pub volatility_index: Option<f64>,
+    /// Trend strength; None when there is insufficient price data
+    pub trend_strength: Option<f64>,
+    /// ISO timestamp of last regime change; None while not tracked
+    pub last_regime_change: Option<String>,
     /// Historical regime data points
     pub regime_history: Vec<RegimeHistoryPoint>,
     /// Performance metrics by regime
@@ -65,12 +64,12 @@ pub struct PerformanceByRegime {
 /// Market conditions response
 #[derive(Debug, Serialize)]
 pub struct MarketConditionsResponse {
-    /// Volatility index
-    pub volatility_index: f64,
-    /// Trend strength
-    pub trend_strength: f64,
-    /// Liquidity index
-    pub liquidity_index: f64,
+    /// Volatility index; None when there is insufficient price data
+    pub volatility_index: Option<f64>,
+    /// Trend strength; None when there is insufficient price data
+    pub trend_strength: Option<f64>,
+    /// Liquidity index; None until real DEX aggregation is implemented
+    pub liquidity_index: Option<f64>,
     /// Market sentiment
     pub market_sentiment: String,
     /// Risk level
@@ -105,31 +104,25 @@ pub async fn get_market_regime(
         .as_ref()
         .ok_or_else(|| AppError::Internal("Market regime detector not initialized".to_string()))?;
 
-    // Detect current regime
-    let regime = detector.detect_regime();
+    // Read the price history snapshot once and derive the regime and the
+    // volatility/trend metrics from the same snapshot so they cannot contradict
+    // each other (a price update landing in between would otherwise mix snapshots).
+    let history = detector.get_price_history();
+    let regime = detector.detect_regime_from_history(&history);
     let current_regime = match regime {
         crate::engine::MarketRegime::Bull => "bull",
         crate::engine::MarketRegime::Bear => "bear",
         crate::engine::MarketRegime::Sideways => "neutral",
     };
 
-    // Get price history and calculate metrics
-    let price_history = detector.get_price_history();
-    let history = price_history.read();
     let volatility_index = calculate_volatility(&history);
     let trend_strength = calculate_trend_strength(&history);
-    drop(history); // Release lock
 
-    // Fixed confidence for now (placeholder)
-    let confidence = 0.75;
-
-    // Current timestamp for last_regime_change (placeholder)
-    let last_regime_change = Utc::now().to_rfc3339();
-
-    // Empty regime history for now (placeholder - would need persistence)
+    // Placeholder analytics: expose None rather than fabricated values so
+    // consumers can distinguish unavailable from real data.
+    let confidence = None;
+    let last_regime_change = None;
     let regime_history = vec![];
-
-    // Empty performance_by_regime for now (placeholder - would need analytics)
     let performance_by_regime = vec![];
 
     Ok(Json(MarketRegimeResponse {
@@ -156,15 +149,12 @@ pub async fn get_market_conditions(
         .as_ref()
         .ok_or_else(|| AppError::Internal("Market regime detector not initialized".to_string()))?;
 
-    // Detect current regime
-    let regime = detector.detect_regime();
-
-    // Get price history and calculate metrics
-    let price_history = detector.get_price_history();
-    let history = price_history.read();
+    // Read the price history snapshot once and derive both regime and metrics
+    // from the same snapshot for internal consistency.
+    let history = detector.get_price_history();
+    let regime = detector.detect_regime_from_history(&history);
     let volatility_index = calculate_volatility(&history);
     let trend_strength = calculate_trend_strength(&history);
-    drop(history); // Release lock
 
     // Market sentiment derived from regime
     let market_sentiment = match regime {
@@ -173,17 +163,17 @@ pub async fn get_market_conditions(
         crate::engine::MarketRegime::Sideways => "neutral",
     };
 
-    // Risk level based on volatility
-    let risk_level = if volatility_index < 20.0 {
-        "low"
-    } else if volatility_index < 40.0 {
-        "medium"
-    } else {
-        "high"
+    // Risk level based on volatility. Unknown when there is no data — reporting
+    // "low" risk for an empty price history would be a dangerously reassuring verdict.
+    let risk_level = match volatility_index {
+        Some(v) if v < 20.0 => "low",
+        Some(v) if v < 40.0 => "medium",
+        Some(_) => "high",
+        None => "unknown",
     };
 
-    // Liquidity index (placeholder - would need DEX aggregation)
-    let liquidity_index = 50.0;
+    // Liquidity index: unavailable until real DEX aggregation exists.
+    let liquidity_index = None;
 
     // Recommended allocation based on regime
     let (shield_percent, spear_percent) = match regime {
@@ -212,24 +202,26 @@ pub async fn get_market_conditions(
 /// Calculate volatility index from price history
 ///
 /// Uses standard deviation of prices as a percentage of the mean price.
+/// Returns `None` when there is insufficient data or a price cannot be
+/// represented as f64, so callers can distinguish "no data" from a flat market.
 fn calculate_volatility(
     price_history: &std::collections::VecDeque<(
         chrono::DateTime<chrono::Utc>,
         rust_decimal::Decimal,
     )>,
-) -> f64 {
+) -> Option<f64> {
     if price_history.len() < 2 {
-        return 0.0;
+        return None;
     }
 
     let prices: Vec<f64> = price_history
         .iter()
-        .map(|(_, p)| p.to_f64().unwrap_or(0.0))
-        .collect();
+        .map(|(_, p)| p.to_f64())
+        .collect::<Option<Vec<f64>>>()?;
 
     let mean = prices.iter().sum::<f64>() / prices.len() as f64;
     if mean == 0.0 {
-        return 0.0;
+        return None;
     }
 
     let variance = prices
@@ -242,34 +234,29 @@ fn calculate_volatility(
         / prices.len() as f64;
 
     let std_dev = variance.sqrt();
-    (std_dev / mean) * 100.0 // As percentage
+    Some((std_dev / mean) * 100.0) // As percentage
 }
 
 /// Calculate trend strength from price history
 ///
-/// Returns the percentage change from the oldest to newest price.
+/// Returns the percentage change from the oldest to newest price, or `None`
+/// when there is insufficient data or the reference price is unavailable/zero.
 fn calculate_trend_strength(
     price_history: &std::collections::VecDeque<(
         chrono::DateTime<chrono::Utc>,
         rust_decimal::Decimal,
     )>,
-) -> f64 {
+) -> Option<f64> {
     if price_history.len() < 2 {
-        return 0.0;
+        return None;
     }
 
-    let first_price = price_history
-        .front()
-        .and_then(|(_, p)| p.to_f64())
-        .unwrap_or(0.0);
-    let last_price = price_history
-        .back()
-        .and_then(|(_, p)| p.to_f64())
-        .unwrap_or(0.0);
+    let first_price = price_history.front().and_then(|(_, p)| p.to_f64())?;
+    let last_price = price_history.back().and_then(|(_, p)| p.to_f64())?;
 
     if first_price == 0.0 {
-        return 0.0;
+        return None;
     }
 
-    ((last_price - first_price) / first_price) * 100.0
+    Some(((last_price - first_price) / first_price) * 100.0)
 }

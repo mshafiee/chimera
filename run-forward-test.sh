@@ -51,13 +51,18 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Escape single quotes for SQL string literals
+sql_escape() {
+    printf '%s' "${1//\'/\'\'}"
+}
+
 # Logging function
 log() {
     local level=$1
     shift
     local message="$@"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[${timestamp}] [${level}] ${message}"
+    echo "[${timestamp}] [${level}] ${message}" >&2
 }
 
 log_info() {
@@ -124,7 +129,8 @@ create_experiment_run() {
     
     local run_id="ft-$(date +%Y%m%d-%H%M%S)"
     local start_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    local settings=$(cat "${CONFIG_FILE}")
+    local settings
+    settings=$(sql_escape "$(cat "${CONFIG_FILE}")")
     
     # Insert experiment manifest
     sqlite3 "${OPERATOR_DB}" << EOF
@@ -139,11 +145,11 @@ INSERT INTO experiment_manifest (
     toxic_wallets,
     total_wallets
 ) VALUES (
-    '${run_id}',
-    '${start_time}',
+    '$(sql_escape "${run_id}")',
+    '$(sql_escape "${start_time}")',
     '${settings}',
     'running',
-    '${start_time}',
+    '$(sql_escape "${start_time}")',
     0,
     0,
     0,
@@ -158,14 +164,32 @@ EOF
 # Wait for experiment to complete
 wait_for_completion() {
     local run_id=$1
+    local operator_pid=$2
     
     log_info "Waiting for experiment to complete (${EXPERIMENT_DAYS} days, ${MIN_TRADES} minimum trades)..."
     
     local elapsed_days=0
     local total_trades=0
+    local iterations=0
+    local max_iterations=$(( (EXPERIMENT_DAYS + 3) * 24 * 60 ))
     
     while true; do
         sleep 60  # Check every minute
+        iterations=$((iterations + 1))
+        
+        # Overall wall-clock timeout so a stalled run cannot poll forever
+        if [[ ${iterations} -ge ${max_iterations} ]]; then
+            log_error "Experiment exceeded ${EXPERIMENT_DAYS}+3 days without completing; aborting"
+            abort_experiment "${run_id}" "Wall-clock timeout exceeded"
+            return 1
+        fi
+        
+        # Operator liveness check
+        if ! kill -0 "${operator_pid}" 2>/dev/null; then
+            log_error "Operator process is no longer running; aborting"
+            abort_experiment "${run_id}" "Operator process died"
+            return 1
+        fi
         
         # Get experiment status
         local status=$(sqlite3 "${OPERATOR_DB}" "SELECT status FROM experiment_manifest WHERE run_id = '${run_id}';")
@@ -201,7 +225,9 @@ EOF
         fi
         
         # Check for abort conditions
-        check_abort_conditions "${run_id}"
+        if ! check_abort_conditions "${run_id}"; then
+            return 1
+        fi
         
         # Progress update (every hour)
         if [[ ${VERBOSE} -eq 1 ]] && [[ $(date +%M) == "00" ]]; then
@@ -222,7 +248,9 @@ check_abort_conditions() {
     if [[ "${credit_status}" == "exhausted" ]]; then
         log_error "Credit budget exhausted - aborting experiment"
         abort_experiment "${run_id}" "Credit budget exhausted"
-        exit 1
+        return 1
+    elif [[ "${credit_status}" == "unknown" ]]; then
+        log_info "Could not determine credit status; continuing"
     fi
     
     # Check tracer cap
@@ -238,13 +266,22 @@ check_abort_conditions() {
 check_credits() {
     local helius_usage_file="${PROJECT_ROOT}/scout/helius_credit_tracker.py"
     
-    if [[ -f "${helius_usage_file}" ]]; then
-        local credits_remaining=$(cd "${PROJECT_ROOT}/scout" && python helius_credit_tracker.py 2>/dev/null | grep "Credits remaining" | awk '{print $3}' || echo "0")
-        
-        if [[ "${credits_remaining}" -lt 10000 ]]; then
-            echo "exhausted"
-            return
-        fi
+    if [[ ! -f "${helius_usage_file}" ]]; then
+        echo "unknown"
+        return
+    fi
+    
+    local credits_remaining
+    credits_remaining=$(cd "${PROJECT_ROOT}/scout" && python helius_credit_tracker.py 2>/dev/null | grep "Credits remaining" | awk '{print $3}' || true)
+    
+    if [[ -z "${credits_remaining}" ]] || ! [[ "${credits_remaining}" =~ ^[0-9]+$ ]]; then
+        echo "unknown"
+        return
+    fi
+    
+    if [[ "${credits_remaining}" -lt 10000 ]]; then
+        echo "exhausted"
+        return
     fi
     
     echo "ok"
@@ -264,8 +301,8 @@ SET
     end_time = datetime('now'),
     verdict = 'KILL',
     verdict_time = datetime('now'),
-    verdict_reasons = '["${reason}"]'
-WHERE run_id = '${run_id}';
+    verdict_reasons = '["$(sql_escape "${reason}")"]'
+WHERE run_id = '$(sql_escape "${run_id}")';
 EOF
 }
 
@@ -275,12 +312,11 @@ evaluate_verdict() {
     
     log_info "Evaluating experiment verdict..."
     
-    local verdict_output=$(python "${VERDICT_SCRIPT}" \
+    local verdict_output verdict_exit_code=0
+    verdict_output=$(python "${VERDICT_SCRIPT}" \
         --db-path "${OPERATOR_DB}" \
         --output "${PROJECT_ROOT}/verdict-$(date +%Y%m%d-%H%M%S).json" \
-        2>&1)
-    
-    local verdict_exit_code=$?
+        2>&1) || verdict_exit_code=$?
     
     echo "${verdict_output}"
     
@@ -294,15 +330,27 @@ UPDATE experiment_manifest
 SET 
     status = 'completed',
     end_time = datetime('now'),
-    verdict = '${verdict}',
+    verdict = '$(sql_escape "${verdict}")',
     verdict_time = datetime('now'),
-    verdict_reasons = '${verdict_output}'
-WHERE run_id = '${run_id}';
+    verdict_reasons = '$(sql_escape "${verdict_output}")'
+WHERE run_id = '$(sql_escape "${run_id}")';
 EOF
         
         return 0
     else
         log_error "Verdict evaluation failed with exit code ${verdict_exit_code}"
+        # Mark the run as aborted so a later run is not blocked on a
+        # perpetually 'running' manifest row.
+        sqlite3 "${OPERATOR_DB}" << EOF
+UPDATE experiment_manifest 
+SET 
+    status = 'aborted',
+    end_time = datetime('now'),
+    verdict = 'KILL',
+    verdict_time = datetime('now'),
+    verdict_reasons = '["Verdict evaluation failed"]'
+WHERE run_id = '$(sql_escape "${run_id}")';
+EOF
         return 1
     fi
 }
@@ -342,7 +390,13 @@ main() {
     log_info "Operator started with PID: ${operator_pid}"
     
     # Wait for experiment to complete
-    wait_for_completion "${run_id}"
+    if ! wait_for_completion "${run_id}" "${operator_pid}"; then
+        # Stop operator and clean up before exiting
+        log_info "Stopping operator..."
+        kill "${operator_pid}" 2>/dev/null || true
+        rm -f "${PROJECT_ROOT}/operator.pid"
+        exit 1
+    fi
     
     # Stop operator
     log_info "Stopping operator..."

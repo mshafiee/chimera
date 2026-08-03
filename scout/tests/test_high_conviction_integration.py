@@ -1,19 +1,16 @@
 """
-Tests for HighConvictionAllocator integration with db_writer
+Tests for HighConvictionAllocator and HighConvictionIntegration
 
-These tests verify that the high-conviction allocation system works correctly
-with the wallet database writing and prioritizes WQS 70+ wallets appropriately.
+These tests verify that the high-conviction allocation system correctly
+prioritizes WQS 70+ wallets and allocates analysis credits.
 """
 
 import pytest
-from unittest.mock import Mock, AsyncMock, MagicMock, patch
-from typing import List, Dict, Any
 from decimal import Decimal
 
 from core.high_conviction_allocator import (
     HighConvictionAllocator,
-    ConvictionLevel,
-    AllocationResult
+    ConvictionLevel
 )
 from core.models import WalletRecord
 from integrations.high_conviction_integration import (
@@ -125,17 +122,19 @@ class TestHighConvictionAllocator:
         assert remaining_budget <= initial_budget
 
     def test_budget_exhaustion(self):
-        """Test behavior when budget is exhausted."""
+        """Test that allocations never exceed the high-conviction pool."""
         allocator = HighConvictionAllocator()
         allocator.set_total_credits(100)  # Small budget for testing
 
-        # Exhaust the high-conviction budget
-        allocator.allocate_analysis_credits("wallet1", 75.0, 50)
-        allocator.allocate_analysis_credits("wallet2", 75.0, 30)
+        # High-conviction pool = 70% of 100 = 70
+        r1 = allocator.allocate_analysis_credits("wallet1", 75.0, 50)
+        r2 = allocator.allocate_analysis_credits("wallet2", 75.0, 30)
+        r3 = allocator.allocate_analysis_credits("wallet3", 75.0, 100)
 
-        # Should still allow allocation but with reduced credits
-        result = allocator.allocate_analysis_credits("wallet3", 75.0, 100)
-        assert result.credits_allocated >= 0  # Should handle gracefully
+        total_granted = r1.credits_allocated + r2.credits_allocated + r3.credits_allocated
+        # The total granted must never exceed the high-conviction pool (70)
+        assert total_granted <= 70
+        assert r3.credits_allocated <= 70 - (r1.credits_allocated + r2.credits_allocated)
 
     def test_allocation_result_structure(self):
         """Test that allocation results have correct structure."""
@@ -221,8 +220,8 @@ class TestHighConvictionIntegration:
         assert "emerging" in reason.lower()
 
     def test_roster_filtering_by_budget(self):
-        """Test filtering wallet roster based on budget."""
-        integration = HighConvictionIntegration(total_credits=5000)
+        """Test filtering wallet roster based on budget (budget-limited)."""
+        integration = HighConvictionIntegration(total_credits=300)
 
         # Create mock wallet records
         wallets = [
@@ -232,12 +231,14 @@ class TestHighConvictionIntegration:
             _wallet("wallet4", 40.0, "REJECTED"),
         ]
 
-        # Filter roster (should prioritize high-conviction)
+        # Filter roster: high budget = 210 credits -> ~2 affordable wallets.
+        # The roster must be trimmed to the affordable count (not returned whole).
         filtered = integration.filter_roster_by_budget(wallets)
 
-        # Should return wallets (may filter based on budget constraints)
         assert isinstance(filtered, list)
-        assert len(filtered) <= len(wallets)
+        assert len(filtered) <= 2, f"Roster must be trimmed to the budget, got {len(filtered)}"
+        # High-conviction wallets must be prioritized (wallet1 WQS 80 kept)
+        assert any(w.address == "wallet1" for w in filtered)
 
     def test_allocation_summary_generation(self):
         """Test allocation summary generation."""
@@ -342,29 +343,30 @@ class TestBudgetDistribution:
         assert high_conviction_budget == 7000
 
     def test_twenty_percent_emerging(self):
-        """Test that emerging wallets get appropriate budget allocation."""
+        """Test that emerging wallets get the 8% budget allocation."""
         allocator = HighConvictionAllocator()
         allocator.set_total_credits(10000)
 
-        # Emerging wallets get 8% of total (800) or MIN_EMERGING_ALLOCATION (1000), whichever is higher
+        # Emerging wallets get 8% of total
         emerging_budget = allocator.get_emerging_wallet_budget()
-        expected = max(10000 * 0.08, 1000)  # 8% or minimum allocation
+        expected = 10000 * 0.08  # 8% = 800
 
         assert emerging_budget == expected
 
     def test_ten_percent_reserve(self):
-        """Test that remaining budget is for other wallet categories."""
+        """Test that the remaining budget matches the allocator's targets."""
         allocator = HighConvictionAllocator()
         allocator.set_total_credits(10000)
 
-        # High-conviction (70%) + Emerging (with minimum allocation) + others
-        high_conviction = allocator.get_high_conviction_budget()  # 70% = 7000
-        emerging = allocator.get_emerging_wallet_budget()  # max(8%, 1000) = 1000
+        summary = allocator.get_allocation_summary()
+        by_level = summary["allocations_by_level"]
+        medium_low = (
+            by_level["medium"]["allocated"]
+            + by_level["low"]["allocated"]
+        )
 
-        # Remaining budget for MEDIUM (20%) + LOW (2%) = 2000
-        remaining = 10000 - high_conviction - emerging
-
-        assert remaining == 2000  # MEDIUM (20%) + LOW (2%)
+        # MEDIUM (20%) + LOW (2%) of 10000 = 2200
+        assert medium_low == 2200
 
 
 class TestWalletPrioritizationLogic:
@@ -434,10 +436,11 @@ class TestPerformanceTracking:
         integration.allocate_analysis_credits("wallet1", 75.0, 100)
         integration.allocate_analysis_credits("wallet2", 60.0, 100)
 
-        # Check tracking
-        assert len(integration._wallets_analyzed) == 2
-        assert "wallet1" in integration._wallets_analyzed
-        assert "wallet2" in integration._wallets_analyzed
+        # Check tracking via the public API
+        summary = integration.get_allocation_summary()
+        assert summary["total_wallets_analyzed"] == 2
+        assert "high" in summary["wallets_analyzed"]
+        assert "medium" in summary["wallets_analyzed"]
 
     def test_high_conviction_counting(self):
         """Test high-conviction wallet counting."""
@@ -454,7 +457,8 @@ class TestPerformanceTracking:
         integration.prioritize_wallets_for_analysis(wallets, wqs_scores)
 
         # Should count 2 high-conviction wallets
-        assert integration._high_conviction_count == 2
+        summary = integration.get_allocation_summary()
+        assert summary["high_conviction_count"] == 2
 
     def test_summary_includes_wallet_details(self):
         """Test that summary includes wallet-level details."""

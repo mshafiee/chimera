@@ -9,12 +9,10 @@ Tests coverage for:
 """
 
 import pytest
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import patch, AsyncMock
 import base64
-import asyncio
-import aiohttp
-from scout.core.analyzer import WalletAnalyzer
-from scout.config import ScoutConfig
+from core.analyzer import WalletAnalyzer
+from config import ScoutConfig
 
 
 class TestToken2022Extensions:
@@ -35,7 +33,8 @@ class TestToken2022Extensions:
 
     def _mock_token_2022_account(self, extension_type, extension_length, token_2022_program):
         """Helper to create mocked Token-2022 account data."""
-        extension_data = bytearray(200)
+        # 165-byte base + 4-byte header + extension body must fit
+        extension_data = bytearray(165 + 4 + extension_length)
         extension_data[165:167] = extension_type.to_bytes(2, 'little')
         extension_data[167:169] = extension_length.to_bytes(2, 'little')
         
@@ -154,8 +153,8 @@ class TestToken2022Extensions:
         # Extension 1: TransferFeeConfig (type 1, length 32)
         extension_data[165:167] = (1).to_bytes(2, 'little')
         extension_data[167:169] = (32).to_bytes(2, 'little')
-        # Extension 2: TokenMetadata (type 19, length 64) - safe extension
-        extension_data[201:203] = (19).to_bytes(2, 'little')
+        # Extension 2: TokenMetadata (type 17, length 64) - safe extension
+        extension_data[201:203] = (17).to_bytes(2, 'little')
         extension_data[203:205] = (64).to_bytes(2, 'little')
         
         account_response = {
@@ -180,8 +179,8 @@ class TestToken2022Extensions:
         
         # Mock account data with only safe extensions
         extension_data = bytearray(300)
-        # Extension 1: TokenMetadata (type 19)
-        extension_data[165:167] = (19).to_bytes(2, 'little')
+        # Extension 1: TokenMetadata (type 17)
+        extension_data[165:167] = (17).to_bytes(2, 'little')
         extension_data[167:169] = (64).to_bytes(2, 'little')
         # Extension 2: MemoTransfer (type 8)
         extension_data[233:235] = (8).to_bytes(2, 'little')
@@ -247,7 +246,7 @@ class TestToken2022Extensions:
         
         extension_data = bytearray(300)
         # Safe extension before sentinel
-        extension_data[165:167] = (19).to_bytes(2, 'little')  # TokenMetadata
+        extension_data[165:167] = (17).to_bytes(2, 'little')  # TokenMetadata
         extension_data[167:169] = (64).to_bytes(2, 'little')
         # Sentinel marker
         extension_data[233:235] = (0).to_bytes(2, 'little')

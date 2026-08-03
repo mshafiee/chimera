@@ -213,14 +213,6 @@ class MLWQSEnhancer:
                     wqs_components=wqs_result.components if hasattr(wqs_result, 'components') else {},
                     predicted_class=predictions.get('predicted_class')
                 )
-                self.monitor.log_prediction(
-                    wallet_id=getattr(wallet_metrics, 'wallet_id', 'unknown'),
-                    predicted_pnl=predictions['predicted_pnl_sol'],
-                    features=features,
-                    model_type=predictions.get('model_type', 'ensemble'),
-                    confidence=predictions.get('confidence', 0.5),
-                    inference_time_ms=predictions.get('inference_time_ms', 0.0),
-                )
 
         except Exception as e:
             logger.error(f"ML enhancement failed: {e}")
@@ -238,23 +230,31 @@ class MLWQSEnhancer:
         """Extract ML features from wallet metrics and history."""
         features = {}
 
-        # Base metrics
-        try:
-            features.update({
-                'roi_7d': float(wallet_metrics.roi_7d) if wallet_metrics.roi_7d else 0.0,
-                'roi_30d': float(wallet_metrics.roi_30d) if wallet_metrics.roi_30d else 0.0,
-                'roi_90d': float(wallet_metrics.roi_90d) if wallet_metrics.roi_90d else 0.0,
-                'win_rate': float(wallet_metrics.win_rate) if wallet_metrics.win_rate else 0.0,
-                'profit_factor': float(wallet_metrics.profit_factor) if wallet_metrics.profit_factor else 0.0,
-                'sortino_ratio': float(wallet_metrics.sortino_ratio) if hasattr(wallet_metrics, 'sortino_ratio') and wallet_metrics.sortino_ratio else 0.0,
-                'trade_count_30d': int(wallet_metrics.trade_count_30d) if wallet_metrics.trade_count_30d else 0,
-                'avg_trade_size_sol': float(wallet_metrics.avg_trade_size_sol) if hasattr(wallet_metrics, 'avg_trade_size_sol') and wallet_metrics.avg_trade_size_sol else 0.0,
-                'avg_hold_time_hours': float(wallet_metrics.avg_hold_time_hours) if hasattr(wallet_metrics, 'avg_hold_time_hours') and wallet_metrics.avg_hold_time_hours else 0.0,
-                'max_drawdown_30d': float(wallet_metrics.max_drawdown_30d) if wallet_metrics.max_drawdown_30d else 0.0,
-                'total_unrealized_loss_sol': float(wallet_metrics.total_unrealized_loss_sol) if hasattr(wallet_metrics, 'total_unrealized_loss_sol') and wallet_metrics.total_unrealized_loss_sol else 0.0,
-            })
-        except Exception as e:
-            logger.warning(f"Failed to extract base features: {e}")
+        # Base metrics (populated per-field so one bad value doesn't drop the rest)
+        def _metric(name, converter, default):
+            value = getattr(wallet_metrics, name, None)
+            if value is None:
+                return default
+            try:
+                return converter(value)
+            except (TypeError, ValueError):
+                return default
+
+        base_fields = {
+            'roi_7d': (float, 0.0),
+            'roi_30d': (float, 0.0),
+            'roi_90d': (float, 0.0),
+            'win_rate': (float, 0.0),
+            'profit_factor': (float, 0.0),
+            'sortino_ratio': (float, 0.0),
+            'trade_count_30d': (int, 0),
+            'avg_trade_size_sol': (float, 0.0),
+            'avg_hold_time_hours': (float, 0.0),
+            'max_drawdown_30d': (float, 0.0),
+            'total_unrealized_loss_sol': (float, 0.0),
+        }
+        for field_name, (converter, default) in base_fields.items():
+            features[field_name] = _metric(field_name, converter, default)
 
         # Time-series features
         if self.ts_extractor and trade_history:

@@ -21,7 +21,7 @@ Features:
 import time
 import logging
 from typing import Dict, Optional, Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 import threading
 
@@ -42,12 +42,8 @@ class ActivityData:
     """Activity tracking data for a wallet."""
     wallet_address: str
     tx_count_24h: int
-    tx_count_1h: int
-    tx_count_5m: int
     last_activity_timestamp: float
-    last_cache_update: float = field(default_factory=time.time)
     wqs_score: Optional[float] = None
-    predicted_hit_rate: float = 0.5
 
 
 @dataclass
@@ -63,8 +59,13 @@ class CacheEntry:
     size_bytes: int = 0
 
     def is_expired(self) -> bool:
-        """Check if cache entry is expired."""
-        return (time.time() - self.last_accessed) > self.ttl_seconds
+        """Check if cache entry is expired.
+
+        Idle expiry (last_accessed) combined with an absolute cap from
+        creation time, so frequently-accessed entries still respect the TTL.
+        """
+        return ((time.time() - self.last_accessed) > self.ttl_seconds or
+                (time.time() - self.created_at) > self.ttl_seconds)
 
     def time_until_expiry(self) -> float:
         """Get seconds until expiry."""
@@ -102,13 +103,6 @@ class CacheConfig:
     # Cleanup settings
     CLEANUP_INTERVAL_SECONDS: int = 3600  # 1 hour
     INACTIVE_HOURS_THRESHOLD: int = 24    # Clean after 24h inactive
-
-    # Prediction settings
-    PREDICTION_WINDOW_HOURS: int = 24
-    MIN_PREDICTION_SAMPLES: int = 5
-
-    # State persistence
-    STATE_FILE: str = "activity_cache_state.json"
 
 
 class ActivityBasedCache:
@@ -224,12 +218,13 @@ class ActivityBasedCache:
 
         activity = self._activity_data[wallet]
 
-        # Check based on 24h transaction count
-        if activity.tx_count_24h > self._config.VERY_HIGH_MIN_TX:
+        # Check based on 24h transaction count (>= so boundary values match
+        # the documented inclusive ranges: >=10 is HIGH, >=1 is MEDIUM)
+        if activity.tx_count_24h >= self._config.VERY_HIGH_MIN_TX:
             return ActivityLevel.VERY_HIGH
-        elif activity.tx_count_24h > self._config.HIGH_MIN_TX:
+        elif activity.tx_count_24h >= self._config.HIGH_MIN_TX:
             return ActivityLevel.HIGH
-        elif activity.tx_count_24h > self._config.MEDIUM_MIN_TX:
+        elif activity.tx_count_24h >= self._config.MEDIUM_MIN_TX:
             return ActivityLevel.MEDIUM
         elif activity.tx_count_24h > 0:
             return ActivityLevel.LOW
@@ -270,6 +265,7 @@ class ActivityBasedCache:
             # Check if expired
             if entry.is_expired():
                 del self._cache[key]
+                self._total_memory_bytes -= entry.size_bytes
                 self._stats['expirations'] += 1
                 self._stats['misses'] += 1
                 return None
@@ -308,10 +304,16 @@ class ActivityBasedCache:
             if len(self._cache) >= self._config.MAX_ENTRIES:
                 self._evict_lru()
 
-            # Determine activity level and TTL
+            # Determine activity level and TTL (pass the wallet's real last
+            # activity time so the recent-activity multiplier is meaningful)
             if wallet:
                 activity_level = self._get_activity_level(wallet)
-                ttl = self.get_cache_ttl(wallet, time.time())
+                last_activity = (
+                    self._activity_data[wallet].last_activity_timestamp
+                    if wallet in self._activity_data
+                    else time.time()
+                )
+                ttl = self.get_cache_ttl(wallet, last_activity)
             else:
                 activity_level = ActivityLevel.MEDIUM
                 ttl = self._config.MEDIUM_TTL
@@ -327,7 +329,10 @@ class ActivityBasedCache:
                 size_bytes=size,
             )
 
-            # Add to cache
+            # Add to cache (account for overwrites so memory accounting stays accurate)
+            old_entry = self._cache.get(key)
+            if old_entry is not None:
+                self._total_memory_bytes -= old_entry.size_bytes
             self._cache[key] = entry
             self._total_memory_bytes += size
 
@@ -384,15 +389,24 @@ class ActivityBasedCache:
             Number of entries invalidated
         """
         with self._lock:
-            # Find all keys for this wallet
-            wallet_keys = [k for k in self._cache.keys() if wallet in k]
+            if wallet is None:
+                return 0
+
+            # Match keys structured as "<prefix>:<wallet>:..." (and the bare
+            # wallet key) so a wallet that is a substring of another address
+            # doesn't invalidate the wrong entries.
+            wallet_keys = [
+                k for k in self._cache.keys()
+                if isinstance(k, str)
+                and (k == wallet or k.startswith(f"{wallet}:") or f":{wallet}:" in k)
+            ]
 
             count = 0
             for key in wallet_keys:
                 if self.invalidate(key):
                     count += 1
 
-            logger.debug(f"Invalidated {count} entries for wallet {wallet[:8]}...")
+            logger.debug("Invalidated %d entries for wallet %s...", count, (wallet or '')[:8])
             return count
 
     def invalidate_inactive_wallets(self, hours_threshold: int = 24) -> int:
@@ -444,8 +458,6 @@ class ActivityBasedCache:
                 self._activity_data[wallet] = ActivityData(
                     wallet_address=wallet,
                     tx_count_24h=tx_count_24h,
-                    tx_count_1h=0,
-                    tx_count_5m=0,
                     last_activity_timestamp=now,
                     wqs_score=wqs,
                 )
@@ -455,7 +467,7 @@ class ActivityBasedCache:
                 if wqs is not None:
                     self._activity_data[wallet].wqs_score = wqs
 
-            logger.debug(f"Updated activity for {wallet[:8]}...: {tx_count_24h} tx/24h")
+            logger.debug("Updated activity for %s...: %s tx/24h", wallet[:8], tx_count_24h)
 
     def predict_cache_hit_rate(self, pattern: ActivityLevel) -> float:
         """

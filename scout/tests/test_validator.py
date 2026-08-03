@@ -3,12 +3,12 @@
 import pytest
 from datetime import datetime, timedelta
 from unittest.mock import Mock
-from scout.core.validator import PrePromotionValidator, ValidationStatus, PromotionCriteria
-from scout.core.wqs import WalletMetrics
-from scout.core.models import HistoricalTrade, TradeAction, SimulatedResult, BacktestConfig
-from scout.core.liquidity import LiquidityProvider, LiquidityData
-from scout.core.wqs import calculate_wqs, classify_wallet
-from scout.core.models import SimulatedTrade
+from core.validator import PrePromotionValidator, ValidationStatus, PromotionCriteria
+from core.wqs import WalletMetrics
+from core.models import HistoricalTrade, TradeAction, SimulatedResult, BacktestConfig
+from core.liquidity import LiquidityProvider, LiquidityData
+from core.wqs import calculate_wqs, classify_wallet
+from core.models import SimulatedTrade
 from decimal import Decimal
 
 
@@ -145,8 +145,8 @@ async def test_validator_rejects_negative_simulated_pnl():
         pnl_difference_sol=6.0,
         total_slippage_cost_sol=2.0,
         total_fee_cost_sol=1.0,
-        passed=False,
-        failure_reason="Negative simulated PnL",
+        passed=True,  # passes the backtest gate so the simulated-PnL gate runs
+        failure_reason=None,
     )
 
     validator = PrePromotionValidator(
@@ -208,8 +208,8 @@ async def test_validator_rejects_high_rejection_rate():
         pnl_difference_sol=3.0,
         total_slippage_cost_sol=1.0,
         total_fee_cost_sol=0.5,
-        passed=False,
-        failure_reason="Too many trades rejected",
+        passed=True,  # passes the backtest gate so the rejection-rate gate (6a) runs
+        failure_reason=None,
     )
 
     validator = PrePromotionValidator(
@@ -366,7 +366,7 @@ def _make_round_trip_trades(
                 token_symbol=tok.upper(),
                 action=TradeAction.BUY,
                 amount_sol=Decimal(str(buy_sol)),
-                price_at_trade=Decimal("100.0"),
+                price_at_trade=Decimal(str(round(buy_sol / tokens_per_trade, 8))),
                 timestamp=base + timedelta(days=2 * k),
                 tx_signature=f"buy_{k}_{token_prefix}",
                 token_amount=Decimal(str(tokens_per_trade)),
@@ -376,7 +376,7 @@ def _make_round_trip_trades(
                 token_symbol=tok.upper(),
                 action=TradeAction.SELL,
                 amount_sol=Decimal(str(sell_sol)),
-                price_at_trade=Decimal(str(sell_sol / buy_sol * 100)),
+                price_at_trade=Decimal(str(round(sell_sol / tokens_per_trade, 8))),
                 timestamp=base + timedelta(days=2 * k, hours=4),
                 tx_signature=f"sell_{k}_{token_prefix}",
                 token_amount=Decimal(str(tokens_per_trade)),
@@ -409,20 +409,20 @@ def _make_mock_sim_result(pnl_list: list, wallet_address: str = "test_wallet") -
             estimated_slippage_percent=Decimal("0.001"),
             slippage_cost_sol=Decimal("0.001"),
             fee_cost_sol=Decimal("0.001"),
-            simulated_pnl_sol=pnl,   # plain float — intentional; avoids Decimal<float TypeError
+            simulated_pnl_sol=Decimal(str(pnl)),  # Decimal, mirroring production
             rejected=False,
         )
         for pnl in pnl_list
     ]
-    total = sum(pnl_list)
+    total = Decimal(str(round(sum(pnl_list), 6)))
     return SimulatedResult(
         wallet_address=wallet_address,
         total_trades=len(sim_trades),
         simulated_trades=len(sim_trades),
         rejected_trades=0,
-        original_pnl_sol=Decimal(str(round(total * 1.05, 6))),
+        original_pnl_sol=Decimal(str(round(float(total) * 1.05, 6))),
         simulated_pnl_sol=total,
-        pnl_difference_sol=Decimal(str(round(total * 0.05, 6))),
+        pnl_difference_sol=Decimal(str(round(float(total) * 0.05, 6))),
         total_slippage_cost_sol=Decimal("0.05"),
         total_fee_cost_sol=Decimal("0.05"),
         trades=sim_trades,
@@ -440,7 +440,7 @@ async def test_realistic_profitable_wallet_reaches_active():
     Uses a real BacktestSimulator (no mock) backed by a high-liquidity mock provider.
     Proves the wallet selection funnel promotes genuinely profitable wallets end-to-end.
     """
-    from scout.core.wqs import WalletMetrics as WM
+    from core.wqs import WalletMetrics as WM
 
     # Step 1: Verify WQS independently — ~72.65 with these metrics
     # roi_7d=80: contributes min(10, (80/100)*10)=8 pts (S-03 fix: 7d ROI scaled same as 30d)
@@ -539,27 +539,28 @@ async def test_realistic_losing_wallet_rejected():
 
 # ─── P3 ──────────────────────────────────────────────────────────────────────
 
-def test_wqs_boundary_60_active_59_9_candidate():
-    """Proves the ACTIVE/CANDIDATE promotion boundary is exactly at WQS 65.0.
+def test_wqs_boundary_75_active_50_candidate():
+    """Proves the ACTIVE/CANDIDATE promotion boundary is at WQS 75.0 / 50.0.
 
-    WQS=65.0 → ACTIVE; WQS=64.99 → CANDIDATE; WQS=19.99 → REJECTED.
-    This boundary is what separates copy-eligible wallets from candidates.
+    WQS=75.0 → ACTIVE; WQS=74.99 → CANDIDATE; WQS=50.0 → CANDIDATE;
+    WQS=49.99 → REJECTED. This boundary is what separates copy-eligible
+    wallets from candidates.
     """
-    assert classify_wallet(65.0) == "ACTIVE",    "WQS 65.0 must be ACTIVE"
-    assert classify_wallet(65.01) == "ACTIVE",   "WQS 65.01 must be ACTIVE"
-    assert classify_wallet(64.99) == "CANDIDATE","WQS 64.99 must be CANDIDATE (not ACTIVE)"
-    assert classify_wallet(20.0) == "CANDIDATE", "WQS 20.0 must be CANDIDATE"
-    assert classify_wallet(19.99) == "REJECTED", "WQS 19.99 must be REJECTED"
+    assert classify_wallet(75.0) == "ACTIVE",    "WQS 75.0 must be ACTIVE"
+    assert classify_wallet(75.01) == "ACTIVE",   "WQS 75.01 must be ACTIVE"
+    assert classify_wallet(74.99) == "CANDIDATE","WQS 74.99 must be CANDIDATE (not ACTIVE)"
+    assert classify_wallet(50.0) == "CANDIDATE", "WQS 50.0 must be CANDIDATE"
+    assert classify_wallet(49.99) == "REJECTED", "WQS 49.99 must be REJECTED"
 
 
 # ─── P4 ──────────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_profit_factor_threshold_1_2_enforced():
-    """Proves validator rejects wallets whose simulated profit factor < 1.2.
+async def test_profit_factor_threshold_1_1_enforced():
+    """Proves validator rejects wallets whose simulated profit factor < 1.1.
 
     PF < 1.1 means wins barely cover losses — the Martingale danger zone.
-    The threshold is 'sim_pf < 1.1' (strict): PF=0.947 fails, PF=1.1 passes.
+    The threshold is 'sim_pf < 1.1' (strict): PF=0.947 fails, PF=1.2 passes.
     """
     # Metrics with min_wqs_score=30 to pass WQS check (trade_count=20 → confidence=1.0)
     metrics = WalletMetrics(
@@ -939,13 +940,11 @@ async def test_fast_track_rejects_thin_history_single_trade():
     )
 
     assert not result.passed, "1-trade high-WQS wallet must not fast-track"
-    # The thin-history ROI guard typically drops the raw WQS below the 80
-    # fast-track threshold entirely (FAILED_WQS); if it still clears the WQS
-    # gate, the normal min-trades gate must block it (FAILED_INSUFFICIENT_TRADES).
-    assert result.status in (
-        ValidationStatus.FAILED_WQS,
-        ValidationStatus.FAILED_INSUFFICIENT_TRADES,
-    ), f"Unexpected status: {result.status}"
+    # The thin-history ROI guard drops the raw WQS below the fast-track
+    # threshold entirely, so the WQS gate must block it.
+    assert result.status == ValidationStatus.FAILED_WQS, (
+        f"Thin-history wallet must fail at the WQS gate. Got: {result.status}: {result.reason}"
+    )
 
 
 @pytest.mark.asyncio

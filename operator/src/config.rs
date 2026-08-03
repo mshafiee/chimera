@@ -30,9 +30,16 @@ pub enum TradeMode {
 ///
 /// Rules, in order:
 /// 1. `explicit` is `Some` → return it (user chose explicitly via env).
-/// 2. `config_mode` is non-default (not `Live`) → return it (set in YAML config).
-/// 3. `rpc_url` contains `"devnet"` → `Devnet` (auto-detect with log).
+/// 2. `rpc_url` contains `"devnet"` → `Devnet` (auto-detect with log), unless
+///    the config explicitly requested `Live` (a production deploy pointing its
+///    RPC at a devnet endpoint must not silently flip to Devnet).
+/// 3. `config_mode` is non-default (not `Live`) → return it (set in YAML config).
 /// 4. else `Live`.
+///
+/// Note: devnet auto-detection is intentionally skipped when `config_mode` is
+/// `Paper` — the Paper default must never be overridden by a devnet-looking RPC
+/// URL, and a fresh deploy pointing at devnet should set
+/// `trade_mode: devnet` explicitly.
 pub fn resolve_trade_mode(
     explicit: Option<TradeMode>,
     config_mode: TradeMode,
@@ -41,12 +48,12 @@ pub fn resolve_trade_mode(
     if let Some(mode) = explicit {
         return mode;
     }
-    if config_mode != TradeMode::Live {
-        return config_mode;
-    }
-    if rpc_url.contains("devnet") {
+    if config_mode == TradeMode::Live && rpc_url.contains("devnet") {
         tracing::info!(rpc_url = %rpc_url, "Auto-detected devnet RPC URL → TradeMode::Devnet");
         return TradeMode::Devnet;
+    }
+    if config_mode != TradeMode::Live {
+        return config_mode;
     }
     TradeMode::Live
 }
@@ -63,20 +70,28 @@ impl std::fmt::Display for TradeMode {
 
 /// Root configuration structure
 #[derive(Debug, Clone, Deserialize)]
+#[derive(Default)]
 pub struct AppConfig {
     /// Server configuration
+    #[serde(default)]
     pub server: ServerConfig,
     /// RPC endpoint configuration
+    #[serde(default)]
     pub rpc: RpcConfig,
     /// Database configuration
+    #[serde(default)]
     pub database: DatabaseConfig,
     /// Security settings
+    #[serde(default)]
     pub security: SecurityConfig,
     /// Circuit breaker thresholds
+    #[serde(default)]
     pub circuit_breakers: CircuitBreakerConfig,
     /// Strategy allocation
+    #[serde(default)]
     pub strategy: StrategyConfig,
     /// Jito tip configuration
+    #[serde(default)]
     pub jito: JitoConfig,
     /// Trade mode: devnet, paper, or live
     #[serde(default)]
@@ -85,6 +100,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub jupiter: JupiterConfig,
     /// Queue configuration
+    #[serde(default)]
     pub queue: QueueConfig,
     /// Token safety configuration
     #[serde(default)]
@@ -127,12 +143,26 @@ pub struct ServerConfig {
     /// Port to listen on
     #[serde(default = "default_port")]
     pub port: u16,
-    /// Number of worker threads for the Tokio runtime (0 = auto-detect)
+    /// Number of worker threads for the Tokio runtime (must be > 0; 0 is
+    /// rejected by `validate()` — there is no auto-detect handling)
     #[serde(default = "default_worker_threads")]
     pub worker_threads: usize,
     /// Request timeout in milliseconds
     #[serde(default = "default_request_timeout")]
     pub request_timeout_ms: u64,
+}
+
+/// Manual Default delegating to the serde default fns so `ServerConfig::default()`
+/// and a deserialized config are equivalent.
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            host: default_host(),
+            port: default_port(),
+            worker_threads: default_worker_threads(),
+            request_timeout_ms: default_request_timeout(),
+        }
+    }
 }
 
 fn default_host() -> String {
@@ -216,6 +246,22 @@ fn default_primary_provider() -> String {
     "helius".to_string()
 }
 
+/// Manual Default delegating to the serde default fns.
+impl Default for RpcConfig {
+    fn default() -> Self {
+        Self {
+            primary_provider: default_primary_provider(),
+            primary_url: default_primary_url(),
+            fallback_url: None,
+            rate_limit_per_second: default_rate_limit(),
+            timeout_ms: default_rpc_timeout(),
+            max_consecutive_failures: default_max_failures(),
+            functional_health_check: default_functional_health_check(),
+            rate_limit_config: None,
+        }
+    }
+}
+
 fn default_primary_url() -> String {
     "https://api.mainnet-beta.solana.com".to_string()
 }
@@ -255,12 +301,23 @@ fn default_db_path() -> PathBuf {
     PathBuf::from("data/chimera.db")
 }
 
+/// Manual Default delegating to the serde default fns.
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            path: default_db_path(),
+            url: None,
+            max_connections: default_max_connections(),
+        }
+    }
+}
+
 fn default_max_connections() -> u32 {
     5
 }
 
 /// Security configuration
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct SecurityConfig {
     /// HMAC secret for webhook verification (loaded from env)
     #[serde(default)]
@@ -283,6 +340,44 @@ pub struct SecurityConfig {
     /// Admin wallets for management endpoints
     #[serde(default)]
     pub admin_wallets: Vec<AdminWalletConfig>,
+}
+
+/// Manual Default delegating to the serde default fns.
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            webhook_secret: String::new(),
+            webhook_secret_previous: None,
+            max_timestamp_drift_secs: default_max_timestamp_drift(),
+            webhook_rate_limit: default_webhook_rate_limit(),
+            webhook_burst_size: default_webhook_burst(),
+            api_keys: Vec::new(),
+            admin_wallets: Vec::new(),
+        }
+    }
+}
+
+/// Redacting Debug: `webhook_secret` must never leak through `{:?}`/tracing
+/// prints of `AppConfig` (mirrors `ApiKeyConfig`/`JupiterConfig`).
+impl std::fmt::Debug for SecurityConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecurityConfig")
+            .field("webhook_secret", &"[REDACTED]")
+            .field(
+                "webhook_secret_previous",
+                &self
+                    .webhook_secret_previous
+                    .as_ref()
+                    .map(|_| "[REDACTED]")
+                    .unwrap_or("None"),
+            )
+            .field("max_timestamp_drift_secs", &self.max_timestamp_drift_secs)
+            .field("webhook_rate_limit", &self.webhook_rate_limit)
+            .field("webhook_burst_size", &self.webhook_burst_size)
+            .field("api_keys", &self.api_keys)
+            .field("admin_wallets", &self.admin_wallets)
+            .finish()
+    }
 }
 
 /// API key configuration
@@ -459,7 +554,7 @@ pub struct StrategyConfig {
 }
 
 /// Profitability gate configuration for live trading enforcement.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ProfitabilityGateConfig {
     /// Enable profitability gating (fail-open by default for safety)
     #[serde(default = "default_profitability_gate_enabled")]
@@ -470,6 +565,18 @@ pub struct ProfitabilityGateConfig {
     /// Scale factor for INCONCLUSIVE verdicts (default 0.5 = 50% of original size)
     #[serde(default = "default_profitability_gate_inconclusive_factor")]
     pub inconclusive_size_factor: f64,
+}
+
+/// Manual Default delegating to the serde default fns (derive(Default) would
+/// yield refresh_interval_seconds=0 / inconclusive_size_factor=0.0).
+impl Default for ProfitabilityGateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_profitability_gate_enabled(),
+            refresh_interval_seconds: default_profitability_gate_refresh_interval(),
+            inconclusive_size_factor: default_profitability_gate_inconclusive_factor(),
+        }
+    }
 }
 
 fn default_profitability_gate_enabled() -> bool {
@@ -538,6 +645,29 @@ fn default_friction_gating_enabled() -> bool {
 
 fn default_copy_wallet_sells() -> bool {
     true // Backward compatible: copy both BUY and SELL by default
+}
+
+/// Manual Default delegating to the serde default fns so `StrategyConfig::default()`
+/// and a deserialized config are equivalent.
+impl Default for StrategyConfig {
+    fn default() -> Self {
+        Self {
+            shield_percent: default_shield_percent(),
+            spear_percent: default_spear_percent(),
+            max_position_sol: default_max_position(),
+            min_position_sol: default_min_position(),
+            shield_signal_quality_threshold: default_shield_signal_quality_threshold(),
+            spear_signal_quality_threshold: default_spear_signal_quality_threshold(),
+            dex_fee_rate: default_dex_fee_rate(),
+            shield_max_total_cost_percent: default_shield_max_cost(),
+            spear_max_total_cost_percent: default_spear_max_cost(),
+            slippage_fallback_small_percent: default_slippage_fallback_small(),
+            slippage_fallback_large_percent: default_slippage_fallback_large(),
+            slippage_fallback_threshold_sol: default_slippage_fallback_threshold(),
+            friction_gating_enabled: default_friction_gating_enabled(),
+            copy_wallet_sells: default_copy_wallet_sells(),
+        }
+    }
 }
 
 /// Jito bundle tip configuration
@@ -623,8 +753,28 @@ fn default_helius_staked_exits() -> bool {
     true  // Enable by default for production
 }
 
+/// Manual Default delegating to the serde default fns so `JitoConfig::default()`
+/// and a deserialized config are equivalent.
+impl Default for JitoConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_jito_enabled(),
+            searcher_endpoint: default_jito_searcher_endpoint(),
+            helius_fallback: default_helius_fallback(),
+            tip_floor_sol: default_tip_floor(),
+            tip_ceiling_sol: default_tip_ceiling(),
+            tip_percentile: default_tip_percentile(),
+            tip_percent_max: default_tip_percent_max(),
+            min_failures_before_fallback: default_jito_min_failures_before_fallback(),
+            disable_fallback: default_jito_disable_fallback(),
+            max_retries: default_jito_max_retries(),
+            helius_staked_exits: default_helius_staked_exits(),
+        }
+    }
+}
+
 /// Jupiter API configuration
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct JupiterConfig {
     /// Jupiter API base URL
     #[serde(default = "default_jupiter_api_url")]
@@ -670,6 +820,10 @@ pub struct JupiterConfig {
     /// Jupiter Price API base URL for fetching token prices (v3+).
     #[serde(default = "default_jupiter_price_api_url")]
     pub price_api_url: String,
+    /// Deprecation deadline (ISO date) for Jupiter's legacy keyless access.
+    /// Used by the skills-integration module to report migration deadlines.
+    #[serde(default = "default_jupiter_deprecation_deadline")]
+    pub deprecation_deadline: String,
 }
 
 impl std::fmt::Debug for JupiterConfig {
@@ -721,8 +875,33 @@ fn default_jupiter_api_url() -> String {
     "https://api.jup.ag/swap/v2".to_string()  // Updated to v2
 }
 
+/// Manual Default (NOT derive): delegates to the same serde default fns so
+/// `JupiterConfig::default()` and a deserialized config are equivalent —
+/// derive(Default) would yield empty api_url / disabled flags.
+impl Default for JupiterConfig {
+    fn default() -> Self {
+        Self {
+            api_url: default_jupiter_api_url(),
+            api_key: None,
+            reconstruct_v0_on_blockhash_expiry: default_reconstruct_v0(),
+            reject_v0_transactions: default_reject_v0(),
+            use_swap_v2: default_use_swap_v2(),
+            multi_dex_comparison: default_multi_dex_comparison(),
+            enable_rtse: default_enable_rtse(),
+            exclude_routers: None,
+            exclude_dexes: None,
+            price_api_url: default_jupiter_price_api_url(),
+            deprecation_deadline: default_jupiter_deprecation_deadline(),
+        }
+    }
+}
+
 fn default_jupiter_price_api_url() -> String {
     "https://api.jup.ag/price".to_string()
+}
+
+fn default_jupiter_deprecation_deadline() -> String {
+    "2026-06-30".to_string()
 }
 
 /// Queue configuration
@@ -763,6 +942,19 @@ fn default_num_workers() -> Option<usize> {
 
 fn default_max_concurrent_rpc() -> Option<usize> {
     Some(8)
+}
+
+/// Manual Default delegating to the serde default fns.
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            capacity: default_queue_capacity(),
+            load_shed_threshold_percent: default_load_shed_threshold(),
+            parallel_enabled: default_parallel_enabled(),
+            num_workers: default_num_workers(),
+            max_concurrent_rpc: default_max_concurrent_rpc(),
+        }
+    }
 }
 
 /// Token safety configuration
@@ -946,7 +1138,7 @@ pub struct NotificationsConfig {
 }
 
 /// Telegram-specific notification configuration
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct TelegramNotificationConfig {
     /// Whether Telegram notifications are enabled
     #[serde(default)]
@@ -960,6 +1152,18 @@ pub struct TelegramNotificationConfig {
     /// Rate limit in seconds between similar notifications
     #[serde(default = "default_notification_rate_limit")]
     pub rate_limit_seconds: u64,
+}
+
+/// Redacting Debug: `bot_token` must never leak through `{:?}`/tracing prints.
+impl std::fmt::Debug for TelegramNotificationConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramNotificationConfig")
+            .field("enabled", &self.enabled)
+            .field("bot_token", &"[REDACTED]")
+            .field("chat_id", &self.chat_id)
+            .field("rate_limit_seconds", &self.rate_limit_seconds)
+            .finish()
+    }
 }
 
 fn default_notification_rate_limit() -> u64 {
@@ -1171,7 +1375,7 @@ fn default_inactivity_max_oscillation_cycles() -> u32 {
 }
 
 /// Monitoring configuration
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct MonitoringConfig {
     /// Enable automatic monitoring
     #[serde(default = "default_true")]
@@ -1250,14 +1454,16 @@ pub struct MonitoringConfig {
     #[serde(default)]
     pub helius_webhook_auth_header: Option<String>,
     /// Enforce mode for Helius webhook auth header.
-    /// `false` (default) = dry-run / fail-open: log `auth_ok` / `auth_mismatch`
-    /// but always accept.  `true` = reject non-matching requests with HTTP 401.
+    /// `true` (default) = reject non-matching requests with HTTP 401.
+    /// `false` = dry-run / fail-open: log `auth_ok` / `auth_mismatch`
+    /// but always accept.
     #[serde(default = "default_true")]
     pub helius_auth_enforce: bool,
     /// Enforce mode for RPC signature verification.
-    /// `false` (default) = dry-run / fail-open: log `rpc_verify_ok` /
-    /// `rpc_verify_failed` but always accept.  `true` = drop events whose
-    /// on-chain deltas do not match the webhook claim.
+    /// `true` (default) = drop events whose on-chain deltas do not match the
+    /// webhook claim.
+    /// `false` = dry-run / fail-open: log `rpc_verify_ok` /
+    /// `rpc_verify_failed` but always accept.
     #[serde(default = "default_true")]
     pub rpc_verify_enforce: bool,
     /// Minutes threshold for the stale trade reaper. PENDING/QUEUED trades
@@ -1404,13 +1610,14 @@ fn default_auto_demote_wallets() -> bool {
 
 impl Default for MonitoringConfig {
     fn default() -> Self {
+        // Keep in sync with the serde default fns (enabled, rate limits).
         Self {
-            enabled: false,
+            enabled: default_true(),
             helius_api_key: None,
             helius_webhook_url: None,
             webhook_registration_batch_size: default_webhook_batch_size(),
             webhook_registration_delay_ms: default_webhook_delay(),
-            webhook_processing_rate_limit: default_webhook_rate_limit(),
+            webhook_processing_rate_limit: default_monitoring_webhook_rate_limit(),
             rpc_polling_enabled: true,
             rpc_poll_interval_secs: default_rpc_poll_interval(),
             tiered_polling_enabled: true,
@@ -1433,6 +1640,77 @@ impl Default for MonitoringConfig {
             rpc_verify_enforce: true,
             stale_trade_reaper_minutes: default_stale_trade_max_age(),
         }
+    }
+}
+
+/// Redacting Debug: `helius_api_key` and `helius_webhook_auth_header` must
+/// never leak through `{:?}`/tracing prints of `AppConfig`.
+impl std::fmt::Debug for MonitoringConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MonitoringConfig")
+            .field("enabled", &self.enabled)
+            .field(
+                "helius_api_key",
+                &self
+                    .helius_api_key
+                    .as_ref()
+                    .map(|_| "[REDACTED]")
+                    .unwrap_or("None"),
+            )
+            .field("helius_webhook_url", &self.helius_webhook_url)
+            .field(
+                "webhook_registration_batch_size",
+                &self.webhook_registration_batch_size,
+            )
+            .field(
+                "webhook_registration_delay_ms",
+                &self.webhook_registration_delay_ms,
+            )
+            .field(
+                "webhook_processing_rate_limit",
+                &self.webhook_processing_rate_limit,
+            )
+            .field("rpc_polling_enabled", &self.rpc_polling_enabled)
+            .field("rpc_poll_interval_secs", &self.rpc_poll_interval_secs)
+            .field("tiered_polling_enabled", &self.tiered_polling_enabled)
+            .field("tiered_polling", &self.tiered_polling)
+            .field("rpc_poll_batch_size", &self.rpc_poll_batch_size)
+            .field("rpc_poll_rate_limit", &self.rpc_poll_rate_limit)
+            .field(
+                "exit_detection_delay_secs",
+                &self.exit_detection_delay_secs,
+            )
+            .field("max_active_wallets", &self.max_active_wallets)
+            .field("auto_demote_wallets", &self.auto_demote_wallets)
+            .field(
+                "inactivity_rotation_enabled",
+                &self.inactivity_rotation_enabled,
+            )
+            .field("inactivity_rotation", &self.inactivity_rotation)
+            .field("webhook_lifecycle", &self.webhook_lifecycle)
+            .field("use_websocket", &self.use_websocket)
+            .field("helius_websocket_url", &self.helius_websocket_url)
+            .field("websocket_reconnect", &self.websocket_reconnect)
+            .field(
+                "websocket_health_timeout_secs",
+                &self.websocket_health_timeout_secs,
+            )
+            .field("websocket_commitment", &self.websocket_commitment)
+            .field(
+                "helius_webhook_auth_header",
+                &self
+                    .helius_webhook_auth_header
+                    .as_ref()
+                    .map(|_| "[REDACTED]")
+                    .unwrap_or("None"),
+            )
+            .field("helius_auth_enforce", &self.helius_auth_enforce)
+            .field("rpc_verify_enforce", &self.rpc_verify_enforce)
+            .field(
+                "stale_trade_reaper_minutes",
+                &self.stale_trade_reaper_minutes,
+            )
+            .finish()
     }
 }
 
@@ -2353,98 +2631,6 @@ impl AppConfig {
     }
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        AppConfig {
-            server: ServerConfig {
-                host: default_host(),
-                port: default_port(),
-                worker_threads: default_worker_threads(),
-                request_timeout_ms: default_request_timeout(),
-            },
-            rpc: RpcConfig {
-                primary_provider: default_primary_provider(),
-                primary_url: default_primary_url(),
-                fallback_url: None,
-                rate_limit_per_second: default_rate_limit(),
-                timeout_ms: default_rpc_timeout(),
-                max_consecutive_failures: default_max_failures(),
-                functional_health_check: true,
-                rate_limit_config: None,
-            },
-            database: DatabaseConfig {
-                path: "data/chimera.db".into(),
-                url: None,
-                max_connections: 5,
-            },
-            security: SecurityConfig {
-                webhook_secret: "${CHIMERA_SECURITY__WEBHOOK_SECRET}".to_string(),
-                webhook_secret_previous: None,
-                max_timestamp_drift_secs: default_max_timestamp_drift(),
-                webhook_rate_limit: 10000,
-                webhook_burst_size: 15000,
-                admin_wallets: vec![],
-                api_keys: vec![],
-            },
-            circuit_breakers: CircuitBreakerConfig {
-                max_loss_24h_usd: default_max_loss(),
-                max_consecutive_losses: default_max_consecutive_losses(),
-                max_drawdown_percent: default_max_drawdown(),
-                portfolio_stop_loss_percent: default_portfolio_stop_loss_percent(),
-                cooldown_minutes: default_cooldown(),
-                max_jupiter_failures: default_max_jupiter_failures(),
-            },
-            strategy: StrategyConfig {
-                shield_percent: 50,
-                spear_percent: 50,
-                max_position_sol: dec!(1.0),
-                min_position_sol: dec!(0.01),
-                shield_signal_quality_threshold: 0.65,
-                spear_signal_quality_threshold: 0.50,
-                dex_fee_rate: dec!(0.003),
-                shield_max_total_cost_percent: dec!(0.05),
-                spear_max_total_cost_percent: dec!(0.08),
-                slippage_fallback_small_percent: dec!(0.005),
-                slippage_fallback_large_percent: dec!(0.01),
-                slippage_fallback_threshold_sol: dec!(0.5),
-                friction_gating_enabled: true,
-                copy_wallet_sells: true,
-            },
-            jito: JitoConfig {
-                enabled: true,
-                searcher_endpoint: None,
-                helius_fallback: false,
-                tip_floor_sol: dec!(0.001),
-                tip_ceiling_sol: dec!(0.01),
-                tip_percentile: 50,
-                tip_percent_max: dec!(0.10),
-                min_failures_before_fallback: 10,
-                disable_fallback: false,
-                max_retries: 5,
-                helius_staked_exits: true,
-            },
-            trade_mode: TradeMode::default(),
-            jupiter: JupiterConfig::default(),
-            queue: QueueConfig {
-                capacity: default_queue_capacity(),
-                load_shed_threshold_percent: 80,
-                parallel_enabled: false,
-                num_workers: None,
-                max_concurrent_rpc: None,
-            },
-            token_safety: TokenSafetyConfig::default(),
-            notifications: NotificationsConfig::default(),
-            monitoring: None,
-            profit_management: ProfitManagementConfig::default(),
-            position_sizing: PositionSizingConfig::default(),
-            mev_protection: MevProtectionConfig::default(),
-            degradation: DegradationConfig::default(),
-            execution_lock: crate::engine::ExecutionLockConfig::default(),
-            experiment: ExperimentConfig::default(),
-            profitability_gate: ProfitabilityGateConfig::default(),
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

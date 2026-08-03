@@ -23,14 +23,23 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Helper to get webhook URL from monitoring config
-fn get_webhook_url(state: &MonitoringState) -> String {
-    state
+/// Helper to get webhook URL from monitoring config.
+/// Returns a validation error when the URL is missing — an empty URL would be
+/// sent to external Helius calls as an invalid request target.
+fn get_webhook_url(state: &MonitoringState) -> AppResult<String> {
+    let url = state
         .config
         .monitoring
         .as_ref()
         .and_then(|m| m.helius_webhook_url.clone())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if url.trim().is_empty() {
+        return Err(AppError::Validation(
+            "helius_webhook_url is not configured — webhook lifecycle operations require it"
+                .to_string(),
+        ));
+    }
+    Ok(url)
 }
 
 /// Helper to get helius_dry_run flag from monitoring config
@@ -53,20 +62,36 @@ fn get_auth_header(state: &MonitoringState) -> Option<String> {
         .and_then(|m| m.resolved_helius_auth_header())
 }
 
-/// Webhook statistics response
-#[derive(Debug, Serialize)]
-pub struct WebhookStatsResponse {
-    pub success: bool,
-    pub data: Option<WebhookStats>,
-    pub error: Option<String>,
+/// Build the lifecycle manager config from the ACTUAL monitoring config so
+/// admin operations agree with the configured policy instead of hard-coded
+/// values duplicated across handlers.
+fn build_lifecycle_config(
+    state: &MonitoringState,
+) -> AppResult<crate::monitoring::webhook_lifecycle::WebhookLifecycleConfig> {
+    let webhook_url = get_webhook_url(state)?;
+    let lifecycle = state
+        .config
+        .monitoring
+        .as_ref()
+        .and_then(|m| m.webhook_lifecycle.as_ref());
+    Ok(crate::monitoring::webhook_lifecycle::WebhookLifecycleConfig {
+        auto_register_enabled: lifecycle.map(|wl| wl.auto_register_enabled).unwrap_or(true),
+        auto_cleanup_enabled: lifecycle.map(|wl| wl.auto_cleanup_enabled).unwrap_or(true),
+        health_check_interval_secs: lifecycle
+            .map(|wl| wl.health_check_interval_secs)
+            .unwrap_or(3600),
+        stale_threshold_days: lifecycle.map(|wl| wl.stale_threshold_days).unwrap_or(7),
+        max_registration_retries: lifecycle.map(|wl| wl.max_registration_retries).unwrap_or(3),
+        webhook_url,
+        helius_dry_run: get_helius_dry_run(state),
+        auth_header: get_auth_header(state),
+    })
 }
 
 /// Bulk register request
 #[derive(Debug, Deserialize)]
 pub struct BulkRegisterRequest {
     pub wallets: Vec<String>,
-    #[serde(default)]
-    pub force_recreate: bool,
 }
 
 /// Bulk cleanup request
@@ -127,7 +152,16 @@ impl<T> ApiResponse<T> {
 /// Get webhook lifecycle statistics
 pub async fn get_webhook_stats(
     State(state): State<Arc<MonitoringState>>,
+    Extension(auth): Extension<AuthExtension>,
 ) -> AppResult<Json<ApiResponse<WebhookStats>>> {
+    // Same operator-role enforcement as every other handler in this file —
+    // webhook stats leak internal monitoring state otherwise.
+    if !auth.0.role.has_permission(Role::Operator) {
+        return Err(AppError::Forbidden(
+            "Requires operator role or higher".to_string(),
+        ));
+    }
+
     let stats = get_webhook_statistics(state.db.as_ref())
         .await
         .map_err(|e| AppError::Internal(format!("Failed to get webhook statistics: {}", e)))?;
@@ -153,19 +187,7 @@ pub async fn bulk_register_webhooks(
         return Err(AppError::Validation("No wallets provided".to_string()));
     }
 
-    let webhook_url = get_webhook_url(&state);
-    let helius_dry_run = get_helius_dry_run(&state);
-    let auth_header = get_auth_header(&state);
-    let lifecycle_config = crate::monitoring::webhook_lifecycle::WebhookLifecycleConfig {
-        auto_register_enabled: true,
-        auto_cleanup_enabled: true,
-        health_check_interval_secs: 3600,
-        stale_threshold_days: 7,
-        max_registration_retries: 3,
-        webhook_url,
-        helius_dry_run,
-        auth_header,
-    };
+    let lifecycle_config = build_lifecycle_config(&state)?;
 
     let manager = WebhookLifecycleManager::new(
         state.db.clone(),
@@ -210,19 +232,7 @@ pub async fn bulk_cleanup_webhooks(
         return Err(AppError::Validation("No wallets provided".to_string()));
     }
 
-    let webhook_url = get_webhook_url(&state);
-    let helius_dry_run = get_helius_dry_run(&state);
-    let auth_header = get_auth_header(&state);
-    let lifecycle_config = crate::monitoring::webhook_lifecycle::WebhookLifecycleConfig {
-        auto_register_enabled: true,
-        auto_cleanup_enabled: true,
-        health_check_interval_secs: 3600,
-        stale_threshold_days: 7,
-        max_registration_retries: 3,
-        webhook_url,
-        helius_dry_run,
-        auth_header,
-    };
+    let lifecycle_config = build_lifecycle_config(&state)?;
 
     let manager = WebhookLifecycleManager::new(
         state.db.clone(),
@@ -262,7 +272,7 @@ pub async fn manual_reconcile_webhooks(
         ));
     }
 
-    let webhook_url = get_webhook_url(&state);
+    let webhook_url = get_webhook_url(&state)?;
     let result = reconcile_internal(
         state.db.clone(),
         &state.helius_client,
@@ -305,7 +315,7 @@ pub async fn manual_health_check(
         ));
     }
 
-    let webhook_url = get_webhook_url(&state);
+    let webhook_url = get_webhook_url(&state)?;
     let stale_threshold = state
         .config
         .monitoring
@@ -391,19 +401,7 @@ pub async fn retry_webhook_registration(
         ));
     }
 
-    let webhook_url = get_webhook_url(&state);
-    let helius_dry_run = get_helius_dry_run(&state);
-    let auth_header = get_auth_header(&state);
-    let lifecycle_config = crate::monitoring::webhook_lifecycle::WebhookLifecycleConfig {
-        auto_register_enabled: true,
-        auto_cleanup_enabled: true,
-        health_check_interval_secs: 3600,
-        stale_threshold_days: 7,
-        max_registration_retries: 3,
-        webhook_url,
-        helius_dry_run,
-        auth_header,
-    };
+    let lifecycle_config = build_lifecycle_config(&state)?;
 
     let manager = WebhookLifecycleManager::new(
         state.db.clone(),
@@ -427,7 +425,10 @@ pub async fn retry_webhook_registration(
                 error = ?result.error_message,
                 "Webhook registration retry failed"
             );
-            Ok(StatusCode::INTERNAL_SERVER_ERROR)
+            Err(AppError::Internal(format!(
+                "Webhook registration retry failed: {}",
+                result.error_message.unwrap_or_else(|| "unknown error".to_string())
+            )))
         }
         Err(e) => {
             tracing::error!(
@@ -435,7 +436,10 @@ pub async fn retry_webhook_registration(
                 error = %e,
                 "Webhook registration retry error"
             );
-            Ok(StatusCode::INTERNAL_SERVER_ERROR)
+            Err(AppError::Internal(format!(
+                "Webhook registration retry error: {}",
+                e
+            )))
         }
     }
 }
@@ -455,19 +459,7 @@ pub async fn toggle_wallet_webhook(
         ));
     }
 
-    let webhook_url = get_webhook_url(&state);
-    let helius_dry_run = get_helius_dry_run(&state);
-    let auth_header = get_auth_header(&state);
-    let lifecycle_config = crate::monitoring::webhook_lifecycle::WebhookLifecycleConfig {
-        auto_register_enabled: true,
-        auto_cleanup_enabled: true,
-        health_check_interval_secs: 3600,
-        stale_threshold_days: 7,
-        max_registration_retries: 3,
-        webhook_url,
-        helius_dry_run,
-        auth_header,
-    };
+    let lifecycle_config = build_lifecycle_config(&state)?;
 
     let manager = WebhookLifecycleManager::new(
         state.db.clone(),
@@ -494,7 +486,7 @@ pub async fn toggle_wallet_webhook(
                 error = %e,
                 "Failed to toggle webhook"
             );
-            Ok(StatusCode::INTERNAL_SERVER_ERROR)
+            Err(AppError::Internal(format!("Failed to toggle webhook: {}", e)))
         }
     }
 }

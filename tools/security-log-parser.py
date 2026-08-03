@@ -10,9 +10,8 @@ This service:
 4. Provides real-time security event feed
 """
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Response
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
-from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import json
@@ -23,7 +22,6 @@ from datetime import datetime
 import re
 import os
 from collections import defaultdict
-from typing import Tuple
 import asyncio
 
 # Configure logging
@@ -47,9 +45,6 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Instrumentator for Prometheus metrics
-instrumentator = Instrumentator(app)
-
 # Redis connection for caching
 try:
     redis_client = redis.Redis(
@@ -70,25 +65,25 @@ except Exception as e:
 security_events_total = Counter(
     "chimera_haproxy_security_events_total",
     "Total security events processed from HAProxy",
-    ["event_type", "severity", "geo_country", "source_ip"]
+    ["event_type", "severity", "geo_country"]
 )
 
 rate_limit_violations_total = Counter(
     "chimera_haproxy_rate_limit_violations_total",
     "Rate limit violations detected by HAProxy",
-    ["endpoint", "source_ip"]
+    ["endpoint"]
 )
 
 auth_failures_total = Counter(
     "chimera_haproxy_auth_failures_total",
     "Authentication failures detected",
-    ["auth_type", "source_ip", "reason"]
+    ["auth_type", "reason"]
 )
 
 attack_detected_total = Counter(
     "chimera_haproxy_attack_detected_total",
     "Attack patterns detected by security analysis",
-    ["attack_type", "severity", "source_ip"]
+    ["attack_type", "severity"]
 )
 
 geo_anomalies_total = Counter(
@@ -115,15 +110,14 @@ threat_history: List[Dict[str, Any]] = []
 
 # Pattern matching for attack detection
 patterns = {
-    "sql_injection": re.compile(r"(union|select|insert|update|delete|drop|create|alter|grant|revoke)\s+", re.IGNORECASE),
+    "sql_injection": re.compile(r"\b(union|select|insert|update|delete|drop|create|alter|grant|revoke)\b\s+[^\s]*\s*('|--|;|/\*)", re.IGNORECASE),
     "path_traversal": re.compile(r"(\.\./|\.\.\\)", re.IGNORECASE),
-    "command_injection": re.compile(r"(;|\||&)", re.IGNORECASE),
+    "command_injection": re.compile(r"(?:[;&|]\s*)(?:cat|id|whoami|rm|wget|curl|nc|bash|sh|cmd|powershell|exec|system)\b", re.IGNORECASE),
     "xss_attempt": re.compile(r"(<script|javascript:|onerror=)", re.IGNORECASE),
     "user_agent_tool": re.compile(r"(curl|wget|python|bash|sh|powershell|perl|ruby)", re.IGNORECASE),
 }
 
 # GeoIP threat indicators
-threat_countries = set()  # Can be configured via environment
 allowed_countries = {"US", "GB", "DE", "FR", "JP", "SG", "CH"}  # Default allowed countries
 
 # Background task for log processing
@@ -133,6 +127,7 @@ class LogProcessor:
         self.processing = False
         self.log_file = None
         self.last_check = 0
+        self.task = None
 
     async def process_logs(self):
         """Background task to process security logs"""
@@ -153,22 +148,26 @@ class LogProcessor:
 
             async with asyncio.Lock():
                 try:
-                    with open(HA_PROXY_LOG_PATH, 'r') as f:
-                        # Seek to last position
-                        f.seek(self.last_position)
+                    # Run the blocking read in a thread so the event loop
+                    # never stalls on large log chunks
+                    def _read_new_lines():
+                        with open(HA_PROXY_LOG_PATH, 'r') as f:
+                            # If the file shrank or was recreated (rotation),
+                            # start over from the beginning
+                            current_size = os.path.getsize(HA_PROXY_LOG_PATH)
+                            if current_size < self.last_position:
+                                self.last_position = 0
+                            f.seek(self.last_position)
+                            lines = [ln.strip() for ln in f]
+                            return lines, f.tell()
 
-                        # Read new lines
-                        new_lines = []
-                        for line in f:
-                            new_lines.append(line.strip())
+                    new_lines, new_position = await asyncio.to_thread(_read_new_lines)
+                    self.last_position = new_position
 
-                        if new_lines:
-                            self.last_position = f.tell()
-
-                            # Process each log line
-                            for line in new_lines:
-                                if line:
-                                    await self._process_log_line(line)
+                    # Process each log line
+                    for line in new_lines:
+                        if line:
+                            await self._process_log_line(line)
                 except IOError as e:
                     logger.error(f"Error reading log file: {e}")
         except Exception as e:
@@ -203,22 +202,19 @@ class LogProcessor:
             security_events_total.labels(
                 event_type=event_type,
                 severity=threat_level,
-                geo_country=event.get("geo_country", "unknown"),
-                source_ip=source_ip
+                geo_country=event.get("geo_country", "unknown")
             ).inc()
 
             # Track rate limit violations
             if http_status == "429":
                 rate_limit_violations_total.labels(
-                    endpoint=http_path,
-                    source_ip=source_ip
+                    endpoint=http_path
                 ).inc()
 
             # Track authentication failures
             if http_status in ["401", "403"]:
                 auth_failures_total.labels(
                     auth_type="bearer_token",
-                    source_ip=source_ip,
                     reason="unauthorized"
                 ).inc()
 
@@ -276,8 +272,7 @@ class LogProcessor:
             if patterns["sql_injection"].search(http_path + http_query):
                 attack_detected_total.labels(
                     attack_type="sql_injection",
-                    severity="high",
-                    source_ip=source_ip
+                    severity="high"
                 ).inc()
                 logger.warning(f"SQL injection attempt from {source_ip} on {http_path}")
 
@@ -285,8 +280,7 @@ class LogProcessor:
             if patterns["path_traversal"].search(http_path + http_query):
                 attack_detected_total.labels(
                     attack_type="path_traversal",
-                    severity="high",
-                    source_ip=source_ip
+                    severity="high"
                 ).inc()
                 logger.warning(f"Path traversal attempt from {source_ip} on {http_path}")
 
@@ -294,8 +288,7 @@ class LogProcessor:
             if patterns["command_injection"].search(http_query):
                 attack_detected_total.labels(
                     attack_type="command_injection",
-                    severity="critical",
-                    source_ip=source_ip
+                    severity="critical"
                 ).inc()
                 logger.warning(f"Command injection attempt from {source_ip} on {http_path}")
 
@@ -303,8 +296,7 @@ class LogProcessor:
             if patterns["xss_attempt"].search(http_path + http_query):
                 attack_detected_total.labels(
                     attack_type="xss_attempt",
-                    severity="medium",
-                    source_ip=source_ip
+                    severity="medium"
                 ).inc()
                 logger.warning(f"XSS attempt from {source_ip} on {http_path}")
 
@@ -312,8 +304,7 @@ class LogProcessor:
             if patterns["user_agent_tool"].search(user_agent):
                 attack_detected_total.labels(
                     attack_type="user_agent_tool",
-                    severity="low",
-                    source_ip=source_ip
+                    severity="low"
                 ).inc()
                 logger.info(f"User-agent tool detected from {source_ip}: {user_agent}")
 
@@ -354,8 +345,16 @@ async def metrics():
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 @app.post("/parse-log", response_model=SecurityEventResponse)
-async def parse_log_line(log_line: str):
-    """Parse a single security log line (for testing)"""
+async def parse_log_line(log_line: str, api_key: Optional[str] = None):
+    """Parse a single security log line (for testing).
+
+    Requires the PARSER_API_KEY header so unauthenticated clients cannot
+    forge security events and corrupt metrics/alerting.
+    """
+    expected_key = os.getenv("PARSER_API_KEY", "")
+    if expected_key and api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
     try:
         event = json.loads(log_line)
         await log_processor._categorize_event(event)
@@ -398,7 +397,7 @@ async def get_active_threats():
     try:
         # Clean up old threats (>24 hours)
         current_time = datetime.now()
-        active_threats = {}
+        active_now = {}
 
         for threat_id, threat_data in active_threats_store.items():
             try:
@@ -406,23 +405,29 @@ async def get_active_threats():
                 time_diff = (current_time - threat_time).total_seconds()
 
                 if time_diff < 86400:  # < 24 hours
-                    active_threats[threat_id] = threat_data
-            except:
+                    active_now[threat_id] = threat_data
+                else:
+                    # Expired: keep the gauge in sync
+                    active_threats.labels(
+                        threat_type=threat_data.get("type", "unknown"),
+                        severity=threat_data.get("severity", "unknown")
+                    ).dec()
+            except (ValueError, TypeError):
                 pass
 
-        # Update gauge based on remaining threats
+        # Update the store
         active_threats_store.clear()
-        active_threats_store.update(active_threats)
+        active_threats_store.update(active_now)
 
-        # Update gauge for each threat type
+        # Count threats by type
         threat_counts = defaultdict(lambda: 0)
-        for threat in active_threats.values():
+        for threat in active_now.values():
             threat_counts[threat.get("type", "unknown")] += 1
 
         return {
-            "total_threats": len(active_threats),
+            "total_threats": len(active_now),
             "threats_by_type": dict(threat_counts),
-            "recent_threats": list(active_threats.values())[-10:],
+            "recent_threats": list(active_now.values())[-10:],
             "last_check": datetime.now().isoformat()
         }
     except Exception as e:
@@ -436,7 +441,7 @@ async def start_processing():
         return {"status": "already_processing"}
 
     log_processor.processing = True
-    asyncio.create_task(log_processor.process_logs())
+    log_processor.task = asyncio.create_task(log_processor.process_logs())
     return {"status": "started"}
 
 @app.post("/stop-processing")
@@ -447,6 +452,9 @@ async def stop_processing():
         return {"status": "not_processing"}
 
     log_processor.processing = False
+    if log_processor.task:
+        log_processor.task.cancel()
+        log_processor.task = None
     return {"status": "stopped"}
 
 # Startup event
@@ -455,9 +463,9 @@ async def startup_event():
     """Initialize security log parser on startup"""
     logger.info("Starting Chimera Security Log Parser Service")
 
-    # Start background log processing
+    # Start background log processing (keep a strong reference to the task)
     log_processor.processing = True
-    asyncio.create_task(log_processor.process_logs())
+    log_processor.task = asyncio.create_task(log_processor.process_logs())
 
     logger.info("Security log parser started successfully")
 
@@ -467,6 +475,9 @@ async def shutdown_event():
     """Clean up on shutdown"""
     global log_processor
     log_processor.processing = False
+    if log_processor.task:
+        log_processor.task.cancel()
+        log_processor.task = None
     logger.info("Security log parser shutting down")
 
 if __name__ == "__main__":

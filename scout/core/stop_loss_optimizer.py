@@ -121,20 +121,31 @@ class StopLossOptimizer:
         self._regime = MarketRegime.NEUTRAL
         self._lock = threading.Lock()
 
-        # ATR calculation cache
-        self._atr_cache: Dict[str, Tuple[float, float]] = {}  # symbol -> (atr, timestamp)
+        # Per-entry trailing stop high-water marks: (entry, regime) -> high
+        self._trailing_highs: Dict[Tuple[float, str], float] = {}
 
         logger.info("Stop-Loss Optimizer initialized")
         logger.info(f"  Default ATR multiplier: {self._config.ATR_MULTIPLIER_DEFAULT}")
         logger.info(f"  Market regime: {self._regime.value}")
 
-    def calculate_atr(self, prices: List[float], period: int = 14) -> float:
+    def calculate_atr(
+        self,
+        prices: List[float],
+        period: int = 14,
+        highs: Optional[List[float]] = None,
+        lows: Optional[List[float]] = None,
+    ) -> float:
         """
         Calculate Average True Range (ATR).
 
         Args:
             prices: List of closing prices
             period: ATR period (default 14)
+            highs: Optional list of high prices (required for a genuine ATR).
+                   When omitted, closes are used as high/low, which collapses
+                   the true range to close-to-close volatility — a documented
+                   approximation, not true ATR.
+            lows: Optional list of low prices
 
         Returns:
             ATR value
@@ -145,11 +156,12 @@ class StopLossOptimizer:
                 return max(prices) - min(prices)
             return 0.0
 
-        # Calculate true ranges
+        # Calculate true ranges. With real high/low series this is a genuine
+        # ATR: max(high-low, |high-prev_close|, |low-prev_close|).
         true_ranges = []
         for i in range(1, len(prices)):
-            high = prices[i]  # Simplified (using close as high)
-            low = prices[i]   # Simplified (using close as low)
+            high = highs[i] if highs and i < len(highs) else prices[i]
+            low = lows[i] if lows and i < len(lows) else prices[i]
             prev_close = prices[i - 1]
 
             tr = max(
@@ -180,7 +192,7 @@ class StopLossOptimizer:
         self,
         entry_price: float,
         atr_value: float,
-        regime: MarketRegime = MarketRegime.NEUTRAL,
+        regime: Optional[MarketRegime] = None,
         growth_stage: str = "mid",
     ) -> StopLossOrder:
         """
@@ -189,12 +201,15 @@ class StopLossOptimizer:
         Args:
             entry_price: Entry price
             atr_value: Current ATR value
-            regime: Market regime
+            regime: Market regime (defaults to the stored regime)
             growth_stage: Growth stage (early/mid/growth/final)
 
         Returns:
             StopLossOrder with calculated stop
         """
+        if regime is None:
+            regime = self._regime
+
         # Get regime multiplier
         regime_multiplier = self.get_regime_multiplier(regime)
 
@@ -228,7 +243,7 @@ class StopLossOptimizer:
         self,
         entry_price: float,
         stop_pct: Optional[float] = None,
-        regime: MarketRegime = MarketRegime.NEUTRAL,
+        regime: Optional[MarketRegime] = None,
         growth_stage: str = "mid",
     ) -> StopLossOrder:
         """
@@ -237,12 +252,15 @@ class StopLossOptimizer:
         Args:
             entry_price: Entry price
             stop_pct: Stop percentage (default uses config)
-            regime: Market regime
+            regime: Market regime (defaults to the stored regime)
             growth_stage: Growth stage
 
         Returns:
             StopLossOrder with calculated stop
         """
+        if regime is None:
+            regime = self._regime
+
         if stop_pct is None:
             # Use aggressive fixed stop for growth mode
             stop_pct = self._config.AGGRESSIVE_FIXED_STOP if growth_stage in ["growth", "final"] else self._config.DEFAULT_FIXED_STOP
@@ -272,36 +290,49 @@ class StopLossOptimizer:
         current_price: float,
         atr_value: Optional[float] = None,
         trail_pct: Optional[float] = None,
-        regime: MarketRegime = MarketRegime.NEUTRAL,
+        regime: Optional[MarketRegime] = None,
     ) -> StopLossOrder:
         """
         Calculate trailing stop loss.
+
+        Maintains a per-entry high-water mark so pullbacks never ratchet the
+        trailing stop DOWN — the stop only ever tightens.
 
         Args:
             entry_price: Original entry price
             current_price: Current market price
             atr_value: ATR value (optional, for ATR-based trailing)
             trail_pct: Trail percentage (optional)
-            regime: Market regime
+            regime: Market regime (defaults to the stored regime)
 
         Returns:
             StopLossOrder with trailing stop
         """
+        if regime is None:
+            regime = self._regime
+
+        # Per-entry high-water mark (the "trailing high" reported must be the
+        # highest price since entry, not the current price on a pullback)
+        key = (round(entry_price, 8), regime.value)
+        with self._lock:
+            high_water = max(current_price, self._trailing_highs.get(key, current_price))
+            self._trailing_highs[key] = high_water
+
         if atr_value and trail_pct is None:
             # ATR-based trailing stop
             multiplier = self.get_regime_multiplier(regime)
             trail_distance = atr_value * self._config.ATR_MULTIPLIER_DEFAULT * multiplier
-            stop_price = current_price - trail_distance
+            stop_price = high_water - trail_distance
             stop_type = StopType.TRAILING_ATR
         else:
             # Percentage-based trailing stop
             if trail_pct is None:
                 trail_pct = self._config.TRAILING_DISTANCE_PCT
-            stop_price = current_price * (1 - trail_pct)
+            stop_price = high_water * (1 - trail_pct)
             stop_type = StopType.TRAILING
 
-        distance_pct = (current_price - stop_price) / current_price if current_price > 0 else 0
-        risk_amount = current_price - stop_price
+        distance_pct = (high_water - stop_price) / high_water if high_water > 0 else 0
+        risk_amount = high_water - stop_price
 
         return StopLossOrder(
             entry_price=entry_price,
@@ -313,7 +344,7 @@ class StopLossOptimizer:
             risk_amount=risk_amount,
             risk_pct=distance_pct,
             is_trailing=True,
-            trailing_high=current_price,
+            trailing_high=high_water,
         )
 
     def optimize_risk_reward(
@@ -353,7 +384,9 @@ class StopLossOptimizer:
 
             stop_loss.stop_price = max(new_stop, entry_price * 0.9)  # Don't go below 10% stop
             stop_loss.risk_amount = entry_price - stop_loss.stop_price
-            stop_loss.risk_pct = stop_loss.risk_amount / entry_price
+            stop_loss.risk_pct = stop_loss.risk_amount / entry_price if entry_price > 0 else 0
+            # Keep distance_pct consistent with the adjusted stop
+            stop_loss.distance_pct = stop_loss.risk_pct
 
         stop_loss.reward_target = target_price
         stop_loss.risk_reward_ratio = reward / (entry_price - stop_loss.stop_price) if (entry_price - stop_loss.stop_price) > 0 else 0

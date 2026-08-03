@@ -58,6 +58,19 @@ impl MarketRegimeDetector {
         if let Some(price_entry) = self.price_cache.get_price(&self.sol_mint) {
             let mut history = self.price_history.write();
 
+            // Skip when the entry is not newer than the last recorded one:
+            // PriceCache returns the same entry until it refreshes (TTL/15s),
+            // so unconditional pushes append many identical (fetched_at, price)
+            // entries that the 24h cutoff (derived from that same fetched_at)
+            // can never evict.
+            let is_newer = history
+                .back()
+                .map(|(t, _)| price_entry.fetched_at > *t)
+                .unwrap_or(true);
+            if !is_newer {
+                return;
+            }
+
             // Add current price with its actual fetch time
             history.push_back((price_entry.fetched_at, price_entry.price_usd));
 
@@ -79,7 +92,17 @@ impl MarketRegimeDetector {
     /// MarketRegime based on price trend
     pub fn detect_regime(&self) -> MarketRegime {
         let history = self.price_history.read();
+        self.detect_regime_from_history(&history)
+    }
 
+    /// Detect market regime from an already-held price history snapshot
+    ///
+    /// Lets callers derive the regime and volatility/trend metrics from the
+    /// same locked snapshot so the results cannot contradict each other.
+    pub fn detect_regime_from_history(
+        &self,
+        history: &VecDeque<(chrono::DateTime<chrono::Utc>, rust_decimal::Decimal)>,
+    ) -> MarketRegime {
         if history.len() < 3 {
             // Not enough data, default to sideways
             return MarketRegime::Sideways;
@@ -99,9 +122,8 @@ impl MarketRegimeDetector {
         }
 
         // Calculate price change over last 24 hours using Decimal for precision
-        let prices: Vec<rust_decimal::Decimal> = history.iter().map(|(_, price)| *price).collect();
-        let first_price = prices.first().unwrap_or(&rust_decimal::Decimal::ZERO);
-        let last_price = prices.last().unwrap_or(&rust_decimal::Decimal::ZERO);
+        let first_price = history.front().map(|(_, p)| *p).unwrap_or(Decimal::ZERO);
+        let last_price = history.back().map(|(_, p)| *p).unwrap_or(Decimal::ZERO);
 
         if first_price.is_zero() || last_price.is_zero() {
             return MarketRegime::Sideways;
@@ -111,16 +133,14 @@ impl MarketRegimeDetector {
         let price_change_percent = if !first_price.is_zero() {
             let diff = last_price - first_price;
             let ratio = diff / first_price;
-            ratio * rust_decimal::Decimal::from(100)
+            ratio * Decimal::from(100)
         } else {
-            rust_decimal::Decimal::ZERO
+            Decimal::ZERO
         };
 
         // Classify regime based on price change (using Decimal comparisons)
-        let five_percent =
-            rust_decimal::Decimal::from_str("5.0").unwrap_or(rust_decimal::Decimal::ZERO);
-        let neg_five_percent =
-            rust_decimal::Decimal::from_str("-5.0").unwrap_or(rust_decimal::Decimal::ZERO);
+        let five_percent = dec!(5.0);
+        let neg_five_percent = dec!(-5.0);
 
         if price_change_percent > five_percent {
             MarketRegime::Bull
@@ -144,24 +164,40 @@ impl MarketRegimeDetector {
             return MarketRegime::Sideways;
         }
 
-        // Enforce a minimum history span of 2 hours for token-specific trend detection
-        let first_time = token_history.front().map(|(t, _)| *t).unwrap_or_else(|| {
-            tracing::error!("Empty token price history despite len() check - should not happen");
-            chrono::Utc::now()
-        });
+        // Enforce the 24h window locally rather than relying on PriceCache's
+        // retention: if the cache holds older entries (backfilled, sparse
+        // updates, changed retention), the trend must still span at most 24h.
         let last_time = token_history.back().map(|(t, _)| *t).unwrap_or_else(|| {
             tracing::error!("Empty token price history despite len() check - should not happen");
             chrono::Utc::now()
         });
+        let window_cutoff = last_time - chrono::Duration::hours(24);
+
+        // First/last prices within the 24h window (no full-history allocation).
+        let mut first_in_window: Option<(chrono::DateTime<chrono::Utc>, Decimal)> = None;
+        let mut last_in_window: Option<(chrono::DateTime<chrono::Utc>, Decimal)> = None;
+        for (t, price) in token_history.iter() {
+            if *t >= window_cutoff {
+                if first_in_window.is_none() {
+                    first_in_window = Some((*t, *price));
+                }
+                last_in_window = Some((*t, *price));
+            }
+        }
+
+        let (first_time, first_price) = match first_in_window {
+            Some(ft) => ft,
+            None => return MarketRegime::Sideways,
+        };
+        let (last_time, last_price) = match last_in_window {
+            Some(lt) => lt,
+            None => return MarketRegime::Sideways,
+        };
+
+        // Enforce a minimum history span of 2 hours for token-specific trend detection
         if last_time.signed_duration_since(first_time) < chrono::Duration::hours(2) {
             return MarketRegime::Sideways;
         }
-
-        // Calculate price change over last 24 hours using Decimal for precision
-        let prices: Vec<rust_decimal::Decimal> =
-            token_history.iter().map(|(_, price)| *price).collect();
-        let first_price = prices.first().unwrap_or(&rust_decimal::Decimal::ZERO);
-        let last_price = prices.last().unwrap_or(&rust_decimal::Decimal::ZERO);
 
         if first_price.is_zero() || last_price.is_zero() {
             return MarketRegime::Sideways;
@@ -171,16 +207,14 @@ impl MarketRegimeDetector {
         let price_change_percent = if !first_price.is_zero() {
             let diff = last_price - first_price;
             let ratio = diff / first_price;
-            ratio * rust_decimal::Decimal::from(100)
+            ratio * Decimal::from(100)
         } else {
-            rust_decimal::Decimal::ZERO
+            Decimal::ZERO
         };
 
         // Classify regime based on price change (using Decimal comparisons)
-        let five_percent =
-            rust_decimal::Decimal::from_str("5.0").unwrap_or(rust_decimal::Decimal::ZERO);
-        let neg_five_percent =
-            rust_decimal::Decimal::from_str("-5.0").unwrap_or(rust_decimal::Decimal::ZERO);
+        let five_percent = dec!(5.0);
+        let neg_five_percent = dec!(-5.0);
 
         if price_change_percent > five_percent {
             MarketRegime::Bull
@@ -228,6 +262,15 @@ impl MarketRegimeDetector {
         let mut history = self.volume_history.write();
         let now = chrono::Utc::now();
 
+        // Deduplicate: skip when the latest snapshot is already from today so
+        // calling more than once per day cannot push duplicate snapshots that
+        // distort the week-over-week average.
+        if let Some((last_time, _)) = history.back() {
+            if last_time.date_naive() == now.date_naive() {
+                return;
+            }
+        }
+
         // Add current volume snapshot
         history.push_back((now, total_dex_volume_usd));
 
@@ -244,14 +287,14 @@ impl MarketRegimeDetector {
 
     /// Get price history for analysis (read-only access)
     ///
-    /// Returns a cloned Arc to the internal price history, allowing read access
-    /// without exposing mutable state.
+    /// Returns an immutable snapshot of the internal price history. Callers
+    /// never receive the writable lock, so the detector's state cannot be
+    /// corrupted by an external mutation.
     #[allow(clippy::type_complexity)]
     pub fn get_price_history(
         &self,
-    ) -> Arc<parking_lot::RwLock<VecDeque<(chrono::DateTime<chrono::Utc>, rust_decimal::Decimal)>>>
-    {
-        self.price_history.clone()
+    ) -> VecDeque<(chrono::DateTime<chrono::Utc>, rust_decimal::Decimal)> {
+        self.price_history.read().clone()
     }
 
     /// Check volume trend (week-over-week)

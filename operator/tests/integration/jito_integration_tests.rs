@@ -1,23 +1,20 @@
 //! Integration tests for Jito prioritization features
 //!
 //! Tests for:
-//! - End-to-end Jito bundle execution
 //! - Health check functionality
 //! - Bundle resolution tracking
 //! - Notification delivery
 //! - Metric recording validation
-//! - Mode switching behavior
+//! - Jito configuration plumbing
 
-use chimera_operator::config::{Config, JitoConfig, RpcConfig, TradeConfig};
-use chimera_operator::engine::executor::{Executor, JitoError, JitoHealth};
+use chimera_operator::config::{AppConfig, JitoConfig, RpcConfig, TradeMode};
+use chimera_operator::engine::executor::{JitoError, JitoHealth};
 use chimera_operator::metrics::MetricsState;
+use chimera_operator::models::{Action, Signal, SignalPayload, Strategy};
 use chimera_operator::notifications::{NotificationEvent, NotificationService};
-use chimera_operator::trade::{Signal, Strategy};
-use chimera_operator::rpc_mode::RpcMode;
 use rust_decimal::Decimal;
+use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::sleep;
 
 /// Mock notification service for testing
 struct MockNotifier {
@@ -53,63 +50,41 @@ impl NotificationService for MockNotifier {
 }
 
 /// Create test configuration for Jito tests
-fn create_test_config() -> Config {
-    Config {
-        trade_mode: chimera_operator::trade_mode::TradeMode::Live,
-        rpc_mode: chimera_operator::rpc_mode::RpcMode::Jito,
-
-        rpc: RpcConfig {
-            primary_url: "https://api.mainnet-beta.solana.com".to_string(),
-            fallback_url: None,
-            health_check_interval_secs: 30,
-            timeout_ms: 5000,
-            mode: chimera_operator::rpc_mode::RpcMode::Jito,
-        },
-
-        trade: TradeConfig {
-            max_position_size_sol: 10.0,
-            min_liquidity_usd: 5000.0,
-            slippage_tolerance_bps: 100,
-            max_slippage_bps: 500,
-            stop_loss_bps: 200,
-            take_profit_bps: 500,
-        },
-
-        jito: JitoConfig {
-            enabled: true,
-            searcher_endpoint: Some("https://mainnet.block-engine.jito.wtf".to_string()),
-            helius_fallback: false,
-            tip_floor_sol: Decimal::from_str("0.001").unwrap(),
-            tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),
-            tip_percentile: 50,
-            tip_percent_max: Decimal::from_str("0.10").unwrap(),
-            min_failures_before_fallback: 10,
-            disable_fallback: false,
-            max_retries: 5,
-            helius_staked_exits: true,
-        },
-
-        // Default values for other fields
-        ..Default::default()
-    }
+fn create_test_config() -> AppConfig {
+    let mut config = AppConfig::default();
+    config.trade_mode = TradeMode::Paper;
+    config.rpc.primary_url = "https://api.mainnet-beta.solana.com".to_string();
+    config.rpc.timeout_ms = 5000;
+    config.jito = JitoConfig {
+        enabled: true,
+        searcher_endpoint: Some("https://mainnet.block-engine.jito.wtf".to_string()),
+        helius_fallback: false,
+        tip_floor_sol: Decimal::from_str("0.001").unwrap(),
+        tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),
+        tip_percentile: 50,
+        tip_percent_max: Decimal::from_str("0.10").unwrap(),
+        min_failures_before_fallback: 10,
+        disable_fallback: false,
+        max_retries: 5,
+        helius_staked_exits: true,
+    };
+    config
 }
 
 /// Create test signal
 fn create_test_signal() -> Signal {
-    Signal {
-        id: uuid::Uuid::new_v4(),
-        wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
-        token_address: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263".to_string(),
-        token_symbol: "BONK".to_string(),
+    let payload = SignalPayload {
         strategy: Strategy::Shield,
-        entry_type: chimera_operator::trade::EntryType::Long,
-        position_size_sol: Decimal::from(1u32),
-        price: Decimal::from_str("0.000025").unwrap(),
-        timestamp: chrono::Utc::now(),
-        stop_loss_bps: Some(200),
-        take_profit_bps: Some(500),
-        confidence: 0.85,
-    }
+        token: "BONK".to_string(),
+        token_address: Some("DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263".to_string()),
+        action: Action::Buy,
+        amount_sol: Decimal::from(1u32),
+        wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+        trade_uuid: None,
+        exit_fraction: None,
+    };
+    payload.validate().expect("test signal payload must be valid");
+    Signal::new(payload, chrono::Utc::now().timestamp(), None)
 }
 
 #[tokio::test]
@@ -184,7 +159,7 @@ async fn test_jito_health_degradation_detection() {
 
 #[tokio::test]
 async fn test_notification_jito_fallback_event() {
-    // Test Jito fallback notification event creation
+    // Test Jito fallback notification event delivery through the notifier
     let notifier = MockNotifier::new();
 
     let event = NotificationEvent::JitoFallbackTriggered {
@@ -192,6 +167,14 @@ async fn test_notification_jito_fallback_event() {
         failure_count: 10,
         threshold: 10,
     };
+
+    notifier.notify(&event, "Live").await.unwrap();
+    let delivered = notifier.get_events();
+    assert_eq!(delivered.len(), 1, "notify() must deliver the event to the notifier");
+    assert!(matches!(
+        delivered[0],
+        NotificationEvent::JitoFallbackTriggered { failure_count: 10, threshold: 10, .. }
+    ));
 
     // Verify event can be created and formatted
     let message = event.format_message("Live");
@@ -201,10 +184,15 @@ async fn test_notification_jito_fallback_event() {
 
 #[tokio::test]
 async fn test_notification_jito_recovery_event() {
-    // Test Jito recovery notification event
-    let event = NotificationEvent::JitoRecovered {
-        latency_ms: 45,
-    };
+    // Test Jito recovery notification event delivery
+    let notifier = MockNotifier::new();
+
+    let event = NotificationEvent::JitoRecovered { latency_ms: 45 };
+
+    notifier.notify(&event, "Live").await.unwrap();
+    let delivered = notifier.get_events();
+    assert_eq!(delivered.len(), 1, "notify() must deliver the event to the notifier");
+    assert!(matches!(delivered[0], NotificationEvent::JitoRecovered { latency_ms: 45 }));
 
     let message = event.format_message("Live");
     assert!(message.contains("recovered"));
@@ -213,12 +201,22 @@ async fn test_notification_jito_recovery_event() {
 
 #[tokio::test]
 async fn test_notification_jito_health_change_event() {
-    // Test Jito health change notification
+    // Test Jito health change notification event delivery
+    let notifier = MockNotifier::new();
+
     let event_unhealthy = NotificationEvent::JitoHealthChanged {
         healthy: false,
         latency_ms: Some(200),
         success_rate: 0.65,
     };
+
+    notifier.notify(&event_unhealthy, "Live").await.unwrap();
+    let delivered = notifier.get_events();
+    assert_eq!(delivered.len(), 1, "notify() must deliver the event to the notifier");
+    assert!(matches!(
+        delivered[0],
+        NotificationEvent::JitoHealthChanged { healthy: false, success_rate, .. } if success_rate == 0.65
+    ));
 
     let message = event_unhealthy.format_message("Live");
     assert!(message.contains("unhealthy"));
@@ -254,12 +252,10 @@ async fn test_jito_configuration_custom_values() {
     config.jito.min_failures_before_fallback = 15;
     config.jito.max_retries = 7;
     config.jito.disable_fallback = true;
-    config.jito.default_tip_lamports = 2000;
 
     assert_eq!(config.jito.min_failures_before_fallback, 15);
     assert_eq!(config.jito.max_retries, 7);
     assert!(config.jito.disable_fallback);
-    assert_eq!(config.jito.default_tip_lamports, 2000);
 }
 
 #[tokio::test]
@@ -289,12 +285,13 @@ async fn test_jito_error_classification_pattern() {
 #[tokio::test]
 async fn test_metrics_initialization() {
     // Test metrics state initialization
-    let metrics = MetricsState::new();
+    let metrics = MetricsState::new().expect("metrics state must initialize");
 
-    // Verify metrics are initialized
-    // This tests the MetricsState::new() method includes Jito metrics
-    assert!(metrics.jito_submissions.get_metric().name().contains("jito"));
-    assert!(metrics.jito_resolutions.get_metric().name().contains("jito"));
+    // Jito counters start at zero
+    assert_eq!(metrics.jito_submissions.with_label_values(&["jito"]).get(), 0);
+    assert_eq!(metrics.jito_submissions.with_label_values(&["helius"]).get(), 0);
+    assert_eq!(metrics.jito_resolutions.with_label_values(&["success"]).get(), 0);
+    assert_eq!(metrics.jito_resolutions.with_label_values(&["failed"]).get(), 0);
 }
 
 #[tokio::test]
@@ -302,10 +299,10 @@ async fn test_signal_creation_for_jito() {
     // Test signal creation for Jito execution
     let signal = create_test_signal();
 
-    assert_eq!(signal.strategy, Strategy::Shield);
-    assert_eq!(signal.token_symbol, "BONK");
-    assert!(signal.confidence > 0.8);
-    assert!(signal.position_size_sol > Decimal::ZERO);
+    assert_eq!(signal.payload.strategy, Strategy::Shield);
+    assert_eq!(signal.payload.token, "BONK");
+    assert_eq!(signal.payload.token_address.as_deref(), Some("DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"));
+    assert!(signal.payload.amount_sol > Decimal::ZERO);
 }
 
 #[tokio::test]
@@ -405,7 +402,9 @@ async fn test_jito_health_various_scenarios() {
 
 #[tokio::test]
 async fn test_jito_notification_rate_limiting_keys() {
-    // Test notification rate limiting key generation
+    // Test notification rate limiting key generation for the Jito events.
+    // The production notifiers (discord.rs/telegram.rs) derive their rate-limit
+    // keys from the event variant, so this pins the variant-level mapping.
     let events = vec![
         NotificationEvent::JitoFallbackTriggered {
             reason: "test".to_string(),
@@ -427,7 +426,7 @@ async fn test_jito_notification_rate_limiting_keys() {
             NotificationEvent::JitoFallbackTriggered { .. } => "jito_fallback",
             NotificationEvent::JitoRecovered { .. } => "jito_recovered",
             NotificationEvent::JitoHealthChanged { .. } => "jito_health",
-            _ => "",
+            _ => "other",
         };
         keys.push(key.to_string());
     }

@@ -51,33 +51,40 @@ def get_weights_path() -> str:
 def load_seeded_weights() -> Dict[str, float]:
     """Load pre-seeded weights from JSON file.
 
-    Returns the merged weights dict on success. On any error (missing file,
-    corrupt JSON, wrong types) logs a warning and returns a dict of all-1.0
-    weights so the system never crashes from a bad weights file.
+    Returns the MERGED weights dict on success: file entries override the
+    hardcoded defaults, so every component always has an explicit weight.
+    On any error (missing file, corrupt JSON, wrong types, encoding issues)
+    logs a warning and returns the hardcoded fallback weights so the system
+    never crashes from a bad weights file.
     """
     path = get_weights_path()
     try:
-        with open(path) as f:
+        # Explicit utf-8 so a non-UTF-8 bytes file can't raise
+        # UnicodeDecodeError (a ValueError subclass outside the handlers)
+        with open(path, encoding="utf-8") as f:
             raw = json.load(f)
         if not isinstance(raw, dict):
             logger.warning("Weight file %s did not contain a dict, using fallback", path)
             return dict(_FALLBACK_WEIGHTS)
-        result = {}
+        # Merge over the fallbacks so partial files never drop components
+        result = dict(_FALLBACK_WEIGHTS)
+        valid = 0
         for k, v in raw.items():
             try:
                 result[k] = float(v)
+                valid += 1
             except (TypeError, ValueError):
                 logger.warning("Skipping non-numeric weight '%s' in %s", k, path)
                 continue
-        if not result:
+        if valid == 0:
             logger.warning("Weight file %s contained no valid entries, using fallback", path)
             return dict(_FALLBACK_WEIGHTS)
-        logger.info("Loaded %d seeded weights from %s", len(result), path)
+        logger.info("Loaded %d seeded weights from %s", valid, path)
         return result
     except FileNotFoundError:
         logger.warning("Weight file %s not found, using hardcoded defaults", path)
         return dict(_FALLBACK_WEIGHTS)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         logger.warning("Corrupt weight file %s: %s, using hardcoded defaults", path, exc)
         return dict(_FALLBACK_WEIGHTS)
     except OSError as exc:

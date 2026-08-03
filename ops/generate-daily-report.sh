@@ -12,8 +12,11 @@ EVAL_DIR="${EVAL_DIR:-/opt/chimera/evaluation}"
 DB_PATH="${EVAL_DIR}/evaluation.db"
 OUTPUT_DIR="${EVAL_DIR}/day-${DAY_NUM}"
 
-# Report sections to include
-INCLUDE_SECTIONS="${INCLUDE_SECTIONS:-performance,health,anomalies,costs,risk,database}"
+# DAY_NUM is used in file paths and passed to Python; require a positive integer
+if [[ ! "${DAY_NUM}" =~ ^[0-9]+$ ]] || [ "${DAY_NUM}" -lt 1 ]; then
+    echo -e "${RED}Error: DAY_NUM must be a positive integer (got '${DAY_NUM}')${NC}" >&2
+    exit 1
+fi
 
 # Colors for terminal output
 RED='\033[0;31m'
@@ -27,7 +30,6 @@ echo "Daily Evaluation Report Generator"
 echo "=========================================="
 echo "Day: ${DAY_NUM}"
 echo "Output Directory: ${OUTPUT_DIR}"
-echo "Sections: ${INCLUDE_SECTIONS}"
 echo ""
 
 # ===================================================================
@@ -35,6 +37,11 @@ echo ""
 # ===================================================================
 if [ ! -d "${OUTPUT_DIR}" ]; then
     echo -e "${RED}Error: Output directory does not exist: ${OUTPUT_DIR}${NC}"
+    exit 1
+fi
+
+if [ ! -f "${DB_PATH}" ]; then
+    echo -e "${RED}Error: Evaluation database not found at ${DB_PATH}${NC}"
     exit 1
 fi
 
@@ -49,36 +56,40 @@ collect_summary_stats() {
     local day=$1
     echo "Collecting summary statistics for day ${day}..."
 
-    python3 <<EOF
+    DB_PATH="$DB_PATH" DAY="$day" python3 <<'PYCOLLECT'
 import sqlite3
 import json
-from datetime import datetime
+import os
 
 try:
-    conn = sqlite3.connect('${DB_PATH}')
+    conn = sqlite3.connect(os.environ['DB_PATH'])
     cursor = conn.cursor()
 
-    # Get daily summary if available
+    # Get daily summary if available (explicit columns, no positional indexes)
     cursor.execute('''
-        SELECT * FROM daily_evaluation_summaries
+        SELECT
+            day_number, total_trades, successful_trades, failed_trades,
+            success_rate_percent, total_pnl_sol, total_costs_sol,
+            avg_trade_latency_ms, max_drawdown_percent, total_anomalies
+        FROM daily_evaluation_summaries
         WHERE day_number = ?
-    ''', (${day},))
+    ''', (int(os.environ['DAY']),))
 
-    summary = cursor.fetchone()
+    row = cursor.fetchone()
 
-    if summary:
+    if row:
         print(json.dumps({
             'success': True,
             'data': {
-                'total_trades': summary[2],
-                'successful_trades': summary[3],
-                'failed_trades': summary[4],
-                'success_rate': summary[5],
-                'total_pnl_sol': summary[6],
-                'total_costs_sol': summary[9],
-                'avg_latency_ms': summary[10],
-                'max_drawdown_percent': summary[13],
-                'total_anomalies': summary[22]
+                'total_trades': row[1],
+                'successful_trades': row[2],
+                'failed_trades': row[3],
+                'success_rate': row[4],
+                'total_pnl_sol': row[5],
+                'total_costs_sol': row[6],
+                'avg_latency_ms': row[7],
+                'max_drawdown_percent': row[8],
+                'total_anomalies': row[9]
             }
         }))
     else:
@@ -94,7 +105,7 @@ try:
                 MAX(max_drawdown_percent) as max_drawdown
             FROM evaluation_snapshots
             WHERE day_number = ?
-        ''', (${day},))
+        ''', (int(os.environ['DAY']),))
 
         result = cursor.fetchone()
         if result and result[0] > 0:
@@ -118,19 +129,19 @@ try:
     conn.close()
 except Exception as e:
     print(json.dumps({'success': False, 'error': str(e)}))
-EOF
+PYCOLLECT
 }
-
 collect_anomalies_summary() {
     local day=$1
     echo "Collecting anomalies summary for day ${day}..."
 
-    python3 <<EOF
+    DB_PATH="$DB_PATH" DAY="$day" python3 <<'PYCOLLECT'
 import sqlite3
 import json
+import os
 
 try:
-    conn = sqlite3.connect('${DB_PATH}')
+    conn = sqlite3.connect(os.environ['DB_PATH'])
     cursor = conn.cursor()
 
     cursor.execute('''
@@ -142,7 +153,7 @@ try:
             AVG(deviation_percent) as avg_deviation
         FROM evaluation_anomalies
         WHERE day_number = ?
-    ''', (${day},))
+    ''', (int(os.environ['DAY']),))
 
     result = cursor.fetchone()
 
@@ -154,7 +165,7 @@ try:
             WHERE day_number = ?
             ORDER BY ABS(deviation_percent) DESC
             LIMIT 5
-        ''', (${day},))
+        ''', (int(os.environ['DAY']),))
 
         top_anomalies = []
         for row in cursor.fetchall():
@@ -192,19 +203,19 @@ try:
     conn.close()
 except Exception as e:
     print(json.dumps({'success': False, 'error': str(e)}))
-EOF
+PYCOLLECT
 }
-
 collect_performance_metrics() {
     local day=$1
     echo "Collecting performance metrics for day ${day}..."
 
-    python3 <<EOF
+    DB_PATH="$DB_PATH" DAY="$day" python3 <<'PYCOLLECT'
 import sqlite3
 import json
+import os
 
 try:
-    conn = sqlite3.connect('${DB_PATH}')
+    conn = sqlite3.connect(os.environ['DB_PATH'])
     cursor = conn.cursor()
 
     # Get hourly performance data
@@ -220,7 +231,7 @@ try:
         FROM evaluation_snapshots
         WHERE day_number = ?
         ORDER BY hour_number
-    ''', (${day},))
+    ''', (int(os.environ['DAY']),))
 
     hourly_data = []
     for row in cursor.fetchall():
@@ -257,13 +268,8 @@ try:
     conn.close()
 except Exception as e:
     print(json.dumps({'success': False, 'error': str(e)}))
-EOF
+PYCOLLECT
 }
-
-# ===================================================================
-# REPORT GENERATION
-# ===================================================================
-
 generate_html_report() {
     local day=$1
     local output_file="${OUTPUT_DIR}/reports/daily-report-day-${day}.html"
@@ -274,6 +280,12 @@ generate_html_report() {
     SUMMARY_STATS=$(collect_summary_stats ${day})
     ANOMALIES_SUMMARY=$(collect_anomalies_summary ${day})
     PERFORMANCE_METRICS=$(collect_performance_metrics ${day})
+
+    # Escape for safe embedding inside a <script> block (prevents stored XSS
+    # if any DB value contains "</script>")
+    ESCAPED_SUMMARY=$(echo "$SUMMARY_STATS" | sed 's|</|<\\/|g')
+    ESCAPED_ANOMALIES=$(echo "$ANOMALIES_SUMMARY" | sed 's|</|<\\/|g')
+    ESCAPED_PERFORMANCE=$(echo "$PERFORMANCE_METRICS" | sed 's|</|<\\/|g')
 
     # Get current timestamp
     TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -435,7 +447,7 @@ generate_html_report() {
     <div class="summary-cards">
         <div class="card">
             <h3>Day Status</h3>
-            <div class="value">$(echo "$SUMMARY_STATS" | jq -r '.data // "N/A"')</div>
+            <div class="value" id="day-status">Loading...</div>
             <div class="subtitle">Completion Status</div>
         </div>
         <div class="card">
@@ -482,12 +494,37 @@ generate_html_report() {
 
     <script>
         // Parse the collected data
-        const summaryData = ${SUMMARY_STATS};
-        const anomaliesData = ${ANOMALIES_SUMMARY};
-        const performanceData = ${PERFORMANCE_METRICS};
+        const summaryData = ${ESCAPED_SUMMARY};
+        const anomaliesData = ${ESCAPED_ANOMALIES};
+        const performanceData = ${ESCAPED_PERFORMANCE};
+
+        // Escape any value before inserting into innerHTML
+        function escapeHtml(value) {
+            return String(value).replace(/[&<>"']/g, function (c) {
+                return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c];
+            });
+        }
 
         // Update summary cards
         function updateSummaryCards() {
+            const statusEl = document.getElementById('day-status');
+            if (summaryData.success && summaryData.data) {
+                const trades = summaryData.data.total_trades || 0;
+                const success = summaryData.data.success_rate || 0;
+                const anomalies = (summaryData.data.total_anomalies || 0);
+                if (trades > 0 && success >= 95 && anomalies === 0) {
+                    statusEl.textContent = 'Good';
+                    statusEl.className = 'value status-good';
+                } else if (anomalies > 0) {
+                    statusEl.textContent = 'Review needed';
+                    statusEl.className = 'value status-critical';
+                } else {
+                    statusEl.textContent = 'Monitor';
+                    statusEl.className = 'value status-warning';
+                }
+            } else {
+                statusEl.textContent = 'N/A';
+            }
             if (summaryData.success && summaryData.data) {
                 document.getElementById('total-trades').textContent = summaryData.data.total_trades || 0;
                 document.getElementById('success-rate').textContent =
@@ -510,6 +547,7 @@ generate_html_report() {
 
             const data = performanceData.data;
             let html = '<table><tr><th>Metric</th><th>Value</th><th>Status</th></tr>';
+            const e = escapeHtml;
 
             html += '<tr><td>Average Trade Latency</td><td>' + (data.avg_latency_ms || 0).toFixed(2) + ' ms</td>';
             html += '<td class="status-good">Good</td></tr>';
@@ -545,11 +583,12 @@ generate_html_report() {
                 if (data.top_anomalies && data.top_anomalies.length > 0) {
                     html += '<h3>Top Anomalies:</h3><table><tr><th>Metric</th><th>Severity</th><th>Deviation</th><th>Description</th></tr>';
                     data.top_anomalies.forEach(anomaly => {
-                        html += '<tr><td>' + anomaly.metric + '</td>';
-                        html += '<td class="status-' + (anomaly.severity === 'CRITICAL' ? 'critical' : 'warning') + '">';
-                        html += anomaly.severity + '</td>';
+                        const sev = anomaly.severity || '';
+                        html += '<tr><td>' + e(anomaly.metric) + '</td>';
+                        html += '<td class="status-' + (sev === 'CRITICAL' ? 'critical' : 'warning') + '">';
+                        html += e(sev) + '</td>';
                         html += '<td>' + (anomaly.deviation || 0).toFixed(1) + '%</td>';
-                        html += '<td>' + (anomaly.description || 'N/A') + '</td></tr>';
+                        html += '<td>' + e(anomaly.description || 'N/A') + '</td></tr>';
                     });
                     html += '</table>';
                 }
@@ -597,7 +636,7 @@ generate_html_report() {
 </html>
 EOF
 
-    if [ $? -eq 0 ]; then
+    if [ -s "${output_file}" ]; then
         echo -e "${GREEN}✓ HTML report generated: ${output_file}${NC}"
         echo "  Report size: $(wc -c < "${output_file}") bytes"
     else
@@ -607,19 +646,26 @@ EOF
 }
 
 # ===================================================================
-// REPORT GENERATION
-// ===================================================================
+# REPORT GENERATION
+# ===================================================================
 
 echo "Starting daily report generation for day ${DAY_NUM}..."
 
 # Generate HTML report
+# Treat collector failures (success: false) as a hard error so a report is
+# never silently rendered with zero values.
+if ! echo "$(collect_summary_stats ${DAY_NUM})" | jq -e '.success == true' > /dev/null 2>&1; then
+    echo -e "${RED}✗ Summary statistics collection failed; aborting report generation${NC}"
+    exit 1
+fi
+
 if generate_html_report ${DAY_NUM}; then
     REPORT_FILE="${OUTPUT_DIR}/reports/daily-report-day-${DAY_NUM}.html"
 
     # Generate summary for notifications
     SUMMARY=$(collect_summary_stats ${DAY_NUM})
 
-    if [ $? -eq 0 ]; then
+    if echo "${SUMMARY}" | jq -e '.success == true' > /dev/null 2>&1; then
         TOTAL_TRADES=$(echo "${SUMMARY}" | jq -r '.data.total_trades // 0')
         SUCCESS_RATE=$(echo "${SUMMARY}" | jq -r '.data.success_rate // 0')
         TOTAL_ANOMALIES=$(collect_anomalies_summary ${DAY_NUM} | jq -r '.data.total_anomalies // 0')
@@ -645,11 +691,13 @@ if generate_html_report ${DAY_NUM}; then
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Report: ${REPORT_FILE}"
 
-            curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                -d "chat_id=${TELEGRAM_CHAT_ID}" \
-                -d "text=${TELEGRAM_MESSAGE}" > /dev/null 2>&1
-
-            echo -e "${GREEN}✓ Telegram notification sent${NC}"
+            if curl -s --max-time 10 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+                --data-urlencode "text=${TELEGRAM_MESSAGE}" > /dev/null 2>&1; then
+                echo -e "${GREEN}✓ Telegram notification sent${NC}"
+            else
+                echo -e "${RED}✗ Telegram notification failed${NC}"
+            fi
         fi
 
         # Send notification if Discord is configured
@@ -670,11 +718,13 @@ Report: ${REPORT_FILE}"
 EOF
 )
 
-            curl -s "${DISCORD_WEBHOOK_URL}" \
+            if curl -s --max-time 10 "${DISCORD_WEBHOOK_URL}" \
                 -H "Content-Type: application/json" \
-                -d "${DISCORD_PAYLOAD}" > /dev/null 2>&1
-
-            echo -e "${GREEN}✓ Discord notification sent${NC}"
+                -d "${DISCORD_PAYLOAD}" > /dev/null 2>&1; then
+                echo -e "${GREEN}✓ Discord notification sent${NC}"
+            else
+                echo -e "${RED}✗ Discord notification failed${NC}"
+            fi
         fi
     else
         echo -e "${YELLOW}⚠ Failed to collect summary statistics${NC}"

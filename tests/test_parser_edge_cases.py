@@ -1,8 +1,6 @@
 import pytest
-from datetime import datetime
 from scout.core.analyzer import WalletAnalyzer
 from scout.core.models import TradeAction
-from scout.core.wqs import WalletMetrics
 
 class TestTransactionParser:
     @pytest.fixture
@@ -48,14 +46,15 @@ class TestTransactionParser:
         assert trade.action == TradeAction.BUY
         assert trade.token_address == "WIF_MINT"
         # 100 USD / 100 USD/SOL = 1 SOL equivalent
-        assert trade.amount_sol == 1.0
-        assert trade.price_usd == 2.0
+        assert trade.amount_sol == pytest.approx(1.0)
+        assert trade.price_usd == pytest.approx(2.0)
 
     @pytest.mark.asyncio
     async def test_parse_complex_routing_stub(self, analyzer):
         """
-        Test extracting trade from a swap dict that might have missing SOL data
-        but present USD data (simulating complex route resolution).
+        Test extracting trade from a swap dict with SOL output data present
+        (a plain SELL where the wallet received SOL), exercising the
+        sol_amount-based path.
         """
         wallet = "Wallet123"
         swap_data = {
@@ -73,5 +72,5 @@ class TestTransactionParser:
 
         assert trade is not None
         assert trade.action == TradeAction.SELL
-        assert trade.amount_sol == 0.5
-        assert trade.token_amount == 1000
+        assert trade.amount_sol == pytest.approx(0.5)
+        assert trade.token_amount == pytest.approx(1000)

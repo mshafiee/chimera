@@ -20,10 +20,10 @@
 -- Index for PnL percentage calculations (net_pnl_sol / amount_sol * 100)
 -- Used in: ROI calculations, performance metrics, wallet rankings
 CREATE INDEX IF NOT EXISTS idx_trades_pnl_percent
-    ON trades (CASE
+    ON trades ((CASE
         WHEN amount_sol > 0 THEN ((net_pnl_sol - COALESCE(total_cost_sol, 0)) / amount_sol * 100.0)
         ELSE NULL
-    END)
+    END))
     WHERE net_pnl_sol IS NOT NULL AND amount_sol > 0;
 
 -- Index for net PnL after all costs (net_pnl_sol - total_cost_sol - network_fee_sol)
@@ -95,7 +95,7 @@ CREATE INDEX IF NOT EXISTS idx_positions_risk_return
 -- Index for wallet total PnL calculations
 -- Used in: Wallet rankings, performance leaderboards
 CREATE INDEX IF NOT EXISTS idx_wallets_total_pnl
-    ON wallets ((COALESCE(realized_pnl_30d_sol, 0) + COALESCE(avg_trade_size_sol, 0)))
+    ON wallets ((COALESCE(realized_pnl_30d_sol, 0)))
     WHERE status = 'ACTIVE';
 
 -- Index for wallet ROI calculations (realized_pnl_30d_sol / avg_trade_size_sol)
@@ -117,22 +117,23 @@ CREATE INDEX IF NOT EXISTS idx_wallets_wqs_status
 -- TIME-SERIES AGGREGATION INDEXES
 -- =============================================================================
 
--- Index for daily PnL aggregations (date truncation)
+-- Index for daily PnL aggregations (date truncation, bucketed in UTC so the
+-- expression is immutable and timezone-independent)
 -- Used in: Daily performance reports, charting data
 CREATE INDEX IF NOT EXISTS idx_trades_daily_pnl
-    ON trades (DATE(created_at), ((net_pnl_sol - COALESCE(total_cost_sol, 0))))
+    ON trades (DATE(created_at AT TIME ZONE 'UTC'), ((net_pnl_sol - COALESCE(total_cost_sol, 0))))
     WHERE net_pnl_sol IS NOT NULL;
 
--- Index for hourly volume aggregations
+-- Index for hourly volume aggregations (bucketed in UTC for immutability)
 -- Used in: High-frequency volume analysis, rate limiting
 CREATE INDEX IF NOT EXISTS idx_trades_hourly_volume
-    ON trades (DATE_TRUNC('hour', created_at), amount_sol)
+    ON trades (DATE_TRUNC('hour', created_at AT TIME ZONE 'UTC'), amount_sol)
     WHERE amount_sol > 0;
 
--- Index for weekly strategy performance
+-- Index for weekly strategy performance (bucketed in UTC for immutability)
 -- Used in: Weekly reports, trend analysis
 CREATE INDEX IF NOT EXISTS idx_trades_weekly_strategy
-    ON trades (strategy, DATE_TRUNC('week', created_at), ((net_pnl_sol - COALESCE(total_cost_sol, 0))))
+    ON trades (strategy, DATE_TRUNC('week', created_at AT TIME ZONE 'UTC'), ((net_pnl_sol - COALESCE(total_cost_sol, 0))))
     WHERE net_pnl_sol IS NOT NULL;
 
 -- =============================================================================
@@ -151,10 +152,11 @@ CREATE INDEX IF NOT EXISTS idx_positions_drawdown
     ON positions (wallet_address, closed_at DESC, realized_pnl_sol)
     WHERE state = 'CLOSED' AND realized_pnl_sol IS NOT NULL;
 
--- Index for position age and PnL correlation
+-- Index for position age and PnL correlation (age computed in the query;
+-- COALESCE(closed_at, CURRENT_TIMESTAMP) is not allowed in index expressions)
 -- Used in: Position aging analysis, PnL decay studies
 CREATE INDEX IF NOT EXISTS idx_positions_age_pnl
-    ON positions (wallet_address, (EXTRACT(EPOCH FROM (COALESCE(closed_at, CURRENT_TIMESTAMP) - opened_at))), realized_pnl_sol)
+    ON positions (wallet_address, opened_at, realized_pnl_sol)
     WHERE state IN ('ACTIVE', 'CLOSED');
 
 -- =============================================================================
@@ -176,25 +178,17 @@ CREATE INDEX IF NOT EXISTS idx_trades_high_value
 -- Index for failed trades analysis
 -- Used in: Error analysis, failure rate monitoring
 CREATE INDEX IF NOT EXISTS idx_trades_failed_analysis
-    ON trades (status, created_at DESC, error_message, ((COALESCE(total_cost_sol, 0) + COALESCE(network_fee_sol, 0))))
+    ON trades (status, created_at DESC)
     WHERE status IN ('FAILED', 'DEAD_LETTER');
 
 -- =============================================================================
 -- MONITORING AND ALERTING INDEXES
 -- =============================================================================
-
--- Index for recent trades requiring attention
--- Used in: Monitoring dashboards, alert systems
-CREATE INDEX IF NOT EXISTS idx_trades_recent_attention
-    ON trades (status, created_at DESC, ((net_pnl_sol - COALESCE(total_cost_sol, 0))))
-    WHERE created_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
-    AND status IN ('ACTIVE', 'EXITING', 'FAILED');
-
--- Index for stuck position detection
--- Used in: Operational monitoring, position recovery
-CREATE INDEX IF NOT EXISTS idx_positions_stuck_detection
-    ON positions (state, last_updated, (EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - last_updated))))
-    WHERE state IN ('EXITING', 'EXECUTING') AND last_updated < CURRENT_TIMESTAMP - INTERVAL '5 minutes';
+--
+-- NOTE: no partial index can use CURRENT_TIMESTAMP in its predicate (index
+-- predicates must be IMMUTABLE and are only evaluated at write time), so the
+-- recent-trades and stuck-position scans rely on the plain (status, created_at
+-- DESC) / (state, last_updated) indexes plus a now() filter in the query.
 
 -- =============================================================================
 -- PERFORMANCE NOTES

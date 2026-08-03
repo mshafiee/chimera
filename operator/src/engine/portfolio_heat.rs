@@ -120,7 +120,13 @@ impl PortfolioHeat {
         }
 
         // Fallback to database queries (legacy path, 50-200ms latency)
-        tracing::warn!("Registry not available - using database fallback for portfolio heat (slower)");
+        // One-time warning: this fires whenever the registry is absent, so a
+        // warn on every call would spam logs (calculate_heat runs per position
+        // attempt and from the background liquidation task).
+        static REGISTRY_FALLBACK_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if REGISTRY_FALLBACK_WARNED.set(()).is_ok() {
+            tracing::warn!("Registry not available - using database fallback for portfolio heat (slower)");
+        }
         // Include EXITING positions — they still hold capital until exit confirms.
         // Use entry_amount_sol only: heat measures capital at risk (deployed capital),
         // not mark-to-market value. Including unrealized PnL inflates heat on winners
@@ -170,6 +176,8 @@ impl PortfolioHeat {
         }
 
         // Get pending/queued/executing trades for heat calculation
+        // Stale BUY trades (>5 minutes, matching get_strategy_heat's cutoff)
+        // are excluded so both gates agree on what is "pending heat".
         for status in &["PENDING", "QUEUED", "EXECUTING", "RETRY"] {
             let trades = self
                 .db
@@ -178,6 +186,10 @@ impl PortfolioHeat {
                 .map_err(|e| format!("Failed to query portfolio heat: {}", e))?;
             for trade in &trades {
                 if trade.side == "BUY" {
+                    let trade_age = chrono::Utc::now() - trade.created_at;
+                    if trade_age.num_seconds() > 300 {
+                        continue;
+                    }
                     total_exposure += trade.amount_sol;
                 }
             }
@@ -216,6 +228,12 @@ impl PortfolioHeat {
     /// # Returns
     /// true if position can be opened, false otherwise
     pub async fn can_open_position(&self, position_size_sol: Decimal) -> Result<bool, String> {
+        // Reject non-positive sizes outright so the capacity accounting stays
+        // sound (a negative size would reduce reported exposure).
+        if position_size_sol <= Decimal::ZERO {
+            return Ok(false);
+        }
+
         let heat = self.calculate_heat().await?;
 
         if !heat.can_open_position {

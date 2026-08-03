@@ -169,8 +169,8 @@ async def test_resolve_funder_root_cache_hit(mock_helius_client):
     
     assert result1 == funder
     assert result2 == funder
-    # Should only call get_wallet_funder twice due to cache (first call had 2 calls, second uses cache)
-    mock_helius_client.get_wallet_funder.assert_called()
+    # First resolution: wallet->funder->None (2 API calls); second must hit the cache
+    assert mock_helius_client.get_wallet_funder.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -265,28 +265,30 @@ async def test_cluster_dedup_same_funder(mock_helius_client, mock_credit_tracker
 async def test_cluster_dedup_exchange_root_singleton(mock_helius_client, mock_credit_tracker):
     """Wallet funded by exchange becomes a singleton."""
     exchange_funder = "BinanceHotWallet1111111111111111111111111111"
-    
-    # Ensure exchange funder is in the set
+
+    # Address is already present via _BUILTIN_EXCHANGE_FUNDERS; add/restore
+    # explicitly so the mutation cannot leak into other tests.
     _EXCHANGE_FUNDERS.add(exchange_funder)
-    
-    mock_helius_client.get_wallet_funder.return_value = exchange_funder
-    
-    records = [
-        MockWalletRecord("WalletA1111222233334444555566667777888899990000", 80),
-        MockWalletRecord("WalletB1111222233334444555566667777888899990000", 70),
-    ]
-    
-    with patch("core.helius_credit_tracker.get_credit_tracker", return_value=mock_credit_tracker):
-        result = await cluster_and_dedup(records, helius_client=mock_helius_client)
-    
+    try:
+        mock_helius_client.get_wallet_funder.return_value = exchange_funder
+
+        records = [
+            MockWalletRecord("WalletA1111222233334444555566667777888899990000", 80),
+            MockWalletRecord("WalletB1111222233334444555566667777888899990000", 70),
+        ]
+
+        with patch("core.helius_credit_tracker.get_credit_tracker", return_value=mock_credit_tracker):
+            result = await cluster_and_dedup(records, helius_client=mock_helius_client)
+    finally:
+        _EXCHANGE_FUNDERS.discard(exchange_funder)
+
     # Both should remain ACTIVE (no merging on exchange root)
     active = [r for r in result if r.status == "ACTIVE"]
-    
+
     assert len(active) == 2
     assert all(r.status == "ACTIVE" for r in result)
 
 
-@pytest.mark.asyncio
 async def test_cluster_dedup_budget_denied_single_hop(mock_helius_client):
     """Budget denied degrades to single-hop mode."""
     # Mock budget denial
@@ -318,48 +320,54 @@ async def test_cluster_dedup_top_k_multihop(mock_helius_client, mock_credit_trac
     records = []
     for i in range(30):
         wqs = 90 - i  # 90, 89, 88, ..., 61
-        wallet = MockWalletRecord(f"Wallet{i:042}", wqs)
+        wallet = MockWalletRecord(f"Wallet{i:02d}0000000000000000000000000000000000", wqs)
         records.append(wallet)
-    
+
     # Setup funders: top 20 share a common root, rest have unique funders
     async def mock_get_funder(addr):
-        # Top 20 (higher WQS) have common funder, rest unique
-        if addr.startswith("Wallet0") or addr.startswith("Wallet1"):
-            return f"Funder{addr[:20]}"
-        return f"UniqueFunder{addr}"
-    
+        if addr.startswith("CommonRoot") or addr.startswith("UniqueFunder"):
+            return None
+        idx = int(addr[6:8])  # "WalletNN..." -> NN
+        if idx < 20:
+            return "CommonRoot0000000000000000000000000000000000000000"
+        return f"UniqueFunder{idx:032d}"
+
     mock_helius_client.get_wallet_funder.side_effect = mock_get_funder
-    
+
     with patch("core.helius_credit_tracker.get_credit_tracker", return_value=mock_credit_tracker):
         result = await cluster_and_dedup(records, helius_client=mock_helius_client)
-    
+
     active = [r for r in result if r.status == "ACTIVE"]
-    
+
     # Top 20 with common funder should cluster to 1 representative
     # Plus 10 with unique funders = 11 total
-    assert len(active) <= 11
+    assert len(active) == 11, f"Expected 11 active, got {len(active)}"
 
 
 @pytest.mark.asyncio
 async def test_cluster_dedup_config_respected(mock_helius_client, mock_credit_tracker):
     """SCOUT_SYBIL_HOPS and SCOUT_SYBIL_MULTIHOP_MAX are respected."""
-    with patch.dict("os.environ", {
-        "SCOUT_SYBIL_HOPS": "3",
-        "SCOUT_SYBIL_MULTIHOP_MAX": "10",
-    }):
-        records = [
-            MockWalletRecord("WalletA1111222233334444555566667777888899990000", 90),
-            MockWalletRecord("WalletB1111222233334444555566667777888899990000", 80),
-        ]
-        
-        mock_helius_client.get_wallet_funder.return_value = "Funder9999888877776666555544443333222211110000"
-        
-        with patch("core.helius_credit_tracker.get_credit_tracker", return_value=mock_credit_tracker):
-            await cluster_and_dedup(records, helius_client=mock_helius_client)
-        
-        # Verify config values were used (via logging or side effects)
-        # The main verification is that the function completes without error
-        assert True
+    records = [
+        MockWalletRecord("WalletA1111222233334444555566667777888899990000", 90),
+        MockWalletRecord("WalletB1111222233334444555566667777888899990000", 80),
+    ]
+
+    async def mock_get_funder(addr):
+        if addr.startswith("Wallet"):
+            return "Funder9999888877776666555544443333222211110000"
+        return None  # The funder itself is a root
+
+    mock_helius_client.get_wallet_funder.side_effect = mock_get_funder
+
+    with patch("config.ScoutConfig.get_sybil_hops", return_value=3), \
+         patch("config.ScoutConfig.get_sybil_multihop_max", return_value=10), \
+         patch("core.helius_credit_tracker.get_credit_tracker", return_value=mock_credit_tracker):
+        result = await cluster_and_dedup(records, helius_client=mock_helius_client)
+
+    # Both wallets share a funder -> cluster to a single ACTIVE representative
+    active = [r for r in result if r.status == "ACTIVE"]
+    assert len(active) == 1
+    assert active[0].address == "WalletA1111222233334444555566667777888899990000"
 
 
 @pytest.mark.asyncio

@@ -30,9 +30,10 @@ export function useWebSocket(options: UseWebSocketOptions) {
   const reconnectAttempts = useRef(0)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const hasConnectedRef = useRef(false)
+  const manuallyDisconnectedRef = useRef(false)
   const queryClient = useQueryClient()
 
-  const connect = useCallback(() => {
+  const connect = useCallback((isManual = false) => {
     if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
       console.log('[WebSocket] Already connected or connecting, skipping duplicate connection')
       return
@@ -44,14 +45,22 @@ export function useWebSocket(options: UseWebSocketOptions) {
       reconnectTimeoutRef.current = null
     }
 
+    // User-initiated connections restart the attempt budget; auto-reconnects keep it.
+    if (isManual) {
+      reconnectAttempts.current = 0
+    }
+    manuallyDisconnectedRef.current = false
+    hasConnectedRef.current = false
     setIsConnecting(true)
     setConnectionError(null)
 
     try {
       // Use API key for WebSocket authentication instead of JWT token
       // The backend expects simple API keys for WebSocket connections
-      const wsUrl = `${url}?token=${customApiKey}`
-      console.log('[WebSocket] Attempting connection to:', wsUrl.replace(/token=\w+/, 'token=***'))
+      const wsUrl = `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(customApiKey)}`
+      const redactedUrl = new URL(wsUrl)
+      redactedUrl.searchParams.set('token', '***')
+      console.log('[WebSocket] Attempting connection to:', redactedUrl.toString())
       const ws = new WebSocket(wsUrl)
 
       // Set a timeout to detect failed connections
@@ -86,7 +95,7 @@ export function useWebSocket(options: UseWebSocketOptions) {
         // But code 1000/1001 during initial connection (hasConnectedRef == false) is likely
         // a connection failure (e.g., timeout, DNS error, TLS failure) — always retry those.
         const isCleanShutdown = hasConnectedRef.current && (event.code === 1000 || event.code === 1001)
-        if (!isCleanShutdown && reconnectAttempts.current < maxReconnectAttempts) {
+        if (!manuallyDisconnectedRef.current && !isCleanShutdown && reconnectAttempts.current < maxReconnectAttempts) {
           reconnectAttempts.current++
           const backoffDelay = reconnectInterval * Math.min(reconnectAttempts.current, 5) // Exponential backoff
           console.log(
@@ -171,11 +180,13 @@ export function useWebSocket(options: UseWebSocketOptions) {
       wsRef.current = ws
     } catch (error) {
       console.error('[WebSocket] Failed to connect:', error)
+      setIsConnecting(false)
       setConnectionError('Failed to establish connection')
     }
   }, [url, reconnectInterval, maxReconnectAttempts, queryClient, customApiKey])
 
   const disconnect = useCallback(() => {
+    manuallyDisconnectedRef.current = true
     // Clear any reconnect timeout
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current)

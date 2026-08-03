@@ -102,10 +102,10 @@ export function useWebhookStats(refetchInterval: number = 30000) {
     queryKey: ['webhooks', 'stats'],
     queryFn: async ({ signal }) => {
       const response = await apiClient.get<ApiResponse<WebhookStats>>('/monitoring/webhooks/stats', { signal })
-      if (response.data.success && response.data.data) {
+      if (response.data?.success && response.data.data) {
         return response.data.data
       }
-      throw new Error(response.data.error || 'Failed to fetch webhook statistics')
+      throw new Error(response.data?.error || 'Failed to fetch webhook statistics')
     },
     refetchInterval,
     staleTime: 10000,
@@ -117,21 +117,28 @@ export function useWebhookStats(refetchInterval: number = 30000) {
  */
 export function useWebhookAuditLog(params: WebhookAuditQuery = {}) {
   return useQuery({
-    queryKey: ['webhooks', 'audit', params],
+    queryKey: [
+      'webhooks',
+      'audit',
+      params.wallet_address ?? '',
+      params.action ?? '',
+      params.status ?? '',
+      params.limit ?? '',
+    ],
     queryFn: async ({ signal }) => {
       const response = await apiClient.get<ApiResponse<WebhookAuditLog[]>>('/monitoring/webhooks/audit', {
         params: {
           ...(params.wallet_address && { wallet_address: params.wallet_address }),
           ...(params.action && { action: params.action }),
           ...(params.status && { status: params.status }),
-          ...(params.limit && { limit: params.limit }),
+          ...(params.limit !== undefined && { limit: params.limit }),
         },
         signal,
       })
-      if (response.data.success && response.data.data) {
+      if (response.data?.success && response.data.data) {
         return response.data.data
       }
-      throw new Error(response.data.error || 'Failed to fetch audit log')
+      throw new Error(response.data?.error || 'Failed to fetch audit log')
     },
     staleTime: 15000,
   })
@@ -241,10 +248,14 @@ export function useToggleWebhook() {
   return useMutation({
     mutationFn: async ({ walletAddress, enabled }: { walletAddress: string; enabled: boolean }) => {
       const response = await apiClient.post(
-        `/monitoring/webhooks/${walletAddress}/toggle`,
+        `/monitoring/webhooks/${encodeURIComponent(walletAddress)}/toggle`,
         { enabled }
       )
-      return response.status === 200
+      // Backend returns 2xx on success and a non-2xx error body on failure.
+      if (response.status >= 200 && response.status < 300) {
+        return true
+      }
+      throw new Error('Failed to toggle webhook')
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['webhooks'] })
@@ -261,9 +272,13 @@ export function useRetryWebhook() {
   return useMutation({
     mutationFn: async (walletAddress: string) => {
       const response = await apiClient.post(
-        `/monitoring/webhooks/${walletAddress}/retry`
+        `/monitoring/webhooks/${encodeURIComponent(walletAddress)}/retry`
       )
-      return response.status === 200
+      // Backend returns 2xx on success and a non-2xx error body on failure.
+      if (response.status >= 200 && response.status < 300) {
+        return true
+      }
+      throw new Error('Failed to retry webhook registration')
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['webhooks'] })

@@ -92,14 +92,30 @@ fn test_jupiter_parse_error_creation() {
 }
 
 #[test]
-fn test_jupiter_unknown_error_classification() {
+fn test_jupiter_unknown_4xx_classification() {
     let error = JupiterError::from_http_error(418, "I'm a teapot".to_string());
 
+    // Unknown 4xx client errors are permanent: retrying them with backoff
+    // only masks the root cause. Only 5xx/network-level unknowns default to
+    // retryable (see from_http_error).
     assert_eq!(error.error_type, JupiterErrorType::Unknown);
-    assert!(error.retryable, "Unknown errors should be retryable");
+    assert!(!error.retryable, "Unknown 4xx errors must not be retryable");
+    assert!(
+        error.retry_delay.is_none(),
+        "Unknown 4xx errors must not have a retry delay"
+    );
+}
+
+#[test]
+fn test_jupiter_unknown_5xx_classification() {
+    let error = JupiterError::from_http_error(599, "Unusual server error".to_string());
+
+    // Unknown 5xx errors remain retryable (transient server-side failures).
+    assert_eq!(error.error_type, JupiterErrorType::Unknown);
+    assert!(error.retryable, "Unknown 5xx errors should be retryable");
     assert!(
         error.retry_delay.is_some(),
-        "Unknown errors should have retry delay"
+        "Unknown 5xx errors should have a retry delay"
     );
 }
 
@@ -117,22 +133,36 @@ fn test_retry_delay_exponential_backoff() {
     assert!(delay3 > delay2, "Delay 3 > Delay 2");
     assert!(delay4 > delay3, "Delay 4 > Delay 3");
 
-    // Verify approximate doubling (within jitter)
+    // Bounds derived from the config (multiplier ± jitter envelope):
+    // min ratio = mult * (1-j)/(1+j), max ratio = mult * (1+j)/(1-j).
+    let j = config.jitter_factor;
+    let min_ratio = config.backoff_multiplier * (1.0 - j) / (1.0 + j);
+    let max_ratio = config.backoff_multiplier * (1.0 + j) / (1.0 - j);
+
     let ratio2_1 = delay2.as_millis() as f64 / delay1.as_millis() as f64;
     let ratio3_2 = delay3.as_millis() as f64 / delay2.as_millis() as f64;
     let ratio4_3 = delay4.as_millis() as f64 / delay3.as_millis() as f64;
 
     assert!(
-        ratio2_1 >= 1.5 && ratio2_1 <= 2.5,
-        "Second retry should be 1.5-2.5x longer (with jitter)"
+        ratio2_1 >= min_ratio && ratio2_1 <= max_ratio,
+        "Second retry ratio {} outside derived bounds [{}, {}]",
+        ratio2_1,
+        min_ratio,
+        max_ratio
     );
     assert!(
-        ratio3_2 >= 1.5 && ratio3_2 <= 2.5,
-        "Third retry should be 1.5-2.5x longer (with jitter)"
+        ratio3_2 >= min_ratio && ratio3_2 <= max_ratio,
+        "Third retry ratio {} outside derived bounds [{}, {}]",
+        ratio3_2,
+        min_ratio,
+        max_ratio
     );
     assert!(
-        ratio4_3 >= 1.5 && ratio4_3 <= 2.5,
-        "Fourth retry should be 1.5-2.5x longer (with jitter)"
+        ratio4_3 >= min_ratio && ratio4_3 <= max_ratio,
+        "Fourth retry ratio {} outside derived bounds [{}, {}]",
+        ratio4_3,
+        min_ratio,
+        max_ratio
     );
 }
 
@@ -185,13 +215,18 @@ fn test_retry_delay_jitter_variation() {
         "Jitter should create variation in delays"
     );
 
-    // Variation should be reasonable (not too extreme)
-    let variation = (max_delay.as_millis() - min_delay.as_millis()) as f64
-        / delays[0].as_millis() as f64;
+    // Variation should be reasonable: max-min ≤ 2 * jitter_factor * base.
+    // Normalize by the DETERMINISTIC theoretical base delay for attempt 2
+    // (initial_delay * backoff^1, capped at max_delay), NOT by a random
+    // sample — normalizing by a sample is flaky.
+    let base_delay = (config.initial_delay_ms as f64 * config.backoff_multiplier.powi(1))
+        .min(config.max_delay_ms as f64);
+    let variation = (max_delay.as_millis() - min_delay.as_millis()) as f64 / base_delay;
 
     assert!(
-        variation <= 0.4,
-        "Jitter variation should be within reasonable bounds (40%)"
+        variation <= 2.0 * config.jitter_factor,
+        "Jitter variation {} should be within 2*jitter_factor of the base delay",
+        variation
     );
 }
 
@@ -258,11 +293,12 @@ fn test_jupiter_error_to_app_error_conversion() {
     let app_error = auth_error.to_app_error();
 
     match app_error {
-        chimera_operator::error::AppError::Config(_) => {
-            // Expected - auth errors should convert to config errors
+        chimera_operator::error::AppError::Auth(_) => {
+            // Expected - an upstream 401/403 is a runtime API-credential
+            // problem, not a configuration problem.
         }
         other => {
-            panic!("Auth error should convert to Config error, got: {:?}", other);
+            panic!("Auth error should convert to Auth error, got: {:?}", other);
         }
     }
 
@@ -311,10 +347,16 @@ fn test_retry_delay_first_attempt() {
     let config = RetryConfig::default();
     let delay = calculate_retry_delay(1, &config);
 
-    // First retry should have minimal delay (initial_delay_ms)
+    // Bounds derived from the config fields (initial ± jitter) instead of
+    // hard-coded literals.
+    let lo = (config.initial_delay_ms as f64 * (1.0 - config.jitter_factor)) as u128;
+    let hi = (config.initial_delay_ms as f64 * (1.0 + config.jitter_factor)) as u128 + 1;
     assert!(
-        delay.as_millis() >= 90 && delay.as_millis() <= 110,
-        "First retry should be around 100ms (allowing for jitter)"
+        delay.as_millis() >= lo && delay.as_millis() <= hi,
+        "First retry should be within [{}, {}]ms (initial_delay ± jitter), got {:?}",
+        lo,
+        hi,
+        delay
     );
 }
 

@@ -103,108 +103,83 @@ export interface Cluster {
   consensus_rate: number
 }
 
-// Fetch Signal Quality
-export function useSignalQuality(timeRange?: string) {
+interface SignalsQueryOptions {
+  refetchInterval?: number
+  staleTime?: number
+  retry?: number
+  params?: Record<string, string>
+  onError?: (error: unknown) => void
+}
+
+function useSignalsQuery<T>(
+  queryKey: unknown[],
+  url: string,
+  label: string,
+  options?: SignalsQueryOptions
+) {
   return useQuery({
-    queryKey: ['signals', 'quality', timeRange],
+    queryKey,
     queryFn: async ({ signal }) => {
-      const response = await apiClient.get<SignalQualityResponse>('/signals/quality', {
-        params: timeRange ? { range: timeRange } : undefined,
-        signal,
-      })
+      const response = await apiClient.get<T>(url, { params: options?.params, signal })
       return response.data
     },
+    refetchInterval: options?.refetchInterval,
+    staleTime: options?.staleTime,
+    retry: options?.retry,
+    meta: {
+      onError: (error: unknown) => {
+        console.error(`[Signals API] Failed to fetch ${label}:`, error)
+        options?.onError?.(error)
+      },
+    },
+  })
+}
+
+// Fetch Signal Quality
+export function useSignalQuality(timeRange?: string) {
+  return useSignalsQuery<SignalQualityResponse>(['signals', 'quality', timeRange], '/signals/quality', 'signal quality', {
+    params: timeRange ? { range: timeRange } : undefined,
     refetchInterval: 30000,
     staleTime: 10000,
     retry: 3,
-    meta: {
-      onError: (error: unknown) => {
-        console.error('[Signals API] Failed to fetch signal quality:', error)
-        // Signal quality is critical - show toast notification
-        toast.error('Failed to load signal quality. Please try again later.')
-      },
+    onError: () => {
+      toast.error('Failed to load signal quality. Please try again later.')
     },
   })
 }
 
 // Fetch Signal Sources
 export function useSignalSources() {
-  return useQuery({
-    queryKey: ['signals', 'sources'],
-    queryFn: async ({ signal }) => {
-      const response = await apiClient.get<SignalSourceResponse>('/signals/sources', { signal })
-      return response.data
-    },
+  return useSignalsQuery<SignalSourceResponse>(['signals', 'sources'], '/signals/sources', 'signal sources', {
     staleTime: 60000,
     retry: 1,
-    meta: {
-      onError: (error: unknown) => {
-        console.error('[Signals API] Failed to fetch signal sources:', error)
-        // Signal sources are optional - console only
-      },
-    },
   })
 }
 
 // Fetch Signal Consensus
 export function useSignalConsensus() {
-  return useQuery({
-    queryKey: ['signals', 'consensus'],
-    queryFn: async ({ signal }) => {
-      const response = await apiClient.get<SignalConsensusResponse>('/signals/consensus', { signal })
-      return response.data
-    },
+  return useSignalsQuery<SignalConsensusResponse>(['signals', 'consensus'], '/signals/consensus', 'signal consensus', {
     refetchInterval: 15000,
     staleTime: 5000,
     retry: 1,
-    meta: {
-      onError: (error: unknown) => {
-        console.error('[Signals API] Failed to fetch signal consensus:', error)
-        // Consensus is optional - console only
-      },
-    },
   })
 }
 
 // Fetch Signal Aggregation
 export function useSignalAggregation(timeRange?: string) {
-  return useQuery({
-    queryKey: ['signals', 'aggregation', timeRange],
-    queryFn: async ({ signal }) => {
-      const response = await apiClient.get<SignalAggregationResponse>('/signals/aggregation', {
-        params: timeRange ? { range: timeRange } : undefined,
-        signal,
-      })
-      return response.data
-    },
+  return useSignalsQuery<SignalAggregationResponse>(['signals', 'aggregation', timeRange], '/signals/aggregation', 'signal aggregation', {
+    params: timeRange ? { range: timeRange } : undefined,
     refetchInterval: 20000,
     staleTime: 10000,
     retry: 1,
-    meta: {
-      onError: (error: unknown) => {
-        console.error('[Signals API] Failed to fetch signal aggregation:', error)
-        // Aggregation is optional - console only
-      },
-    },
   })
 }
 
 // Fetch Signal Clustering
 export function useSignalClustering() {
-  return useQuery({
-    queryKey: ['signals', 'clustering'],
-    queryFn: async ({ signal }) => {
-      const response = await apiClient.get<SignalClusteringResponse>('/signals/clustering', { signal })
-      return response.data
-    },
+  return useSignalsQuery<SignalClusteringResponse>(['signals', 'clustering'], '/signals/clustering', 'signal clustering', {
     refetchInterval: 30000,
     staleTime: 15000,
     retry: 1,
-    meta: {
-      onError: (error: unknown) => {
-        console.error('[Signals API] Failed to fetch signal clustering:', error)
-        // Clustering is optional - console only
-      },
-    },
   })
 }

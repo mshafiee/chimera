@@ -12,12 +12,10 @@ Usage:
 """
 
 import argparse
-import json
 import os
-import sys
 import time
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 from enum import Enum
@@ -166,6 +164,7 @@ class AnomalyDetector:
         # Monitoring state
         self.previous_metrics = {}
         self.anomaly_history = []
+        self.last_fetch_ok = True
 
     def fetch_metrics(self, url: str) -> Dict[str, float]:
         """Fetch Prometheus metrics from the specified URL.
@@ -380,7 +379,8 @@ Time: {anomaly.timestamp}
                 'text': message.strip(),
                 'parse_mode': 'HTML'
             }
-            requests.post(url, json=data, timeout=10)
+            resp = requests.post(url, json=data, timeout=10)
+            resp.raise_for_status()
             print(f"Telegram alert sent for {anomaly.metric_name}")
 
         except Exception as e:
@@ -413,24 +413,27 @@ Time: {anomaly.timestamp}
         }
 
         try:
-            requests.post(self.discord_webhook, json={'embeds': [embed]}, timeout=10)
+            resp = requests.post(self.discord_webhook, json={'embeds': [embed]}, timeout=10)
+            resp.raise_for_status()
             print(f"Discord alert sent for {anomaly.metric_name}")
 
         except Exception as e:
             print(f"Failed to send Discord alert: {e}")
 
-    def store_anomaly(self, anomaly: Anomaly, day_number: int, hour_number: int):
+    def store_anomaly(self, anomaly: Anomaly, day_number: int, hour_number: int, anomaly_type: str = 'threshold_exceeded', alert_sent: bool = True):
         """Store anomaly in evaluation database.
 
         Args:
             anomaly: The anomaly to store
             day_number: Current day number
             hour_number: Current hour number
+            anomaly_type: Type of anomaly (threshold_exceeded or trend_violation)
+            alert_sent: Whether an alert was actually sent for this anomaly
         """
-        try:
-            import sqlite3
+        import sqlite3
 
-            conn = sqlite3.connect(self.eval_db_path)
+        conn = sqlite3.connect(self.eval_db_path)
+        try:
             cursor = conn.cursor()
 
             # Create table if not exists
@@ -467,7 +470,7 @@ Time: {anomaly.timestamp}
                 anomaly.timestamp,
                 day_number,
                 hour_number,
-                'threshold_exceeded',
+                anomaly_type,
                 anomaly.severity.value,
                 anomaly.metric_name,
                 anomaly.value,
@@ -475,15 +478,17 @@ Time: {anomaly.timestamp}
                 anomaly.deviation_percent,
                 anomaly.description,
                 anomaly.affected_component,
-                True
+                alert_sent
             ))
 
             conn.commit()
-            conn.close()
             print(f"Stored anomaly in database: {anomaly.metric_name}")
 
         except Exception as e:
             print(f"Failed to store anomaly in database: {e}")
+
+        finally:
+            conn.close()
 
     def check_anomalies(self) -> List[Anomaly]:
         """Perform comprehensive anomaly check.
@@ -505,8 +510,14 @@ Time: {anomaly.timestamp}
             print("Scout metrics URL not configured, skipping Scout metrics")
 
         if not all_metrics:
-            print("Warning: No metrics retrieved")
+            print("Error: No metrics retrieved (operator metrics endpoint may be down)")
+            self.last_fetch_ok = False
+            # A failed fetch must not be compared against an old baseline on
+            # the next successful poll (would produce false trend anomalies)
+            self.previous_metrics = {}
             return all_anomalies
+
+        self.last_fetch_ok = True
 
         print(f"Retrieved {len(all_metrics)} metrics")
 
@@ -538,13 +549,16 @@ Time: {anomaly.timestamp}
         hour_number = now.hour
 
         for anomaly in anomalies:
-            # Send alerts
+            # Send alerts (only CRITICAL anomalies are alerted)
+            alert_sent = False
             if anomaly.severity == Severity.CRITICAL:
                 self.send_telegram_alert(anomaly)
                 self.send_discord_alert(anomaly)
+                alert_sent = True
 
-            # Store in database
-            self.store_anomaly(anomaly, day_number, hour_number)
+            # Store in database with the real type and alert state
+            anomaly_type = 'trend_violation' if anomaly.description.startswith('Sudden increase') else 'threshold_exceeded'
+            self.store_anomaly(anomaly, day_number, hour_number, anomaly_type=anomaly_type, alert_sent=alert_sent)
 
             # Add to history
             self.anomaly_history.append(anomaly)
@@ -558,13 +572,16 @@ Time: {anomaly.timestamp}
 
         anomalies = self.check_anomalies()
 
+        if not self.last_fetch_ok:
+            print("\n⚠️  Monitoring failure: metrics could not be retrieved")
+
         if anomalies:
             print(f"\n🚨 Detected {len(anomalies)} anomalies:")
             for anomaly in anomalies:
                 print(f"  - [{anomaly.severity.value}] {anomaly.metric_name}: {anomaly.value:.2f} (threshold: {anomaly.threshold:.2f})")
 
             self.process_anomalies(anomalies)
-        else:
+        elif self.last_fetch_ok:
             print("\n✅ No anomalies detected")
 
         print("=" * 50)

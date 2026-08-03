@@ -94,16 +94,22 @@ def append_to_log(comparison: WqsComparisonResult):
         os.path.join(os.path.dirname(__file__), "..", "data", "wqs_comparison.jsonl"),
     )
     try:
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        log_dir = os.path.dirname(log_path)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        # Round first, then compute the delta from the ROUNDED values so the
+        # logged record is internally consistent
+        old_rounded = round(comparison.old_wqs, 1)
+        new_rounded = round(comparison.new_wqs, 1)
         with open(log_path, "a") as f:
             f.write(json.dumps({
                 "wallet_address": comparison.wallet_address,
                 "timestamp": comparison.timestamp,
-                "old_wqs": round(comparison.old_wqs, 1),
-                "new_wqs": round(comparison.new_wqs, 1),
+                "old_wqs": old_rounded,
+                "new_wqs": new_rounded,
                 "old_status": comparison.old_status,
                 "new_status": comparison.new_status,
-                "delta": round(comparison.delta, 1),
+                "delta": round(new_rounded - old_rounded, 1),
                 "promoted_by_new_only": comparison.promoted_by_new_only,
                 "demoted_by_new_only": comparison.demoted_by_new_only,
             }) + "\n")

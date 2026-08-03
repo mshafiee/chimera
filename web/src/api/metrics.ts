@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { apiClient } from './client'
+import { apiClient, getApiError } from './client'
 
 export interface PerformanceMetrics {
   pnl_24h: number
@@ -27,14 +27,23 @@ export interface CostMetrics {
   roi_percent: number
 }
 
+const PERFORMANCE_ENDPOINT = '/metrics/performance'
+const STRATEGY_ENDPOINT = '/metrics/strategy'
+const COSTS_ENDPOINT = '/metrics/costs'
+
 export function usePerformanceMetrics() {
   return useQuery({
     queryKey: ['metrics', 'performance'],
     queryFn: async ({ signal }) => {
-      const { data } = await apiClient.get<PerformanceMetrics>('/metrics/performance', { signal })
+      const { data } = await apiClient.get<PerformanceMetrics>(PERFORMANCE_ENDPOINT, { signal })
       return data
     },
     refetchInterval: 30000, // Refetch every 30 seconds
+    meta: {
+      onError: (error: unknown) => {
+        console.error('[Metrics API] Failed to fetch performance metrics:', getApiError(error))
+      },
+    },
   })
 }
 
@@ -43,12 +52,17 @@ export function useStrategyPerformance(strategy: 'SHIELD' | 'SPEAR', days: numbe
     queryKey: ['metrics', 'strategy', strategy, days],
     queryFn: async ({ signal }) => {
       const { data } = await apiClient.get<StrategyPerformance>(
-        `/metrics/strategy`,
+        STRATEGY_ENDPOINT,
         { params: { strategy, days: days.toString() }, signal }
       )
       return data
     },
     refetchInterval: 60000, // Refetch every minute
+    meta: {
+      onError: (error: unknown) => {
+        console.error('[Metrics API] Failed to fetch strategy performance:', getApiError(error))
+      },
+    },
   })
 }
 
@@ -56,9 +70,14 @@ export function useCostMetrics() {
   return useQuery({
     queryKey: ['metrics', 'costs'],
     queryFn: async ({ signal }) => {
-      const { data } = await apiClient.get<CostMetrics>('/metrics/costs', { signal })
+      const { data } = await apiClient.get<CostMetrics>(COSTS_ENDPOINT, { signal })
       return data
     },
     refetchInterval: 60000, // Refetch every minute
+    meta: {
+      onError: (error: unknown) => {
+        console.error('[Metrics API] Failed to fetch cost metrics:', getApiError(error))
+      },
+    },
   })
 }

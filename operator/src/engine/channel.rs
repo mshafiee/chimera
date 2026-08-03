@@ -41,8 +41,13 @@ pub struct PriorityQueue {
 impl PriorityQueue {
     /// Create a new priority queue
     pub fn new(capacity: usize, load_shed_threshold_percent: u32) -> Self {
-        // High-WQS SPEAR queue capacity is 10% of total capacity (minimum 10, maximum 50)
-        let spear_high_wqs_capacity = (capacity / 10).clamp(10, 50);
+        // High-WQS SPEAR queue capacity is 10% of total capacity (minimum 1,
+        // maximum 50), never exceeding the global capacity so a small queue
+        // cannot grow past its configured size via the dedicated queue alone.
+        let spear_high_wqs_capacity = ((capacity / 10).clamp(1, 50)).min(capacity);
+        // A 0% threshold would reject every low-WQS push (current >= 0 always);
+        // clamp to [1, 100] so the documented "percentage of capacity" holds.
+        let load_shed_threshold = load_shed_threshold_percent.clamp(1, 100);
 
         Self {
             high: Mutex::new(VecDeque::new()),
@@ -51,7 +56,7 @@ impl PriorityQueue {
             low: Mutex::new(VecDeque::new()),
             total_len: AtomicUsize::new(0),
             capacity,
-            load_shed_threshold: load_shed_threshold_percent,
+            load_shed_threshold,
             spear_high_wqs_capacity,
             push_notify: Arc::new(Notify::new()),
         }
@@ -78,6 +83,23 @@ impl PriorityQueue {
         current >= threshold
     }
 
+    /// Atomically reserve a slot under the global capacity. Returns an error
+    /// when the queue is already at capacity. The reservation and the
+    /// `total_len` increment are one atomic operation, so concurrent pushes
+    /// into different sub-queues can never jointly exceed `capacity`.
+    fn try_reserve_slot(&self) -> Result<(), String> {
+        self.total_len
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                if n >= self.capacity {
+                    None
+                } else {
+                    Some(n + 1)
+                }
+            })
+            .map(|_| ())
+            .map_err(|_| "Queue is full".to_string())
+    }
+
     /// Push a signal onto the appropriate queue
     ///
     /// # Arguments
@@ -94,11 +116,8 @@ impl PriorityQueue {
             }
             Strategy::Shield => {
                 let mut medium = self.medium.lock();
-                if self.total_len.load(Ordering::Acquire) >= self.capacity {
-                    return Err("Queue is full".to_string());
-                }
+                self.try_reserve_slot()?;
                 medium.push_back(signal);
-                self.total_len.fetch_add(1, Ordering::AcqRel);
                 self.push_notify.notify_one();
             }
             Strategy::Spear => {
@@ -108,13 +127,12 @@ impl PriorityQueue {
                     if wqs >= 70.0 {
                         let mut spear_high_wqs = self.spear_high_wqs.lock();
                         if spear_high_wqs.len() < self.spear_high_wqs_capacity {
+                            // The global capacity still applies — the dedicated
+                            // queue must not let the total exceed `capacity`.
+                            self.try_reserve_slot()?;
                             // Add to high-WQS SPEAR queue
                             let trade_uuid = signal.trade_uuid.clone();
                             spear_high_wqs.push_back(signal);
-                            // Increment counter while the lock is still held to prevent
-                            // a TOCTOU race where two threads both pass the capacity check
-                            // before either increments total_len.
-                            self.total_len.fetch_add(1, Ordering::AcqRel);
                             drop(spear_high_wqs);
                             tracing::debug!(
                                 trade_uuid = %trade_uuid,
@@ -157,12 +175,9 @@ impl PriorityQueue {
                 }
 
                 let mut low = self.low.lock();
-                if self.total_len.load(Ordering::Acquire) >= self.capacity {
-                    return Err("Queue is full".to_string());
-                }
+                self.try_reserve_slot()?;
                 // Add to regular SPEAR queue
                 low.push_back(signal);
-                self.total_len.fetch_add(1, Ordering::AcqRel);
                 self.push_notify.notify_one();
             }
         }
@@ -207,10 +222,11 @@ impl PriorityQueue {
     /// Uses the internal `Notify` to avoid busy-waiting when the queue is empty.
     pub async fn pop_wait(&self) -> Option<Signal> {
         loop {
+            let notified = self.push_notify.notified();
             if let Some(signal) = self.pop().await {
                 return Some(signal);
             }
-            self.push_notify.notified().await;
+            notified.await;
         }
     }
 

@@ -49,20 +49,29 @@ impl ControlTrade {
         }
     }
 
-    /// Close the control trade and calculate PnL
-    pub fn close(&mut self, exit_price: Decimal) -> Decimal {
+    /// Close the control trade and calculate PnL.
+    ///
+    /// Idempotent: closing an already-closed trade returns the recorded PnL
+    /// without overwriting the original exit.
+    pub fn close(&mut self, exit_price: Decimal) -> Result<Decimal, String> {
+        if let Some(pnl) = self.pnl {
+            return Ok(pnl);
+        }
+
+        if self.entry_price <= Decimal::ZERO {
+            return Err(format!(
+                "Cannot close control trade with non-positive entry price: {}",
+                self.entry_price
+            ));
+        }
+
         self.exit_time = Some(Utc::now());
         self.exit_price = Some(exit_price);
 
         // Calculate PnL: (exit - entry) / entry * position_size
-        if self.entry_price > Decimal::ZERO {
-            self.pnl = Some(
-                (exit_price - self.entry_price) / self.entry_price * self.position_size_sol
-            );
-            self.pnl.unwrap()
-        } else {
-            Decimal::ZERO
-        }
+        let pnl = (exit_price - self.entry_price) / self.entry_price * self.position_size_sol;
+        self.pnl = Some(pnl);
+        Ok(pnl)
     }
 
     /// Get current PnL if position is still open
@@ -104,13 +113,9 @@ impl ControlArms {
             return Err("No liquid tokens available for random selection".to_string());
         }
 
-        // Randomly select a liquid token
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as usize;
-        let idx = timestamp % self.liquid_tokens.len();
+        // Randomly select a liquid token using a real RNG — wall-clock
+        // microseconds are predictable and repeat within the same microsecond.
+        let idx = rand::rng().random_range(0..self.liquid_tokens.len());
         let selected_token = &self.liquid_tokens[idx];
 
         let control_trade = ControlTrade::new(
@@ -146,8 +151,11 @@ impl ControlArms {
     /// Close random token control
     pub async fn close_random_control(&self, token_mint: &str, exit_price: Decimal) -> Result<Decimal, String> {
         let mut trades = self.random_trades.lock().await;
-        if let Some(trade) = trades.iter_mut().find(|t| t.token_mint == token_mint && t.exit_time.is_none()) {
-            Ok(trade.close(exit_price))
+        // Close the MOST RECENT open trade for this token — with multiple open
+        // trades on the same mint, closing the first would associate the exit
+        // price/PnL with the wrong entry.
+        if let Some(trade) = trades.iter_mut().rev().find(|t| t.token_mint == token_mint && t.exit_time.is_none()) {
+            trade.close(exit_price)
         } else {
             Err(format!("No open random control trade found for {}", token_mint))
         }
@@ -156,8 +164,9 @@ impl ControlArms {
     /// Close SOL benchmark control
     pub async fn close_sol_benchmark(&self, exit_price: Decimal) -> Result<Decimal, String> {
         let mut trades = self.sol_bench_trades.lock().await;
-        if let Some(trade) = trades.iter_mut().find(|t| t.exit_time.is_none()) {
-            Ok(trade.close(exit_price))
+        // Close the most recent open SOL benchmark trade.
+        if let Some(trade) = trades.iter_mut().rev().find(|t| t.exit_time.is_none()) {
+            trade.close(exit_price)
         } else {
             Err("No open SOL benchmark trade found".to_string())
         }
@@ -174,17 +183,20 @@ impl ControlArms {
     }
 
     /// Calculate aggregate statistics for a control type
-    pub async fn get_control_stats(&self, control_type: &str) -> ControlStats {
+    ///
+    /// Returns `Err` for an unknown control type and `Ok(None)` when there are
+    /// no closed trades — an empty record must not be reported as a 0% win rate.
+    pub async fn get_control_stats(&self, control_type: &str) -> Result<Option<ControlStats>, String> {
         let trades = match control_type {
             "random_token" => self.get_random_controls().await,
             "sol_benchmark" => self.get_sol_benchmarks().await,
-            _ => return ControlStats::default(),
+            _ => return Err(format!("Unknown control type: {}", control_type)),
         };
 
         let closed_trades: Vec<_> = trades.iter().filter(|t| t.exit_time.is_some()).collect();
 
         if closed_trades.is_empty() {
-            return ControlStats::default();
+            return Ok(None);
         }
 
         let total_pnl: Decimal = closed_trades.iter()
@@ -198,14 +210,14 @@ impl ControlArms {
         let avg_pnl = total_pnl / Decimal::from(closed_trades.len() as u64);
         let win_rate = (win_count as f64) / (closed_trades.len() as f64);
 
-        ControlStats {
+        Ok(Some(ControlStats {
             total_trades: closed_trades.len(),
             total_pnl,
             avg_pnl,
             win_rate,
             win_count,
             loss_count: closed_trades.len() - win_count,
-        }
+        }))
     }
 }
 
@@ -253,11 +265,28 @@ mod tests {
             Decimal::from_str("0.02").unwrap(),
         );
 
-        let pnl = trade.close(Decimal::from_str("1.10").unwrap());
+        let pnl = trade.close(Decimal::from_str("1.10").unwrap()).unwrap();
 
         assert_eq!(pnl, Decimal::from_str("0.002").unwrap()); // 10% gain on 0.02 SOL
         assert!(trade.exit_time.is_some());
         assert_eq!(trade.exit_price, Some(Decimal::from_str("1.10").unwrap()));
+
+        // Closing again is idempotent and preserves the original exit
+        let pnl2 = trade.close(Decimal::from_str("0.50").unwrap()).unwrap();
+        assert_eq!(pnl, pnl2);
+        assert_eq!(trade.exit_price, Some(Decimal::from_str("1.10").unwrap()));
+    }
+
+    #[tokio::test]
+    async fn test_control_trade_close_rejects_bad_entry() {
+        let mut trade = ControlTrade::new(
+            "random_token".to_string(),
+            "test_mint".to_string(),
+            Decimal::ZERO,
+            Decimal::from_str("0.02").unwrap(),
+        );
+
+        assert!(trade.close(Decimal::from_str("1.10").unwrap()).is_err());
     }
 
     #[tokio::test]
@@ -305,11 +334,18 @@ mod tests {
             arms.close_random_control(&trade.token_mint, exit_price).await.unwrap();
         }
 
-        let stats = arms.get_control_stats("random_token").await;
+        let stats = arms.get_control_stats("random_token").await.unwrap().unwrap();
 
         assert_eq!(stats.total_trades, 3);
         assert_eq!(stats.win_count, 2);
         assert_eq!(stats.loss_count, 1);
         assert!((stats.win_rate - 0.666).abs() < 0.01); // ~66.7% win rate
+
+        // No closed trades → Ok(None), not a fabricated 0% record
+        let empty_stats = arms.get_control_stats("sol_benchmark").await.unwrap();
+        assert!(empty_stats.is_none());
+
+        // Unknown control type → Err
+        assert!(arms.get_control_stats("bogus").await.is_err());
     }
 }

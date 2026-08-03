@@ -1,5 +1,8 @@
 -- Chimera Database Schema - PostgreSQL
 -- Generated from database/schema_yaml/*.yaml
+-- Prerequisites: this file must be applied AFTER database/schema/wallets.sql
+-- and the operator's trades table (operator/migrations_postgres/0001_full_schema.sql),
+-- since several tables reference wallets(address) and trades(trade_uuid).
 
 -- Enable required extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -9,8 +12,6 @@ CREATE EXTENSION IF NOT EXISTS "pg_trgm";
 -- ML predictions for wallet performance
 -- =============================================================================
 
--- ML predictions for wallet performance
-COMMENT ON TABLE ml_predictions IS 'ML predictions for wallet performance';
 CREATE TABLE IF NOT EXISTS ml_predictions (
     id BIGSERIAL PRIMARY KEY,
     wallet_address TEXT NOT NULL,
@@ -25,6 +26,8 @@ CREATE TABLE IF NOT EXISTS ml_predictions (
     FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
 );
 
+COMMENT ON TABLE ml_predictions IS 'ML predictions for wallet performance';
+
 CREATE INDEX IF NOT EXISTS idx_ml_predictions_wallet ON ml_predictions (wallet_address, prediction_timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_ml_predictions_type ON ml_predictions (prediction_type, prediction_timestamp DESC);
 
@@ -32,8 +35,6 @@ CREATE INDEX IF NOT EXISTS idx_ml_predictions_type ON ml_predictions (prediction
 -- Exit recommendations for positions
 -- =============================================================================
 
--- Exit recommendations for positions
-COMMENT ON TABLE exit_recommendations IS 'Exit recommendations for positions';
 CREATE TABLE IF NOT EXISTS exit_recommendations (
     id BIGSERIAL PRIMARY KEY,
     trade_uuid TEXT NOT NULL,
@@ -45,10 +46,12 @@ CREATE TABLE IF NOT EXISTS exit_recommendations (
     confidence_score DOUBLE PRECISION,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     executed_at TIMESTAMPTZ,
-    executed BOOLEAN DEFAULT FALSE,
+    executed BOOLEAN NOT NULL DEFAULT FALSE,
     FOREIGN KEY (trade_uuid) REFERENCES trades(trade_uuid) ON DELETE CASCADE,
     FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
 );
+
+COMMENT ON TABLE exit_recommendations IS 'Exit recommendations for positions';
 
 CREATE INDEX IF NOT EXISTS idx_exit_recommendations_trade ON exit_recommendations (trade_uuid, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_exit_recommendations_wallet ON exit_recommendations (wallet_address, created_at DESC);
@@ -58,8 +61,6 @@ CREATE INDEX IF NOT EXISTS idx_exit_recommendations_pending ON exit_recommendati
 -- System alerts and notifications
 -- =============================================================================
 
--- System alerts and notifications
-COMMENT ON TABLE alerts IS 'System alerts and notifications';
 CREATE TABLE IF NOT EXISTS alerts (
     id BIGSERIAL PRIMARY KEY,
     alert_type TEXT NOT NULL CHECK(alert_type IN ('WALLET_PERFORMANCE', 'POSITION_RISK', 'SYSTEM', 'WEBHOOK', 'RATE_LIMIT', 'LIQUIDITY')),
@@ -69,12 +70,15 @@ CREATE TABLE IF NOT EXISTS alerts (
     wallet_address TEXT,
     trade_uuid TEXT,
     metadata_json JSONB,
-    acknowledged BOOLEAN DEFAULT FALSE,
+    acknowledged BOOLEAN NOT NULL DEFAULT FALSE,
     acknowledged_at TIMESTAMPTZ,
     acknowledged_by TEXT,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
+    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE,
+    FOREIGN KEY (trade_uuid) REFERENCES trades(trade_uuid) ON DELETE CASCADE
 );
+
+COMMENT ON TABLE alerts IS 'System alerts and notifications';
 
 CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts (alert_type, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts (severity, created_at DESC);
@@ -85,8 +89,6 @@ CREATE INDEX IF NOT EXISTS idx_alerts_wallet ON alerts (wallet_address, created_
 -- System performance metrics
 -- =============================================================================
 
--- System performance metrics
-COMMENT ON TABLE metrics IS 'System performance metrics';
 CREATE TABLE IF NOT EXISTS metrics (
     id BIGSERIAL PRIMARY KEY,
     metric_name TEXT NOT NULL,
@@ -96,6 +98,8 @@ CREATE TABLE IF NOT EXISTS metrics (
     timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
+COMMENT ON TABLE metrics IS 'System performance metrics';
+
 CREATE INDEX IF NOT EXISTS idx_metrics_name ON metrics (metric_name, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON metrics (timestamp DESC);
 
@@ -103,8 +107,6 @@ CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON metrics (timestamp DESC);
 -- System health check results
 -- =============================================================================
 
--- System health check results
-COMMENT ON TABLE health_checks IS 'System health check results';
 CREATE TABLE IF NOT EXISTS health_checks (
     id BIGSERIAL PRIMARY KEY,
     check_name TEXT NOT NULL,
@@ -114,6 +116,8 @@ CREATE TABLE IF NOT EXISTS health_checks (
     timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
+COMMENT ON TABLE health_checks IS 'System health check results';
+
 CREATE INDEX IF NOT EXISTS idx_health_checks_name ON health_checks (check_name, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_health_checks_status ON health_checks (status, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_health_checks_timestamp ON health_checks (timestamp DESC);
@@ -122,8 +126,6 @@ CREATE INDEX IF NOT EXISTS idx_health_checks_timestamp ON health_checks (timesta
 -- Account growth tracking over time
 -- =============================================================================
 
--- Account growth tracking over time
-COMMENT ON TABLE growth_history IS 'Account growth tracking over time';
 CREATE TABLE IF NOT EXISTS growth_history (
     id BIGSERIAL PRIMARY KEY,
     wallet_address TEXT NOT NULL,
@@ -135,8 +137,11 @@ CREATE TABLE IF NOT EXISTS growth_history (
     trade_count INTEGER DEFAULT 0,
     win_count INTEGER DEFAULT 0,
     loss_count INTEGER DEFAULT 0,
-    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
+    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE,
+    UNIQUE (wallet_address, timestamp)
 );
+
+COMMENT ON TABLE growth_history IS 'Account growth tracking over time';
 
 CREATE INDEX IF NOT EXISTS idx_growth_history_wallet ON growth_history (wallet_address, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_growth_history_timestamp ON growth_history (timestamp DESC);
@@ -145,8 +150,6 @@ CREATE INDEX IF NOT EXISTS idx_growth_history_timestamp ON growth_history (times
 -- Capital deposits and withdrawals
 -- =============================================================================
 
--- Capital deposits and withdrawals
-COMMENT ON TABLE capital_events IS 'Capital deposits and withdrawals';
 CREATE TABLE IF NOT EXISTS capital_events (
     id BIGSERIAL PRIMARY KEY,
     wallet_address TEXT NOT NULL,
@@ -161,6 +164,8 @@ CREATE TABLE IF NOT EXISTS capital_events (
     FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
 );
 
+COMMENT ON TABLE capital_events IS 'Capital deposits and withdrawals';
+
 CREATE INDEX IF NOT EXISTS idx_capital_events_wallet ON capital_events (wallet_address, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_capital_events_type ON capital_events (event_type, timestamp DESC);
 
@@ -168,8 +173,6 @@ CREATE INDEX IF NOT EXISTS idx_capital_events_type ON capital_events (event_type
 -- Growth-related alerts and notifications
 -- =============================================================================
 
--- Growth-related alerts and notifications
-COMMENT ON TABLE growth_alerts IS 'Growth-related alerts and notifications';
 CREATE TABLE IF NOT EXISTS growth_alerts (
     id BIGSERIAL PRIMARY KEY,
     wallet_address TEXT NOT NULL,
@@ -178,11 +181,13 @@ CREATE TABLE IF NOT EXISTS growth_alerts (
     previous_balance_sol NUMERIC(30,18),
     percentage_change NUMERIC(20,10),
     threshold_value NUMERIC(20,10),
-    acknowledged BOOLEAN DEFAULT FALSE,
+    acknowledged BOOLEAN NOT NULL DEFAULT FALSE,
     acknowledged_at TIMESTAMPTZ,
     timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
 );
+
+COMMENT ON TABLE growth_alerts IS 'Growth-related alerts and notifications';
 
 CREATE INDEX IF NOT EXISTS idx_growth_alerts_wallet ON growth_alerts (wallet_address, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_growth_alerts_type ON growth_alerts (alert_type, timestamp DESC);
@@ -192,17 +197,17 @@ CREATE INDEX IF NOT EXISTS idx_growth_alerts_unacknowledged ON growth_alerts (wa
 -- Credit usage history for rate limiting
 -- =============================================================================
 
--- Credit usage history for rate limiting
-COMMENT ON TABLE credit_history IS 'Credit usage history for rate limiting';
 CREATE TABLE IF NOT EXISTS credit_history (
     id BIGSERIAL PRIMARY KEY,
     wallet_address TEXT NOT NULL,
     credits_used INTEGER NOT NULL,
     credits_remaining INTEGER NOT NULL,
-    operation_type TEXT NOT NULL,
+    operation_type TEXT NOT NULL CHECK(operation_type IN ('initialization', 'discovery', 'analysis', 'validation', 'enrichment', 'monitoring', 'reserve')),
     timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
 );
+
+COMMENT ON TABLE credit_history IS 'Credit usage history for rate limiting';
 
 CREATE INDEX IF NOT EXISTS idx_credit_history_wallet ON credit_history (wallet_address, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_credit_history_timestamp ON credit_history (timestamp DESC);
@@ -211,8 +216,6 @@ CREATE INDEX IF NOT EXISTS idx_credit_history_timestamp ON credit_history (times
 -- Historical wallet performance metrics
 -- =============================================================================
 
--- Historical wallet performance metrics
-COMMENT ON TABLE wallet_performance_history IS 'Historical wallet performance metrics';
 CREATE TABLE IF NOT EXISTS wallet_performance_history (
     id BIGSERIAL PRIMARY KEY,
     wallet_address TEXT NOT NULL,
@@ -228,8 +231,11 @@ CREATE TABLE IF NOT EXISTS wallet_performance_history (
     profit_factor NUMERIC(20,10),
     max_drawdown_sol NUMERIC(30,18),
     max_drawdown_percent NUMERIC(20,10),
-    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
+    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE,
+    UNIQUE (wallet_address, timestamp)
 );
+
+COMMENT ON TABLE wallet_performance_history IS 'Historical wallet performance metrics';
 
 CREATE INDEX IF NOT EXISTS idx_wallet_performance_history_wallet ON wallet_performance_history (wallet_address, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_wallet_performance_history_timestamp ON wallet_performance_history (timestamp DESC);
@@ -238,8 +244,6 @@ CREATE INDEX IF NOT EXISTS idx_wallet_performance_history_timestamp ON wallet_pe
 -- ROI calculations and metrics
 -- =============================================================================
 
--- ROI calculations and metrics
-COMMENT ON TABLE roi_metrics IS 'ROI calculations and metrics';
 CREATE TABLE IF NOT EXISTS roi_metrics (
     id BIGSERIAL PRIMARY KEY,
     wallet_address TEXT NOT NULL,
@@ -254,18 +258,18 @@ CREATE TABLE IF NOT EXISTS roi_metrics (
     sortino_ratio NUMERIC(20,10),
     max_drawdown_percent NUMERIC(20,10),
     calculated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
+    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE,
+    UNIQUE (wallet_address, timeframe)
 );
 
-CREATE INDEX IF NOT EXISTS idx_roi_metrics_wallet ON roi_metrics (wallet_address, timeframe);
+COMMENT ON TABLE roi_metrics IS 'ROI calculations and metrics';
+
 CREATE INDEX IF NOT EXISTS idx_roi_metrics_timeframe ON roi_metrics (timeframe, calculated_at DESC);
 
 -- =============================================================================
 -- Multi-timeframe wallet discovery statistics
 -- =============================================================================
 
--- Multi-timeframe wallet discovery statistics
-COMMENT ON TABLE multi_timeframe_discovery_stats IS 'Multi-timeframe wallet discovery statistics';
 CREATE TABLE IF NOT EXISTS multi_timeframe_discovery_stats (
     id BIGSERIAL PRIMARY KEY,
     wallet_address TEXT NOT NULL,
@@ -276,8 +280,10 @@ CREATE TABLE IF NOT EXISTS multi_timeframe_discovery_stats (
     signal_count INTEGER,
     avg_signal_strength NUMERIC(20,10),
     discovered_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
+    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE,
+    UNIQUE (wallet_address, discovery_timeframe)
 );
 
-CREATE INDEX IF NOT EXISTS idx_multi_timeframe_discovery_wallet ON multi_timeframe_discovery_stats (wallet_address, discovery_timeframe);
+COMMENT ON TABLE multi_timeframe_discovery_stats IS 'Multi-timeframe wallet discovery statistics';
+
 CREATE INDEX IF NOT EXISTS idx_multi_timeframe_discovery_wqs ON multi_timeframe_discovery_stats (wqs_score DESC);

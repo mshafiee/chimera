@@ -21,7 +21,7 @@ def test_validation_reporter_import():
     print("Testing Validation Reporter imports...")
 
     try:
-        from core.validation_reporter import ValidationReporter, AlertConfig, get_validation_reporter
+        import core.validation_reporter as _vr  # noqa: F401
         print("✓ Validation Reporter imports successful")
         return True
     except Exception as e:
@@ -39,7 +39,7 @@ def test_validation_reporter_initialization():
         from core.validation_reporter import ValidationReporter, AlertConfig
 
         # Test basic initialization
-        reporter = ValidationReporter()
+        ValidationReporter()
         print("✓ Validation Reporter initialized with defaults")
 
         # Test with custom config
@@ -50,46 +50,16 @@ def test_validation_reporter_initialization():
             low_accuracy_threshold=0.6,
             alert_dir="data/test_alerts"
         )
-        reporter_with_config = ValidationReporter(alert_config=alert_config)
+        ValidationReporter(alert_config=alert_config)
         print("✓ Validation Reporter initialized with custom config")
 
         # Test singleton function (optional test)
         try:
             from core.validation_reporter import get_validation_reporter
-            reporter_singleton = get_validation_reporter()
+            get_validation_reporter()
             print("✓ Validation Reporter singleton function works")
         except Exception as e:
             print(f"⚠ Singleton function test skipped: {e}")
-
-        return True
-    except Exception as e:
-        print(f"✗ Validation Reporter initialization failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-
-def test_validation_reporter_initialization():
-    """Test Validation Reporter initialization."""
-    print("\nTesting Validation Reporter initialization...")
-
-    try:
-        from core.validation_reporter import ValidationReporter, AlertConfig
-
-        # Test basic initialization
-        reporter = ValidationReporter()
-        print("✓ Validation Reporter initialized with defaults")
-
-        # Test with custom config
-        alert_config = AlertConfig(
-            webhook_url="https://example.com/webhook",
-            high_error_threshold=1.0,
-            drift_threshold=0.2,
-            low_accuracy_threshold=0.6,
-            alert_dir="data/test_alerts"
-        )
-        reporter_with_config = ValidationReporter(alert_config=alert_config)
-        print("✓ Validation Reporter initialized with custom config")
 
         return True
     except Exception as e:
@@ -107,7 +77,7 @@ def test_alert_config():
         from core.validation_reporter import AlertConfig
 
         # Test default AlertConfig
-        default_config = AlertConfig()
+        AlertConfig()
         print("✓ Default AlertConfig created")
 
         # Test AlertConfig with custom values
@@ -187,27 +157,22 @@ def test_report_generation():
         reporter = ValidationReporter()
 
         # Test report generation with empty database
-        try:
-            report = reporter.generate_report(
-                model_types=['xgboost', 'lightgbm'],
-                time_window='7d',
-                output_format='dict',
-                include_recommendations=True
-            )
+        report = reporter.generate_report(
+            model_types=['xgboost', 'lightgbm'],
+            time_window='7d',
+            output_format='dict',
+            include_recommendations=True
+        )
 
-            # Verify report structure
-            assert 'generated_at' in report
-            assert 'time_window' in report
-            assert 'summary' in report
-            assert 'issues' in report
-            assert 'recommendations' in report
+        # Verify report structure
+        assert 'generated_at' in report
+        assert 'time_window' in report
+        assert 'summary' in report
+        assert 'issues' in report
+        assert 'recommendations' in report
 
-            print("✓ Report generation works (empty DB)")
-            print(f"  Report keys: {list(report.keys())}")
-
-        except Exception as e:
-            print(f"⚠ Report generation failed (expected if no ML data): {e}")
-            # This is acceptable if there's no actual ML data
+        print("✓ Report generation works (empty DB)")
+        print(f"  Report keys: {list(report.keys())}")
 
         return True
     except Exception as e:
@@ -222,7 +187,6 @@ def test_environment_config_loading():
     print("\nTesting environment variable configuration...")
 
     try:
-        import os
         from core.validation_reporter import ValidationReporter
 
         # Set environment variables
@@ -232,24 +196,25 @@ def test_environment_config_loading():
         os.environ['SCOUT_ALERT_LOW_ACCURACY_THRESHOLD'] = '0.4'
         os.environ['SCOUT_ALERT_DIR'] = 'test_alerts'
 
-        # Create Validation Reporter (should load from env)
-        reporter = ValidationReporter()
+        try:
+            # Create Validation Reporter (should load from env)
+            reporter = ValidationReporter()
 
-        # Verify environment variables were loaded
-        assert reporter.alert_config.webhook_url == 'https://test.webhook.com'
-        assert reporter.alert_config.high_error_threshold == 1.5
-        assert reporter.alert_config.drift_threshold == 0.3
-        assert reporter.alert_config.low_accuracy_threshold == 0.4
-        assert reporter.alert_config.alert_dir == 'test_alerts'
+            # Verify environment variables were loaded
+            assert reporter.alert_config.webhook_url == 'https://test.webhook.com'
+            assert reporter.alert_config.high_error_threshold == 1.5
+            assert reporter.alert_config.drift_threshold == 0.3
+            assert reporter.alert_config.low_accuracy_threshold == 0.4
+            assert reporter.alert_config.alert_dir == 'test_alerts'
 
-        print("✓ Environment variable configuration loading works")
-
-        # Clean up environment variables
-        del os.environ['SCOUT_ALERT_WEBHOOK_URL']
-        del os.environ['SCOUT_ALERT_HIGH_ERROR_THRESHOLD']
-        del os.environ['SCOUT_ALERT_DRIFT_THRESHOLD']
-        del os.environ['SCOUT_ALERT_LOW_ACCURACY_THRESHOLD']
-        del os.environ['SCOUT_ALERT_DIR']
+            print("✓ Environment variable configuration loading works")
+        finally:
+            # Always clean up the environment variables
+            os.environ.pop('SCOUT_ALERT_WEBHOOK_URL', None)
+            os.environ.pop('SCOUT_ALERT_HIGH_ERROR_THRESHOLD', None)
+            os.environ.pop('SCOUT_ALERT_DRIFT_THRESHOLD', None)
+            os.environ.pop('SCOUT_ALERT_LOW_ACCURACY_THRESHOLD', None)
+            os.environ.pop('SCOUT_ALERT_DIR', None)
 
         return True
     except Exception as e:

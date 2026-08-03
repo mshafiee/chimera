@@ -13,8 +13,14 @@ NC='\033[0m' # No Color
 # Configuration
 DOMAIN="${1:-chimera.example.com}"
 EMAIL="${2:-admin@example.com}"
-CERT_DIR="./ssl/certbot/letsencrypt"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CERT_DIR="$SCRIPT_DIR/certbot/letsencrypt"
+
+# Validate domain (no shell metacharacters, hostname charset only)
+if [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9.-]+$ ]]; then
+    echo -e "${RED}Error: invalid domain: $DOMAIN${NC}"
+    exit 1
+fi
 
 echo "======================================================================"
 echo "Chimera Trading System - SSL Certificate Generation"
@@ -43,13 +49,15 @@ generate_self_signed() {
     # Generate private key
     openssl genrsa -out "$CERT_DIR/chimera.key" 2048
 
-    # Generate certificate
+    # Generate certificate with a Subject Alternative Name
     openssl req -new -x509 -key "$CERT_DIR/chimera.key" \
         -out "$CERT_DIR/chimera.crt" -days 365 \
-        -subj "/C=US/ST=State/L=City/O=Chimera/OU=Trading/CN=$DOMAIN"
+        -subj "/C=US/ST=State/L=City/O=Chimera/OU=Trading/CN=$DOMAIN" \
+        -addext "subjectAltName=DNS:$DOMAIN"
 
     # Combine key and cert for HAProxy
     cat "$CERT_DIR/chimera.crt" "$CERT_DIR/chimera.key" > "$CERT_DIR/chimera.pem"
+    chmod 600 "$CERT_DIR/chimera.pem"
 
     echo -e "${GREEN}Self-signed certificate generated successfully${NC}"
     echo "Certificate: $CERT_DIR/chimera.pem"
@@ -85,7 +93,7 @@ generate_lets_encrypt() {
         -v "$SCRIPT_DIR/logs:/var/log/letsencrypt" \
         -v "$SCRIPT_DIR/work:/var/lib/letsencrypt" \
         -p 80:80 \
-        certbot/certbot:latest certonly \
+        certbot/certbot:2.9.0 certonly \
         --standalone \
         --email "$EMAIL" \
         --agree-tos \
@@ -99,13 +107,17 @@ generate_lets_encrypt() {
         exit 1
     }
 
-    # Convert to combined PEM for HAProxy
+    # Convert to combined PEM for HAProxy (live dir passed as argument,
+    # never interpolated into the container command)
     LIVE_DIR="/etc/letsencrypt/live/$DOMAIN"
     docker run --rm \
         -v "$SCRIPT_DIR/letsencrypt:/etc/letsencrypt" \
         -v "$CERT_DIR:/output" \
-        alpine:latest sh -c \
-        "cat $LIVE_DIR/fullchain.pem $LIVE_DIR/privkey.pem > /output/chimera.pem"
+        alpine:3.19 sh -c \
+        'cat "$1/fullchain.pem" "$1/privkey.pem" > /output/chimera.pem' \
+        sh "$LIVE_DIR"
+
+    chmod 600 "$CERT_DIR/chimera.pem"
 
     echo -e "${GREEN}Certificate generated successfully${NC}"
     echo "Certificate: $CERT_DIR/chimera.pem"
@@ -117,6 +129,11 @@ generate_lets_encrypt() {
 # Main logic
 if [[ "$DOMAIN" == "chimera.example.com" ]]; then
     # Default behavior - generate self-signed for development
+    if [[ -f "$CERT_DIR/chimera.pem" ]]; then
+        echo -e "${YELLOW}WARNING: $CERT_DIR/chimera.pem already exists${NC}"
+        read -p "Overwrite existing certificate? [y/N]: " overwrite
+        [[ "$overwrite" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+    fi
     generate_self_signed
 else
     # Check if user wants Let's Encrypt or self-signed
@@ -141,9 +158,9 @@ else
     esac
 fi
 
-# Set proper permissions
+# Set proper permissions (the PEM contains the private key)
 chmod 600 "$CERT_DIR/chimera.key" 2>/dev/null || true
-chmod 644 "$CERT_DIR/chimera.pem"
+chmod 600 "$CERT_DIR/chimera.pem"
 
 echo ""
 echo -e "${GREEN}Certificate setup complete!${NC}"

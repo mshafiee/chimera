@@ -71,8 +71,12 @@ pub async fn refresh_token(
 
     let claims = token_data.claims;
 
+    // Re-validate the wallet against the DB on every refresh so demoted/removed
+    // wallets cannot keep their stale role claim via rolling sessions.
+    let role = check_wallet_role(&state.db, &claims.sub).await?;
+
     // Generate a new JWT token with fresh 24h expiry
-    let new_token = generate_jwt(&claims.sub, &claims.role, &state.jwt_secret)?;
+    let new_token = generate_jwt(&claims.sub, &role, &state.jwt_secret)?;
 
     let expires_in = 24 * 60 * 60; // 24 hours in seconds
 
@@ -117,7 +121,9 @@ pub async fn wallet_auth(
         .map_err(|_| AppError::Auth("Invalid timestamp format".to_string()))?;
 
     let now = Utc::now().timestamp();
-    let drift = (now - timestamp).abs();
+    // Promote to i128 and use unsigned_abs so attacker-controlled extreme
+    // timestamps (i64::MIN/MAX) cannot overflow/panic the subtraction.
+    let drift = (now as i128 - timestamp as i128).unsigned_abs();
     // Allow up to 5 minutes (300 seconds) of clock drift/delay
     if drift > 300 {
         return Err(AppError::Auth(format!(
@@ -153,12 +159,26 @@ pub async fn wallet_auth(
         let nonce_key: AuthNonceKey = (req.wallet_address.clone(), timestamp);
         let mut store = state.seen_auth_nonces.lock();
         let now = Utc::now().timestamp();
-        // Evict entries older than 300 seconds (the max drift window)
-        store.retain(|_, seen_at| now - *seen_at < 300);
+        // Evict entries based on the message's own validity window (±300s around
+        // its timestamp), so a future-dated message cannot be replayed after its
+        // nonce is dropped while still inside the drift window.
+        store.retain(|(_, ts), _| (now as i128 - *ts as i128).unsigned_abs() <= 300);
         if store.contains_key(&nonce_key) {
             return Err(AppError::Auth(
                 "Replay detected: this authentication request has already been used".to_string(),
             ));
+        }
+        // Bound the store so an attacker flooding unique (wallet, timestamp)
+        // pairs cannot grow memory without limit and make every request O(n).
+        const MAX_NONCES: usize = 10_000;
+        if store.len() >= MAX_NONCES {
+            if let Some(oldest) = store
+                .iter()
+                .min_by_key(|(_, seen_at)| **seen_at)
+                .map(|(k, _)| k.clone())
+            {
+                store.remove(&oldest);
+            }
         }
         store.insert(nonce_key, now);
     }

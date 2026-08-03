@@ -28,16 +28,25 @@ pub fn helius_api_base_url() -> String {
 /// methods (`sendBundle`, `getBundleStatuses`). Per Helius docs these live at
 /// the RPC host (`mainnet.helius-rpc.com`), NOT at `api.helius.xyz/v0`.
 /// Overridable via `HELIUS_RPC_BASE_URL`.
+///
+/// The key is percent-encoded so a key containing `&`, `#`, or `=` cannot
+/// produce a malformed/ambiguous URL.
 pub fn helius_rpc_url(api_key: &str) -> String {
     let base = std::env::var("HELIUS_RPC_BASE_URL")
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "https://mainnet.helius-rpc.com".into());
-    format!("{}?api-key={}", base, api_key)
+    format!("{}?api-key={}", base, urlencoding::encode(api_key))
 }
 
 /// Safely convert SOL (Decimal) to Lamports (u64) using Decimal to avoid precision loss
 pub fn sol_to_lamports(sol: Decimal) -> Result<u64, AppError> {
+    if sol.is_sign_negative() {
+        return Err(AppError::InvalidInput(format!(
+            "Negative SOL value: {} SOL cannot be negative",
+            sol
+        )));
+    }
     // 1 SOL = 1,000,000,000 Lamports
     let multiplier = Decimal::new(1_000_000_000, 0);
     let result = sol * multiplier;
@@ -54,7 +63,9 @@ pub fn sol_to_lamports(sol: Decimal) -> Result<u64, AppError> {
 /// This is a convenience function for legacy code that still uses f64
 pub fn sol_to_lamports_f64(sol: f64) -> Result<u64, AppError> {
     // Convert float to Decimal first to handle precision safely
-    let sol_decimal = Decimal::from_f64_retain(sol).unwrap_or(Decimal::ZERO);
+    let sol_decimal = Decimal::from_f64_retain(sol).ok_or_else(|| {
+        AppError::InvalidInput(format!("Cannot represent {} as a Decimal", sol))
+    })?;
     sol_to_lamports(sol_decimal)
 }
 

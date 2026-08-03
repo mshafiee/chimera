@@ -9,21 +9,25 @@
 //! for DAS endpoints. These two helpers must never resolve to the same host.
 
 use chimera_operator::utils::{helius_api_base_url, helius_rpc_url};
+use url::Url;
 
 /// Pin the JSON-RPC URL format: must target mainnet.helius-rpc.com with API key.
 #[test]
 fn helius_rpc_url_targets_mainnet_rpc_host_not_das_api() {
-    let url = helius_rpc_url("test-key-123");
-    assert!(
-        url.starts_with("https://mainnet.helius-rpc.com"),
+    let url = Url::parse(&helius_rpc_url("test-key-123")).expect("valid URL");
+    assert_eq!(url.scheme(), "https", "RPC URL must use https, got: {url}");
+    assert_eq!(
+        url.host_str(),
+        Some("mainnet.helius-rpc.com"),
         "RPC URL must target mainnet.helius-rpc.com for JSON-RPC methods, got: {url}"
     );
-    assert!(
-        !url.contains("api.helius.xyz"),
+    assert_ne!(
+        url.host_str(),
+        Some("api.helius.xyz"),
         "RPC URL must NOT use the DAS API host (api.helius.xyz), got: {url}"
     );
     assert!(
-        url.contains("api-key=test-key-123"),
+        url.query().unwrap_or_default().contains("api-key=test-key-123"),
         "RPC URL must include the API key, got: {url}"
     );
 }
@@ -34,11 +38,12 @@ fn helius_rpc_url_targets_mainnet_rpc_host_not_das_api() {
 /// endpoint and every webhook would be rejected with HTTP 404.
 #[test]
 fn rpc_url_and_das_base_url_target_different_hosts() {
-    let rpc_url = helius_rpc_url("key");
-    let das_base = helius_api_base_url();
-    assert!(
-        !rpc_url.starts_with(&das_base),
-        "RPC URL ({rpc_url}) must NOT share the DAS base host ({das_base}); \
+    let rpc = Url::parse(&helius_rpc_url("key")).expect("valid RPC URL");
+    let das = Url::parse(&helius_api_base_url()).expect("valid DAS base URL");
+    assert_ne!(
+        rpc.host_str(),
+        das.host_str(),
+        "RPC URL ({rpc}) must NOT share the DAS base host ({das}); \
          verify_signature_exists requires a different host than DAS endpoints"
     );
 }

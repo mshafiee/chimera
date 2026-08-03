@@ -33,8 +33,8 @@ def pearson(xs: list, ys: list) -> float:
 
 def binomial_p_value(k: int, n: int, p: float = 0.5) -> float:
     """One-tailed binomial test: prob of >= k successes in n trials with prob p."""
-    if k >= n:
-        return 1.0
+    if k > n:
+        return 0.0
     from math import comb
     return sum(comb(n, i) * (p ** i) * ((1 - p) ** (n - i)) for i in range(k, n + 1))
 
@@ -58,6 +58,7 @@ def main():
         SELECT wqs_score, realized_pnl_30d_sol, roi_30d, archetype, trade_count_30d
         FROM wallets
         WHERE realized_pnl_30d_sol IS NOT NULL
+          AND wqs_score IS NOT NULL
           AND trade_count_30d >= ?
           AND status IN ('ACTIVE', 'CANDIDATE')
         ORDER BY wqs_score ASC
@@ -72,17 +73,12 @@ def main():
     pnl_vals = [r["realized_pnl_30d_sol"] for r in rows]
     roi_vals = [r["roi_30d"] or 0.0 for r in rows]
     total = len(rows)
-    profitable = sum(1 for p in pnl_vals if p > 0)
 
     # Correlations
     wqs_r = pearson(wqs_vals, pnl_vals)
     roi_r = pearson(roi_vals, pnl_vals)
 
-    # Profitability rate test
-    profit_rate = profitable / total * 100
-    p_value = binomial_p_value(profitable, total)
-
-    # Top vs bottom tercile
+    # Top vs bottom tercile (by WQS)
     sorted_pairs = sorted(zip(wqs_vals, pnl_vals, roi_vals, rows),
                           key=lambda x: x[0])
     n_tercile = total // 3
@@ -90,6 +86,14 @@ def main():
     bottom_tercile = sorted_pairs[:n_tercile] if n_tercile > 0 else sorted_pairs
     top_mean_pnl = sum(p for _, p, _, _ in top_tercile) / max(1, len(top_tercile))
     bottom_mean_pnl = sum(p for _, p, _, _ in bottom_tercile) / max(1, len(bottom_tercile))
+
+    # Profitability-rate test tied to WQS ranking: run the binomial test on the
+    # top tercile so the result measures whether high-WQS wallets are profitable,
+    # not just whether the overall pool is profitable.
+    top_profitable = sum(1 for _, p, _, _ in top_tercile if p > 0)
+    top_total = len(top_tercile)
+    top_profit_rate = top_profitable / max(1, top_total) * 100
+    p_value = binomial_p_value(top_profitable, top_total)
 
     # Archetype breakdown
     archetype_stats = {}
@@ -113,10 +117,10 @@ def main():
     print(f"    ROI-30d alone:    r = {roi_r:+.4f}  (baseline)")
     print()
 
-    print("  Profitability comparison:")
-    print(f"    WQS-promoted wallets profitable:  {profitable}/{total}  ({profit_rate:.1f}%)")
-    print(f"    Random expectation (coin flip):    {total//2}/{total}  (50.0%)")
-    print(f"    Excess over random:               {profit_rate - 50:+.1f} percentage points")
+    print("  Profitability comparison (top tercile by WQS):")
+    print(f"    Top-tercile wallets profitable:  {top_profitable}/{top_total}  ({top_profit_rate:.1f}%)")
+    print(f"    Random expectation (coin flip):    {top_total/2:g}/{top_total}  (50.0%)")
+    print(f"    Excess over random:               {top_profit_rate - 50:+.1f} percentage points")
     print(f"    Binomial test p-value:            {p_value:.4f}  "
           + ("(significant)" if p_value < 0.05 else "(not significant)"))
     print()
@@ -138,7 +142,7 @@ def main():
 
     # Verdict
     print("  VERDICT:")
-    beats_random = profit_rate > 50 and p_value < 0.05
+    beats_random = top_profit_rate > 50 and p_value < 0.05
     if beats_random and wqs_r > 0.1:
         print("    WQS POSITIVELY PREDICTS profitability.")
         print("    Correlation is significant and exceeds random baseline.")

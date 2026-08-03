@@ -37,24 +37,38 @@ while [[ $# -gt 0 ]]; do
             API_URL="${1#*=}"
             shift
             ;;
-        --api-key=*)
-            API_KEY="${1#*=}"
-            shift
-            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--api-url=URL] [--api-key=KEY]"
+            echo "Usage: $0 [--api-url=URL]"
             exit 1
             ;;
     esac
 done
 
+# API key must come from the environment or a restricted file, never the CLI
+if [[ -z "$API_KEY" && -f "${CHIMERA_HOME}/.metrics-api-key" ]]; then
+    API_KEY=$(cat "${CHIMERA_HOME}/.metrics-api-key" 2>/dev/null || true)
+fi
+if [[ -z "$API_KEY" ]]; then
+    log "ERROR" "No API key configured: set API_KEY or create ${CHIMERA_HOME}/.metrics-api-key (chmod 600)"
+    exit 1
+fi
+
 # Ensure log directory exists
 mkdir -p "$(dirname "$LOG_FILE")"
+
+# Prevent overlapping runs
+exec 9>"${CHIMERA_HOME}/.update-metrics.lock"
+flock -n 9 || { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] [WARN] Another metrics update is already running" | tee -a "$LOG_FILE"; exit 0; }
 
 # Check dependencies
 if ! command -v curl &> /dev/null; then
     log "ERROR" "curl is required but not installed"
+    exit 1
+fi
+
+if ! command -v sqlite3 &> /dev/null; then
+    log "ERROR" "sqlite3 is required but not installed"
     exit 1
 fi
 
@@ -69,46 +83,60 @@ update_reconciliation_metrics() {
     
     # Get total checked (from reconciliation_log table)
     local total_checked
-    total_checked=$(sqlite3 "$DB_PATH" "
+    if ! total_checked=$(sqlite3 "$DB_PATH" "
         SELECT COUNT(DISTINCT trade_uuid) 
         FROM reconciliation_log
         WHERE created_at > datetime('now', '-24 hours')
-    " 2>/dev/null || echo "0")
+    " 2>/dev/null); then
+        log "ERROR" "Failed to query reconciliation_log (total checked)"
+        return 1
+    fi
     
     # Get total discrepancies found in last 24h
     local total_discrepancies
-    total_discrepancies=$(sqlite3 "$DB_PATH" "
+    if ! total_discrepancies=$(sqlite3 "$DB_PATH" "
         SELECT COUNT(*) 
         FROM reconciliation_log
         WHERE discrepancy != 'NONE'
         AND created_at > datetime('now', '-24 hours')
-    " 2>/dev/null || echo "0")
+    " 2>/dev/null); then
+        log "ERROR" "Failed to query reconciliation_log (discrepancies)"
+        return 1
+    fi
     
-    # Get current unresolved count
+    # Get current unresolved count (only actual discrepancy rows)
     local unresolved
-    unresolved=$(sqlite3 "$DB_PATH" "
+    if ! unresolved=$(sqlite3 "$DB_PATH" "
         SELECT COUNT(*) 
         FROM reconciliation_log
         WHERE resolved_at IS NULL
-    " 2>/dev/null || echo "0")
+        AND discrepancy != 'NONE'
+    " 2>/dev/null); then
+        log "ERROR" "Failed to query reconciliation_log (unresolved)"
+        return 1
+    fi
     
     log "INFO" "Reconciliation metrics: checked=$total_checked, discrepancies=$total_discrepancies, unresolved=$unresolved"
     
-    # Update via API
-    local response
-    response=$(curl -s -X POST "${API_URL}/api/v1/metrics/reconciliation" \
+    # Update via API (bounded timeouts, retry, and HTTP status validation)
+    local response http_code
+    response=$(curl -s --max-time 15 --connect-timeout 5 --retry 2 -o /tmp/update-metrics-recon-body -w "%{http_code}" \
+        -X POST "${API_URL}/api/v1/metrics/reconciliation" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${API_KEY}" \
         -d "{
             \"checked\": ${total_checked},
             \"discrepancies\": ${total_discrepancies},
             \"unresolved\": ${unresolved}
-        }" 2>&1)
+        }" 2>&1 || true)
+    http_code=$response
+    response=$(cat /tmp/update-metrics-recon-body 2>/dev/null || true)
+    rm -f /tmp/update-metrics-recon-body
     
-    if echo "$response" | grep -q '"status":"updated"'; then
+    if [[ "$http_code" =~ ^2 ]] && echo "$response" | grep -q '"status":"updated"'; then
         log "INFO" "Reconciliation metrics updated successfully"
     else
-        log "WARN" "Failed to update reconciliation metrics: $response"
+        log "WARN" "Failed to update reconciliation metrics (HTTP $http_code): $response"
         return 1
     fi
 }
@@ -142,20 +170,24 @@ update_secret_rotation_metrics() {
     
     log "INFO" "Secret rotation metrics: last_success=$last_rotation, days_until_due=$days_until_due"
     
-    # Update via API
-    local response
-    response=$(curl -s -X POST "${API_URL}/api/v1/metrics/secret-rotation" \
+    # Update via API (bounded timeouts, retry, and HTTP status validation)
+    local response http_code
+    response=$(curl -s --max-time 15 --connect-timeout 5 --retry 2 -o /tmp/update-metrics-rotation-body -w "%{http_code}" \
+        -X POST "${API_URL}/api/v1/metrics/secret-rotation" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${API_KEY}" \
         -d "{
             \"last_success_timestamp\": ${last_rotation},
             \"days_until_due\": ${days_until_due}
-        }" 2>&1)
+        }" 2>&1 || true)
+    http_code=$response
+    response=$(cat /tmp/update-metrics-rotation-body 2>/dev/null || true)
+    rm -f /tmp/update-metrics-rotation-body
     
-    if echo "$response" | grep -q '"status":"updated"'; then
+    if [[ "$http_code" =~ ^2 ]] && echo "$response" | grep -q '"status":"updated"'; then
         log "INFO" "Secret rotation metrics updated successfully"
     else
-        log "WARN" "Failed to update secret rotation metrics: $response"
+        log "WARN" "Failed to update secret rotation metrics (HTTP $http_code): $response"
         return 1
     fi
 }

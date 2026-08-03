@@ -123,6 +123,7 @@ class ModelRouter:
         model_type = force_model or self._select_model(wallet_features, wallet_id)
 
         # Get prediction from selected model
+        prediction = None
         try:
             model = self.models.get(model_type)
             if model is None:
@@ -137,17 +138,8 @@ class ModelRouter:
             else:
                 prediction = self._fallback_prediction(wallet_features)
 
-            prediction['model_type'] = model_type.value
-            prediction['router'] = 'ModelRouter'
-            prediction['strategy'] = strategy
-
-            # Track performance
-            self._track_prediction(model_type, prediction)
-
-            return prediction
-
         except Exception as e:
-            logger.warning(f"Prediction with {model_type} failed: {e}")
+            logger.warning("Prediction with %s failed: %s", model_type, e)
             self._track_error(model_type, str(e))
 
             # Fallback to linear model
@@ -158,11 +150,25 @@ class ModelRouter:
                     prediction['model_type'] = ModelType.LINEAR.value
                     prediction['router'] = 'ModelRouter::fallback'
                     prediction['fallback_reason'] = str(e)
-                    return prediction
                 except Exception as e2:
-                    logger.warning(f"Linear model fallback also failed: {e2}")
+                    logger.warning("Linear model fallback also failed: %s", e2)
+                    return self._fallback_prediction(wallet_features)
 
+        if prediction is None:
             return self._fallback_prediction(wallet_features)
+
+        prediction['model_type'] = prediction.get('model_type', model_type.value)
+        prediction['router'] = 'ModelRouter'
+        prediction['strategy'] = strategy
+
+        # Track performance OUTSIDE the model try/except so bookkeeping
+        # failures are not misattributed to the model
+        try:
+            self._track_prediction(model_type, prediction)
+        except Exception as e:
+            logger.warning("Performance tracking failed: %s", e)
+
+        return prediction
 
     def _select_model(
         self,
@@ -204,9 +210,18 @@ class ModelRouter:
         """Select model based on A/B test assignment."""
         # Get or assign group
         if wallet_id not in self.ab_test_group:
-            # Assign group based on hash (consistent per wallet)
-            hash_val = hash(wallet_id) % 100
+            # Assign group based on a STABLE hash (Python's built-in hash()
+            # is salted per process and would break A/B consistency across
+            # restarts and worker processes)
+            import zlib
+            hash_val = zlib.crc32(wallet_id.encode()) % 100
             self.ab_test_group[wallet_id] = 'B' if hash_val < self.ab_test_split * 100 else 'A'
+
+            # Bound the registry so it doesn't grow without bound
+            if len(self.ab_test_group) > 10000:
+                oldest_keys = list(self.ab_test_group.keys())[:1000]
+                for k in oldest_keys:
+                    del self.ab_test_group[k]
 
         group = self.ab_test_group[wallet_id]
 

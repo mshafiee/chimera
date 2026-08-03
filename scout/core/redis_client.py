@@ -57,11 +57,13 @@ class RedisClient:
         self.redis_client = None
         self._fallback_cache: OrderedDict[str, tuple] = OrderedDict()  # key -> (value, expiry_time)
         self._fallback_max_size = 1000  # Max entries before eviction
+        # Keys this client has written (for scoped clears — never flushdb)
+        self._keys: set = set()
         
         if self.enabled and REDIS_AVAILABLE:
             try:
                 # Parse Redis URL
-                if self.redis_url.startswith("redis://"):
+                if self.redis_url.startswith(("redis://", "rediss://", "unix://")):
                     # Simple parsing - in production, use redis.from_url()
                     self.redis_client = redis.Redis.from_url(
                         self.redis_url,
@@ -97,7 +99,10 @@ class RedisClient:
         """
         if self.enabled and self.redis_client:
             try:
-                return self.redis_client.get(key)
+                value = self.redis_client.get(key)
+                if value is not None:
+                    return value
+                # Redis miss: fall through and consult the fallback cache
             except Exception as e:
                 logger.debug(f"Redis get failed for key {key}: {e}, using fallback")
                 # Fall through to fallback
@@ -124,10 +129,11 @@ class RedisClient:
         """
         if self.enabled and self.redis_client:
             try:
-                if ttl_seconds:
+                if ttl_seconds is not None:
                     self.redis_client.setex(key, ttl_seconds, value)
                 else:
                     self.redis_client.set(key, value)
+                self._keys.add(key)
                 return
             except Exception as e:
                 logger.debug(f"Redis set failed for key {key}: {e}, using fallback")
@@ -135,9 +141,10 @@ class RedisClient:
         
         # Fallback: in-memory cache with bounded size
         expiry = None
-        if ttl_seconds:
+        if ttl_seconds is not None:
             expiry = datetime.utcnow() + timedelta(seconds=ttl_seconds)
         self._fallback_cache[key] = (value, expiry)
+        self._keys.add(key)
         self._fallback_cache.move_to_end(key)
         # Evict oldest entries when exceeding max size (FIFO)
         if len(self._fallback_cache) > self._fallback_max_size:
@@ -146,6 +153,7 @@ class RedisClient:
     
     def delete(self, key: str):
         """Delete key from cache."""
+        self._keys.discard(key)
         if self.enabled and self.redis_client:
             try:
                 self.redis_client.delete(key)
@@ -160,12 +168,17 @@ class RedisClient:
         """Clear all cached values."""
         if self.enabled and self.redis_client:
             try:
-                self.redis_client.flushdb()
+                # Delete only the keys this client has written — never the
+                # whole database, which may be shared with other services.
+                if self._keys:
+                    self.redis_client.delete(*self._keys)
+                self._keys.clear()
                 return
             except Exception as e:
                 logger.debug(f"Redis clear failed: {e}")
         
         # Fallback
+        self._keys.clear()
         self._fallback_cache.clear()
     
     def close(self):

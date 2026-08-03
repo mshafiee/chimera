@@ -8,10 +8,9 @@ using recorded fixtures (zero credit consumption).
 
 import asyncio
 import json
-import os
+import resource
 import sys
 import time
-import tracemalloc
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
@@ -19,23 +18,8 @@ from datetime import datetime
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Try to import profiling dependencies
-try:
-    import pyinstrument
-    PYINSTRUMENT_AVAILABLE = True
-except ImportError:
-    PYINSTRUMENT_AVAILABLE = False
-    print("WARNING: pyinstrument not available. Install with: pip install pyinstrument")
-
-try:
-    from memory_profiler import memory_usage
-    MEMORY_PROFILER_AVAILABLE = True
-except ImportError:
-    MEMORY_PROFILER_AVAILABLE = False
-    print("WARNING: memory_profiler not available. Install with: pip install memory-profiler")
-
 from core.helius_client import HeliusClient
-from core.helius_credit_tracker import HeliusCreditTracker
+from core.helius_credit_tracker import get_credit_tracker
 from tests.fixtures.replay import FixtureReplayer, create_replay_patch
 
 
@@ -110,32 +94,42 @@ class BaselineRunner:
         
         # Create client with fixture replay
         client = HeliusClient(api_key="dummy")
-        
-        # Track credit consumption
-        credit_tracker = HeliusCreditTracker()
-        initial_credits = credit_tracker.get_remaining_credits()
-        
+
+        # Track credit consumption via the shared tracker the client records against
+        credit_tracker = get_credit_tracker()
+        initial_credits = credit_tracker.get_snapshot().credits_remaining
+
         try:
-            with create_replay_patch(self.replayer):
+            # Reset per-wallet call counter
+            self._network_call_count = 0
+            with create_replay_patch(self.replayer) as replay_mock:
+                orig_side_effect = replay_mock.side_effect
+
+                async def counting_side_effect(*args, **kwargs):
+                    self._network_call_count += 1
+                    return await orig_side_effect(*args, **kwargs)
+
+                replay_mock.side_effect = counting_side_effect
+
                 # Measure latency
                 start_time = time.time()
                 transactions = await client.get_wallet_transactions(
                     wallet, days=days, limit=limit
                 )
                 latency_ms = (time.time() - start_time) * 1000
-                
+
                 # Calculate credit consumption
-                final_credits = credit_tracker.get_remaining_credits()
+                final_credits = credit_tracker.get_snapshot().credits_remaining
                 credits_consumed = initial_credits - final_credits
-                
+
                 wallet_metrics.update({
                     "success": True,
                     "credits_consumed": credits_consumed,
                     "latency_ms": latency_ms,
-                    "network_calls": self._network_call_count,  # Would be tracked in real mode
+                    "network_calls": self._network_call_count,
                     "transaction_count": len(transactions) if transactions else 0
                 })
-                
+
                 # Update aggregate metrics
                 self.metrics.credits_per_wallet[wallet] = credits_consumed
                 self.metrics.latency_samples.append(latency_ms)
@@ -173,24 +167,12 @@ class BaselineRunner:
         return all_results
     
     def measure_memory_usage(self):
-        """Measure peak memory usage."""
-        if MEMORY_PROFILER_AVAILABLE:
-            # Run a simple measurement
-            def dummy_operation():
-                replayer = FixtureReplayer()
-                wallets = replayer.get_all_wallets()
-                return len(wallets)
-            
-            mem_usage = memory_usage((dummy_operation,), max_usage=True)
-            self.metrics.peak_rss = mem_usage
+        """Measure peak RSS of the process (covers the benchmark workload)."""
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        if sys.platform == "darwin":
+            self.metrics.peak_rss = usage.ru_maxrss / (1024 * 1024)
         else:
-            # Fallback to tracemalloc
-            tracemalloc.start()
-            replayer = FixtureReplayer()
-            wallets = replayer.get_all_wallets()
-            current, peak = tracemalloc.get_traced_memory()
-            self.metrics.peak_rss = peak / 1024 / 1024  # Convert to MB
-            tracemalloc.stop()
+            self.metrics.peak_rss = usage.ru_maxrss / 1024
     
     async def run(self) -> Dict[str, Any]:
         """Run complete baseline measurement."""

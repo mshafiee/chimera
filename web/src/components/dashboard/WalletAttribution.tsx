@@ -31,10 +31,10 @@ export function WalletAttribution({ wallets }: WalletAttributionProps) {
             </TableCell>
             <TableCell mono className="text-sm text-right">
               <Badge
-                variant={wallet.wqs_score && wallet.wqs_score >= 60 ? 'success' : wallet.wqs_score && wallet.wqs_score >= 40 ? 'warning' : 'default'}
+                variant={toNum(wallet.wqs_score) >= 60 ? 'success' : toNum(wallet.wqs_score) >= 40 ? 'warning' : 'default'}
                 size="sm"
               >
-                {wallet.wqs_score?.toFixed(1) || 'N/A'}
+                {wallet.wqs_score !== null && wallet.wqs_score !== undefined ? `${toNum(wallet.wqs_score).toFixed(1)}` : 'N/A'}
               </Badge>
             </TableCell>
             <TableCell mono className="text-sm text-right">
@@ -43,7 +43,7 @@ export function WalletAttribution({ wallets }: WalletAttributionProps) {
               </span>
             </TableCell>
             <TableCell mono className="text-sm text-right">
-              {wallet.win_rate ? `${wallet.win_rate.toFixed(1)}%` : 'N/A'}
+              {wallet.win_rate !== null && wallet.win_rate !== undefined ? `${toNum(wallet.win_rate).toFixed(1)}%` : 'N/A'}
             </TableCell>
             <TableCell mono className="text-sm text-right">
               {wallet.trade_count_30d || 0}

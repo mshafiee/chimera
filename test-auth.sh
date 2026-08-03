@@ -5,7 +5,11 @@
 set -e
 
 API_URL="http://localhost:8080"
-WEBHOOK_SECRET=$(docker exec chimera-operator printenv CHIMERA_SECURITY__WEBHOOK_SECRET 2>/dev/null || echo "devnet-webhook-secret-change-me-in-production")
+WEBHOOK_SECRET=$(docker exec chimera-operator printenv CHIMERA_SECURITY__WEBHOOK_SECRET 2>/dev/null || true)
+if [ -z "$WEBHOOK_SECRET" ]; then
+    echo "[FAIL] Could not read CHIMERA_SECURITY__WEBHOOK_SECRET from chimera-operator container" >&2
+    exit 1
+fi
 
 # Colors
 GREEN='\033[0;32m'
@@ -79,29 +83,36 @@ log_info "Sending 10 webhook signals in parallel..."
 TIMESTAMP=$(date +%s)
 PAYLOAD='{"strategy":"SHIELD","token":"So11111111111111111111111111111111111111112","action":"BUY","amount_sol":0.1,"wallet_address":"7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU","consensus_count":5}'
 
-SUCCESS=0
-FAILED=0
-
+PIDS=()
 for i in {1..10}; do
     TS=$((TIMESTAMP + i))
     SIG=$(generate_signature "$TS" "$PAYLOAD")
     
-    RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${API_URL}/api/v1/webhook" \
+    curl -s -o "/tmp/webhook_result_$i" -w "%{http_code}" -X POST "${API_URL}/api/v1/webhook" \
         -H "Content-Type: application/json" \
         -H "X-Signature: $SIG" \
         -H "X-Timestamp: $TS" \
-        -d "$PAYLOAD" 2>&1)
-    
-    STATUS=$(echo "$RESPONSE" | tail -1)
-    
+        -d "$PAYLOAD" > "/tmp/webhook_status_$i" 2>/dev/null &
+    PIDS+=($!)
+done
+
+for pid in "${PIDS[@]}"; do
+    wait "$pid" 2>/dev/null || true
+done
+
+SUCCESS=0
+FAILED=0
+for i in {1..10}; do
+    STATUS=$(cat "/tmp/webhook_status_$i" 2>/dev/null || echo "000")
     if [ "$STATUS" = "200" ] || [ "$STATUS" = "202" ]; then
-        ((SUCCESS += 1))
+        SUCCESS=$((SUCCESS + 1))
         echo -n "."
     else
-        ((FAILED += 1))
+        FAILED=$((FAILED + 1))
         echo -n "F"
     fi
 done
+rm -f /tmp/webhook_result_* /tmp/webhook_status_*
 
 echo ""
 log_info "Load test results: $SUCCESS succeeded, $FAILED failed"
@@ -120,7 +131,7 @@ RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${API_URL}/api/v1/webhook" \
     -H "Content-Type: application/json" \
     -H "X-Signature: $SIG" \
     -H "X-Timestamp: $TIMESTAMP" \
-    -d "$HIGH_QUALITY" 2>&1)
+    -d "$HIGH_QUALITY" 2>&1 || true)
 
 STATUS=$(echo "$RESPONSE" | tail -1)
 BODY=$(echo "$RESPONSE" | sed '$d')
@@ -131,8 +142,8 @@ else
     log_info "Response: $(echo "$BODY" | python3 -m json.tool 2>/dev/null | grep -E '"reason"|"status"' | head -2)"
 fi
 
-# Medium quality signal
-TIMESTAMP=$((TIMESTAMP + 1))
+# Medium quality signal (fresh timestamp from the current clock)
+TIMESTAMP=$(date +%s)
 MEDIUM_QUALITY='{"strategy":"SPEAR","token":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","action":"BUY","amount_sol":0.05,"wallet_address":"7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU","consensus_count":2,"signal_quality":0.65}'
 SIG=$(generate_signature "$TIMESTAMP" "$MEDIUM_QUALITY")
 
@@ -141,7 +152,7 @@ RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${API_URL}/api/v1/webhook" \
     -H "Content-Type: application/json" \
     -H "X-Signature: $SIG" \
     -H "X-Timestamp: $TIMESTAMP" \
-    -d "$MEDIUM_QUALITY" 2>&1)
+    -d "$MEDIUM_QUALITY" 2>&1 || true)
 
 STATUS=$(echo "$RESPONSE" | tail -1)
 BODY=$(echo "$RESPONSE" | sed '$d')
@@ -155,8 +166,8 @@ fi
 echo ""
 
 log_section "Current System Status"
-HEALTH=$(curl -s "${API_URL}/api/v1/health" | python3 -m json.tool 2>/dev/null)
-echo "$HEALTH" | grep -A 3 '"circuit_breaker"'
+HEALTH=$(curl -s "${API_URL}/api/v1/health" | python3 -m json.tool 2>/dev/null || true)
+echo "$HEALTH" | grep -A 3 '"circuit_breaker"' || echo "Circuit breaker status unavailable"
 echo ""
 
 log_section "Next Steps"

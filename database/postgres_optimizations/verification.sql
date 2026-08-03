@@ -33,6 +33,7 @@ WHERE indexname LIKE 'idx_%_pnl%'
    OR indexname LIKE 'idx_%_strategy%'
    OR indexname LIKE 'idx_%_wallets%'
    OR indexname LIKE 'idx_%_positions%'
+   OR indexname LIKE 'idx_%_high_value%'
 ORDER BY tablename, indexname;
 
 \echo ''
@@ -80,7 +81,8 @@ SELECT
 FROM trades
 WHERE status = 'CLOSED'
   AND net_pnl_sol IS NOT NULL
-  AND created_at >= CURRENT_DATE - INTERVAL '7 days'
+  AND amount_sol > 0
+  AND created_at >= NOW() - INTERVAL '7 days'
 GROUP BY strategy
 ORDER BY total_pnl DESC;
 
@@ -153,7 +155,7 @@ SELECT
     created_at
 FROM trades
 WHERE amount_sol >= 1.0
-  AND created_at >= CURRENT_DATE - INTERVAL '24 hours'
+  AND created_at >= NOW() - INTERVAL '24 hours'
 ORDER BY amount_sol DESC, created_at DESC
 LIMIT 20;
 
@@ -170,8 +172,8 @@ LIMIT 20;
 
 SELECT
     schemaname,
-    tablename,
-    indexname,
+    relname as tablename,
+    indexrelname as indexname,
     idx_scan as index_scans,
     idx_tup_read as tuples_read,
     idx_tup_fetch as tuples_fetched,
@@ -179,11 +181,11 @@ SELECT
 FROM pg_stat_user_indexes
 WHERE schemaname = 'public'
   AND (
-    indexname LIKE 'idx_%_pnl%'
-    OR indexname LIKE 'idx_%_strategy%'
-    OR indexname LIKE 'idx_%_wallets%'
-    OR indexname LIKE 'idx_%_positions%'
-    OR indexname LIKE 'idx_%_high_value%'
+    indexrelname LIKE 'idx_%_pnl%'
+    OR indexrelname LIKE 'idx_%_strategy%'
+    OR indexrelname LIKE 'idx_%_wallets%'
+    OR indexrelname LIKE 'idx_%_positions%'
+    OR indexrelname LIKE 'idx_%_high_value%'
   )
 ORDER BY idx_scan DESC;
 
@@ -237,7 +239,7 @@ WHERE status = 'CLOSED'
 GROUP BY strategy;
 
 \echo ''
-\echo 'Testing with indexes disabled (sequential scan):'
+\echo 'Testing with indexes forced (sequential scans disabled):'
 SET enable_seqscan = off;
 EXPLAIN (ANALYZE, BUFFERS)
 SELECT
@@ -266,14 +268,14 @@ SET enable_seqscan = on;
 -- Check for potentially unused indexes
 SELECT
     schemaname,
-    tablename,
-    indexname,
+    relname as tablename,
+    indexrelname as indexname,
     pg_size_pretty(pg_relation_size(indexrelid)) as index_size,
     idx_scan as scans
 FROM pg_stat_user_indexes
 WHERE schemaname = 'public'
   AND idx_scan = 0
-  AND indexname LIKE 'idx_%'
+  AND indexrelname LIKE 'idx_%'
 ORDER BY pg_relation_size(indexrelid) DESC
 LIMIT 10;
 
@@ -284,20 +286,20 @@ LIMIT 10;
 -- Check for index bloat indicators
 SELECT
     schemaname,
-    tablename,
-    indexname,
+    relname as tablename,
+    indexrelname as indexname,
     pg_size_pretty(pg_relation_size(indexrelid)) as size,
     idx_scan as scans,
     idx_tup_read as tuples_read,
     idx_tup_fetch as tuples_fetched,
     CASE
-        WHEN idx_scan > 0 THEN
+        WHEN idx_tup_read > 0 THEN
             ROUND(100.0 * idx_tup_fetch / idx_tup_read, 2)
         ELSE 0
     END as fetch_ratio_percent
 FROM pg_stat_user_indexes
 WHERE schemaname = 'public'
-  AND indexname LIKE 'idx_%'
+  AND indexrelname LIKE 'idx_%'
   AND idx_scan > 0
 ORDER BY idx_tup_fetch DESC
 LIMIT 10;
@@ -317,7 +319,7 @@ LIMIT 10;
 \echo 'Key points to review:'
 \echo '1. Check that optimization indexes exist in first section'
 \echo '2. Verify execution plans show "Index Scan" instead of "Seq Scan"'
-\echo '3. Compare execution times between indexed and sequential scans'
+\echo '3. Compare execution times between default planning and index-forced (seqscan off) runs'
 \echo '4. Monitor index usage statistics over time'
 \echo '5. Check storage impact is within expected 15-25% range'
 \echo ''

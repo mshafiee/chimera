@@ -12,7 +12,6 @@ Tests various edge cases for token age validation:
 
 import pytest
 from datetime import datetime, timedelta
-from decimal import Decimal
 
 
 class TestTokenAgeEdgeCases:
@@ -166,9 +165,8 @@ class TestTokenAgeEdgeCases:
 
     def test_token_age_string_parsing(self):
         """Test parsing token age from string format."""
-        age_string = "2025-01-01T00:00:00Z"
+        age_string = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
-            from datetime import datetime
             creation_time = datetime.fromisoformat(age_string.replace('Z', '+00:00'))
             age_hours = (datetime.now(creation_time.tzinfo) - creation_time).total_seconds() / 3600
             assert age_hours > 0, "Parsed age should be positive"

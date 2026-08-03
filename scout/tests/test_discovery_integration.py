@@ -22,6 +22,24 @@ import pytest
 from core.helius_client import HeliusClient, DiscoveryError
 
 
+@pytest.fixture(autouse=True)
+def clean_credit_tracker():
+    """Give every test a fresh credit tracker with no persisted usage.
+
+    The module-level singleton persists daily usage to a state file (default
+    /tmp/helius_credit_state.json); a stale file can exhaust the daily budget
+    and short-circuit discovery with "Monthly credit cap reached".
+    """
+    from core.helius_credit_tracker import reset_credit_tracker
+
+    with patch.dict(
+        "os.environ", {"SCOUT_CREDIT_STATE_FILE": "/tmp/nonexistent_credit_state.json"}
+    ):
+        reset_credit_tracker()
+        yield
+        reset_credit_tracker()
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

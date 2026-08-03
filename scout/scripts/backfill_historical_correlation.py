@@ -16,6 +16,7 @@ Usage:
 import argparse
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -55,11 +56,11 @@ def main():
     # Read wallets with PnL that haven't been backfilled yet
     rows = conn.execute("""
         SELECT w.address, w.wqs_score, w.realized_pnl_30d_sol,
-               w.trade_count_30d, w.win_rate, w.profit_factor,
-               w.promoted_at, w.archetype
+               w.trade_count_30d, w.promoted_at
         FROM wallets w
         LEFT JOIN wqs_pnl_correlation c ON w.address = c.wallet_address
         WHERE w.realized_pnl_30d_sol IS NOT NULL
+          AND w.wqs_score IS NOT NULL
           AND w.promoted_at IS NOT NULL
           AND (c.wallet_address IS NULL
                OR c.actual_copy_pnl_30d_sol IS NULL)
@@ -69,15 +70,19 @@ def main():
         print("No new wallets with PnL data to backfill.")
         return
 
-    now = __import__('datetime').datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     inserted = 0
     for r in rows:
         conn.execute("""
-            INSERT OR REPLACE INTO wqs_pnl_correlation
+            INSERT INTO wqs_pnl_correlation
             (wallet_address, wqs_score_at_promotion,
              actual_copy_pnl_30d_sol, copy_trade_count_30d,
              strategy, promoted_at, last_updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(wallet_address) DO UPDATE SET
+             actual_copy_pnl_30d_sol = excluded.actual_copy_pnl_30d_sol,
+             copy_trade_count_30d = excluded.copy_trade_count_30d,
+             last_updated_at = excluded.last_updated_at
         """, (
             r["address"], r["wqs_score"],
             r["realized_pnl_30d_sol"], r["trade_count_30d"] or 0,
@@ -89,7 +94,7 @@ def main():
     conn.close()
 
     print(f"Backfilled {inserted} historical correlation records from wallets table.")
-    print(f"Total records now in wqs_pnl_correlation: ", end="")
+    print("Total records now in wqs_pnl_correlation: ", end="")
     conn = sqlite3.connect(db_path)
     total = conn.execute("SELECT COUNT(*) FROM wqs_pnl_correlation").fetchone()[0]
     conn.close()

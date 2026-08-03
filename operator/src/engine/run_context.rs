@@ -7,14 +7,16 @@
 //! configuration + wallet roster that produced it.
 //!
 //! ## `run_id` format
-//! `v{version}-{config_hash_short}-{start_unix}`
+//! `v{version}-{config_hash_short}-{start_unix_millis}`
 //! - `version`: `CARGO_PKG_VERSION`
-//! - `config_hash_short`: first 8 chars of [`SelectionConfig::hash`]
-//! - `start_unix`: Unix timestamp of process start
+//! - `config_hash_short`: first 16 chars of [`SelectionConfig::hash`]
+//! - `start_unix_millis`: Unix millisecond timestamp of process start
 //!
 //! The format is deterministic for a given (version, config, start-time)
 //! triple, so a restarted process always gets a fresh `run_id` while records
-//! from a single run share one identifier.
+//! from a single run share one identifier. Millisecond resolution avoids
+//! colliding `run_id`s for restarts within the same second (which would
+//! silently merge evidence from different runs in C4 cohorting).
 
 use chrono::{DateTime, Utc};
 
@@ -36,7 +38,7 @@ pub struct RunContext {
 impl RunContext {
     /// Build a run context from its constituent identity parts.
     ///
-    /// `config_hash` is the full [`SelectionConfig::hash`]; only its first 8
+    /// `config_hash` is the full [`SelectionConfig::hash`]; only its first 16
     /// characters are embedded in the `run_id`. `roster_addresses` are hashed
     /// after sorting so the roster hash is order-independent.
     pub fn new(
@@ -45,8 +47,8 @@ impl RunContext {
         started_at: DateTime<Utc>,
     ) -> Self {
         let config_hash = config_hash.into();
-        let config_hash_short: String = config_hash.chars().take(8).collect();
-        let start_unix = started_at.timestamp();
+        let config_hash_short: String = config_hash.chars().take(16).collect();
+        let start_unix = started_at.timestamp_millis();
         let run_id = format!(
             "v{}-{}-{}",
             env!("CARGO_PKG_VERSION"),
@@ -69,8 +71,11 @@ impl RunContext {
 
     /// Stable (order-independent) hash of the ACTIVE wallet roster.
     ///
-    /// Not cryptographic — a compact fingerprint so decision records can be
-    /// grouped by "which roster was live" without storing the full list.
+    /// Not cryptographic — a compact fingerprint (8 bytes of SHA-256, ~50%
+    /// collision chance around 2^32 distinct rosters) so decision records can
+    /// be grouped by "which roster was live" without storing the full list.
+    /// The bound is fine for realistic roster counts; if grouping by
+    /// `roster_hash` ever grows beyond that scale, use the full digest.
     pub fn hash_roster(roster_addresses: &[String]) -> String {
         use sha2::{Digest, Sha256};
         let mut sorted: Vec<&str> = roster_addresses.iter().map(|s| s.as_str()).collect();
@@ -92,7 +97,7 @@ mod tests {
     fn run_id_format_is_version_config_start() {
         let started = DateTime::from_timestamp(1_753_456_789, 0).unwrap();
         let ctx = RunContext::new("a1b2c3d4e5f6", &[], started);
-        let expected = format!("v{}-a1b2c3d4-1753456789", env!("CARGO_PKG_VERSION"));
+        let expected = format!("v{}-a1b2c3d4e5f6-1753456789000", env!("CARGO_PKG_VERSION"));
         assert_eq!(ctx.run_id, expected);
         assert_eq!(ctx.config_hash, "a1b2c3d4e5f6");
         assert_eq!(ctx.started_at, started);

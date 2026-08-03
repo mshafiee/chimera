@@ -19,10 +19,16 @@ if [ ! -f "docker-compose.evaluation.yml" ]; then
     exit 1
 fi
 
-# Load existing configuration if available
+# Load existing configuration if available (parse KEY=VALUE lines only;
+# never execute the file as shell code)
 if [ -f "docker/env.evaluation" ]; then
     echo "📋 Loading existing configuration from docker/env.evaluation..."
-    source docker/env.evaluation 2>/dev/null || true
+    while IFS='=' read -r key value; do
+        case "$key" in
+            TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|DISCORD_WEBHOOK_URL)
+                export "$key=$value" ;;
+        esac
+    done < docker/env.evaluation
 else
     echo "📋 No existing configuration found"
 fi
@@ -33,7 +39,9 @@ check_token_status() {
     local token_value=$2
     local setup_instructions=$3
 
-    if [ -n "$token_value" ] && [ "$token_value" != "changeme" ] && [ "$token_value" != "your_token_here" ]; then
+    if [ -n "$token_value" ] && [ "$token_value" != "changeme" ] && [ "$token_value" != "your_token_here" ] \
+        && [ "$token_value" != "your_bot_token_here" ] && [ "$token_value" != "your_chat_id_here" ] \
+        && [ "$token_value" != "your_webhook_url_here" ]; then
         echo "✅ $token_name: CONFIGURED"
         return 0
     else
@@ -51,14 +59,21 @@ echo "Current Configuration Status:"
 echo "----------------------------"
 
 telegram_configured=false
+telegram_bot_configured=false
+telegram_chat_configured=false
 discord_configured=false
 
 if check_token_status "TELEGRAM_BOT_TOKEN" "$TELEGRAM_BOT_TOKEN" "Get token from @BotFather in Telegram"; then
-    telegram_configured=true
+    telegram_bot_configured=true
 fi
 
 if check_token_status "TELEGRAM_CHAT_ID" "$TELEGRAM_CHAT_ID" "Get ID from @userinfobot or @getidsbot in Telegram"; then
-    : # Token is configured
+    telegram_chat_configured=true
+fi
+
+# Telegram is only considered configured when BOTH values are present
+if [ "$telegram_bot_configured" = true ] && [ "$telegram_chat_configured" = true ]; then
+    telegram_configured=true
 fi
 
 if check_token_status "DISCORD_WEBHOOK_URL" "$DISCORD_WEBHOOK_URL" "Create webhook in Server Settings → Integrations"; then
@@ -108,4 +123,9 @@ echo "   • Monitor for unauthorized access"
 echo "   • Revoke compromised tokens immediately"
 
 echo ""
+if [ "$telegram_configured" = false ] && [ "$discord_configured" = false ]; then
+    echo "⚠️  No channels configured yet — add the values above to docker/env.evaluation and re-run."
+    exit 1
+fi
+
 echo "Configuration complete! 🚀"

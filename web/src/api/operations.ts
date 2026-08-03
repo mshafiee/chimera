@@ -82,8 +82,8 @@ export interface HealthCheck {
 export function useResourceUsage(refetchInterval?: number) {
   return useQuery({
     queryKey: ['operations', 'resources'],
-    queryFn: async ({ signal: _signal }) => {
-      const response = await apiClient.get<ResourceUsageResponse>('/operations/resources')
+    queryFn: async ({ signal }) => {
+      const response = await apiClient.get<ResourceUsageResponse>('/operations/resources', { signal })
       return response.data
     },
     refetchInterval,
@@ -103,8 +103,8 @@ export function useResourceUsage(refetchInterval?: number) {
 export function useSecretRotation() {
   return useQuery({
     queryKey: ['operations', 'secrets'],
-    queryFn: async ({ signal: _signal }) => {
-      const response = await apiClient.get<SecretRotationResponse>('/operations/secrets')
+    queryFn: async ({ signal }) => {
+      const response = await apiClient.get<SecretRotationResponse>('/operations/secrets', { signal })
       return response.data
     },
     refetchInterval: 300000, // 5 minutes
@@ -123,8 +123,8 @@ export function useSecretRotation() {
 export function useRateLimitStatus() {
   return useQuery({
     queryKey: ['operations', 'rate-limit'],
-    queryFn: async ({ signal: _signal }) => {
-      const response = await apiClient.get<RateLimitStatusResponse>('/operations/rate-limit')
+    queryFn: async ({ signal }) => {
+      const response = await apiClient.get<RateLimitStatusResponse>('/operations/rate-limit', { signal })
       return response.data
     },
     refetchInterval: 10000,
@@ -143,8 +143,8 @@ export function useRateLimitStatus() {
 export function useHealthCheckDetails() {
   return useQuery({
     queryKey: ['operations', 'health-checks'],
-    queryFn: async ({ signal: _signal }) => {
-      const response = await apiClient.get<HealthCheckDetailsResponse>('/operations/health-checks')
+    queryFn: async ({ signal }) => {
+      const response = await apiClient.get<HealthCheckDetailsResponse>('/operations/health-checks', { signal })
       return response.data
     },
     refetchInterval: 30000,

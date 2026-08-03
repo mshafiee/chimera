@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::*;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -15,8 +16,11 @@ pub struct TracerState {
     pub tracer_count: u32,
     /// Timestamp of first tracer trade
     pub first_tracer_time: Option<DateTime<Utc>>,
-    /// Current sample rate (decreases after cap)
+    /// Current sample rate (starts at the configured rate)
     pub current_sample_rate: f64,
+    /// Paper trade UUIDs that already fired a tracer (dedup — at most one
+    /// tracer per paper trade)
+    pub fired_paper_trades: HashSet<String>,
 }
 
 impl Default for TracerState {
@@ -25,6 +29,7 @@ impl Default for TracerState {
             tracer_count: 0,
             first_tracer_time: None,
             current_sample_rate: 1.0,
+            fired_paper_trades: HashSet::new(),
         }
     }
 }
@@ -70,8 +75,10 @@ impl ExecutionGap {
 pub struct TracerHook {
     state: Arc<Mutex<TracerState>>,
     enabled: bool,
+    /// Hard bound on live-trade exposure: no tracer fires once reached.
     tracer_cap: u32,
     initial_sample_rate: f64,
+    #[allow(dead_code)] // Reserved for position-size gating of tracer orders
     min_live_position_sol: Decimal,
 }
 
@@ -83,7 +90,12 @@ impl TracerHook {
         min_live_position_sol: Decimal,
     ) -> Self {
         Self {
-            state: Arc::new(Mutex::new(TracerState::default())),
+            state: Arc::new(Mutex::new(TracerState {
+                tracer_count: 0,
+                first_tracer_time: None,
+                current_sample_rate: sample_rate,
+                fired_paper_trades: HashSet::new(),
+            })),
             enabled,
             tracer_cap,
             initial_sample_rate: sample_rate,
@@ -92,34 +104,74 @@ impl TracerHook {
     }
 
     /// Check if tracer should fire for this paper trade
-    pub async fn should_fire_tracer(&self, _paper_trade_uuid: &str) -> bool {
+    ///
+    /// `tracer_cap` is a HARD stop: once reached, no further tracers fire
+    /// (the old tapering behavior never reached zero and left live-trade
+    /// exposure unbounded).
+    pub async fn should_fire_tracer(&self, paper_trade_uuid: &str) -> bool {
         if !self.enabled {
             return false;
         }
 
-        let mut state = self.state.lock().await;
+        let state = self.state.lock().await;
 
-        // Check if cap reached
+        if state.fired_paper_trades.contains(paper_trade_uuid) {
+            return false;
+        }
+
         if state.tracer_count >= self.tracer_cap {
-            // Taper sample rate after cap
-            let taper_factor = (self.tracer_cap as f64) / (state.tracer_count as f64 + 1.0);
-            state.current_sample_rate = self.initial_sample_rate * taper_factor;
-
-            // Sample randomly based on tapered rate
-            use rand::Rng;
-            let mut rng = rand::thread_rng();
-            let should_sample: f64 = rng.gen();
-            return should_sample < state.current_sample_rate;
+            return false;
         }
 
         // Random sample at initial rate
         use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let should_sample: f64 = rng.gen();
-        should_sample < self.initial_sample_rate
+        rand::rng().random::<f64>() < self.initial_sample_rate
+    }
+
+    /// Atomically decide and record a tracer fire.
+    ///
+    /// Checks dedup, the cap, and samples under a single lock, so concurrent
+    /// callers can never both pass the cap check and over-fire. Returns the
+    /// execution gap when the tracer fires, `None` otherwise.
+    pub async fn try_record_tracer(
+        &self,
+        paper_trade_uuid: &str,
+        paper_fill_price: Decimal,
+        real_fill_price: Decimal,
+        side: String,
+    ) -> Option<ExecutionGap> {
+        if !self.enabled {
+            return None;
+        }
+
+        let mut state = self.state.lock().await;
+
+        if state.fired_paper_trades.contains(paper_trade_uuid) {
+            return None;
+        }
+
+        if state.tracer_count >= self.tracer_cap {
+            return None;
+        }
+
+        use rand::Rng;
+        if rand::rng().random::<f64>() >= self.initial_sample_rate {
+            return None;
+        }
+
+        state.fired_paper_trades.insert(paper_trade_uuid.to_string());
+        if state.first_tracer_time.is_none() {
+            state.first_tracer_time = Some(Utc::now());
+        }
+        state.tracer_count += 1;
+
+        Some(ExecutionGap::new(paper_fill_price, real_fill_price, side))
     }
 
     /// Record tracer execution and return execution gap
+    ///
+    /// Manual path: increments the count unconditionally. Prefer
+    /// [`TracerHook::try_record_tracer`] for the decision+record flow.
     pub async fn record_tracer(
         &self,
         paper_fill_price: Decimal,
@@ -192,5 +244,28 @@ mod tests {
 
         // Should cap after 2 tracers
         assert!(hook.cap_reached().await);
+        // Hard stop: no further fires past the cap
+        assert!(!hook.should_fire_tracer("another").await);
+    }
+
+    #[tokio::test]
+    async fn test_try_record_tracer_dedup() {
+        let hook = TracerHook::new(true, 10, 1.0, Decimal::from_str("0.02").unwrap());
+
+        // 100% rate: first call fires
+        assert!(hook
+            .try_record_tracer("paper-1", Decimal::ONE, Decimal::ONE, "entry".to_string())
+            .await
+            .is_some());
+        // Same paper trade cannot fire twice
+        assert!(hook
+            .try_record_tracer("paper-1", Decimal::ONE, Decimal::ONE, "entry".to_string())
+            .await
+            .is_none());
+        // A different paper trade can
+        assert!(hook
+            .try_record_tracer("paper-2", Decimal::ONE, Decimal::ONE, "entry".to_string())
+            .await
+            .is_some());
     }
 }

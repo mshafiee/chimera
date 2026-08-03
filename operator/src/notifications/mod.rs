@@ -113,10 +113,14 @@ impl NotificationEvent {
 
     /// Format the event as a notification message
     pub fn format_message(&self, trade_mode: &str) -> String {
-        let prefix = match trade_mode {
+        let prefix = match trade_mode.trim().to_lowercase().as_str() {
             "paper" => "[PAPER] ",
             "devnet" => "[DEVNET] ",
-            _ => "",
+            "live" | "" => "",
+            other => {
+                tracing::warn!(mode = other, "Unknown trade mode, treating as live");
+                ""
+            }
         };
         match self {
             NotificationEvent::CircuitBreakerTriggered { reason } => {
@@ -158,11 +162,20 @@ impl NotificationEvent {
                 format!("{prefix}⚠️ Switched to fallback RPC: {}", reason)
             }
             NotificationEvent::WalletPromoted { address, wqs_score } => {
+                // Guard against short/malformed addresses — slicing by raw byte
+                // offsets panics when the address is shorter than 8 bytes or
+                // contains multi-byte characters.
+                let (head, tail) = if address.len() > 8 {
+                    (
+                        &address[..4],
+                        &address[address.len() - 4..],
+                    )
+                } else {
+                    (address.as_str(), "")
+                };
                 format!(
                     "{prefix}📊 Wallet promoted: {}...{} (WQS: {:.2})",
-                    &address[..4],
-                    &address[address.len() - 4..],
-                    wqs_score
+                    head, tail, wqs_score
                 )
             }
             NotificationEvent::DailySummary {
@@ -203,9 +216,13 @@ impl NotificationEvent {
                 success_rate,
             } => {
                 let status = if *healthy { "healthy" } else { "unhealthy" };
-                let latency = latency_ms.unwrap_or(0);
+                // A missing latency must read as "unknown", not a perfect 0ms.
+                let latency = match latency_ms {
+                    Some(ms) => format!("{}ms", ms),
+                    None => "N/A".to_string(),
+                };
                 format!(
-                    "{prefix}🔄 Jito health: {} (latency: {}ms, success_rate: {:.1}%)",
+                    "{prefix}🔄 Jito health: {} (latency: {}, success_rate: {:.1}%)",
                     status,
                     latency,
                     success_rate * 100.0
@@ -247,19 +264,46 @@ impl CompositeNotifier {
         self.services.push(service);
     }
 
-    /// Send notification to all enabled services
+    /// Send notification to all enabled services.
+    ///
+    /// Services are dispatched CONCURRENTLY with an individual timeout so a
+    /// slow or hung Telegram/Discord client can never stall critical alerts
+    /// behind it.
     pub async fn notify(&self, event: NotificationEvent) {
         let mode = self.trade_mode.as_str();
+        let mut tasks = Vec::new();
         for service in &self.services {
             if service.is_enabled() {
-                if let Err(e) = service.notify(&event, mode).await {
-                    tracing::error!(
-                        error = %e,
-                        event = ?event.level(),
-                        "Failed to send notification"
-                    );
-                }
+                let service = service.clone();
+                let event = event.clone();
+                let mode = mode.to_string();
+                tasks.push(tokio::spawn(async move {
+                    let result = tokio::time::timeout(
+                        tokio::time::Duration::from_secs(15),
+                        service.notify(&event, &mode),
+                    )
+                    .await;
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            tracing::error!(
+                                error = %e,
+                                event = ?event.level(),
+                                "Failed to send notification"
+                            );
+                        }
+                        Err(_) => {
+                            tracing::error!(
+                                event = ?event.level(),
+                                "Notification service timed out"
+                            );
+                        }
+                    }
+                }));
             }
+        }
+        for task in tasks {
+            let _ = task.await;
         }
     }
 }

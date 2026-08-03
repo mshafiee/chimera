@@ -211,8 +211,11 @@ class PositionManager:
 
         except Exception as e:
             logger.error(f"Failed to calculate stop-loss for position {position.position_id}: {e}")
-            # Fallback to fixed percentage stop
-            position.stop_loss_price = position.entry_price * 0.95  # 5% stop
+            # Fallback to fixed percentage stop (side-aware)
+            if position.side == PositionSide.LONG:
+                position.stop_loss_price = position.entry_price * 0.95  # 5% below entry
+            else:  # SHORT
+                position.stop_loss_price = position.entry_price * 1.05  # 5% above entry
             position.stop_type = "FIXED"
             position.updated_at = time.time()
             return position
@@ -234,8 +237,11 @@ class PositionManager:
                 logger.warning(f"Position {position_id} not found for price update")
                 return None
 
+            # Ignore updates for positions that are no longer active
+            if position.status != PositionStatus.ACTIVE:
+                return position
+
             # Update price and calculate PnL
-            old_price = position.current_price
             position.current_price = current_price
             position.updated_at = time.time()
 
@@ -295,8 +301,14 @@ class PositionManager:
                     regime=regime
                 )
 
-                # Update stop-loss to trailing level (only if higher)
-                if trailing_stop.stop_price > position.stop_loss_price:
+                # Update stop-loss to trailing level (side-aware):
+                # LONG tightens upward, SHORT tightens downward
+                if position.side == PositionSide.LONG:
+                    should_update = trailing_stop.stop_price > position.stop_loss_price
+                else:  # SHORT
+                    should_update = trailing_stop.stop_price < position.stop_loss_price
+
+                if should_update:
                     position.stop_loss_price = trailing_stop.stop_price
                     position.stop_type = "TRAILING"
                     position.updated_at = time.time()
@@ -320,16 +332,19 @@ class PositionManager:
 
     def get_position(self, position_id: str) -> Optional[Position]:
         """Get position by ID."""
-        return self._positions.get(position_id)
+        with self._lock:
+            return self._positions.get(position_id)
 
     def get_wallet_positions(self, wallet_address: str) -> List[Position]:
         """Get all positions for a wallet."""
-        position_ids = self._wallet_positions.get(wallet_address, [])
-        return [self._positions[pid] for pid in position_ids if pid in self._positions]
+        with self._lock:
+            position_ids = self._wallet_positions.get(wallet_address, [])
+            return [self._positions[pid] for pid in position_ids if pid in self._positions]
 
     def get_all_positions(self) -> List[Position]:
         """Get all positions."""
-        return list(self._positions.values())
+        with self._lock:
+            return list(self._positions.values())
 
     def close_position(self, position_id: str, exit_price: float, exit_reason: str = "") -> Optional[Position]:
         """
@@ -369,28 +384,30 @@ class PositionManager:
 
     def get_positions_needing_update(self) -> List[Position]:
         """Get positions that need stop-loss updates (trailing stops, regime changes)."""
-        return [
-            pos for pos in self._positions.values()
-            if pos.status == PositionStatus.ACTIVE and pos.unrealized_pnl > 0
-        ]
+        with self._lock:
+            return [
+                pos for pos in self._positions.values()
+                if pos.status == PositionStatus.ACTIVE and pos.unrealized_pnl > 0
+            ]
 
     def get_summary(self) -> Dict[str, Any]:
         """Get summary of all positions."""
-        positions = list(self._positions.values())
+        with self._lock:
+            positions = list(self._positions.values())
 
-        total_value = sum(p.position_value_usd for p in positions)
-        total_unrealized_pnl = sum(p.unrealized_pnl for p in positions)
-        total_realized_pnl = sum(p.realized_pnl for p in positions if p.status == PositionStatus.CLOSED)
+            total_value = sum(p.position_value_usd for p in positions)
+            total_unrealized_pnl = sum(p.unrealized_pnl for p in positions)
+            total_realized_pnl = sum(p.realized_pnl for p in positions if p.status == PositionStatus.CLOSED)
 
-        return {
-            "total_positions": len(positions),
-            "active_positions": len([p for p in positions if p.status == PositionStatus.ACTIVE]),
-            "closed_positions": len([p for p in positions if p.status == PositionStatus.CLOSED]),
-            "total_value_usd": total_value,
-            "total_unrealized_pnl": total_unrealized_pnl,
-            "total_realized_pnl": total_realized_pnl,
-            "positions_needing_update": len(self.get_positions_needing_update()),
-        }
+            return {
+                "total_positions": len(positions),
+                "active_positions": len([p for p in positions if p.status == PositionStatus.ACTIVE]),
+                "closed_positions": len([p for p in positions if p.status == PositionStatus.CLOSED]),
+                "total_value_usd": total_value,
+                "total_unrealized_pnl": total_unrealized_pnl,
+                "total_realized_pnl": total_realized_pnl,
+                "positions_needing_update": len([p for p in positions if p.status == PositionStatus.ACTIVE and p.unrealized_pnl > 0]),
+            }
 
 
 # Singleton instance

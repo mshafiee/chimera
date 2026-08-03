@@ -7,11 +7,9 @@ transaction detection and trading signal generation.
 """
 
 import os
-import sys
-import json
 import argparse
 import requests
-from typing import List, Dict, Optional
+from typing import List, Dict
 from datetime import datetime
 
 # Configuration
@@ -41,7 +39,7 @@ def register_webhook(wallet_addresses: List[str]) -> Dict:
     }
 
     try:
-        response = requests.post(url, json=webhook_config)
+        response = requests.post(url, json=webhook_config, timeout=30)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
@@ -59,7 +57,7 @@ def get_existing_webhooks() -> List[Dict]:
     url = f"{HELIUS_BASE_URL}/v0/webhooks?api-key={HELIUS_API_KEY}"
 
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=30)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
@@ -80,7 +78,7 @@ def delete_webhook(webhook_id: str) -> bool:
     url = f"{HELIUS_BASE_URL}/v0/webhooks/{webhook_id}?api-key={HELIUS_API_KEY}"
 
     try:
-        response = requests.delete(url)
+        response = requests.delete(url, timeout=30)
         response.raise_for_status()
         return True
     except requests.exceptions.RequestException as e:
@@ -147,8 +145,14 @@ def validate_wallet_address(address: str) -> bool:
     Returns:
         True if valid format, False otherwise
     """
-    # Basic validation: Solana addresses are base58 encoded, typically 32-44 characters
-    return isinstance(address, str) and 32 <= len(address) <= 44 and address.isalnum()
+    # Basic validation: Solana addresses are base58 encoded, typically 32-44
+    # characters (note: base58 excludes 0, O, I, l and all Unicode)
+    base58_chars = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+    return (
+        isinstance(address, str)
+        and 32 <= len(address) <= 44
+        and all(c in base58_chars for c in address)
+    )
 
 
 def main():
@@ -209,7 +213,12 @@ def main():
     print("Chimera Trading System - Helius Webhook Registration")
     print("=" * 70)
     print(f"Webhook URL: {WEBHOOK_URL}")
-    print(f"Helius API Key: {HELIUS_API_KEY[:10]}...")
+
+    if not HELIUS_API_KEY:
+        print("Helius API Key: NOT SET (export HELIUS_API_KEY)")
+        print("=" * 70)
+        return
+    print("Helius API Key: configured")
     print("=" * 70)
 
     # List existing webhooks
@@ -226,6 +235,8 @@ def main():
                 print(f"  Type: {webhook.get('webhookType', 'N/A')}")
                 print(f"  Accounts: {', '.join(webhook.get('accountKeys', []))}")
                 print()
+
+        return
 
     # Test webhook URL
     if args.test:

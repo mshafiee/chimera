@@ -90,10 +90,11 @@ async def _resolve_funder_root(
     if cache_key in cache:
         return cache[cache_key]
     
-    # Cycle detection
+    # Cycle detection (do NOT cache the cycle outcome: it is chain-dependent —
+    # a valid root cached by one chain could mask a cycle for another chain
+    # that reaches the same address as an ancestor)
     if address in visited:
         logger.debug(f"Cycle detected at {address[:8]}, returning None")
-        cache[cache_key] = None
         return None
     
     visited.add(address)
@@ -146,7 +147,9 @@ async def cluster_and_dedup(
         helius_client: Optional existing HeliusClient instance (reuses session)
 
     Returns:
-        Deduplicated list of WalletRecord objects (ACTIVE only, reduced)
+        The original ``records`` list with demoted ACTIVE wallets mutated
+        in place to CANDIDATE (plus ``cluster_id`` set on records). Callers
+        must filter ``status == "ACTIVE"`` to obtain the reduced roster.
     """
     import asyncio
 
@@ -190,9 +193,13 @@ async def cluster_and_dedup(
                 created_client = True
         
         if helius_client:
-            # Pre-flight budget check for multi-hop
-            cost_per_wallet = (CreditCost.SIGNATURES.value + CreditCost.GET_TRANSACTION.value) * hops
-            estimated_cost = cost_per_wallet * min(multihop_max, len(active))
+            # Pre-flight budget check for multi-hop. Include the Phase-1
+            # per-wallet funder fetch (SIGNATURES + GET_TRANSACTION each)
+            # plus the Phase-2 multi-hop fetches for top-K wallets.
+            per_fetch = CreditCost.SIGNATURES.value + CreditCost.GET_TRANSACTION.value
+            phase1_cost = per_fetch * len(active)
+            cost_per_wallet = per_fetch * hops
+            estimated_cost = phase1_cost + cost_per_wallet * min(multihop_max, len(active))
             
             tracker = get_credit_tracker()
             can_proceed, reason = tracker.can_make_request(
@@ -217,12 +224,18 @@ async def cluster_and_dedup(
                     else:
                         funder_map[record.address] = funder
                 
-                # Phase 2: Resolve roots for top-K wallets using multi-hop
+                # Phase 2: Resolve roots for top-K wallets using multi-hop.
+                # Per-wallet error handling: a single failure must not abort
+                # the whole clustering run — degrade to the direct funder.
                 cache: Dict[tuple, Optional[str]] = {}
                 for record in top_k_active:
                     funder = funder_map.get(record.address)
                     if funder:
-                        root = await _resolve_funder_root(helius_client, funder, hops, cache)
+                        try:
+                            root = await _resolve_funder_root(helius_client, funder, hops, cache)
+                        except Exception as e:
+                            logger.warning(f"Root resolution failed for {record.address[:8]}, falling back to direct funder: {e}")
+                            root = funder
                         root_map[record.address] = root
                     else:
                         root_map[record.address] = None
@@ -281,23 +294,31 @@ async def cluster_and_dedup(
         best = max(cluster_records, key=lambda r: r.wqs_score or 0)
         deduped.append(best)
 
-    # Sort by WQS descending and limit
+    # Sort by WQS descending and limit. Wallets truncated purely by the cap
+    # (not by correlation) get a distinct demotion note below.
     deduped.sort(key=lambda r: r.wqs_score or 0, reverse=True)
+    cap_cut = deduped[top_n:]
     deduped = deduped[:top_n]
 
     removed = len(active) - len(deduped)
+    correlated_removed = removed - len(cap_cut)
     if removed > 0:
         mode_str = "multi-hop" if use_multihop else "single-hop"
-        print(f"[Clustering] Removed {removed} correlated wallets "
-              f"(same funder/root, {mode_str}), retained {len(deduped)} top-WQS representatives")
+        logger.info(f"[Clustering] Removed {removed} wallets "
+                    f"({correlated_removed} correlated, {len(cap_cut)} roster-cap), "
+                    f"retained {len(deduped)} top-WQS representatives")
 
     # Update the original records list: demote removed ACTIVE to CANDIDATE
     deduped_addresses = {r.address for r in deduped}
+    cap_cut_addresses = {r.address for r in cap_cut}
     for record in records:
         if record.status == "ACTIVE" and record.address not in deduped_addresses:
             mode_str = "multi-hop" if use_multihop else "single-hop"
             record.status = "CANDIDATE"
-            record.notes = (record.notes or "") + f" | Demoted: cluster dedup (same funder/root as higher-WQS wallet, {mode_str})"
+            if record.address in cap_cut_addresses:
+                record.notes = (record.notes or "") + " | Demoted: roster size cap"
+            else:
+                record.notes = (record.notes or "") + f" | Demoted: cluster dedup (same funder/root as higher-WQS wallet, {mode_str})"
 
     return records
 
@@ -374,7 +395,7 @@ def apply_cross_wallet_token_correlation(
                 demoted += 1
 
     if demoted > 0:
-        print(f"[Clustering] Cross-wallet token correlation: demoted {demoted} "
-              f"wallets with >{max_overlap_ratio*100:.0f}% token overlap")
+        logger.info("[Clustering] Cross-wallet token correlation: demoted %d "
+                    "wallets with >%.0f%% token overlap", demoted, max_overlap_ratio * 100)
 
     return demoted

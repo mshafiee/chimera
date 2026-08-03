@@ -14,8 +14,10 @@ Environment Variables:
 """
 
 import argparse
+import hashlib
 import json
 import logging
+import os
 import sqlite3
 import sys
 from datetime import datetime
@@ -72,6 +74,10 @@ class DataValidator:
             "wallets",
             "dead_letter_queue",
             "config_audit",
+            "circuit_breaker_state",
+            "kill_switch_state",
+            "admin_wallets",
+            "schema_migrations",
             "jito_tip_history",
             "reconciliation_log",
             "wallet_monitoring",
@@ -112,22 +118,25 @@ class DataValidator:
 
         return all_valid
 
-    def validate_checksums(self, table: str, key_column: str) -> bool:
+    @staticmethod
+    def _table_checksum(conn, table: str) -> str:
+        """Compute a deterministic md5 over the table's rows (Python-side, so
+        it works identically for SQLite and PostgreSQL)."""
+        hasher = hashlib.md5()
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT * FROM {table} ORDER BY 1")
+        for row in cursor.fetchall():
+            hasher.update(repr(tuple(row)).encode("utf-8", "replace"))
+        cursor.close()
+        return hasher.hexdigest()
+
+    def validate_checksums(self, table: str, key_column: str = None) -> bool:
         """Validate data checksums for a table."""
         logger.info(f"Validating checksums for {table}...")
 
         try:
-            # Get checksums from SQLite (simple row count + sum of IDs)
-            sqlite_cursor = self.sqlite_conn.execute(
-                f"SELECT MD5(GROUP_CONCAT(id)) FROM {table}"
-            )
-            sqlite_checksum = sqlite_cursor.fetchone()[0]
-
-            # Get checksums from PostgreSQL
-            pg_cursor = self.pg_conn.cursor()
-            pg_cursor.execute(f"SELECT MD5(ARRAY_AGG(id::TEXT ORDER BY id)) FROM {table}")
-            pg_checksum = pg_cursor.fetchone()[0]
-            pg_cursor.close()
+            sqlite_checksum = self._table_checksum(self.sqlite_conn, table)
+            pg_checksum = self._table_checksum(self.pg_conn, table)
 
             if sqlite_checksum == pg_checksum:
                 logger.info(f"✓ {table} checksums match")
@@ -139,7 +148,7 @@ class DataValidator:
                 return False
         except Exception as e:
             logger.warning(f"Could not validate checksums for {table}: {e}")
-            return True  # Don't fail on checksum errors
+            return False
 
 
 class MigrationRunner:
@@ -148,7 +157,7 @@ class MigrationRunner:
     def __init__(self, config: MigrationConfig):
         self.config = config
         self.sqlite_conn: Optional[sqlite3.Connection] = None
-        self.pg_conn = Optional[psycopg2.extensions.connection]
+        self.pg_conn: Optional[psycopg2.extensions.connection] = None
         self.validator: Optional[DataValidator] = None
 
         # Statistics
@@ -175,7 +184,9 @@ class MigrationRunner:
 
         # PostgreSQL
         self.pg_conn = psycopg2.connect(self.config.postgres_url)
-        self.pg_conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+        # Single transaction: commit only at the end so a mid-migration
+        # failure can be rolled back (the module docstring advertises
+        # rollback support)
         logger.info("Connected to PostgreSQL")
 
         self.validator = DataValidator(self.sqlite_conn, self.pg_conn)
@@ -193,20 +204,22 @@ class MigrationRunner:
 
         backup_path = f"backup_before_migration_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sql"
 
-        # Use pg_dump for backup
+        # Use pg_dump for backup (file handle managed by a context manager;
+        # a failed backup is fatal since the documented rollback relies on it)
         import subprocess
 
         try:
-            result = subprocess.run(
-                ["pg_dump", self.config.postgres_url],
-                stdout=open(backup_path, "w"),
-                check=True,
-            )
+            with open(backup_path, "w") as backup_file:
+                subprocess.run(
+                    ["pg_dump", self.config.postgres_url],
+                    stdout=backup_file,
+                    check=True,
+                )
             logger.info(f"Backup created: {backup_path}")
             return backup_path
         except Exception as e:
-            logger.warning(f"Could not create backup: {e}")
-            return ""
+            logger.error(f"Could not create backup: {e}")
+            raise
 
     def migrate_table(
         self,
@@ -224,7 +237,8 @@ class MigrationRunner:
             cursor = self.sqlite_conn.execute(f"SELECT * FROM {table_name} LIMIT 1")
             columns = [desc[0] for desc in cursor.description]
 
-            # Apply column mapping if provided
+            # Apply column mapping if provided (applied again per row below so
+            # the INSERT always uses the mapped names)
             if column_mapping:
                 columns = [column_mapping.get(col, col) for col in columns]
 
@@ -255,6 +269,10 @@ class MigrationRunner:
                         for col, transform in value_transforms.items():
                             if col in row_dict:
                                 row_dict[col] = transform(row_dict[col])
+
+                    # Apply column mapping so the INSERT references mapped names
+                    if column_mapping:
+                        row_dict = {column_mapping.get(k, k): v for k, v in row_dict.items()}
 
                     # Build insert query
                     cols = row_dict.keys()
@@ -342,7 +360,15 @@ class MigrationRunner:
             logger.error("Validator not initialized")
             return False
 
-        return self.validator.validate_table_counts()
+        counts_valid = self.validator.validate_table_counts()
+
+        # Spot-check checksums on the core tables
+        checksums_valid = True
+        for table in ("trades", "positions", "wallets"):
+            if not self.validator.validate_checksums(table):
+                checksums_valid = False
+
+        return counts_valid and checksums_valid
 
     def generate_report(self) -> Dict[str, Any]:
         """Generate migration report."""
@@ -422,10 +448,20 @@ def main():
             runner.backup_postgres()
 
         runner.migrate_all()
-        runner.validate()
+        valid = runner.validate()
+        if not valid:
+            runner.stats["errors"].append("Validation failed: row counts/checksums differ between SQLite and PostgreSQL")
+
+        # Commit the single transaction (rolled back automatically on error)
+        if not config.dry_run and runner.pg_conn:
+            runner.pg_conn.commit()
 
         report = runner.generate_report()
         runner.save_report(report)
+
+        if runner.stats["errors"]:
+            logger.error(f"Migration completed with errors: {json.dumps(report, indent=2)}")
+            sys.exit(1)
 
         logger.info("Migration completed successfully!")
         logger.info(f"Report: {json.dumps(report, indent=2)}")
@@ -434,12 +470,12 @@ def main():
 
     except Exception as e:
         logger.error(f"Migration failed: {e}")
+        if runner.pg_conn:
+            runner.pg_conn.rollback()
         sys.exit(1)
     finally:
         runner.close()
 
 
 if __name__ == "__main__":
-    import os
-
     main()

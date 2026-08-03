@@ -16,9 +16,21 @@
 //! Both the `import_keypair` tool and `load_wallet_keypair` route through this
 //! helper so the on-disk format stays unambiguous (hex) regardless of input.
 //!
-//! All intermediate buffers (the decoded `Vec<u8>` and the returned array) are
-//! wrapped in `Zeroizing` so the raw Ed25519 secret is wiped from memory on
-//! drop, not just the textual input.
+//! # Wipe guarantees
+//!
+//! Only the decoded `Vec<u8>` and the returned array are wrapped in
+//! `Zeroizing`; the textual input `&str` is borrowed (never wiped), and the
+//! decoder internals (`serde_json`/`hex`/`bs58`) and any temporary copies they
+//! make can hold secret bytes until their own drop. Callers needing a stronger
+//! guarantee must wipe their own source buffer.
+//!
+//! # Keypair validity
+//!
+//! The returned 64 bytes are NOT guaranteed to form a valid Ed25519 keypair
+//! (the 32-byte public half is not cross-checked against the secret half — a
+//! mismatched buffer is accepted by design, e.g. for legacy import formats).
+//! Callers that need a verifiably-consistent keypair must validate via
+//! `solana_sdk::signature::Keypair::try_from` before use.
 
 use crate::error::{AppError, AppResult};
 use zeroize::Zeroizing;
@@ -96,7 +108,7 @@ pub fn normalize_to_64_bytes(input: &str) -> AppResult<Zeroizing<[u8; 64]>> {
         return Err(AppError::Validation(format!(
             "Unrecognized keypair format (len={}). \
              Accepted formats: Solana CLI JSON byte-array (starts with '['), \
-             base58 (86-88 chars), or hex (128 chars).",
+             base58 (up to 88 chars, must decode to 64 bytes), or hex (128 chars).",
             trimmed.len()
         )));
     };
@@ -107,6 +119,18 @@ pub fn normalize_to_64_bytes(input: &str) -> AppResult<Zeroizing<[u8; 64]>> {
              (32-byte Ed25519 secret + 32-byte public key).",
             bytes.len()
         )));
+    }
+
+    // Reject all-zero secrets: a base58 string of 64 '1' characters (each '1'
+    // is base58 digit 0) decodes to 64 zero bytes and passes the length check,
+    // yet the Ed25519 secret half would be all zeros — a degenerate key that
+    // must never be imported as valid.
+    if bytes.iter().all(|&b| b == 0) {
+        return Err(AppError::Validation(
+            "Decoded keypair is all zeros — refusing to import a degenerate key. \
+             Check the keypair source for truncation or corruption."
+                .to_string(),
+        ));
     }
 
     let mut arr = Zeroizing::new([0u8; 64]);

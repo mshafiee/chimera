@@ -13,6 +13,7 @@ use parking_lot::RwLock;
 use rust_decimal::prelude::*;
 use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::time::interval;
@@ -42,6 +43,11 @@ const DECIMALS_TTL_SECS: i64 = 86400;
 /// stop-loss/momentum exits. 90s covers 3+ update intervals with margin while
 /// still bounding how old a price can be before risk checks refuse it.
 pub const STALENESS_THRESHOLD_SECS: i64 = 90;
+
+/// Upper age bound for the `get_sol_price_usd_fallback` path: an expired SOL
+/// price older than this is refused even as a "last known" value so stale
+/// prices are not fed into market-condition checks.
+const FALLBACK_MAX_AGE_SECS: i64 = 3600;
 
 /// Price entry in cache
 #[derive(Debug, Clone)]
@@ -86,14 +92,15 @@ struct PriceCacheInner {
     price_history: HashMap<String, VecDeque<(DateTime<Utc>, Decimal)>>,
     /// Decimals cache from Jupiter (token -> (decimals, fetched_at))
     decimals: HashMap<String, (u8, Instant)>,
-    /// Cache hit counter (for performance monitoring)
-    cache_hits: u64,
+    /// Cache hit counter (for performance monitoring) — atomic so hot-path
+    /// lookups can use the read lock only
+    cache_hits: AtomicU64,
     /// Cache miss counter (for performance monitoring)
-    cache_misses: u64,
+    cache_misses: AtomicU64,
     /// Decimals cache hit counter (for performance monitoring)
-    decimals_cache_hits: u64,
+    decimals_cache_hits: AtomicU64,
     /// Decimals cache miss counter (for performance monitoring)
-    decimals_cache_misses: u64,
+    decimals_cache_misses: AtomicU64,
 }
 
 /// Price cache for token prices
@@ -135,10 +142,10 @@ impl PriceCache {
                 prices: HashMap::new(),
                 price_history: HashMap::new(),
                 decimals: HashMap::new(),
-                cache_hits: 0,
-                cache_misses: 0,
-                decimals_cache_hits: 0,
-                decimals_cache_misses: 0,
+                cache_hits: AtomicU64::new(0),
+                cache_misses: AtomicU64::new(0),
+                decimals_cache_hits: AtomicU64::new(0),
+                decimals_cache_misses: AtomicU64::new(0),
             })),
             ttl: Duration::seconds(DEFAULT_CACHE_TTL_SECS),
             active_tokens: Arc::new(RwLock::new(Vec::new())),
@@ -158,10 +165,10 @@ impl PriceCache {
                 prices: HashMap::new(),
                 price_history: HashMap::new(),
                 decimals: HashMap::new(),
-                cache_hits: 0,
-                cache_misses: 0,
-                decimals_cache_hits: 0,
-                decimals_cache_misses: 0,
+                cache_hits: AtomicU64::new(0),
+                cache_misses: AtomicU64::new(0),
+                decimals_cache_hits: AtomicU64::new(0),
+                decimals_cache_misses: AtomicU64::new(0),
             })),
             ttl: Duration::seconds(DEFAULT_CACHE_TTL_SECS),
             active_tokens: Arc::new(RwLock::new(Vec::new())),
@@ -174,17 +181,26 @@ impl PriceCache {
 
     /// Create with custom TTL
     ///
-    /// Returns an error if the HTTP client cannot be built.
+    /// Returns an error if the HTTP client cannot be built or the TTL would
+    /// violate the module invariant `ttl >= STALENESS_THRESHOLD_SECS` (a TTL
+    /// below the staleness window would expire prices before the staleness
+    /// guard can extend them).
     pub fn with_ttl(ttl_secs: i64) -> Result<Self, PriceCacheError> {
+        if ttl_secs < STALENESS_THRESHOLD_SECS {
+            return Err(PriceCacheError::HttpError(format!(
+                "ttl_secs {} must be >= STALENESS_THRESHOLD_SECS ({})",
+                ttl_secs, STALENESS_THRESHOLD_SECS
+            )));
+        }
         Ok(Self {
             inner: Arc::new(RwLock::new(PriceCacheInner {
                 prices: HashMap::new(),
                 price_history: HashMap::new(),
                 decimals: HashMap::new(),
-                cache_hits: 0,
-                cache_misses: 0,
-                decimals_cache_hits: 0,
-                decimals_cache_misses: 0,
+                cache_hits: AtomicU64::new(0),
+                cache_misses: AtomicU64::new(0),
+                decimals_cache_hits: AtomicU64::new(0),
+                decimals_cache_misses: AtomicU64::new(0),
             })),
             ttl: Duration::seconds(ttl_secs),
             active_tokens: Arc::new(RwLock::new(Vec::new())),
@@ -197,12 +213,15 @@ impl PriceCache {
 
     /// Get price for a token
     pub fn get_price(&self, token_address: &str) -> Option<PriceEntry> {
-        let mut inner = self.inner.write();
+        // Read-only hot path: read lock only (counters are atomics), so
+        // concurrent readers never contend with each other or with the
+        // background updater's writes.
+        let inner = self.inner.read();
 
         let entry = match inner.prices.get(token_address) {
             Some(entry) => entry.clone(),
             None => {
-                inner.cache_misses += 1;
+                inner.cache_misses.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
         };
@@ -210,11 +229,11 @@ impl PriceCache {
         // Check if expired
         let age = Utc::now().signed_duration_since(entry.fetched_at);
         if age > self.ttl {
-            inner.cache_misses += 1;
+            inner.cache_misses.fetch_add(1, Ordering::Relaxed);
             return None;
         }
 
-        inner.cache_hits += 1;
+        inner.cache_hits.fetch_add(1, Ordering::Relaxed);
         Some(entry)
     }
 
@@ -392,7 +411,12 @@ impl PriceCache {
         self.get_price_usd(&self.sol_mint)
     }
 
-    /// Get last known non-zero SOL price in USD, even if the primary entry is expired
+    /// Get last known non-zero SOL price in USD, even if the primary entry is expired.
+    ///
+    /// Guards: never returns a zero price (a zero would be treated as a valid
+    /// SOL price by risk logic), and bounds the age to
+    /// [`FALLBACK_MAX_AGE_SECS`] so an hours-old price is not fed into
+    /// market-condition checks.
     pub fn get_sol_price_usd_fallback(&self) -> Option<Decimal> {
         if let Some(price) = self.get_sol_price_usd() {
             if !price.is_zero() {
@@ -400,7 +424,15 @@ impl PriceCache {
             }
         }
         let inner = self.inner.read();
-        inner.prices.get(&self.sol_mint).map(|p| p.price_usd)
+        let entry = inner.prices.get(&self.sol_mint)?;
+        if entry.price_usd.is_zero() {
+            return None;
+        }
+        let age = Utc::now().signed_duration_since(entry.fetched_at);
+        if age.num_seconds() > FALLBACK_MAX_AGE_SECS {
+            return None;
+        }
+        Some(entry.price_usd)
     }
 
     /// Get SOL price volatility (for market condition filtering)
@@ -411,35 +443,31 @@ impl PriceCache {
     /// Get token decimals from Jupiter cache.
     /// Returns None if token not in cache or cache entry expired.
     pub fn get_decimals(&self, token_address: &str) -> Option<u8> {
+        // Lookup path: read lock for the lookup + fallback; the write lock is
+        // reserved for the expired-entry removal and counter updates (atomics).
+        {
+            let inner = self.inner.read();
+
+            // Check decimals cache first
+            if let Some((decimals, fetched_at)) = inner.decimals.get(token_address) {
+                let elapsed = fetched_at.elapsed().as_secs() as i64;
+                if elapsed < DECIMALS_TTL_SECS {
+                    inner.decimals_cache_hits.fetch_add(1, Ordering::Relaxed);
+                    return Some(*decimals);
+                }
+            }
+
+            // Fallback: check if we have it in a recent price entry
+            if let Some(decimals) = inner.prices.get(token_address).and_then(|e| e.decimals) {
+                inner.decimals_cache_hits.fetch_add(1, Ordering::Relaxed);
+                return Some(decimals);
+            }
+        }
+
+        // Cache expired — remove the entry (best effort) and record a miss.
         let mut inner = self.inner.write();
-
-        // Check decimals cache first - copy values to release borrow before mutable operations
-        let (decimals_value, is_valid) = if let Some((decimals, fetched_at)) = inner.decimals.get(token_address) {
-            let elapsed = fetched_at.elapsed().as_secs() as i64;
-            (*decimals, elapsed < DECIMALS_TTL_SECS)
-        } else {
-            (0, false)
-        };
-
-        if is_valid {
-            inner.decimals_cache_hits += 1;
-            return Some(decimals_value);
-        }
-
-        // Cache expired - remove entry if it existed
-        if inner.decimals.contains_key(token_address) {
-            inner.decimals.remove(token_address);
-        }
-
-        // Fallback: check if we have it in a recent price entry
-        let price_decimals = inner.prices.get(token_address).and_then(|entry| entry.decimals);
-
-        if let Some(decimals) = price_decimals {
-            inner.decimals_cache_hits += 1;
-            return Some(decimals);
-        }
-
-        inner.decimals_cache_misses += 1;
+        inner.decimals.remove(token_address);
+        inner.decimals_cache_misses.fetch_add(1, Ordering::Relaxed);
         None
     }
 
@@ -539,6 +567,10 @@ impl PriceCache {
                 break;
             }
         }
+        // Supervisor exited: the updater is no longer running, so a later
+        // start_updater call can start a fresh one. (In the panic-restart path
+        // the flag intentionally stays set while the supervisor re-runs the loop.)
+        *self.updater_running.write() = false;
     }
 
     /// Inner price update loop (runs until cancellation or panic).
@@ -746,7 +778,16 @@ impl PriceCache {
         let mut results = Vec::new();
         let mut decimals_map = HashMap::new();
         for token in tokens {
-            if let Some(price_data) = data.data.get(token) {
+            if let Some(value) = data.data.get(token) {
+                // Per-token parse: an unparseable entry only skips that token
+                // (and is logged) instead of failing the whole batch.
+                let price_data: JupiterPriceData = match serde_json::from_value(value.clone()) {
+                    Ok(pd) => pd,
+                    Err(e) => {
+                        tracing::warn!(token = token, error = %e, "Token entry in Jupiter price response failed to parse — skipping");
+                        continue;
+                    }
+                };
                 // Jupiter returns price in USD as f64, convert to Decimal for precision
                 // Try from_f64_retain first for best precision, fall back to string conversion
                 let price = match Decimal::from_f64_retain(price_data.usdPrice) {
@@ -788,15 +829,20 @@ impl PriceCache {
             "Fetched prices from Jupiter"
         );
 
-        // If we got 0 prices but requested >0, log a clear error
+        // If we got 0 prices but requested >0, fail loudly so the caller can
+        // retry/fall back instead of silently letting the cache go stale.
         if results.is_empty() && !tokens.is_empty() {
             tracing::error!(
                 token_count = tokens.len(),
                 url = %url,
-                 "Jupiter price API returned 0 prices for {} requested tokens — \
-                  check API key and endpoint configuration. The token may have unreliable pricing and was omitted.",
+                "Jupiter price API returned 0 prices for {} requested tokens — \
+                 check API key and endpoint configuration. The token may have unreliable pricing and was omitted.",
                 tokens.len()
             );
+            return Err(PriceCacheError::HttpError(format!(
+                "Jupiter price API returned 0 prices for {} requested tokens",
+                tokens.len()
+            )));
         }
 
         Ok((results, decimals_map))
@@ -853,15 +899,16 @@ impl PriceCache {
             }
         }
 
-        let total_requests = inner.cache_hits + inner.cache_misses;
+        let total_requests = inner.cache_hits.load(Ordering::Relaxed)
+            + inner.cache_misses.load(Ordering::Relaxed);
         let hit_rate = if total_requests > 0 {
-            (inner.cache_hits as f64 / total_requests as f64) * 100.0
+            (inner.cache_hits.load(Ordering::Relaxed) as f64 / total_requests as f64) * 100.0
         } else {
             0.0
         };
 
         let miss_rate = if total_requests > 0 {
-            (inner.cache_misses as f64 / total_requests as f64) * 100.0
+            (inner.cache_misses.load(Ordering::Relaxed) as f64 / total_requests as f64) * 100.0
         } else {
             0.0
         };
@@ -871,13 +918,13 @@ impl PriceCache {
             valid_entries: valid_count,
             stale_entries: stale_count,
             tracked_tokens: self.active_tokens.read().len(),
-            total_hits: inner.cache_hits,
-            total_misses: inner.cache_misses,
+            total_hits: inner.cache_hits.load(Ordering::Relaxed),
+            total_misses: inner.cache_misses.load(Ordering::Relaxed),
             hit_rate,
             miss_rate,
             decimals_cache_entries: inner.decimals.len(),
-            decimals_cache_hits: inner.decimals_cache_hits,
-            decimals_cache_misses: inner.decimals_cache_misses,
+            decimals_cache_hits: inner.decimals_cache_hits.load(Ordering::Relaxed),
+            decimals_cache_misses: inner.decimals_cache_misses.load(Ordering::Relaxed),
         }
     }
 
@@ -957,11 +1004,14 @@ pub struct PriceCacheStats {
 }
 
 /// Jupiter Price API V3 response structure
-/// The API returns a flat map where keys are token addresses and values are price data
+/// The API returns a flat map where keys are token addresses and values are
+/// price data. Values are kept as raw JSON and parsed per-token so unknown
+/// top-level metadata fields (e.g. a request id or `timeTaken`) never fail
+/// the deserialization of the entire batch.
 #[derive(Debug, serde::Deserialize)]
 struct JupiterPriceResponse {
     #[serde(flatten)]
-    data: std::collections::HashMap<String, JupiterPriceData>,
+    data: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// Price data for a single token from Jupiter Price API V3
@@ -1058,19 +1108,46 @@ mod tests {
         );
         let data = res.unwrap();
         assert_eq!(data.data.len(), 2);
-        let sol = data
+        let sol_value = data
             .data
             .get("So11111111111111111111111111111111111111112")
             .unwrap();
+        let sol: JupiterPriceData = serde_json::from_value(sol_value.clone()).unwrap();
         assert_eq!(sol.usdPrice, 180.5);
-        let meme = data
+        let meme_value = data
             .data
             .get("32vUHPxVShN552WwJ36vWnxCoy34eTDHRiQwL6ZA3ntP")
             .unwrap();
+        let meme: JupiterPriceData = serde_json::from_value(meme_value.clone()).unwrap();
         assert_eq!(meme.usdPrice, 0.000046);
         assert!(meme.priceChange24h.is_none());
         assert!(meme.blockId.is_none());
         assert!(meme.liquidity.is_none());
+    }
+
+    /// Unknown top-level metadata fields must be tolerated: they cannot fail
+    /// the deserialization of the whole batch (regression for the old
+    /// `#[serde(flatten)]` into typed values).
+    #[test]
+    fn test_jupiter_price_response_tolerates_unknown_metadata_fields() {
+        let json_data = r#"{
+            "timeTaken": 12,
+            "requestId": "req-123",
+            "So11111111111111111111111111111111111111112": {
+                "usdPrice": 180.5,
+                "decimals": 9
+            }
+        }"#;
+        let res: JupiterPriceResponse = serde_json::from_str(json_data).unwrap();
+        let sol: JupiterPriceData = serde_json::from_value(
+            res.data
+                .get("So11111111111111111111111111111111111111112")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(sol.usdPrice, 180.5);
+        assert!(res.data.get("timeTaken").is_some(), "metadata field is kept in the map");
     }
 
     #[test]

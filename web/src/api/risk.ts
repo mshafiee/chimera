@@ -120,12 +120,17 @@ export interface SizeBucket {
   percentage: number
 }
 
+const PORTFOLIO_RISK_ENDPOINT = '/risk/portfolio'
+const STOP_LOSS_ENDPOINT = '/risk/stop-loss'
+const PROFIT_TARGET_ENDPOINT = '/risk/profit-target'
+const POSITION_SIZE_ENDPOINT = '/risk/position-size'
+
 // Fetch Portfolio Risk
 export function usePortfolioRisk() {
   return useQuery({
     queryKey: ['risk', 'portfolio'],
     queryFn: async ({ signal }) => {
-      const response = await apiClient.get<PortfolioRiskResponse>('/risk/portfolio', { signal })
+      const response = await apiClient.get<PortfolioRiskResponse>(PORTFOLIO_RISK_ENDPOINT, { signal })
       return response.data
     },
     refetchInterval: 15000,
@@ -135,12 +140,12 @@ export function usePortfolioRisk() {
 
 // Fetch Stop Loss Metrics
 export function useStopLossMetrics(timeRange?: string) {
+  const days = timeRangeToDays(timeRange)
   return useQuery({
-    queryKey: ['risk', 'stop-loss', timeRange],
+    queryKey: ['risk', 'stop-loss', days ?? 'all'],
     queryFn: async ({ signal }) => {
-      const days = timeRangeToDays(timeRange)
-      const response = await apiClient.get<StopLossMetricsResponse>('/risk/stop-loss', {
-        params: days ? { days } : undefined,
+      const response = await apiClient.get<StopLossMetricsResponse>(STOP_LOSS_ENDPOINT, {
+        params: { days },
         signal,
       })
       return response.data
@@ -151,12 +156,12 @@ export function useStopLossMetrics(timeRange?: string) {
 
 // Fetch Profit Target Metrics
 export function useProfitTargetMetrics(timeRange?: string) {
+  const days = timeRangeToDays(timeRange)
   return useQuery({
-    queryKey: ['risk', 'profit-targets', timeRange],
+    queryKey: ['risk', 'profit-targets', days ?? 'all'],
     queryFn: async ({ signal }) => {
-      const days = timeRangeToDays(timeRange)
-      const response = await apiClient.get<ProfitTargetMetricsResponse>('/risk/profit-target', {
-        params: days ? { days } : undefined,
+      const response = await apiClient.get<ProfitTargetMetricsResponse>(PROFIT_TARGET_ENDPOINT, {
+        params: { days },
         signal,
       })
       return response.data
@@ -170,15 +175,17 @@ export function usePositionSizeAnalysis() {
   return useQuery({
     queryKey: ['risk', 'position-size'],
     queryFn: async ({ signal }) => {
-      const response = await apiClient.get<PositionSizeAnalysisResponse>('/risk/position-size', { signal })
+      const response = await apiClient.get<PositionSizeAnalysisResponse>(POSITION_SIZE_ENDPOINT, { signal })
       return response.data
     },
     staleTime: 300000, // 5 minutes
   })
 }
 
-// Helper function to convert time range string to days
-function timeRangeToDays(range?: string): number {
+// Helper function to convert time range string to days.
+// Unknown/omitted ranges return undefined so the backend's default applies
+// instead of silently mapping every invalid value to 30 days.
+function timeRangeToDays(range?: string): number | undefined {
   switch (range) {
     case '24h':
       return 1
@@ -189,6 +196,6 @@ function timeRangeToDays(range?: string): number {
     case '90d':
       return 90
     default:
-      return 30
+      return undefined
   }
 }

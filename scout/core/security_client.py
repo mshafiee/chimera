@@ -106,8 +106,9 @@ class RugCheckClient:
         # Check L2 (Redis) cache first if available
         if CACHE_AVAILABLE and self._cache:
             try:
-                cache_key = f"token_security:{token_mint}"
-                cached_data = self._cache.get(cache_key, category=CacheCategory.TOKEN_SECURITY)
+                cached_data = self._cache.get(
+                    "token_security", token_mint, category=CacheCategory.TOKEN_SECURITY
+                )
                 if cached_data is not None:
                     cached_result = cached_data.copy()
                     cached_result["cached"] = True
@@ -156,7 +157,15 @@ class RugCheckClient:
                     
                     # Check specific flags
                     risk_names = [r.get('name', '') for r in risks if isinstance(r, dict)]
-                    has_mutable_metadata = any('MutableMetadata' in name or 'mutable' in name.lower() for name in risk_names)
+
+                    # Derive safety from a deny-list of dangerous flag names —
+                    # freeze authority / supply bundling in particular are
+                    # common rug-pull vectors and must influence the verdict
+                    dangerous_flags = ('MutableMetadata', 'FreezeAuthority', 'SupplyBundling', 'TopHoldersPercentage')
+                    has_dangerous_flag = any(
+                        any(f in name or f.lower() in name.lower() for f in dangerous_flags)
+                        for name in risk_names
+                    )
                     
                     # Check top holder concentration
                     top_holders_concentration = 0
@@ -174,7 +183,7 @@ class RugCheckClient:
                     high_concentration = top_holders_concentration > 80
                     
                     # Determine if safe
-                    is_safe = not (is_danger or has_mutable_metadata or high_concentration)
+                    is_safe = not (is_danger or has_dangerous_flag or high_concentration)
                     
                     result = {
                         "is_safe": is_safe,
@@ -184,7 +193,9 @@ class RugCheckClient:
                         "cache_level": "none"
                     }
                     
-                    # Cache in L1 (in-memory)
+                    # Cache in L1 (in-memory) with a size cap
+                    if len(self._l1_cache) >= 5000:
+                        self._evict_expired_l1()
                     self._l1_cache[token_mint] = {
                         "data": result.copy(),
                         "timestamp": datetime.now()
@@ -193,16 +204,28 @@ class RugCheckClient:
                     # Cache in L2 (Redis) if available
                     if CACHE_AVAILABLE and self._cache:
                         try:
-                            cache_key = f"token_security:{token_mint}"
-                            self._cache.set(cache_key, result, category=CacheCategory.TOKEN_SECURITY)
+                            self._cache.set(
+                                "token_security", token_mint, result,
+                                category=CacheCategory.TOKEN_SECURITY
+                            )
                         except Exception as e:
                             logger.warning(f"Failed to cache token security in L2 for {token_mint[:8]}...: {e}")
                     
                     return result
                     
                 elif response.status == 404:
-                    # Token not found in RugCheck - assume safe but log
+                    # Token not found in RugCheck. Honor the fail mode: with
+                    # fail_mode="closed" an unknown token is NOT safe (the API
+                    # cannot vouch for it), and the verdict is not cached.
                     logger.debug(f"Token {token_mint} not found in RugCheck")
+                    if self.fail_mode == "closed":
+                        return {
+                            "is_safe": False,
+                            "score": 9999,
+                            "risks": ["Token not found in RugCheck"],
+                            "cached": False,
+                            "cache_level": "none"
+                        }
                     result = {
                         "is_safe": True,  # Fail open for unknown tokens
                         "score": 0,
@@ -211,6 +234,8 @@ class RugCheckClient:
                         "cache_level": "none"
                     }
                     # Cache in L1
+                    if len(self._l1_cache) >= 5000:
+                        self._evict_expired_l1()
                     self._l1_cache[token_mint] = {
                         "data": result.copy(),
                         "timestamp": datetime.now()
@@ -218,10 +243,12 @@ class RugCheckClient:
                     # Cache in L2 if available
                     if CACHE_AVAILABLE and self._cache:
                         try:
-                            cache_key = f"token_security:{token_mint}"
-                            self._cache.set(cache_key, result, category=CacheCategory.TOKEN_SECURITY)
-                        except Exception:
-                            pass
+                            self._cache.set(
+                                "token_security", token_mint, result,
+                                category=CacheCategory.TOKEN_SECURITY
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to cache token security in L2 for {token_mint[:8]}...: {e}")
                     return result
                 else:
                     logger.warning(f"RugCheck API returned status {response.status} for token {token_mint}")
@@ -296,6 +323,16 @@ class RugCheckClient:
         risk = await self.get_token_risk(token_mint)
         return risk.get("is_safe", False)
     
+    def _evict_expired_l1(self) -> None:
+        """Sweep expired entries from the in-memory L1 cache."""
+        now = datetime.now()
+        expired = [
+            mint for mint, entry in self._l1_cache.items()
+            if now - entry["timestamp"] >= timedelta(hours=2)
+        ]
+        for mint in expired:
+            del self._l1_cache[mint]
+
     def clear_cache(self):
         """Clear the L1 risk assessment cache."""
         self._l1_cache.clear()
@@ -305,8 +342,8 @@ class RugCheckClient:
         self._l1_cache.clear()
         if CACHE_AVAILABLE and self._cache:
             try:
-                # Clear L2 cache by category
-                await self._cache.invalidate_by_category(CacheCategory.TOKEN_SECURITY)
-                logger.info("Cleared L2 Redis cache for TOKEN_SECURITY category")
+                # Clear L2 cache by category (sync method — no await)
+                self._cache.invalidate_category(CacheCategory.TOKEN_SECURITY)
+                logger.info("Cleared L2 cache for TOKEN_SECURITY category")
             except Exception as e:
                 logger.warning(f"Failed to clear L2 cache: {e}")

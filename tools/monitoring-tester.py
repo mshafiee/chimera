@@ -11,14 +11,14 @@ This tool validates:
 5. Integration with existing monitoring tools
 """
 
+import os
 import requests
 import json
 import sys
 import time
 import argparse
-from typing import Dict, List, Tuple, Any
+from typing import Dict, Any
 from urllib.parse import urljoin
-from dataclasses import dataclass
 from enum import Enum
 
 class TestResult(Enum):
@@ -27,27 +27,33 @@ class TestResult(Enum):
     WARN = "WARN"
     SKIP = "SKIP"
 
-@dataclass
-class Test:
-    name: str
-    category: str
-    description: str
-    function: callable
-    critical: bool = True
-
 class MonitoringGatewayTester:
     """Main tester class for monitoring gateway validation"""
 
-    def __init__(self, base_url: str = "https://localhost", verify_ssl: bool = False):
+    def __init__(self, base_url: str = "https://localhost", verify_ssl: bool = True):
         self.base_url = base_url
         self.verify_ssl = verify_ssl
         self.results = []
         self.performance_metrics = {}
 
-        # Test credentials (should match config)
-        self.admin_auth = ('admin', 'changeme_asap')
-        self.operator_auth = ('operator', 'changeme_asap')
-        self.viewer_auth = ('viewer', 'changeme_asap')
+        # Test credentials from the environment (never baked-in defaults).
+        # The suite is only meaningful when these match the deployed gateway.
+        gateway_user = os.getenv("GATEWAY_ADMIN_USER", "admin")
+        gateway_pass = os.getenv("GATEWAY_ADMIN_PASSWORD", "")
+        operator_user = os.getenv("GATEWAY_OPERATOR_USER", "operator")
+        operator_pass = os.getenv("GATEWAY_OPERATOR_PASSWORD", "")
+        viewer_user = os.getenv("GATEWAY_VIEWER_USER", "viewer")
+        viewer_pass = os.getenv("GATEWAY_VIEWER_PASSWORD", "")
+
+        if not (gateway_pass and operator_pass and viewer_pass):
+            raise SystemExit(
+                "Set GATEWAY_ADMIN_PASSWORD / GATEWAY_OPERATOR_PASSWORD / "
+                "GATEWAY_VIEWER_PASSWORD to the real deployed credentials"
+            )
+
+        self.admin_auth = (gateway_user, gateway_pass)
+        self.operator_auth = (operator_user, operator_pass)
+        self.viewer_auth = (viewer_user, viewer_pass)
 
     def log_test(self, test_name: str, result: TestResult, message: str, duration: float = 0.0, details: Dict = None):
         """Log test result"""
@@ -317,6 +323,10 @@ class MonitoringGatewayTester:
             else:
                 return TestResult.FAIL
 
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            self.log_test("Geographic Restrictions", TestResult.FAIL,
+                       f"Connection failed while testing geographic restrictions: {str(e)}")
+            return TestResult.FAIL
         except Exception as e:
             self.log_test("Geographic Restrictions", TestResult.WARN,
                        f"Test skipped (GeoIP may not be configured): {str(e)}")
@@ -331,27 +341,32 @@ class MonitoringGatewayTester:
                 return TestResult.SKIP
 
             url = urljoin(self.base_url, "/monitoring/prometheus/")
-            response = requests.get(url, auth=self.admin_auth, verify=self.verify_ssl, timeout=10)
+            # Certificate verification is the point of this test: always
+            # verify, regardless of the global --insecure flag
+            response = requests.get(url, auth=self.admin_auth, verify=True, timeout=10)
 
             if response.status_code == 200:
-                # Check if SSL was actually used
-                if response.url.startswith("https://"):
-                    self.log_test("SSL/TLS Connectivity", TestResult.PASS,
-                               "SSL/TLS connection successful", response.elapsed.total_seconds())
-                    return TestResult.PASS
-                else:
-                    self.log_test("SSL/TLS Connectivity", TestResult.WARN,
-                               "Connection not using HTTPS")
-                    return TestResult.WARN
+                self.log_test("SSL/TLS Connectivity", TestResult.PASS,
+                           "SSL/TLS connection successful with certificate verification",
+                           response.elapsed.total_seconds())
+                return TestResult.PASS
             else:
                 self.log_test("SSL/TLS Connectivity", TestResult.FAIL,
                            f"SSL connection failed: {response.status_code}")
                 return TestResult.FAIL
 
+        except requests.exceptions.SSLError as e:
+            self.log_test("SSL/TLS Connectivity", TestResult.FAIL,
+                       f"Certificate validation failed: {str(e)}")
+            return TestResult.FAIL
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            self.log_test("SSL/TLS Connectivity", TestResult.FAIL,
+                       f"TLS connection failed: {str(e)}")
+            return TestResult.FAIL
         except Exception as e:
-            self.log_test("SSL/TLS Connectivity", TestResult.WARN,
-                       f"SSL test inconclusive: {str(e)}")
-            return TestResult.WARN
+            self.log_test("SSL/TLS Connectivity", TestResult.FAIL,
+                       f"SSL test failed: {str(e)}")
+            return TestResult.FAIL
 
     def test_performance_benchmarks(self) -> TestResult:
         """Test performance benchmarks for monitoring access"""
@@ -368,6 +383,7 @@ class MonitoringGatewayTester:
 
                 # Make multiple requests to get average latency
                 times = []
+                endpoint_failed = False
                 for i in range(5):
                     start = time.time()
                     response = requests.get(url, auth=self.admin_auth, verify=self.verify_ssl, timeout=30)
@@ -376,7 +392,14 @@ class MonitoringGatewayTester:
                     if response.status_code == 200:
                         times.append((end - start) * 1000)  # Convert to ms
                     else:
+                        endpoint_failed = True
                         break
+
+                if endpoint_failed:
+                    # A downed endpoint must be surfaced, not silently dropped
+                    self.log_test(f"Performance - {endpoint}", TestResult.FAIL,
+                               f"Endpoint returned HTTP {response.status_code}")
+                    continue
 
                 if times:
                     avg_latency = sum(times) / len(times)
@@ -521,7 +544,7 @@ class MonitoringGatewayTester:
                        f"Integration test failed: {str(e)}")
             return TestResult.FAIL
 
-    def run_all_tests(self) -> Dict[str, Any]:
+    def run_all_tests(self, quick: bool = False) -> Dict[str, Any]:
         """Run all tests and generate summary"""
         print("🚀 Starting Chimera Monitoring Gateway Tests")
         print("=" * 60)
@@ -539,13 +562,17 @@ class MonitoringGatewayTester:
                 self.test_geographic_restrictions,
                 self.test_ssl_tls_connectivity
             ]),
-            ("Performance & Integration", [
+        ]
+
+        if quick:
+            print("⚡ Quick mode: skipping performance benchmarks and slow integration tests")
+        else:
+            tests.append(("Performance & Integration", [
                 self.test_performance_benchmarks,
                 self.test_prometheus_integration,
                 self.test_grafana_integration,
                 self.test_alertmanager_integration
-            ])
-        ]
+            ]))
 
         for category, test_group in tests:
             print(f"\n📋 {category}")
@@ -592,14 +619,14 @@ class MonitoringGatewayTester:
 def main():
     parser = argparse.ArgumentParser(description='Chimera Monitoring Gateway Tester')
     parser.add_argument('--url', default='https://localhost', help='Base URL of the monitoring gateway')
-    parser.add_argument('--verify-ssl', action='store_true', help='Verify SSL certificates')
+    parser.add_argument('--insecure', action='store_true', help='Disable TLS certificate verification (NOT recommended)')
     parser.add_argument('--output', help='Output results to JSON file')
     parser.add_argument('--quick', action='store_true', help='Run quick tests only')
 
     args = parser.parse_args()
 
-    tester = MonitoringGatewayTester(base_url=args.url, verify_ssl=args.verify_ssl)
-    results = tester.run_all_tests()
+    tester = MonitoringGatewayTester(base_url=args.url, verify_ssl=not args.insecure)
+    results = tester.run_all_tests(quick=args.quick)
 
     if args.output:
         with open(args.output, 'w') as f:

@@ -39,7 +39,7 @@ check_service_health() {
     local service_name=$1
     local health_url=$2
 
-    if curl -sf "${health_url}" > /dev/null 2>&1; then
+    if curl -sf --max-time 5 "${health_url}" > /dev/null 2>&1; then
         echo -e "${GREEN}✓${NC} ${service_name}"
         return 0
     else
@@ -50,28 +50,35 @@ check_service_health() {
 
 get_system_metrics() {
     local metrics_data=""
-    local health_check=0
+    local health_check=1
+    local cpu_usage="N/A"
+    local memory_usage="N/A"
+    local queue_depth="N/A"
+    local active_positions="N/A"
+    local trades_total="N/A"
+    local latency_avg="N/A"
+    local circuit_breaker="N/A"
 
     # Get metrics from operator
-    if curl -sf "http://localhost:8080/metrics" > /tmp/operator-metrics.txt 2>/dev/null; then
-        # Extract key metrics
-        local cpu_usage=$(grep "chimera_cpu_usage_percent" /tmp/operator-metrics.txt | cut -d' ' -f2 || echo "0")
-        local memory_usage=$(grep "chimera_memory_usage_percent" /tmp/operator-metrics.txt | cut -d' ' -f2 || echo "0")
-        local queue_depth=$(grep "chimera_queue_depth" /tmp/operator-metrics.txt | cut -d' ' -f2 || echo "0")
-        local active_positions=$(grep "chimera_active_positions" /tmp/operator-metrics.txt | cut -d' ' -f2 || echo "0")
-        local trades_total=$(grep "chimera_trades_total" /tmp/operator-metrics.txt | cut -d' ' -f2 || echo "0")
-        local latency_avg=$(grep "chimera_trade_latency_avg_ms" /tmp/operator-metrics.txt | cut -d' ' -f2 || echo "0")
-        local circuit_breaker=$(grep "chimera_circuit_breaker_state" /tmp/operator-metrics.txt | cut -d' ' -f2 || echo "0")
+    if curl -sf --max-time 5 "http://localhost:8080/metrics" > /tmp/operator-metrics.txt 2>/dev/null; then
+        # Extract key metrics: anchor to actual sample lines (the # HELP/# TYPE
+        # comment lines are skipped) and use N/A when a metric is absent
+        cpu_usage=$(awk '/^chimera_cpu_usage_percent /{print $2; exit}' /tmp/operator-metrics.txt)
+        cpu_usage="${cpu_usage:-N/A}"
+        memory_usage=$(awk '/^chimera_memory_usage_percent /{print $2; exit}' /tmp/operator-metrics.txt)
+        memory_usage="${memory_usage:-N/A}"
+        queue_depth=$(awk '/^chimera_queue_depth /{print $2; exit}' /tmp/operator-metrics.txt)
+        queue_depth="${queue_depth:-N/A}"
+        active_positions=$(awk '/^chimera_active_positions /{print $2; exit}' /tmp/operator-metrics.txt)
+        active_positions="${active_positions:-N/A}"
+        trades_total=$(awk '/^chimera_trades_total /{print $2; exit}' /tmp/operator-metrics.txt)
+        trades_total="${trades_total:-N/A}"
+        latency_avg=$(awk '/^chimera_trade_latency_avg_ms /{print $2; exit}' /tmp/operator-metrics.txt)
+        latency_avg="${latency_avg:-N/A}"
+        circuit_breaker=$(awk '/^chimera_circuit_breaker_state /{print $2; exit}' /tmp/operator-metrics.txt)
+        circuit_breaker="${circuit_breaker:-N/A}"
 
-        health_check=1
-    else
-        cpu_usage="N/A"
-        memory_usage="N/A"
-        queue_depth="N/A"
-        active_positions="N/A"
-        trades_total="N/A"
-        latency_avg="N/A"
-        circuit_breaker="N/A"
+        health_check=0
     fi
 
     # Get Docker stats
@@ -102,10 +109,11 @@ check_anomalies() {
 
     # Check evaluation database for recent anomalies
     if [ -f "${EVAL_DIR}/evaluation.db" ]; then
-        local last_hour=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)
+        local last_hour
+        last_hour=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)
 
-        anomaly_count=$(sqlite3 "${EVAL_DIR}/evaluation.db" "SELECT COUNT(*) FROM evaluation_anomalies WHERE resolved = 0;" 2>/dev/null || echo "0")
-        critical_count=$(sqlite3 "${EVAL_DIR}/evaluation.db" "SELECT COUNT(*) FROM evaluation_anomalies WHERE resolved = 0 AND severity = 'CRITICAL';" 2>/dev/null || echo "0")
+        anomaly_count=$(sqlite3 "${EVAL_DIR}/evaluation.db" "SELECT COUNT(*) FROM evaluation_anomalies WHERE resolved = 0 AND detected_at >= datetime('now','-1 hour');" 2>/dev/null || echo "0")
+        critical_count=$(sqlite3 "${EVAL_DIR}/evaluation.db" "SELECT COUNT(*) FROM evaluation_anomalies WHERE resolved = 0 AND severity = 'CRITICAL' AND detected_at >= datetime('now','-1 hour');" 2>/dev/null || echo "0")
     fi
 
     echo "${anomaly_count}|${critical_count}"
@@ -202,16 +210,17 @@ main() {
 
         # Service Health Check
         echo -e "${BLUE}[Service Health]${NC}"
-        check_service_health "Operator" "http://localhost:8080/api/v1/health"
-        check_service_health "Scout" "http://localhost:8081/health"
-        check_service_health "Prometheus Eval" "http://localhost:9091/-/healthy"
+        check_service_health "Operator" "http://localhost:8080/api/v1/health" || true
+        check_service_health "Scout" "http://localhost:8081/health" || true
+        check_service_health "Prometheus Eval" "http://localhost:9091/-/healthy" || true
         check_service_health "Vector" "http://localhost:8383/health" 2>/dev/null || echo -e "${YELLOW}?${NC} Vector"
         echo ""
 
         # System Metrics
         echo -e "${BLUE}[System Metrics]${NC}"
-        local metrics_output=$(get_system_metrics)
-        local metrics_health=$?
+        local metrics_output metrics_health
+        metrics_output=$(get_system_metrics)
+        metrics_health=$?
 
         echo "${metrics_output}"
         echo ""
@@ -221,21 +230,21 @@ main() {
         local memory_usage=$(echo "${metrics_output}" | grep "Memory Usage" | awk '{print $3}' | sed 's/%//')
         local queue_depth=$(echo "${metrics_output}" | grep "Queue Depth" | awk '{print $3}')
 
-        if [ "${metrics_health}" -eq 1 ]; then
+        if [ "${metrics_health}" -eq 0 ]; then
             # CPU Alert
-            if [ "${cpu_usage}" != "N/A" ] && [ "${cpu_usage}" -gt "${ALERT_THRESHOLD_CPU}" ]; then
+            if [ "${cpu_usage}" != "N/A" ] && [[ "${cpu_usage}" =~ ^[0-9]+([.][0-9]+)?$ ]] && [ "${cpu_usage%%.*}" -gt "${ALERT_THRESHOLD_CPU}" ]; then
                 echo -e "${RED}⚠️ CPU usage alert: ${cpu_usage}% exceeds ${ALERT_THRESHOLD_CPU}%${NC}"
                 send_alert "WARNING" "CPU usage (${cpu_usage}%) exceeds threshold (${ALERT_THRESHOLD_CPU}%)"
             fi
 
             # Memory Alert
-            if [ "${memory_usage}" != "N/A" ] && [ "${memory_usage}" -gt "${ALERT_THRESHOLD_MEMORY}" ]; then
+            if [ "${memory_usage}" != "N/A" ] && [[ "${memory_usage}" =~ ^[0-9]+([.][0-9]+)?$ ]] && [ "${memory_usage%%.*}" -gt "${ALERT_THRESHOLD_MEMORY}" ]; then
                 echo -e "${RED}⚠️ Memory usage alert: ${memory_usage}% exceeds ${ALERT_THRESHOLD_MEMORY}%${NC}"
                 send_alert "WARNING" "Memory usage (${memory_usage}%) exceeds threshold (${ALERT_THRESHOLD_MEMORY}%)"
             fi
 
             # Queue Depth Alert
-            if [ "${queue_depth}" != "N/A" ] && [ "${queue_depth}" -gt "${ALERT_THRESHOLD_QUEUE}" ]; then
+            if [ "${queue_depth}" != "N/A" ] && [[ "${queue_depth}" =~ ^[0-9]+([.][0-9]+)?$ ]] && [ "${queue_depth%%.*}" -gt "${ALERT_THRESHOLD_QUEUE}" ]; then
                 echo -e "${RED}⚠️ Queue depth alert: ${queue_depth} exceeds ${ALERT_THRESHOLD_QUEUE}${NC}"
                 send_alert "WARNING" "Queue depth (${queue_depth}) exceeds threshold (${ALERT_THRESHOLD_QUEUE})"
             fi
@@ -272,10 +281,10 @@ main() {
 
         # Disk space alert
         local disk_percent=$(echo "${disk_usage}" | sed 's/%//')
-        if [ "${disk_percent}" -gt 90 ]; then
+        if [[ "${disk_percent}" =~ ^[0-9]+([.][0-9]+)?$ ]] && [ "${disk_percent%%.*}" -gt 90 ]; then
             echo -e "${RED}⚠️ Disk usage critical: ${disk_usage}${NC}"
             send_alert "CRITICAL" "Disk usage (${disk_usage}) exceeds 90% - evaluation at risk"
-        elif [ "${disk_percent}" -gt 80 ]; then
+        elif [[ "${disk_percent}" =~ ^[0-9]+([.][0-9]+)?$ ]] && [ "${disk_percent%%.*}" -gt 80 ]; then
             echo -e "${YELLOW}⚠️ Disk usage warning: ${disk_usage}${NC}"
         fi
 

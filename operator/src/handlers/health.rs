@@ -122,14 +122,41 @@ pub async fn health_check(
     let now = Utc::now();
     let uptime = (now - state.started_at).num_seconds();
 
-    // Check database health
-    let db_health = check_database(state.db.as_ref(), &state.last_db_ok_epoch).await;
+    // Check database health — bounded by a timeout so a *hung* query cannot
+    // hang the health endpoint indefinitely (the grace window only applies
+    // to errors, not to stalls).
+    let db_health = match tokio::time::timeout(
+        tokio::time::Duration::from_secs(3),
+        check_database(state.db.as_ref(), &state.last_db_ok_epoch),
+    )
+    .await
+    {
+        Ok(h) => h,
+        Err(_) => {
+            tracing::error!("Database health check timed out");
+            ComponentHealth {
+                status: HealthStatus::Unhealthy,
+                message: Some("Database health check timed out".to_string()),
+            }
+        }
+    };
 
     // Get queue depth from engine
     let queue_depth = state.engine.queue_depth();
 
     // Get last trade timestamp
-    let last_trade_at = get_last_trade_time(state.db.as_ref()).await;
+    let last_trade_at = match tokio::time::timeout(
+        tokio::time::Duration::from_secs(3),
+        get_last_trade_time(state.db.as_ref()),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(_) => {
+            tracing::warn!("Last-trade query timed out");
+            None
+        }
+    };
 
     // Get RPC health from executor
     let rpc_health_result = state.engine.get_rpc_health().await;
@@ -170,11 +197,12 @@ pub async fn health_check(
         message: rpc_message,
     };
 
-    // Get circuit breaker status
+    // Get circuit breaker status — derive `trading_allowed` from the SAME
+    // snapshot so the response can never expose contradictory state.
     let cb_status = state.circuit_breaker.status();
     let circuit_breaker_health = CircuitBreakerHealth {
         state: cb_status.state.to_string(),
-        trading_allowed: state.circuit_breaker.is_trading_allowed(),
+        trading_allowed: cb_status.state == CircuitBreakerState::Active,
         trip_reason: cb_status.trip_reason,
         cooldown_remaining_secs: cb_status.cooldown_remaining_secs,
     };
@@ -186,11 +214,14 @@ pub async fn health_check(
         tracked_tokens: price_stats.tracked_tokens,
     };
 
-    // Determine overall status
-    let overall_status = if matches!(db_health.status, HealthStatus::Unhealthy) {
+    // Determine overall status. A complete RPC outage makes the node unable to
+    // trade, so it must surface as Unhealthy (not just Degraded) to load balancers.
+    let overall_status = if matches!(db_health.status, HealthStatus::Unhealthy)
+        || matches!(rpc_health.status, HealthStatus::Unhealthy)
+    {
         HealthStatus::Unhealthy
     } else if matches!(db_health.status, HealthStatus::Degraded)
-        || matches!(rpc_health.status, HealthStatus::Unhealthy)
+        || matches!(rpc_health.status, HealthStatus::Degraded)
         || queue_depth > 800
         || cb_status.state == CircuitBreakerState::Tripped
     {
@@ -231,8 +262,11 @@ pub async fn health_check(
 /// Simple health check (for load balancers)
 ///
 /// GET /health
-pub async fn health_simple() -> StatusCode {
-    StatusCode::OK
+/// Reuses the full health computation so a dead DB, tripped circuit breaker,
+/// or broken RPC actually surfaces as non-200 here too.
+pub async fn health_simple(State(state): State<Arc<AppState>>) -> StatusCode {
+    let (status_code, _) = health_check(State(state)).await;
+    status_code
 }
 
 /// Check database health
@@ -316,8 +350,11 @@ mod tests {
     #[test]
     fn test_determine_db_grace_status_exact_boundary() {
         let now = 1_000_000u64;
-        let (status, _msg) = determine_db_grace_status(now, now);
-        let (status2, _msg2) = determine_db_grace_status(now, now);
-        assert_eq!(status, status2);
+        // Just inside the window → Degraded
+        let (status, _msg) = determine_db_grace_status(now - (DB_GRACE_WINDOW_SECS - 1), now);
+        assert_eq!(status, HealthStatus::Degraded);
+        // At the window boundary → Unhealthy
+        let (status2, _msg2) = determine_db_grace_status(now - DB_GRACE_WINDOW_SECS, now);
+        assert_eq!(status2, HealthStatus::Unhealthy);
     }
 }

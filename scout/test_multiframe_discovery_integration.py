@@ -14,10 +14,24 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 import unittest
-from unittest.mock import Mock, AsyncMock, MagicMock, patch
+from unittest.mock import Mock, AsyncMock, patch
+
+import pytest
 
 # Add Scout directory to path
 sys.path.insert(0, str(Path(__file__).parent))
+
+
+@pytest.fixture(autouse=True)
+def _fake_state_db(fake_db_layer):
+    """Route StatePersistence to the in-memory SQLite stand-in.
+
+    The production ``_init_database`` path translates the schema to PostgreSQL
+    (``strftime('%s','now')`` -> ``EXTRACT(EPOCH FROM NOW())``); the fake DB
+    layer patches ``translate_ddl`` to identity so the native SQLite DDL is
+    applied as-is against the in-memory database.
+    """
+    return fake_db_layer
 
 # Import configuration
 try:
@@ -33,8 +47,6 @@ try:
         MultiTimeframeDiscovery,
         DiscoveryTimeframe,
         get_multi_timeframe_discovery,
-        TimeframeConfig,
-        TimeframeResult,
         MultiTimeframeResult
     )
     MULTITIMEFRAME_AVAILABLE = True
@@ -59,13 +71,17 @@ class TestMultiTimeframeConfiguration(unittest.TestCase):
     def setUp(self):
         """Set up test configuration."""
         if CONFIG_AVAILABLE and ScoutConfig:
-            # Set test environment variables
-            os.environ["SCOUT_MULTI_TIMEFRAME_ENABLED"] = "true"
-            os.environ["SCOUT_MULTI_TIMEFRAME_PARALLEL"] = "true"
-            os.environ["SCOUT_MULTI_TIMEFRAME_GOAL"] = "balanced"
-            os.environ["SCOUT_DISCOVERY_DEEP_HOURS"] = "720"
-            os.environ["SCOUT_DISCOVERY_FAST_HOURS"] = "24"
-            os.environ["SCOUT_DISCOVERY_TRENDING_HOURS"] = "4"
+            # Set test environment variables (restored automatically on teardown)
+            self._env_patch = patch.dict(os.environ, {
+                "SCOUT_MULTI_TIMEFRAME_ENABLED": "true",
+                "SCOUT_MULTI_TIMEFRAME_PARALLEL": "true",
+                "SCOUT_MULTI_TIMEFRAME_GOAL": "balanced",
+                "SCOUT_DISCOVERY_DEEP_HOURS": "720",
+                "SCOUT_DISCOVERY_FAST_HOURS": "24",
+                "SCOUT_DISCOVERY_TRENDING_HOURS": "4",
+            })
+            self._env_patch.start()
+            self.addCleanup(self._env_patch.stop)
 
     def test_multi_timeframe_enabled(self):
         """Test multi-timeframe enabled configuration."""
@@ -205,10 +221,15 @@ class TestMultiTimeframeExecution(unittest.TestCase):
 
             self.assertIsNotNone(result)
             self.assertIsInstance(result, MultiTimeframeResult)
-            self.assertGreater(len(result.timeframe_results), 0)
+            # Each requested timeframe must have been executed and contributed a result
+            self.assertEqual(self.mock_helius_client.discover_wallets.await_count, 2)
+            self.assertIn(DiscoveryTimeframe.DEEP, result.timeframe_results)
+            self.assertIn(DiscoveryTimeframe.FAST, result.timeframe_results)
+            self.assertNotIn(DiscoveryTimeframe.TRENDING, result.timeframe_results)
+            self.assertGreater(len(result.combined_wallets), 0)
             return result
 
-        result = asyncio.run(run_parallel_test())
+        asyncio.run(run_parallel_test())
 
     def test_sequential_execution(self):
         """Test sequential execution mode."""
@@ -223,9 +244,13 @@ class TestMultiTimeframeExecution(unittest.TestCase):
             )
 
             self.assertIsNotNone(result)
+            # Sequential mode must still run every requested timeframe
+            self.assertEqual(self.mock_helius_client.discover_wallets.await_count, 2)
+            self.assertIn(DiscoveryTimeframe.DEEP, result.timeframe_results)
+            self.assertIn(DiscoveryTimeframe.FAST, result.timeframe_results)
             return result
 
-        result = asyncio.run(run_sequential_test())
+        asyncio.run(run_sequential_test())
 
     def test_cross_timeframe_deduplication(self):
         """Test cross-timeframe deduplication."""
@@ -245,9 +270,11 @@ class TestMultiTimeframeExecution(unittest.TestCase):
 
             # Deduplication ratio should be reasonable (< 1.0)
             self.assertLess(result.deduplication_stats['deduplication_ratio'], 1.0)
+            # wallet1 appears in both DEEP and TRENDING responses - must be deduplicated
+            self.assertEqual(result.combined_wallets.count('wallet1'), 1)
             return result
 
-        result = asyncio.run(run_dedup_test())
+        asyncio.run(run_dedup_test())
 
 
 class TestStatePersistenceIntegration(unittest.TestCase):
@@ -272,7 +299,7 @@ class TestStatePersistenceIntegration(unittest.TestCase):
         if hasattr(self, 'temp_db') and self.temp_db:
             try:
                 os.unlink(self.temp_db.name)
-            except:
+            except OSError:
                 pass
 
     def test_save_multi_timeframe_stats(self):
@@ -344,13 +371,6 @@ class TestAnalyzerIntegration(unittest.TestCase):
         if not MULTITIMEFRAME_AVAILABLE or not STATE_PERSISTENCE_AVAILABLE:
             self.skipTest("Required components not available")
 
-        # Mock Helius client
-        self.mock_helius_client = Mock()
-        self.mock_helius_client.api_key = "test_key"
-        self.mock_helius_client.discover_wallets = AsyncMock(
-            return_value={"wallet1": 10, "wallet2": 8}
-        )
-
     def test_configuration_routing(self):
         """Test that configuration correctly routes to multi-timeframe system."""
         if not CONFIG_AVAILABLE or not ScoutConfig:
@@ -367,12 +387,9 @@ class TestAnalyzerIntegration(unittest.TestCase):
             self.skipTest("ScoutConfig not available")
 
         # Test that disabling multi-timeframe discovery falls back to manual
-        os.environ["SCOUT_MULTI_TIMEFRAME_ENABLED"] = "false"
-        mt_enabled = ScoutConfig.get_multi_timeframe_enabled()
-        self.assertFalse(mt_enabled, "Should be able to disable multi-timeframe discovery")
-
-        # Re-enable for other tests
-        os.environ["SCOUT_MULTI_TIMEFRAME_ENABLED"] = "true"
+        with patch.dict(os.environ, {"SCOUT_MULTI_TIMEFRAME_ENABLED": "false"}):
+            mt_enabled = ScoutConfig.get_multi_timeframe_enabled()
+            self.assertFalse(mt_enabled, "Should be able to disable multi-timeframe discovery")
 
 
 class TestCrossComponentIntegration(unittest.TestCase):
@@ -395,12 +412,9 @@ class TestCrossComponentIntegration(unittest.TestCase):
         valid_goals = ['quality', 'quantity', 'balanced', 'speed']
 
         for goal in valid_goals:
-            os.environ["SCOUT_MULTI_TIMEFRAME_GOAL"] = goal
-            current_goal = ScoutConfig.get_multi_timeframe_goal()
-            self.assertEqual(current_goal, goal)
-
-        # Reset to default
-        os.environ["SCOUT_MULTI_TIMEFRAME_GOAL"] = "balanced"
+            with patch.dict(os.environ, {"SCOUT_MULTI_TIMEFRAME_GOAL": goal}):
+                current_goal = ScoutConfig.get_multi_timeframe_goal()
+                self.assertEqual(current_goal, goal)
 
 
 def run_tests():
@@ -430,7 +444,11 @@ def run_tests():
         runner = unittest.TextTestRunner(verbosity=2)
         result = runner.run(suite)
 
-        all_results.append((test_class.__name__, result.wasSuccessful()))
+        # Skipped tests must NOT count as passed: the suite must give a real signal
+        all_results.append((test_class.__name__, result.wasSuccessful() and len(result.skipped) == 0))
+        if result.skipped:
+            for test, reason in result.skipped:
+                print(f"⚠ SKIPPED: {test} - {reason}")
 
     # Print summary
     print("\n" + "=" * 70)

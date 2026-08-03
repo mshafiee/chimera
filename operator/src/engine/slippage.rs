@@ -13,9 +13,14 @@
 //! # Model
 //! Preference order for the expected-impact fraction:
 //!   1. Jupiter's `priceImpactPct` from a live quote (most accurate), else
-//!   2. square-root market impact: `trade_usd / (2 × liquidity_usd)`, clamped to
-//!      `[0.1%, 15%]`, else
+//!   2. linear market-impact approximation: `trade_usd / (2 × liquidity_usd)`,
+//!      clamped to `[0.1%, 15%]`, else
 //!   3. config-based size-tier fallback.
+//!
+//! Note: the liquidity model is LINEAR in trade size (`trade_usd / (2 × liq)`),
+//! not an actual square-root impact model. For larger trades on thin books a
+//! linear model understates real impact, so the derived tolerance under-buffers
+//! exactly where reverts/MEV risk is highest (the 15% ceiling caps it).
 //!
 //! The tolerance is `expected × BUFFER_MULT + MIN_BUFFER` (≈ 2× the expected
 //! impact plus a 30 bps absolute cushion), then clamped to per-strategy bounds:
@@ -126,17 +131,31 @@ pub fn expected_fraction(
 ) -> Decimal {
     if let Some(pct) = jupiter_impact_pct {
         // pct is a percent (1.5 = 1.5%); convert to fraction.
+        // Clamp malformed (negative/absurd) feed values instead of trusting
+        // them: a negative impact would produce a negative cost estimate and
+        // a bps conversion failure below would widen the on-chain tolerance to
+        // the strategy maximum.
+        let pct = pct.max(Decimal::ZERO).min(Decimal::from(100));
         return pct / Decimal::from(100);
     }
 
     if let (Some(liq_usd), Some(sol_price)) = (liquidity_usd, sol_price_usd) {
         if sol_price > Decimal::ZERO && liq_usd > Decimal::ZERO {
-            let trade_usd = amount_sol * sol_price;
-            // Square-root market impact approximation, clamped to a sane range.
-            let est = (trade_usd / (Decimal::from(2) * liq_usd))
-                .max(LIQ_IMPACT_FLOOR)
-                .min(LIQ_IMPACT_CEIL);
-            return est;
+            // Linear market-impact approximation, clamped to a sane range.
+            // Checked arithmetic: a malformed/extreme feed value must degrade
+            // to the size-tier fallback, never panic the quoting task.
+            let est = amount_sol
+                .checked_mul(sol_price)
+                .and_then(|trade_usd| {
+                    trade_usd
+                        .checked_div(Decimal::from(2))
+                        .and_then(|half| half.checked_div(liq_usd))
+                })
+                .map(|est| est.max(LIQ_IMPACT_FLOOR).min(LIQ_IMPACT_CEIL));
+            if let Some(est) = est {
+                return est;
+            }
+            return fallback.fraction_for(amount_sol);
         }
     }
 
@@ -165,9 +184,15 @@ pub fn estimate(
     // tolerance = expected × BUFFER_MULT + MIN_BUFFER
     let tolerance_fraction = expected * Decimal::from_f64(BUFFER_MULT).unwrap_or(Decimal::ONE)
         + MIN_BUFFER;
-    let raw_bps = (tolerance_fraction * Decimal::from(10_000u64))
-        .to_u16()
-        .unwrap_or(bounds.ceil_bps);
+    // A negative/overflowing fraction must NOT widen the on-chain tolerance:
+    // fall back to the strategy floor (the tightest tolerance), never the
+    // ceiling. Legitimate large impacts still clamp up to the ceiling below.
+    let raw_bps = match (tolerance_fraction.checked_mul(Decimal::from(10_000u64)))
+        .and_then(|bps| bps.to_u16())
+    {
+        Some(bps) => bps,
+        None => bounds.floor_bps,
+    };
 
     let tolerance_bps = raw_bps.clamp(bounds.floor_bps, bounds.ceil_bps);
 

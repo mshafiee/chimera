@@ -6,8 +6,7 @@ Vybe Network provides free access to historical trade data for Solana DEXs.
 
 import requests
 import json
-import csv
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
 def download_vybe_historical_trades():
@@ -79,29 +78,29 @@ def download_vybe_historical_trades():
             trades_data = response.json()
             print(f"✅ Successfully fetched {len(trades_data.get('trades', []))} trades")
 
-            return convert_vybe_to_signals(trades_data)
+            return convert_vybe_to_signals(trades_data), None
 
         elif response.status_code == 401:
             print("⚠️  Authentication required for API access")
             print("💡 Sign up for free API key at: https://www.vybenetwork.com/")
-            return None
+            return None, "auth_required"
 
         elif response.status_code == 404:
             print("⚠️  Endpoint not found - API structure may have changed")
             print("💡 Check Vybe Network documentation for current endpoints")
-            return None
+            return None, "endpoint_changed"
 
         else:
             print(f"⚠️  API returned: {response.status_code} - {response.text[:100]}")
-            return None
+            return None, f"http_{response.status_code}"
 
     except requests.exceptions.RequestException as e:
         print(f"❌ Network error: {e}")
         print("💡 Check your internet connection")
-        return None
+        return None, "network_error"
     except Exception as e:
         print(f"❌ Error accessing Vybe API: {e}")
-        return None
+        return None, "unknown"
 
 def convert_vybe_to_signals(trades_data):
     """Convert Vybe Network trade data to our signal format."""
@@ -114,27 +113,50 @@ def convert_vybe_to_signals(trades_data):
 
     for trade in trades:
         try:
-            # Extract basic information
-            timestamp = trade.get("timestamp", trade.get("time", datetime.now().isoformat()))
+            # Skip records that lack the fields we need; never fabricate values
+            raw_ts = trade.get("timestamp") or trade.get("time") or ''
+            wallet = trade.get("wallet") or trade.get("trader") or trade.get("authority") or ''
+            token = trade.get("token_mint") or trade.get("mint") or ''
+            signature = trade.get("signature") or trade.get("tx_id") or ''
+            amount_raw = trade.get("amount", trade.get("quantity"))
 
-            # Determine action from trade data
-            amount = float(trade.get("amount", trade.get("quantity", 1)))
-            action = "buy" if amount > 0 else "sell"
+            if not raw_ts or not wallet or not token or amount_raw is None:
+                print("⚠️  Skipping trade: missing required fields")
+                continue
+
+            # Normalize timestamp to a string (API may return epoch or null)
+            if isinstance(raw_ts, (int, float)):
+                timestamp = datetime.fromtimestamp(raw_ts, tz=timezone.utc).isoformat()
+            else:
+                timestamp = str(raw_ts)
+
+            amount = float(amount_raw)
+
+            # Prefer the API's explicit direction field when present;
+            # otherwise only infer from the sign of a signed amount
+            direction = (trade.get("side") or trade.get("direction") or '').lower()
+            if direction in ("buy", "sell"):
+                action = direction
+            elif amount != 0:
+                action = "buy" if amount > 0 else "sell"
+            else:
+                print("⚠️  Skipping trade: cannot determine direction")
+                continue
 
             # Determine strategy based on amount
             strategy = "spear" if abs(amount) > 1.0 else "shield"
 
             signal = {
                 "timestamp": timestamp,
-                "wallet_address": trade.get("wallet", trade.get("trader", trade.get("authority", "unknown"))),
-                "token_address": trade.get("token_mint", trade.get("mint", "So11111111111111111111111111111111111111112")),
+                "wallet_address": wallet,
+                "token_address": token,
                 "action": action,
                 "amount_sol": abs(amount),
                 "strategy": strategy,
-                "price_usd": float(trade.get("price", trade.get("usd_price", 1.0))),
-                "market": trade.get("market", trade.get("dex", "unknown")),
+                "price_usd": float(trade.get("price") or trade.get("usd_price") or 1.0),
+                "market": trade.get("market") or trade.get("dex") or "unknown",
                 "source": "vybe_network_api",
-                "signature": trade.get("signature", trade.get("tx_id", ""))
+                "signature": signature
             }
 
             signals.append(signal)
@@ -184,7 +206,7 @@ def main():
     print("")
 
     # Download from Vybe Network
-    signals = download_vybe_historical_trades()
+    signals, failure_reason = download_vybe_historical_trades()
 
     if signals and len(signals) > 0:
         # Save the signals
@@ -198,12 +220,16 @@ def main():
             print(f"\n❌ ERROR: Failed to save signals")
             return 1
     else:
-        print(f"\n⚠️  Vybe Network API requires authentication")
-        print(f"💡 RECOMMENDED APPROACH:")
-        print(f"   1. Visit: https://www.vybenetwork.com/")
-        print(f"   2. Sign up for free API access")
-        print(f"   3. Download CSV files manually from their dashboard")
-        print(f"   4. Import the downloaded CSV into evaluation/signals/")
+        if failure_reason == "auth_required":
+            print(f"\n⚠️  Vybe Network API requires authentication")
+            print(f"💡 RECOMMENDED APPROACH:")
+            print(f"   1. Visit: https://www.vybenetwork.com/")
+            print(f"   2. Sign up for free API access")
+            print(f"   3. Download CSV files manually from their dashboard")
+            print(f"   4. Import the downloaded CSV into evaluation/signals/")
+        else:
+            print(f"\n⚠️  Vybe Network download failed: {failure_reason or 'no data'}")
+            print("💡 Check the error above (network, endpoint, or data availability)")
         print(f"\n💡 ALTERNATIVE: Use realistic synthetic data for evaluation")
         return 1
 

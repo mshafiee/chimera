@@ -73,14 +73,17 @@ class EvaluationMetricsProcessor:
 
                     # Parse metric line
                     # Format: metric_name{labels} value
-                    match = re.match(r'^(\w+)(\{.*?\})?\s+(.+)$', line)
+                    match = re.match(r'^([A-Za-z_:][A-Za-z0-9_:]*)(\{.*?\})?\s+(.+)$', line)
                     if match:
                         metric_name = match.group(1)
+                        labels = match.group(2) or ''
                         value = match.group(3)
 
-                        # Store the numeric value
+                        # Store the numeric value; keep labeled series separate
+                        # from unlabeled ones so they cannot overwrite each other
                         try:
-                            metrics[metric_name] = float(value)
+                            key = metric_name + labels
+                            metrics[key] = float(value)
                         except ValueError:
                             continue
 
@@ -104,17 +107,19 @@ class EvaluationMetricsProcessor:
             with open(stats_file, 'r') as f:
                 lines = f.readlines()
                 # Skip header line
+                # MemUsage renders as "10.2MiB / 100MiB" (contains a space), so a
+                # fixed split() index is unreliable; anchor on the percentage
+                # values instead (first token, CPU%, and trailing MemPerc%).
                 for line in lines[1:]:
-                    parts = line.split()
-                    if len(parts) >= 5:
-                        container_name = parts[0]
-                        cpu_percent = float(parts[1].rstrip('%'))
-                        memory_usage = parts[2]
-                        memory_percent = float(parts[3].rstrip('%'))
+                    match = re.match(r'^(\S+)\s+([0-9.]+)%\s+.*?\s+([0-9.]+)%$', line)
+                    if match:
+                        container_name = match.group(1)
+                        cpu_percent = float(match.group(2))
+                        memory_percent = float(match.group(3))
 
                         containers[container_name] = {
                             'cpu_percent': cpu_percent,
-                            'memory_usage': memory_usage,
+                            'memory_usage': line,
                             'memory_percent': memory_percent
                         }
         except Exception as e:
@@ -252,7 +257,8 @@ class EvaluationMetricsProcessor:
         snapshot_id: int,
         day_number: int,
         hour_number: int,
-        operator_metrics: Dict[str, Any]
+        operator_metrics: Dict[str, Any],
+        timestamp: str
     ) -> int:
         """Detect anomalies based on threshold checking and store them.
 
@@ -304,7 +310,10 @@ class EvaluationMetricsProcessor:
                     }
                     anomalies.append(anomaly)
 
-        # Store detected anomalies
+        # Store detected anomalies (stamped with the same UTC snapshot time
+        # as the snapshot row so the two tables align)
+        anomaly_time = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+
         stored_count = 0
         for anomaly in anomalies:
             try:
@@ -315,7 +324,7 @@ class EvaluationMetricsProcessor:
                         threshold_value, deviation_percent, related_snapshot_id
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
-                    datetime.now().isoformat(),
+                    anomaly_time,
                     day_number, hour_number,
                     'threshold_exceeded', anomaly['severity'],
                     anomaly['metric_name'], anomaly['value'],
@@ -415,6 +424,10 @@ class EvaluationMetricsProcessor:
                 except (json.JSONDecodeError, ValueError) as e:
                     print(f"Warning: Health status file is not valid JSON: {e}")
 
+            if not operator_metrics:
+                print("Warning: No operator metrics available; skipping snapshot for this cycle")
+                return False
+
             # Store evaluation snapshot
             snapshot_id = self.store_evaluation_snapshot(
                 day_number=day_number,
@@ -437,7 +450,8 @@ class EvaluationMetricsProcessor:
                         snapshot_id=snapshot_id,
                         day_number=day_number,
                         hour_number=hour_number,
-                        operator_metrics=operator_metrics
+                        operator_metrics=operator_metrics,
+                        timestamp=timestamp
                     )
             else:
                 print("Warning: Failed to store evaluation snapshot")

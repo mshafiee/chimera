@@ -33,8 +33,6 @@ logger = logging.getLogger(__name__)
 def train_all_models(
     db_path="data/chimera.db",
     output_dir="data/models",
-    optimize_hyperparams=False,
-    n_trials=50,
     target_column="roi_30d",
     min_trades=5,
     val_split=0.2
@@ -45,8 +43,6 @@ def train_all_models(
     Args:
         db_path: Path to SQLite database
         output_dir: Directory for saving trained models
-        optimize_hyperparams: Whether to run hyperparameter optimization
-        n_trials: Number of optimization trials
         target_column: Column name for target variable
         min_trades: Minimum number of trades required
         val_split: Validation split ratio
@@ -101,8 +97,9 @@ def train_all_models(
         logger.info(f"  Training samples: {xgb_results.get('training_samples')}")
         if 'metrics' in xgb_results and 'xgboost' in xgb_results['metrics']:
             metrics = xgb_results['metrics']['xgboost']
-            logger.info(f"  Train RMSE: {metrics.get('train_rmse', 'N/A'):.4f}")
-            logger.info(f"  Val RMSE: {metrics.get('val_rmse', 'N/A'):.4f}")
+            if 'train_rmse' in metrics and 'val_rmse' in metrics:
+                logger.info(f"  Train RMSE: {metrics['train_rmse']:.4f}")
+                logger.info(f"  Val RMSE: {metrics['val_rmse']:.4f}")
 
     # 4. Train LightGBM model
     logger.info("=" * 60)
@@ -125,8 +122,9 @@ def train_all_models(
         logger.info(f"  Training samples: {lgb_results.get('training_samples')}")
         if 'metrics' in lgb_results and 'lightgbm' in lgb_results['metrics']:
             metrics = lgb_results['metrics']['lightgbm']
-            logger.info(f"  Train RMSE: {metrics.get('train_rmse', 'N/A'):.4f}")
-            logger.info(f"  Val RMSE: {metrics.get('val_rmse', 'N/A'):.4f}")
+            if 'train_rmse' in metrics and 'val_rmse' in metrics:
+                logger.info(f"  Train RMSE: {metrics['train_rmse']:.4f}")
+                logger.info(f"  Val RMSE: {metrics['val_rmse']:.4f}")
 
     # 5. Train Meta-Learner (if both base models trained successfully)
     logger.info("=" * 60)
@@ -169,6 +167,13 @@ def train_all_models(
         'meta_learner': meta_results,
         'model_directory': str(output_path),
     }
+
+    # Propagate sub-model failures to the top level so CI/cron can detect them
+    if any(
+        'error' in r
+        for r in (xgb_results, lgb_results, meta_results)
+    ):
+        results['error'] = 'model_training_failed'
 
     # Determine best model
     best_model = None
@@ -217,9 +222,6 @@ Examples:
     # Train with custom database path
     python -m scout.scripts.train_ml_models --db-path /path/to/chimera.db
 
-    # Train without hyperparameter optimization (faster)
-    python -m scout.scripts.train_ml_models --no-optimize
-
     # Train with specific output directory
     python -m scout.scripts.train_ml_models --output-dir /path/to/models
         """
@@ -234,17 +236,6 @@ Examples:
         "--output-dir",
         default="data/models",
         help="Output directory for trained models (default: data/models)"
-    )
-    parser.add_argument(
-        "--no-optimize",
-        action="store_true",
-        help="Skip hyperparameter optimization (faster training)"
-    )
-    parser.add_argument(
-        "--n-trials",
-        type=int,
-        default=50,
-        help="Number of hyperparameter optimization trials (default: 50)"
     )
     parser.add_argument(
         "--target-column",
@@ -280,8 +271,6 @@ Examples:
         results = train_all_models(
             db_path=args.db_path,
             output_dir=args.output_dir,
-            optimize_hyperparams=not args.no_optimize,
-            n_trials=args.n_trials,
             target_column=args.target_column,
             min_trades=args.min_trades,
             val_split=args.val_split

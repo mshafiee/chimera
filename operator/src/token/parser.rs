@@ -351,11 +351,7 @@ impl TokenParser {
         let account_pubkeys: Vec<Pubkey> = largest_accounts
             .iter()
             .filter_map(|account| {
-                if let Ok(pubkey) = account.address.parse::<Pubkey>() {
-                    Some(pubkey)
-                } else {
-                    None
-                }
+                account.address.parse::<Pubkey>().ok()
             })
             .collect();
 
@@ -385,7 +381,7 @@ impl TokenParser {
             if let Some(account) = account_opt {
                 let owner = account.owner.to_string();
                 if !dex_programs.contains(&owner) {
-                    if let Some(ref token_account) = largest_accounts.get(i) {
+                    if let Some(token_account) = largest_accounts.get(i) {
                         if let Ok(amount) = token_account.amount.ui_amount_string.parse::<u64>() {
                             top_10_non_dex_amount += amount;
                             non_dex_count += 1;

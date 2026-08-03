@@ -1,18 +1,19 @@
 //! Fix-Verification Tests
 //!
 //! Each test asserts the CORRECT (post-fix) behavior for a documented bug.
-//! A FAILING test = the bug is not yet fixed.
-//! A PASSING test = the fix is in place and has not regressed.
+//! The bugs below are FIXED in the current codebase; these tests exist to
+//! prevent regressions:
 //!
-//! Bugs covered:
-//!   F3/F7 — Hard stop sign bug: default hard_stop_loss=15.0 (positive) fires on ALL losses
-//!   F4    — Trailing stop ratchet: stop_price never updates after initial activation
-//!   F6    — Silent status update: update_trade_status returns Ok on non-existent UUID
+//!   F3/F7 — Hard stop sign bug: default was +15.0 (positive) which fired on
+//!           EVERY losing position. Fix: default max_stop_loss_distance = -5.0.
+//!   F4    — Trailing stop ratchet: stop_price never updated after activation.
+//!   F6    — Silent status update: update_trade_status now returns
+//!           Err(NotFound) when rows_affected() == 0.
+//!
+//! If any of these tests fail, the corresponding bug has regressed.
 
 use chimera_operator::config::ProfitManagementConfig;
-use chimera_operator::db_abstraction::{
-    create_database, Database, DatabaseConfig, DbPool, InsertTrade, UpdateTradeStatus,
-};
+use chimera_operator::db_abstraction::{Database, DbPool, InsertTrade, UpdateTradeStatus};
 use chimera_operator::engine::profit_targets::{ProfitTargetAction, ProfitTargetManager};
 use chimera_operator::engine::stop_loss::{StopLossAction, StopLossManager};
 use chimera_operator::price_cache::{PriceCache, PriceSource};
@@ -21,13 +22,15 @@ use sqlx::Pool;
 use sqlx::Postgres;
 use std::str::FromStr;
 use std::sync::Arc;
-use tempfile::TempDir;
+
+#[path = "../common/mod.rs"]
+mod common;
 
 fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
-    match db.pool() {
-        DbPool::PostgreSQL(pool) => pool,
-        _ => panic!("test requires PostgreSQL backend"),
-    }
+    // DbPool is PostgreSQL-only (single variant): irrefutable destructure, no
+    // fallback panic arm (which would be unreachable).
+    let DbPool::PostgreSQL(pool) = db.pool();
+    pool
 }
 
 fn past_entry() -> chrono::DateTime<chrono::Utc> {
@@ -36,18 +39,17 @@ fn past_entry() -> chrono::DateTime<chrono::Utc> {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
-    let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
-    let db = create_database(&config).await.unwrap();
-    db.run_migrations().await.unwrap();
-    (db, temp_dir)
+async fn create_test_db() -> (Arc<dyn Database>, common::TestDbGuard) {
+    common::create_test_pg_db().await
 }
 
-#[allow(dead_code)]
-fn config_with_hard_stop(hard_stop: &str) -> Arc<ProfitManagementConfig> {
+/// A config with an explicit `max_stop_loss_distance` (negative; the config
+/// validator rejects positive values). A wide value (e.g. -50.0) lets the
+/// WQS-based dynamic thresholds operate instead of being clamped to the
+/// default -5.0.
+fn config_with_stop_distance(stop_distance: &str) -> Arc<ProfitManagementConfig> {
     Arc::new(ProfitManagementConfig {
-        max_stop_loss_distance: Decimal::from_str(hard_stop).unwrap(),
+        max_stop_loss_distance: Decimal::from_str(stop_distance).unwrap(),
         ..ProfitManagementConfig::default()
     })
 }
@@ -81,18 +83,12 @@ async fn seed_trade(db: &Arc<dyn Database>, trade_uuid: &str) {
     .unwrap();
 }
 
-// ─── F3/F7: Hard stop sign bug ───────────────────────────────────────────────
+// ─── F3/F7: Hard stop sign bug (FIXED) ────────────────────────────────────────
 
 #[tokio::test]
 async fn should_not_fire_hard_stop_at_2pct_loss_with_default_config() {
-    // BUG (F7): default hard_stop_loss = Decimal::from_str("15.0") (positive).
-    // Check: loss_percent <= hard_stop → -2.0 <= 15.0 → TRUE → exits EVERY losing position.
-    //
-    // Fix: hard_stop_loss default should be -15.0 (negative), OR the comparison
-    // should negate the config value: loss_percent <= -hard_stop_loss.
-    //
-    // This test asserts the CORRECT behavior: a 2% loss must NOT trigger the hard stop.
-    // It FAILS while the bug exists, and PASSES after the fix.
+    // F7 regression guard: the default max_stop_loss_distance is now -5.0
+    // (negative). A 2% loss must NOT trigger any stop.
 
     let (db, _tmp) = create_test_db().await;
     let pool = pg_pool(&db);
@@ -102,14 +98,11 @@ async fn should_not_fire_hard_stop_at_2pct_loss_with_default_config() {
 
     insert_wallet(&pool, WALLET, 75.0).await;
 
-    // Use DEFAULT config (hard_stop_loss = 15.0 with the bug, should be -15.0 after fix)
+    // Use the DEFAULT config (max_stop_loss_distance = -5.0 after the fix)
     let cfg = Arc::new(ProfitManagementConfig::default());
     let mgr = StopLossManager::new(db, cfg, price_cache.clone());
 
     // Entry = $100, Current = $98 → loss = -2%
-    // Dynamic threshold at WQS=75: -20% (not hit at -2%)
-    // Hard stop at -15% (after fix): not hit at -2%
-    // Hard stop at +15.0 (with bug): -2.0 <= 15.0 → EXIT fires → BUG
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("100.00").unwrap(),
@@ -136,20 +129,22 @@ async fn should_not_fire_hard_stop_at_2pct_loss_with_default_config() {
     assert_eq!(
         action,
         StopLossAction::None,
-        "A 2% loss must NOT trigger the hard stop (threshold is -15%, not +15%). \
-         BUG: hard_stop_loss default is 15.0 (positive) causing it to fire on any negative loss_percent."
+        "A 2% loss must NOT trigger any stop (default threshold is -5%)"
     );
 }
 
 #[tokio::test]
 async fn should_fire_dynamic_stop_at_21pct_loss_for_high_wqs_wallet() {
-    // With hard_stop_loss default changed to -25%, the WQS-based dynamic stop now has room
-    // to operate:
+    // With a wide max_stop_loss_distance the WQS-based dynamic stop operates:
     //   - WQS=75 → dynamic base = -20%
-    //   - effective_threshold = max(-20, -25) = -20%  (hard stop no longer overrides)
+    //   - effective threshold ≈ -18% (volatility × 0.9 with sub-10% vol)
     //
-    // Scenario A: -16% loss → -16% > -20% → no exit (dynamic stop not yet reached)
-    // Scenario B: -21% loss → -21% <= -20% → Exit   (dynamic stop fires correctly)
+    // Scenario A: -16% loss → -16% > -18% → no exit
+    // Scenario B: -21% loss → -21% <= -18% → Exit (dynamic stop fires)
+    //
+    // NOTE: with the DEFAULT max_stop_loss_distance (-5.0), every dynamic
+    // threshold is clamped to -5% — that is the config's intent (tight stops)
+    // and the "Adaptive stop-loss widening overridden" warning in the logs.
 
     let (db, _tmp) = create_test_db().await;
     let pool = pg_pool(&db);
@@ -159,10 +154,10 @@ async fn should_fire_dynamic_stop_at_21pct_loss_for_high_wqs_wallet() {
 
     insert_wallet(&pool, WALLET, 75.0).await; // High WQS → dynamic threshold = -20%
 
-    let cfg = Arc::new(ProfitManagementConfig::default()); // hard_stop = -25%
+    let cfg = config_with_stop_distance("-50.0");
     let mgr = StopLossManager::new(db, cfg, price_cache.clone());
 
-    // Scenario A: Entry = $100, Current = $84 → loss = -16% (not past -20% dynamic stop)
+    // Scenario A: Entry = $100, Current = $84 → loss = -16% (not past ~-18% dynamic stop)
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("84.00").unwrap(),
@@ -181,10 +176,10 @@ async fn should_fire_dynamic_stop_at_21pct_loss_for_high_wqs_wallet() {
     assert_eq!(
         action_a,
         StopLossAction::None,
-        "A -16% loss must NOT fire for a high-WQS wallet (dynamic stop = -20%)"
+        "A -16% loss must NOT fire for a high-WQS wallet (dynamic stop ≈ -18%)"
     );
 
-    // Scenario B: Entry = $100, Current = $79 → loss = -21% (past -20% dynamic stop)
+    // Scenario B: Entry = $100, Current = $79 → loss = -21% (past ~-18% dynamic stop)
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("79.00").unwrap(),
@@ -203,26 +198,22 @@ async fn should_fire_dynamic_stop_at_21pct_loss_for_high_wqs_wallet() {
     assert_eq!(
         action_b,
         StopLossAction::Exit,
-        "A -21% loss must trigger the dynamic stop (-20% threshold) for a high-WQS wallet"
+        "A -21% loss must trigger the dynamic stop (≈ -18% threshold) for a high-WQS wallet"
     );
 }
 
-// ─── F4: Trailing stop ratchet ───────────────────────────────────────────────
+// ─── F4: Trailing stop ratchet (FIXED) ────────────────────────────────────────
 
 #[tokio::test]
 async fn should_ratchet_trailing_stop_price_as_peak_rises() {
-    // BUG (F4): profit_targets.rs ~L216 checks `current_price > peak_price` AFTER
-    // peak_price was already set to current_price → condition is always FALSE.
-    // Result: trailing_stop_price never ratchets up after initial activation.
+    // F4 regression guard: the trailing stop must ratchet up as the peak
+    // rises (is_new_peak is captured before peak_price is overwritten).
     //
     // Sequence:
     //   Entry $1.00
-    //   Price $1.20 (+20%): trailing activates (activation=10%), stop locks at $0.96
-    //   Price $2.00 (+100%): new peak → correct stop = $2.00 × 0.80 = $1.60
-    //   Price $1.40: below $1.60 ratcheted stop → should Exit
-    //
-    // With bug: stop stays at $0.96 → $1.40 > $0.96 → no exit (loses $0.60/SOL of gain)
-    // After fix: stop ratchets to $1.60 → $1.40 < $1.60 → Exit (correct capital protection)
+    //   Price $1.20 (+20%): trailing activates (activation=10%), stop ≈ $0.96
+    //   Price $2.00 (+100%): new peak → stop ratchets to ≈ $1.60
+    //   Price $1.40: below ratcheted stop → must FullExit
 
     let (db, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new().unwrap());
@@ -260,7 +251,7 @@ async fn should_ratchet_trailing_stop_price_as_peak_rises() {
     );
     let _ = mgr.check_targets("uuid-ratchet-fix", TOKEN, "SHIELD").await;
 
-    // New peak at $2.00 → correct ratcheted stop = $1.60
+    // New peak at $2.00 → ratcheted stop ≈ $1.60
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("2.00").unwrap(),
@@ -269,7 +260,7 @@ async fn should_ratchet_trailing_stop_price_as_peak_rises() {
     );
     let _ = mgr.check_targets("uuid-ratchet-fix", TOKEN, "SHIELD").await;
 
-    // Price falls to $1.40 — below ratcheted stop $1.60 → must Exit
+    // Price falls to $1.40 — below ratcheted stop ≈ $1.60 → must Exit
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("1.40").unwrap(),
@@ -280,30 +271,23 @@ async fn should_ratchet_trailing_stop_price_as_peak_rises() {
 
     assert!(
         matches!(action, ProfitTargetAction::FullExit),
-        "After ratchet fix: price $1.40 < ratcheted trailing stop $1.60 must trigger FullExit. \
-         BUG: stop_price locked at $0.96 (activation-time peak) instead of ratcheting to $1.60."
+        "Price $1.40 < ratcheted trailing stop ≈ $1.60 must trigger FullExit"
     );
 }
 
-// ─── F6: Silent status update ─────────────────────────────────────────────────
+// ─── F6: Silent status update (FIXED) ─────────────────────────────────────────
 
 #[tokio::test]
 async fn should_return_error_on_status_update_for_missing_uuid() {
-    // BUG (F6): update_trade_status executes UPDATE ... WHERE trade_uuid=?
-    // and calls .execute() which returns QueryResult with rows_affected().
-    // The current code does NOT check rows_affected() — returns Ok(()) even
-    // when UUID does not exist, causing phantom state transitions.
-    //
-    // Fix: after execute(), check rows_affected() == 0 → return Err(AppError::NotFound)
-    //
-    // This test calls update_trade_status with a nonexistent UUID and asserts Err.
-    // It FAILS while the bug exists (returns Ok), PASSES after the fix.
+    // F6 regression guard: update_trade_status returns Err(NotFound) when
+    // rows_affected() == 0, so callers can detect phantom state transitions.
 
     let (db, _tmp) = create_test_db().await;
 
     let result = db
         .update_trade_status(&UpdateTradeStatus {
-            trade_uuid: "00000000-0000-0000-0000-nonexistent00".to_string(),
+            // Well-formed UUID that does not exist in the database.
+            trade_uuid: "00000000-0000-0000-0000-000000000000".to_string(),
             status: "QUEUED".to_string(),
             tx_signature: None,
             error_message: None,
@@ -313,15 +297,13 @@ async fn should_return_error_on_status_update_for_missing_uuid() {
 
     assert!(
         result.is_err(),
-        "update_trade_status must return Err when the trade_uuid does not exist. \
-         BUG: currently returns Ok(()) silently, allowing phantom state transitions."
+        "update_trade_status must return Err when the trade_uuid does not exist"
     );
 }
 
 #[tokio::test]
 async fn should_succeed_on_status_update_for_existing_trade() {
-    // Complement to F6: verify the fix does not break the happy path.
-    // A real UUID must still return Ok(()).
+    // Complement to F6: the fix must not break the happy path.
 
     let (db, _tmp) = create_test_db().await;
     let uuid = "aaaabbbb-cccc-dddd-eeee-ffffffffffff";
@@ -352,47 +334,23 @@ async fn should_succeed_on_status_update_for_existing_trade() {
     assert_eq!(status, "QUEUED", "Trade status must be updated to QUEUED");
 }
 
-/// Test Issue 4: Log pruning uses correct directory path
-///
-/// Verify that log pruning uses CHIMERA_LOG_DIR env var or /app/data/logs default,
-/// not the incorrect "logs" path that caused "df output missing data line" error.
-#[test]
-fn test_log_pruning_uses_correct_directory_path() {
-    use std::path::PathBuf;
+/// Log pruning must run through the real pruning entry point
+/// (`engine::prune_logs_if_needed`) with an injectable directory — no
+/// process-global env mutation. The CHIMERA_LOG_DIR env resolution itself
+/// lives in main.rs and is outside the testable library surface; on a healthy
+/// disk the pruning call is a no-op (Ok), and the deletion path only activates
+/// under disk pressure.
+#[tokio::test]
+async fn test_log_pruning_uses_correct_directory_path() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("operator.log"), "test log").unwrap();
 
-    // Test with CHIMERA_LOG_DIR environment variable set
-    std::env::set_var("CHIMERA_LOG_DIR", "/custom/logs/path");
-    let log_dir = std::env::var("CHIMERA_LOG_DIR")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "/app/data/logs".into());
-    assert_eq!(log_dir, "/custom/logs/path",
-        "Should use CHIMERA_LOG_DIR when set");
+    let result = chimera_operator::engine::prune_logs_if_needed(dir.path(), 7).await;
+    assert!(
+        result.is_ok(),
+        "prune_logs_if_needed must complete without error for a valid log dir"
+    );
 
-    // Test with empty CHIMERA_LOG_DIR (falls back to default)
-    std::env::set_var("CHIMERA_LOG_DIR", "");
-    let log_dir = std::env::var("CHIMERA_LOG_DIR")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "/app/data/logs".into());
-    assert_eq!(log_dir, "/app/data/logs",
-        "Should use default /app/data/logs when CHIMERA_LOG_DIR is empty");
-
-    // Test with CHIMERA_LOG_DIR unset (falls back to default)
-    std::env::remove_var("CHIMERA_LOG_DIR");
-    let log_dir = std::env::var("CHIMERA_LOG_DIR")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "/app/data/logs".into());
-    assert_eq!(log_dir, "/app/data/logs",
-        "Should use default /app/data/logs when CHIMERA_LOG_DIR is unset");
-
-    // Verify the fix resolves to /app/data/logs, not "logs" (which fails)
-    assert_ne!(log_dir, "logs",
-        "Should NOT resolve to relative 'logs' path (bug behavior)");
-    assert!(log_dir.starts_with('/'),
-        "Should resolve to absolute path starting with /");
-
-    // Cleanup
-    std::env::remove_var("CHIMERA_LOG_DIR");
+    // The active log file must never be pruned.
+    assert!(dir.path().join("operator.log").exists());
 }

@@ -1,26 +1,44 @@
 #!/bin/bash
 # Quick setup helper for evaluation credentials
 
+set -euo pipefail
+
 echo "🔧 Chimera 10-Day Evaluation - Credential Setup Helper"
 echo "====================================================="
 echo ""
 
+# Prerequisites
+if ! command -v openssl >/dev/null 2>&1; then
+    echo "Error: openssl is required to generate secrets" >&2
+    exit 1
+fi
+if [ ! -d docker ]; then
+    echo "Error: docker/ directory not found (run this script from the repo root)" >&2
+    exit 1
+fi
+
 # Generate webhook secret
 echo "1. Generating Webhook Secret..."
 WEBHOOK_SECRET=$(openssl rand -hex 32)
-echo "   Generated secret: ${WEBHOOK_SECRET:0:16}..."
+echo "   Webhook secret: ******** (saved in docker/env.evaluation.local)"
 echo ""
 
 # Suggest secure passwords
 echo "2. Generating secure passwords..."
 POSTGRES_PASSWORD=$(openssl rand -base64 16 | tr -d '=+/' | cut -c1-16)
 GRAFANA_PASSWORD=$(openssl rand -base64 16 | tr -d '=+/' | cut -c1-16)
-echo "   PostgreSQL password: ${POSTGRES_PASSWORD}"
-echo "   Grafana password: ${GRAFANA_PASSWORD}"
+echo "   PostgreSQL password: ******** (saved in docker/env.evaluation.local)"
+echo "   Grafana password: ******** (saved in docker/env.evaluation.local)"
 echo ""
 
 # Create template
 echo "3. Creating configuration template..."
+if [ -f docker/env.evaluation.local ]; then
+    cp docker/env.evaluation.local "docker/env.evaluation.local.bak.$(date +%s)"
+    echo "   Backed up existing configuration"
+fi
+
+umask 077
 cat > docker/env.evaluation.local << EOF
 # Chimera Evaluation Local Configuration
 # Generated: $(date)
@@ -66,6 +84,7 @@ CHIMERA_SECURITY__WEBHOOK_SECRET=${WEBHOOK_SECRET}
 SIGNAL_PROVIDER_URL=https://your-signal-provider.com/webhook
 SIGNAL_PROVIDER_API_KEY=your_signal_provider_api_key_if_needed
 EOF
+chmod 600 docker/env.evaluation.local
 
 echo "   ✅ Template created: docker/env.evaluation.local"
 echo ""

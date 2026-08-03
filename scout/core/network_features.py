@@ -42,7 +42,7 @@ class NetworkFeatures:
 
     def __init__(self):
         """Initialize network features."""
-        self.graph_cache = {}
+        pass
 
     def extract_features(
         self,
@@ -166,7 +166,8 @@ class NetworkFeatures:
         self,
         wallet_address: str,
         token_holdings: Dict[str, float],
-        known_successful_wallets: List[str]
+        known_successful_wallets: List[str],
+        successful_wallet_holdings: Optional[Dict[str, Dict[str, float]]] = None
     ) -> Dict[str, float]:
         """
         Calculate token co-holding patterns with successful wallets.
@@ -175,6 +176,8 @@ class NetworkFeatures:
             wallet_address: Wallet to analyze
             token_holdings: This wallet's token holdings
             known_successful_wallets: List of successful wallet addresses
+            successful_wallet_holdings: Optional map of successful wallet ->
+                its token holdings (real intersections require this)
 
         Returns:
             Dictionary of co-holding features
@@ -184,14 +187,21 @@ class NetworkFeatures:
         if not token_holdings or not known_successful_wallets:
             return features
 
+        # Without the successful wallets' actual holdings we cannot compute a
+        # real overlap — emit nothing rather than a fabricated constant 1.0.
+        if not successful_wallet_holdings:
+            features['successful_wallets_analyzed'] = 0
+            return features
+
         # Calculate overlap with each successful wallet
         overlaps = []
         for success_wallet in known_successful_wallets:
-            # In production, you'd fetch their holdings
-            # For now, calculate based on shared tokens
-            shared_tokens = set(token_holdings.keys())
-
-            # Simulated overlap (in production, use actual data)
+            if success_wallet == wallet_address:
+                continue
+            success_holdings = successful_wallet_holdings.get(success_wallet, {})
+            if not success_holdings:
+                continue
+            shared_tokens = set(token_holdings.keys()) & set(success_holdings.keys())
             overlap_score = len(shared_tokens) / max(1, len(token_holdings))
             overlaps.append(overlap_score)
 
@@ -263,14 +273,23 @@ class NetworkFeatures:
         try:
             G = self._build_graph(transaction_graph)
 
+            # Prune weak edges so the threshold parameter is actually used:
+            # a single weakly-connected chain must not merge legitimate
+            # wallets into one giant flagged component.
+            G.remove_edges_from(
+                (u, v) for u, v, d in G.edges(data=True)
+                if d.get('weight', 1.0) < threshold
+            )
+
             # Use connected components or community detection
             communities = nx.connected_components(G)
 
             sybil_clusters = {}
+            wallet_set = set(wallet_addresses)
 
             for i, community in enumerate(communities):
-                # Filter to wallets in our list
-                community_wallets = [w for w in community if w in wallet_addresses]
+                # Filter to wallets in our list (O(1) set membership)
+                community_wallets = [w for w in community if w in wallet_set]
 
                 if len(community_wallets) > 3:  # Suspicious cluster
                     sybil_clusters[f'cluster_{i}'] = community_wallets
@@ -421,53 +440,63 @@ class NetworkFeatures:
                 wallet_addresses, wallet_trades_map
             )
 
+            # Holdings per wallet, for real co-holding intersections
+            all_holdings = {
+                wallet: self._extract_token_holdings(wallet_trades_map.get(wallet, []))
+                for wallet in wallet_addresses
+            }
+
+            # Global graph metrics: compute ONCE, index per wallet inside the
+            # loop (they are identical across iterations)
+            pagerank = nx.pagerank(G, max_iter=100) if G.number_of_nodes() > 0 else {}
+            degree = nx.degree_centrality(G) if G.number_of_nodes() > 0 else {}
+            betweenness = (
+                nx.betweenness_centrality(G)
+                if 0 < G.number_of_nodes() < 100 else {}
+            )
+            clustering = nx.clustering(G) if G.number_of_nodes() > 0 else {}
+
+            # Community map (once per batch, not per wallet)
+            community_map = {}
+            if 0 < G.number_of_nodes() < 500:
+                try:
+                    communities = nx.algorithms.community.greedy_modularity_communities(G)
+                    community_map = {
+                        node: (i, len(c))
+                        for i, c in enumerate(communities)
+                        for node in c
+                    }
+                except Exception as e:
+                    logger.debug(f"Community detection failed: {e}")
+
             # Extract features for each wallet
             for wallet_address in wallet_addresses:
                 features = {}
 
-                # Centrality features
+                # Centrality features (indexed from the precomputed maps)
                 if wallet_address in G.nodes:
                     try:
-                        # PageRank centrality
-                        pagerank = nx.pagerank(G, max_iter=100)
                         features['pagerank_centrality'] = float(pagerank.get(wallet_address, 0.0))
-
-                        # Degree centrality
-                        degree = nx.degree_centrality(G)
                         features['degree_centrality'] = float(degree.get(wallet_address, 0.0))
-
-                        # Betweenness centrality (for smaller graphs)
-                        if G.number_of_nodes() < 100:
-                            betweenness = nx.betweenness_centrality(G)
+                        if 0 < G.number_of_nodes() < 100:
                             features['betweenness_centrality'] = float(betweenness.get(wallet_address, 0.0))
-
-                        # Clustering coefficient
-                        clustering = nx.clustering(G)
                         features['local_clustering'] = float(clustering.get(wallet_address, 0.0))
-
                     except Exception as e:
                         logger.debug(f"Centrality calculation failed for {wallet_address[:8]}: {e}")
 
-                # Token co-holding with successful wallets
-                if wallet_address in successful_wallets or successful_wallets:
-                    trades = wallet_trades_map.get(wallet_address, [])
-                    token_holdings = self._extract_token_holdings(trades)
-                    coholding_score = self._calculate_coholding_with_successful(
-                        wallet_address, token_holdings, successful_wallets, wallet_trades_map
+                # Token co-holding with successful wallets (real intersections)
+                if successful_wallets:
+                    token_holdings = all_holdings.get(wallet_address, {})
+                    coholding_score = self._calculate_coholding_patterns(
+                        wallet_address, token_holdings, successful_wallets, all_holdings
                     )
                     features.update(coholding_score)
 
-                # Community detection
-                if G.number_of_nodes() < 500 and wallet_address in G.nodes:
-                    try:
-                        communities = nx.algorithms.community.greedy_modularity_communities(G)
-                        for i, community in enumerate(communities):
-                            if wallet_address in community:
-                                features['community_id'] = int(i)
-                                features['community_size'] = len(community)
-                                break
-                    except Exception as e:
-                        logger.debug(f"Community detection failed: {e}")
+                # Community membership (from the precomputed map)
+                if wallet_address in community_map:
+                    cid, csize = community_map[wallet_address]
+                    features['community_id'] = int(cid)
+                    features['community_size'] = csize
 
                 network_features[wallet_address] = features
 
@@ -565,40 +594,6 @@ class NetworkFeatures:
             if token and amount > 0:
                 token_amounts[token] = token_amounts.get(token, 0) + amount
         return token_amounts
-
-    def _calculate_coholding_with_successful(
-        self,
-        wallet_address: str,
-        token_holdings: Dict[str, float],
-        successful_wallets: List[str],
-        wallet_trades_map: Dict[str, List[Dict[str, Any]]]
-    ) -> Dict[str, float]:
-        """Calculate token co-holding metrics with successful wallets."""
-        features = {}
-
-        if not token_holdings or not successful_wallets:
-            return features
-
-        overlaps = []
-        for success_wallet in successful_wallets:
-            if success_wallet == wallet_address:
-                continue
-
-            success_trades = wallet_trades_map.get(success_wallet, [])
-            success_holdings = self._extract_token_holdings(success_trades)
-
-            if success_holdings:
-                shared_tokens = set(token_holdings.keys()) & set(success_holdings.keys())
-                if token_holdings:
-                    overlap_score = len(shared_tokens) / len(token_holdings)
-                    overlaps.append(overlap_score)
-
-        if overlaps:
-            features['avg_coholding_with_successful'] = float(np.mean(overlaps))
-            features['max_coholding_with_successful'] = float(np.max(overlaps))
-            features['successful_wallets_analyzed'] = len(overlaps)
-
-        return features
 
 
 # Convenience function

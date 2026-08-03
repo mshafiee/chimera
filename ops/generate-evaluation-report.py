@@ -16,11 +16,10 @@ import argparse
 import json
 import sqlite3
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from dataclasses import dataclass
-import os
 
 
 @dataclass
@@ -77,16 +76,30 @@ class EvaluationReportGenerator:
         cursor = self.conn.cursor()
 
         # Get overall evaluation statistics
+        # total_trades_today / total_pnl_sol / total_costs_sol are cumulative
+        # daily counters stored on every hourly row; take the MAX per day so
+        # each day contributes its final value instead of being counted ~24x.
         cursor.execute('''
             SELECT
                 COUNT(DISTINCT day_number) as days_evaluated,
-                SUM(total_trades_today) as total_trades,
-                SUM(successful_trades_today) as total_successful,
-                AVG(avg_trade_latency_ms) as avg_latency,
-                AVG(total_pnl_sol) as total_pnl,
-                SUM(total_costs_sol) as total_costs,
+                SUM(day_trades) as total_trades,
+                SUM(day_successful) as total_successful,
+                AVG(avg_latency) as avg_latency,
+                SUM(day_pnl) as total_pnl,
+                SUM(day_costs) as total_costs,
                 MAX(max_drawdown_percent) as max_drawdown
-            FROM evaluation_snapshots
+            FROM (
+                SELECT
+                    day_number,
+                    MAX(total_trades_today) as day_trades,
+                    MAX(successful_trades_today) as day_successful,
+                    AVG(avg_trade_latency_ms) as avg_latency,
+                    MAX(total_pnl_sol) as day_pnl,
+                    MAX(total_costs_sol) as day_costs,
+                    MAX(max_drawdown_percent) as max_drawdown_percent
+                FROM evaluation_snapshots
+                GROUP BY day_number
+            )
         ''')
 
         stats = cursor.fetchone()
@@ -161,8 +174,8 @@ class EvaluationReportGenerator:
             SELECT
                 day_number,
                 AVG(avg_trade_latency_ms) as day_avg_latency,
-                SUM(total_trades_today) as day_trades,
-                AVG(total_pnl_sol) as day_pnl,
+                MAX(total_trades_today) as day_trades,
+                MAX(total_pnl_sol) as day_pnl,
                 AVG(rpc_latency_avg_ms) as day_rpc_latency
             FROM evaluation_snapshots
             GROUP BY day_number
@@ -251,8 +264,13 @@ class EvaluationReportGenerator:
                 COUNT(*) as total_trips,
                 AVG(max_drawdown_percent) as avg_drawdown_at_trip,
                 MAX(portfolio_exposure_percent) as max_exposure
-            FROM evaluation_snapshots
-            WHERE circuit_breaker_state = 1
+            FROM (
+                SELECT
+                    circuit_breaker_state,
+                    LAG(circuit_breaker_state) OVER (ORDER BY snapshot_time) as prev_state
+                FROM evaluation_snapshots
+            )
+            WHERE circuit_breaker_state = 1 AND (prev_state IS NULL OR prev_state != 1)
         ''')
 
         circuit_breaker_stats = cursor.fetchone()
@@ -553,12 +571,15 @@ class EvaluationReportGenerator:
         """
         score = 100
 
-        # Deduct for high resource usage
-        if health_stats['avg_cpu'] > 80:
-            score -= (health_stats['avg_cpu'] - 80) * 2
+        avg_cpu = health_stats['avg_cpu'] or 0
+        avg_memory = health_stats['avg_memory'] or 0
 
-        if health_stats['avg_memory'] > 80:
-            score -= (health_stats['avg_memory'] - 80) * 2
+        # Deduct for high resource usage
+        if avg_cpu > 80:
+            score -= (avg_cpu - 80) * 2
+
+        if avg_memory > 80:
+            score -= (avg_memory - 80) * 2
 
         # Deduct for errors
         score -= min(health_stats['total_errors'] or 0, 50)
@@ -837,9 +858,9 @@ class EvaluationReportGenerator:
             </tr>
             <tr>
                 <td>Success Rate</td>
-                <td>{{report_data.executive_summary['trading_performance']['success_rate_percent']:.1f}}%</td>
-                <td class="{{'status-good' if report_data.executive_summary['trading_performance']['success_rate_percent'] >= 95 else 'status-warning'}}">
-                    {{'Excellent' if report_data.executive_summary['trading_performance']['success_rate_percent'] >= 95 else 'Review'}}
+                <td>{report_data.executive_summary['trading_performance']['success_rate_percent']:.1f}%</td>
+                <td class="{'status-good' if report_data.executive_summary['trading_performance']['success_rate_percent'] >= 95 else 'status-warning'}">
+                    {'Excellent' if report_data.executive_summary['trading_performance']['success_rate_percent'] >= 95 else 'Review'}
                 </td>
             </tr>
             <tr>

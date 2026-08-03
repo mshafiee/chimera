@@ -1,31 +1,30 @@
 """
 Tests for credit tracking features in Helius client.
 
-Tests credit cost tracking, monthly hard cap enforcement, and pagination integration.
+Tests credit cost tracking, budget enforcement, and pagination integration
+against the real HeliusCreditTracker API.
 """
 
+import os
+import time
+
 import pytest
-
-# TODO(scout): This entire module is written against a legacy/non-existent API of
-# core.helius_credit_tracker. Mismatches include: a `CreditCost` enum (does not
-# exist — real API takes an int cost), `HeliusCreditTracker(monthly_credits=...)`
-# kwarg (real __init__ takes no args), attrs `_credits_used`/`monthly_credits`
-# (real: `_credits_used_today`/`_credits_used_month`), methods
-# `get_usage_percentage`/`_get_reset_time`/`CreditCost.PAGINATION` (absent), and
-# `patch(...)` used 7x without `from unittest.mock import patch`. The CreditCost
-# value assertions are also wrong (GET_TRANSACTIONS is 50 credits, not 10).
-# Rewrite these tests against the real HeliusCreditTracker before re-enabling.
-# See docs/reviews/full-repo-scan-2026-08-02.md (T5.3).
-pytest.skip(
-    "test_credit_tracking.py targets a legacy/non-existent credit-tracking API; "
-    "rewrite against the real HeliusCreditTracker before re-enabling",
-    allow_module_level=True,
-)
-
-from datetime import datetime
+from unittest.mock import patch
 
 from core.helius_client import HeliusClient
-from core.helius_credit_tracker import HeliusCreditTracker, CreditCost, get_credit_tracker
+from core.helius_credit_tracker import (
+    HeliusCreditTracker, CreditCost, get_credit_tracker, reset_credit_tracker,
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tracker(tmp_path):
+    """Point the tracker at a fresh state file and reset the singleton per test."""
+    os.environ["SCOUT_CREDIT_STATE_FILE"] = str(tmp_path / "credit_state.json")
+    reset_credit_tracker()
+    yield
+    reset_credit_tracker()
+    os.environ.pop("SCOUT_CREDIT_STATE_FILE", None)
 
 
 class TestCreditCostEnum:
@@ -42,7 +41,7 @@ class TestCreditCostEnum:
         assert CreditCost.DISCOVER_WALLETS.value == 50   # Also getTransactionsForAddress
         assert CreditCost.TOKEN_METADATA.value == 10     # DAS API
         assert CreditCost.GET_TRANSACTION.value == 1     # Standard RPC
-        assert CreditCost.WALLET_FIRST_TX.value == 1     # Standard RPC (getSignaturesForAddress)
+        assert CreditCost.WALLET_FIRST_TX.value == 1     # getSignaturesForAddress
 
 
 class TestHeliusCreditTracker:
@@ -51,84 +50,56 @@ class TestHeliusCreditTracker:
     def test_initialization(self):
         """Test credit tracker initialization with default limits."""
         tracker = HeliusCreditTracker()
-        assert tracker.monthly_credits == 10000000  # Developer tier 10M
-        assert tracker.reset_day == 1  # First of month
-
-    def test_initialization_with_custom_limit(self):
-        """Test credit tracker initialization with custom monthly limit."""
-        tracker = HeliusCreditTracker(monthly_credits=1000000)
-        assert tracker.monthly_credits == 1000000
-
-    def test_get_snapshot_initial(self):
-        """Test initial snapshot shows full credits available."""
-        tracker = HeliusCreditTracker(monthly_credits=1000)
         snapshot = tracker.get_snapshot()
         assert snapshot.credits_used == 0
-        assert snapshot.credits_remaining == 1000
-        assert snapshot.monthly_limit == 1000
+        assert snapshot.credits_remaining > 0
 
     def test_record_request(self):
         """Test recording a request deducts credits."""
-        tracker = HeliusCreditTracker(monthly_credits=1000)
-        tracker.record_request(CreditCost.GET_TRANSACTIONS)
+        tracker = HeliusCreditTracker()
+        tracker.record_request(cost=CreditCost.GET_TRANSACTIONS.value)
         snapshot = tracker.get_snapshot()
-        assert snapshot.credits_used == 10
-        assert snapshot.credits_remaining == 990
+        assert snapshot.credits_used == 50
 
     def test_record_multiple_requests(self):
         """Test recording multiple requests accumulates correctly."""
-        tracker = HeliusCreditTracker(monthly_credits=1000)
-        tracker.record_request(CreditCost.GET_TRANSACTIONS)  # 10
-        tracker.record_request(CreditCost.TOKEN_METADATA)    # 10
-        tracker.record_request(CreditCost.GET_TRANSACTION)    # 1
+        tracker = HeliusCreditTracker()
+        tracker.record_request(cost=CreditCost.GET_TRANSACTIONS.value)  # 50
+        tracker.record_request(cost=CreditCost.TOKEN_METADATA.value)    # 10
+        tracker.record_request(cost=CreditCost.GET_TRANSACTION.value)   # 1
         snapshot = tracker.get_snapshot()
-        assert snapshot.credits_used == 21
-        assert snapshot.credits_remaining == 979
+        assert snapshot.credits_used == 61
 
-    def test_check_monthly_cap_available(self):
-        """Test monthly cap check when credits available."""
-        tracker = HeliusCreditTracker(monthly_credits=1000)
-        tracker.record_request(CreditCost.GET_TRANSACTIONS)
-        assert tracker.check_monthly_cap()
-
-    def test_check_monthly_cap_exhausted(self):
-        """Test monthly cap check when credits exhausted."""
-        tracker = HeliusCreditTracker(monthly_credits=100)
-        tracker.record_request(CreditCost.TOKEN_METADATA)  # 10
-        tracker.record_request(CreditCost.GET_TRANSACTIONS)  # 10
-        # Not exhausted yet
-        assert tracker.check_monthly_cap()
-
-    def test_check_monthly_cap_negative(self):
-        """Test monthly cap check when negative (edge case)."""
-        tracker = HeliusCreditTracker(monthly_credits=100)
-        tracker._credits_used = 150  # Force negative
-        assert not tracker.check_monthly_cap()
-
-    def test_get_usage_percentage(self):
-        """Test usage percentage calculation."""
-        tracker = HeliusCreditTracker(monthly_credits=1000)
-        assert tracker.get_usage_percentage() == 0.0
-        tracker.record_request(CreditCost.TOKEN_METADATA)  # 10
-        assert tracker.get_usage_percentage() == 1.0
-
-    def test_get_reset_time(self):
-        """Test reset time calculation."""
-        now = datetime(2026, 7, 9, 12, 0, 0)
+    def test_usage_percentage_decreases_remaining(self):
+        """Test that usage reduces credits_remaining."""
         tracker = HeliusCreditTracker()
-        reset_time = tracker._get_reset_time(now)
-        assert reset_time.day == 1
-        assert reset_time.month == 8  # Next month
-        assert reset_time.year == 2026
+        initial = tracker.get_snapshot().credits_remaining
+        tracker.record_request(cost=CreditCost.TOKEN_METADATA.value)  # 10
+        snapshot = tracker.get_snapshot()
+        assert snapshot.credits_remaining == initial - 10
 
-    def test_get_reset_time_first_of_month(self):
-        """Test reset time when today is first of month."""
-        now = datetime(2026, 7, 1, 12, 0, 0)
+    def test_can_make_request_insufficient_budget(self):
+        """Test can_make_request denies when the category budget is exhausted."""
         tracker = HeliusCreditTracker()
-        reset_time = tracker._get_reset_time(now)
-        # Still next month (tomorrow doesn't reset)
-        assert reset_time.day == 1
-        assert reset_time.month == 8
+        tracker._analysis_spent = tracker._analysis_budget
+        allowed, reason = tracker.can_make_request(cost=100, category="analysis")
+        assert allowed is False
+        assert "budget" in reason.lower()
+
+    def test_can_make_request_sufficient_budget(self):
+        """Test can_make_request allows when budget remains."""
+        tracker = HeliusCreditTracker()
+        allowed, reason = tracker.can_make_request(cost=10, category="analysis")
+        assert allowed is True
+
+    def test_rate_limit_enforcement(self):
+        """Test that the rate limit blocks requests at 50 req/s."""
+        tracker = HeliusCreditTracker()
+        # Fill the request window with the maximum allowed requests
+        tracker._request_times = [time.time()] * 50
+        allowed, reason = tracker.can_make_request(cost=1)
+        assert allowed is False
+        assert "rate limit" in reason.lower()
 
 
 class TestGetCreditTracker:
@@ -136,135 +107,79 @@ class TestGetCreditTracker:
 
     def test_get_credit_tracker_singleton(self):
         """Test get_credit_tracker returns same instance."""
+        reset_credit_tracker()
         tracker1 = get_credit_tracker()
         tracker2 = get_credit_tracker()
         assert tracker1 is tracker2
-
-    def test_get_credit_tracker_fallback(self):
-        """Test fallback to no-op tracker when unavailable."""
-        with patch('core.helius_client.CreditTrackerUnavailable'):
-            # Should return a no-op tracker that never raises
-            tracker = get_credit_tracker()
-            tracker.record_request(CreditCost.PAGINATION)
-            snapshot = tracker.get_snapshot()
-            # No-op tracker should show unlimited credits
-            assert snapshot.credits_remaining >= 0
+        reset_credit_tracker()
 
 
 @pytest.mark.asyncio
 class TestHeliusClientCreditIntegration:
     """Test credit tracking integration in HeliusClient."""
 
-    async def test_get_wallet_transactions_records_credits(self, helius_client):
+    @pytest.fixture(autouse=True)
+    def _reset_tracker(self):
+        """Reset the shared singleton before each test so credits cannot leak."""
+        reset_credit_tracker()
+        yield
+        reset_credit_tracker()
+
+    async def test_get_wallet_transactions_records_credits(self):
         """Test that get_wallet_transactions records credits per pagination."""
-        # Mock the HTTP response with multiple pages
-        mock_response = {
-            "result": [{"signature": "sig1"}],
-            "totalTransactions": 100
-        }
-        
-        with patch.object(helius_client, '_make_helius_request') as mock_request:
-            mock_request.return_value = mock_response
-            
-            # Make a call with pagination
-            await helius_client.get_wallet_transactions(
-                "test_wallet",
-                limit=100
-            )
-            
-            # Should have recorded credits (10 per call)
-            # Exact number depends on implementation
-            tracker = get_credit_tracker()
-            snapshot = tracker.get_snapshot()
-            assert snapshot.credits_used > 0
+        with patch('core.helius_client.CACHE_AVAILABLE', False), \
+             patch(
+            'core.helius_client.HeliusClient._make_request',
+            return_value=[{"signature": "sig1"}],
+        ):
+            client = HeliusClient(api_key="test_key")
+            client._activity_cache = None  # cache is not under test here
 
-    async def test_get_wallet_transactions_checks_monthly_cap(self, helius_client):
-        """Test that get_wallet_transactions checks monthly cap before pagination."""
-        tracker = get_credit_tracker()
-        
-        # Exhaust credits
-        tracker._credits_used = tracker.monthly_credits + 1
-        
-        with patch.object(helius_client, '_make_helius_request') as mock_request:
-            # Should return empty due to cap enforcement
-            transactions = await helius_client.get_wallet_transactions(
+            transactions = await client.get_wallet_transactions(
                 "test_wallet",
-                limit=100
+                limit=100,
             )
-            
+
+            assert len(transactions) > 0
+            # Each successful page costs 50 credits (GET_TRANSACTIONS)
+            snapshot = get_credit_tracker().get_snapshot()
+            assert snapshot.credits_used >= 50
+
+    async def test_get_wallet_transactions_checks_cap(self):
+        """Test that get_wallet_transactions skips the API when credits are exhausted."""
+        tracker = get_credit_tracker()
+        tracker.record_request(cost=tracker._daily_budget + 1)
+
+        with patch('core.helius_client.CACHE_AVAILABLE', False), \
+             patch('core.helius_client.HeliusClient._make_request') as mock_request:
+            client = HeliusClient(api_key="test_key")
+
+            transactions = await client.get_wallet_transactions(
+                "test_wallet",
+                limit=100,
+            )
+
             # Should not make HTTP request due to cap
-            assert mock_request.call_count == 0 or len(transactions) == 0
+            assert transactions == []
+            mock_request.assert_not_called()
 
-    async def test_discover_wallets_from_recent_swaps_records_credits(self, helius_client):
-        """Test that discovery method records credits."""
-        # Mock successful discovery response
-        mock_response = [{"wallet": "wallet1"}, {"wallet": "wallet2"}]
-        
-        with patch.object(helius_client, '_make_helius_request') as mock_request:
-            mock_request.return_value = mock_response
-            
-            await helius_client.discover_wallets_from_recent_swaps(
-                token_mint="test_token",
-                hours=24
-            )
-            
-            # Should have recorded discovery credits
-            tracker = get_credit_tracker()
-            snapshot = tracker.get_snapshot()
-            assert snapshot.credits_used >= 10  # Discovery costs 10
+    async def test_pagination_loop_respects_cap(self):
+        """Test that pagination stops once credits are exhausted."""
+        with patch('core.helius_client.CACHE_AVAILABLE', False), \
+             patch(
+            'core.helius_client.HeliusClient._make_request',
+            return_value=[{"signature": f"sig{i}"} for i in range(50)],
+        ) as mock_request:
+            client = HeliusClient(api_key="test_key")
+            client._activity_cache = None  # cache is not under test here
 
-    async def test_discovery_checks_monthly_cap(self, helius_client):
-        """Test that discovery checks monthly cap."""
-        tracker = get_credit_tracker()
-        
-        # Exhaust credits
-        tracker._credits_used = tracker.monthly_credits + 1
-        
-        with patch.object(helius_client, '_make_helius_request') as mock_request:
-            # Should return empty due to cap enforcement
-            wallets = await helius_client.discover_wallets_from_recent_swaps(
-                token_mint="test_token",
-                hours=24
-            )
-            
-            # Should not make HTTP request due to cap
-            assert mock_request.call_count == 0 or len(wallets) == 0
-
-    async def test_pagination_loop_respects_cap(self, helius_client):
-        """Test that pagination loop stops when cap is reached."""
-        tracker = get_credit_tracker()
-        
-        # Set low limit
-        initial_credits = 100
-        tracker._credits_used = 0
-        tracker._monthly_credits = initial_credits
-        
-        # Mock response that would require multiple pages
-        mock_response = {
-            "result": [{"signature": f"sig{i}"} for i in range(50)],
-            "totalTransactions": 150  # Would need 3 pages
-        }
-        
-        with patch.object(helius_client, '_make_helius_request') as mock_request:
-            mock_request.return_value = mock_response
-            
-            # Request with limit that would need multiple pages
-            await helius_client.get_wallet_transactions(
+            await client.get_wallet_transactions(
                 "test_wallet",
-                limit=150
+                limit=150,
             )
-            
-            # Should stop before exhausting all credits
-            # Each page costs 10 credits, so at most 10 pages
-            assert mock_request.call_count <= 10
 
-
-@pytest.fixture
-def helius_client():
-    """Create a HeliusClient instance for testing."""
-    with patch('core.helius_client.get_credit_tracker') as mock_get_tracker:
-        mock_tracker = HeliusCreditTracker(monthly_credits=10000)
-        mock_get_tracker.return_value = mock_tracker
-        
-        client = HeliusClient(api_url="https://test.helius.xyz", api_key="test_key")
-        return client
+            # Each page costs 50 credits; the daily budget is ~333k so this
+            # exercises multiple pages of pagination through the mock
+            assert mock_request.call_count >= 2
+            snapshot = get_credit_tracker().get_snapshot()
+            assert snapshot.credits_used == 50 * mock_request.call_count

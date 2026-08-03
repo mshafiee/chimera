@@ -13,7 +13,6 @@ interface AuthState {
   tokenExpiresAt: number | null
   refreshToken: string | null
   lastActivity: number | null
-  _hasHydrated: boolean
   login: (user: AuthUser, expiresIn?: number) => void
   logout: () => void
   hasPermission: (required: Role) => boolean
@@ -37,7 +36,6 @@ export const useAuthStore = create<AuthState>()(
       tokenExpiresAt: null,
       refreshToken: null,
       lastActivity: null,
-      _hasHydrated: false,
 
       login: (user: AuthUser, expiresIn?: number) => {
         const now = Date.now()
@@ -46,6 +44,7 @@ export const useAuthStore = create<AuthState>()(
           user,
           isAuthenticated: true,
           tokenExpiresAt: expiresAt,
+          refreshToken: null,
           lastActivity: now,
         })
       },
@@ -77,10 +76,13 @@ export const useAuthStore = create<AuthState>()(
         const now = Date.now()
         const expiresAt = now + expiresIn * 1000
         const { user } = get()
+        if (!user) return
         set({
+          user: { ...user, token: accessToken },
+          isAuthenticated: true,
           tokenExpiresAt: expiresAt,
           refreshToken,
-          user: user ? { ...user, token: accessToken } : null,
+          lastActivity: now,
         })
       },
 
@@ -89,8 +91,9 @@ export const useAuthStore = create<AuthState>()(
       },
 
       isSessionExpired: () => {
-        const { lastActivity } = get()
-        if (!lastActivity) return false
+        const { lastActivity, isAuthenticated } = get()
+        if (!isAuthenticated) return false
+        if (!lastActivity) return true
         return Date.now() - lastActivity > SESSION_TIMEOUT_MS
       },
     }),
@@ -101,8 +104,18 @@ export const useAuthStore = create<AuthState>()(
         isAuthenticated: state.isAuthenticated,
         lastActivity: state.lastActivity,
       }),
-      onRehydrateStorage: () => () => {
-        // No-op since we removed _hasHydrated
+      onRehydrateStorage: () => (state) => {
+        // The persisted state has no token (partialize strips it), so an
+        // "authenticated" session cannot actually authenticate after reload.
+        if (state && state.isAuthenticated && !state.user?.token) {
+          useAuthStore.setState({
+            user: null,
+            isAuthenticated: false,
+            tokenExpiresAt: null,
+            refreshToken: null,
+            lastActivity: null,
+          })
+        }
       },
     }
   )

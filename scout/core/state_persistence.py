@@ -337,7 +337,6 @@ class StatePersistence:
                         avg_pnl = EXCLUDED.avg_pnl,
                         win_rate = EXCLUDED.win_rate,
                         roi_score = EXCLUDED.roi_score,
-                        first_seen = EXCLUDED.first_seen,
                         last_updated = EXCLUDED.last_updated
                 """, (
                     performance.wallet_address,
@@ -490,10 +489,11 @@ class StatePersistence:
             discovery_goal: Discovery goal (quality/quantity/balanced/speed)
         """
         with self._lock:
-            # Extract timeframe-specific data
-            deep_result = result.timeframe_results.get(DiscoveryTimeframe.DEEP) if hasattr(result, 'timeframe_results') else None
-            fast_result = result.timeframe_results.get(DiscoveryTimeframe.FAST) if hasattr(result, 'timeframe_results') else None
-            trending_result = result.timeframe_results.get(DiscoveryTimeframe.TRENDING) if hasattr(result, 'timeframe_results') else None
+            # Extract timeframe-specific data (guarded: the fallback import
+            # can set DiscoveryTimeframe to None)
+            deep_result = result.timeframe_results.get(DiscoveryTimeframe.DEEP) if (DiscoveryTimeframe is not None and hasattr(result, 'timeframe_results')) else None
+            fast_result = result.timeframe_results.get(DiscoveryTimeframe.FAST) if (DiscoveryTimeframe is not None and hasattr(result, 'timeframe_results')) else None
+            trending_result = result.timeframe_results.get(DiscoveryTimeframe.TRENDING) if (DiscoveryTimeframe is not None and hasattr(result, 'timeframe_results')) else None
 
             # Calculate cross-timeframe quality average
             if result.combined_quality_scores:
@@ -660,6 +660,7 @@ class StatePersistence:
                         SUM(credits_validation) as validation,
                         SUM(credits_enrichment) as enrichment,
                         SUM(credits_monitoring) as monitoring,
+                        SUM(credits_reserve) as reserve,
                         AVG(total_credits) as avg_daily,
                         MAX(total_credits) as max_daily,
                         MIN(total_credits) as min_daily
@@ -678,6 +679,7 @@ class StatePersistence:
                         'validation': row['validation'] or 0,
                         'enrichment': row['enrichment'] or 0,
                         'monitoring': row['monitoring'] or 0,
+                        'reserve': row['reserve'] or 0,
                     },
                     'avg_daily': row['avg_daily'] or 0,
                     'max_daily': row['max_daily'] or 0,
@@ -707,7 +709,16 @@ class StatePersistence:
                 """, (cutoff,))
                 roi_deleted = cursor.rowcount
 
-                total_deleted = credit_deleted + roi_deleted
+                # Clean old multi-timeframe discovery stats (this table was
+                # never pruned, so it grew unbounded despite the retention
+                # setting)
+                cursor = conn.execute("""
+                    DELETE FROM multi_timeframe_discovery_stats
+                    WHERE discovery_timestamp < %s
+                """, (cutoff,))
+                mtf_deleted = cursor.rowcount
+
+                total_deleted = credit_deleted + roi_deleted + mtf_deleted
 
                 logger.info(f"Cleaned up {total_deleted} old history records")
                 return total_deleted
@@ -721,30 +732,42 @@ class StatePersistence:
 
     def backup_database(self, backup_path: Optional[str] = None) -> str:
         """
-        Backup database to specified path.
+        Backup the PostgreSQL database to the specified path via pg_dump.
+
+        The previous implementation used sqlite3's Connection.backup() API,
+        which does not exist on the psycopg3 pooled connections.
 
         Args:
-            backup_path: Path for backup file, or default auto-generated
+            backup_path: Path for the backup file, or default auto-generated
 
         Returns:
             Path to backup file
         """
+        import os as _os
+        import subprocess
+
         if backup_path is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_path = str(Path(self._get_db_path()).parent / f"scout_persistence_backup_{timestamp}.db")
+            backup_path = str(Path(self._get_db_path()).parent / f"scout_persistence_backup_{timestamp}.sql")
+
+        database_url = _os.environ.get("DATABASE_URL", "")
+        if not database_url:
+            raise ValueError("DATABASE_URL is required for pg_dump backup")
 
         with self._lock:
-            # Read from source
-            source = get_connection(self._get_db_path())
-            backup = get_connection(backup_path)
-
             try:
-                source.backup(backup)
+                result = subprocess.run(
+                    ["pg_dump", database_url, "-f", backup_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(f"pg_dump failed: {result.stderr[:500]}")
                 logger.info(f"Database backed up to {backup_path}")
                 return backup_path
-            finally:
-                source.close()
-                backup.close()
+            except FileNotFoundError:
+                raise RuntimeError("pg_dump not found — install postgresql client tools to enable backups")
 
     def get_database_stats(self) -> Dict[str, Any]:
         """Get database statistics."""
@@ -759,15 +782,19 @@ class StatePersistence:
             cursor = conn.execute("SELECT COUNT(*) FROM roi_metrics")
             roi_count = cursor.fetchone()["count"]
 
+            cursor = conn.execute("SELECT COUNT(*) FROM multi_timeframe_discovery_stats")
+            mtf_count = cursor.fetchone()["count"]
+
             # Database size
             db_path = Path(self._get_db_path())
             db_size = db_path.stat().st_size if db_path.exists() else 0
-            total = credit_count + wallet_count + roi_count
+            total = credit_count + wallet_count + roi_count + mtf_count
 
             return {
                 'credit_history_records': credit_count,
                 'wallet_performance_records': wallet_count,
                 'roi_metrics_records': roi_count,
+                'multi_timeframe_discovery_records': mtf_count,
                 'total_records': total,
                 'database_path': str(db_path),
                 'database_size_bytes': db_size,

@@ -64,7 +64,7 @@ class AdaptiveWeightCalibrator:
                     cached = json.load(f)
                     if isinstance(cached, dict) and cached:
                         return {k: float(v) for k, v in cached.items()}
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError, TypeError):
                 pass
         return dict(DEFAULT_WQS_WEIGHTS)
 
@@ -85,7 +85,7 @@ class AdaptiveWeightCalibrator:
 
         if len(records) < self.MIN_SAMPLES:
             logger.info(
-                f"Adaptive weights: insufficient data ({len(records)} < {self.MIN_SAMPLES} records)"
+                "Adaptive weights: insufficient data (%d < %d records)", len(records), self.MIN_SAMPLES
             )
             return None
 
@@ -111,6 +111,10 @@ class AdaptiveWeightCalibrator:
         if not pnl_vals:
             return None
 
+        # Confidence must reflect the records that actually produced pairs,
+        # not the (possibly larger) raw record count.
+        n_records = len(pnl_vals)
+
         # Compute per-component regression coefficients
         current_weights = self.get_current_weights()
         component_corrs: Dict[str, float] = {}
@@ -118,7 +122,7 @@ class AdaptiveWeightCalibrator:
         from .correlation_reader import CorrelationReader as CR
 
         for comp_name, pairs in component_pairs.items():
-            if len(pairs) < 5:
+            if len(pairs) < self.MIN_SAMPLES:
                 continue
             xs = [p[0] for p in pairs]
             ys = [p[1] for p in pairs]
@@ -133,13 +137,18 @@ class AdaptiveWeightCalibrator:
         # Positive correlation → weight >= 1.0, negative → weight <= 1.0
         new_weights = dict(current_weights)
 
+        # Components with only noise-level correlation get pulled back to
+        # neutral so stale boosted weights don't persist forever.
+        for comp_name in component_pairs:
+            if comp_name not in component_corrs:
+                new_weights[comp_name] = 1.0
+
         for comp_name, corr in component_corrs.items():
             adjusted = 1.0 + corr
             new_weights[comp_name] = max(self.MIN_WEIGHT, min(self.MAX_WEIGHT, adjusted))
 
         # Confidence-weighted blend: gradually transition from seeded to adaptive weights
         # based on data confidence (sample size between MIN_SAMPLES and WARM_START_SAMPLES)
-        n_records = len(records)
 
         if n_records < self.WARM_START_SAMPLES:
             seeded = load_seeded_weights()
@@ -190,7 +199,7 @@ class AdaptiveWeightCalibrator:
         self._weights_cache_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self._weights_cache_file, "w") as f:
             json.dump(weights, f, indent=2)
-        logger.info(f"Adaptive weights saved to {self._weights_cache_file}")
+        logger.info("Adaptive weights saved to %s", self._weights_cache_file)
 
     def should_calibrate(self, run_interval: int = 10) -> bool:
         """

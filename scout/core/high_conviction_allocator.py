@@ -227,8 +227,12 @@ class HighConvictionAllocator:
 
             allocated = int(base_credits * multiplier * perf_boost)
 
-            # Check against allocation budget
-            allocated = min(allocated, self._allocations.get(level, 0))
+            # Check against the level's REMAINING budget (allocated - consumed)
+            # so repeated calls cannot collectively over-spend the level.
+            allocated = min(
+                allocated,
+                max(0, self._allocations.get(level, 0) - self._consumed[level]),
+            )
 
             # Track consumption
             if allocated > 0:
@@ -266,10 +270,7 @@ class HighConvictionAllocator:
         with self._lock:
             allocated = self._allocations.get(ConvictionLevel.EMERGING, 0)
             consumed = self._consumed.get(ConvictionLevel.EMERGING, 0)
-            remaining = max(0, allocated - consumed)
-
-            # Ensure minimum allocation
-            return max(remaining, self._config.MIN_EMERGING_ALLOCATION)
+            return max(0, allocated - consumed)
 
     def get_high_conviction_budget(self) -> int:
         """Get remaining budget for high-conviction wallets (WQS 70+)."""
@@ -311,10 +312,13 @@ class HighConvictionAllocator:
             # Check if any level is significantly under budget
             # and move those credits to high-conviction levels
             credits_to_move = 0
+            moved_from = {}
             for level in [ConvictionLevel.EMERGING, ConvictionLevel.LOW]:
                 if remaining[level] > (self._allocations[level] * (1 - self._config.DEVIATION_THRESHOLD)):
                     excess = int(remaining[level] * 0.5)  # Move 50% of excess
-                    credits_to_move += excess
+                    if excess > 0:
+                        credits_to_move += excess
+                        moved_from[level] = excess
 
             if credits_to_move > 0:
                 # Distribute to high-conviction levels
@@ -323,6 +327,11 @@ class HighConvictionAllocator:
 
                 self._allocations[ConvictionLevel.HIGH] += high_split
                 self._allocations[ConvictionLevel.VERY_HIGH] += very_high_split
+
+                # Subtract the moved credits from the source levels so the
+                # same credits are not spendable from both ends
+                for level, amount in moved_from.items():
+                    self._allocations[level] -= amount
 
                 self._last_rebalance = now
 
@@ -389,6 +398,12 @@ class HighConvictionAllocator:
             total_allocated = sum(self._allocations.values())
             total_consumed = sum(self._consumed.values())
 
+            # Compute budgets inline: the public accessors re-acquire the same
+            # non-reentrant lock and would deadlock from here.
+            high_budget = max(0, (self._allocations[ConvictionLevel.HIGH] - self._consumed[ConvictionLevel.HIGH]) +
+                                  (self._allocations[ConvictionLevel.VERY_HIGH] - self._consumed[ConvictionLevel.VERY_HIGH]))
+            emerging_budget = max(0, self._allocations[ConvictionLevel.EMERGING] - self._consumed[ConvictionLevel.EMERGING])
+
             return {
                 'total_credits': self._total_credits,
                 'total_allocated': total_allocated,
@@ -403,8 +418,8 @@ class HighConvictionAllocator:
                     }
                     for level in ConvictionLevel
                 },
-                'high_conviction_budget': self.get_high_conviction_budget(),
-                'emerging_wallet_budget': self.get_emerging_wallet_budget(),
+                'high_conviction_budget': high_budget,
+                'emerging_wallet_budget': emerging_budget,
                 'wallets_tracked': len(self._wallet_performance),
             }
 

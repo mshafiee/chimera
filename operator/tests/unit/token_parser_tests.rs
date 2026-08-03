@@ -1,21 +1,17 @@
 //! Token Parser Unit Tests
 //!
 //! Tests token safety validation:
-//! - Fast/slow path checks
-//! - Freeze authority rejection
-//! - Mint authority whitelist
+//! - Freeze/mint authority whitelists (production defaults)
 //! - Liquidity thresholds per strategy
+//! - TokenSafetyResult construction
+//!
+//! NOTE: the fast/slow validation paths (TokenParser::fast_check /
+//! slow_check) require live RPC metadata and are covered by the integration
+//! suite and the in-module tests in parser.rs, not here.
 
 use chimera_operator::token::{TokenSafetyConfig, TokenSafetyResult};
 use rust_decimal::Decimal;
 use std::str::FromStr;
-
-// Known token addresses for testing
-mod known_tokens {
-    pub const USDC: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-    pub const USDT: &str = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
-    pub const WSOL: &str = "So11111111111111111111111111111111111111112";
-}
 
 #[test]
 fn test_freeze_authority_whitelist() {
@@ -25,24 +21,37 @@ fn test_freeze_authority_whitelist() {
     assert!(
         config
             .freeze_authority_whitelist
-            .contains(known_tokens::USDC),
+            .contains(chimera_operator::token::known_tokens::USDC),
         "USDC should be in freeze authority whitelist"
+    );
+    // USDT and WSOL must also be whitelisted — a regression that drops them
+    // from the default whitelist would reject their trades.
+    assert!(
+        config
+            .freeze_authority_whitelist
+            .contains(chimera_operator::token::known_tokens::USDT),
+        "USDT should be in freeze authority whitelist"
+    );
+    assert!(
+        config
+            .freeze_authority_whitelist
+            .contains(chimera_operator::token::known_tokens::WSOL),
+        "WSOL should be in freeze authority whitelist"
     );
 }
 
 #[test]
 fn test_freeze_authority_rejection() {
+    // A token with freeze authority that is NOT on the production whitelist
+    // must be rejected. (The rejection decision itself lives in
+    // TokenParser::slow_check, which needs RPC metadata; here we pin the
+    // whitelist-membership precondition.)
     let config = TokenSafetyConfig::default();
     let unknown_token = "UnknownTokenWithFreezeAuthority";
 
-    // Token with freeze authority that's not whitelisted should be rejected
-    let has_freeze = true;
-    let is_whitelisted = config.freeze_authority_whitelist.contains(unknown_token);
-    let should_reject = has_freeze && !is_whitelisted;
-
     assert!(
-        should_reject,
-        "Non-whitelisted token with freeze authority should be rejected"
+        !config.freeze_authority_whitelist.contains(unknown_token),
+        "unknown token must NOT be whitelisted, so slow_check rejects it"
     );
 }
 
@@ -50,11 +59,16 @@ fn test_freeze_authority_rejection() {
 fn test_mint_authority_whitelist() {
     let config = TokenSafetyConfig::default();
 
-    // USDC has mint authority but is whitelisted
-    assert!(
-        config.mint_authority_whitelist.contains(known_tokens::USDC),
-        "USDC should be in mint authority whitelist"
-    );
+    for token in [
+        chimera_operator::token::known_tokens::USDC,
+        chimera_operator::token::known_tokens::USDT,
+        chimera_operator::token::known_tokens::WSOL,
+    ] {
+        assert!(
+            config.mint_authority_whitelist.contains(token),
+            "{token} should be in mint authority whitelist"
+        );
+    }
 }
 
 #[test]
@@ -95,19 +109,13 @@ fn test_safety_result_unsafe() {
 }
 
 #[test]
-fn test_known_tokens() {
-    assert_eq!(
-        known_tokens::USDC,
-        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-    );
-    assert_eq!(
-        known_tokens::USDT,
-        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
-    );
-    assert_eq!(
-        known_tokens::WSOL,
-        "So11111111111111111111111111111111111111112"
-    );
+fn test_known_tokens_match_production() {
+    // The test constants must match the production mint addresses (the
+    // production defaults for the whitelists are built from these).
+    use chimera_operator::token::known_tokens as production;
+    assert_eq!(known_tokens::USDC, production::USDC);
+    assert_eq!(known_tokens::USDT, production::USDT);
+    assert_eq!(known_tokens::WSOL, production::WSOL);
 }
 
 #[test]
@@ -121,18 +129,25 @@ fn test_honeypot_detection_enabled() {
 
 #[test]
 fn test_liquidity_zero_rejection() {
-    let liquidity_usd = 0.0;
-    let threshold = 10_000.0;
-    let should_reject = liquidity_usd < threshold;
-
-    assert!(should_reject, "Zero liquidity should be rejected");
+    // Zero liquidity is below the configured floor for BOTH strategies.
+    let config = TokenSafetyConfig::default();
+    let zero = Decimal::ZERO;
+    assert!(zero < config.min_liquidity_shield_usd);
+    assert!(zero < config.min_liquidity_spear_usd);
 }
 
 #[test]
 fn test_liquidity_insufficient_rejection() {
-    let liquidity_usd = 5_000.0;
-    let threshold = 10_000.0;
-    let should_reject = liquidity_usd < threshold;
+    // $5k is below the Shield floor (and the Spear floor).
+    let config = TokenSafetyConfig::default();
+    let insufficient = Decimal::from(5000u32);
+    assert!(insufficient < config.min_liquidity_shield_usd);
+    assert!(insufficient < config.min_liquidity_spear_usd);
+}
 
-    assert!(should_reject, "Insufficient liquidity should be rejected");
+// Local copy kept in sync with the production module (asserted above).
+mod known_tokens {
+    pub const USDC: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    pub const USDT: &str = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+    pub const WSOL: &str = "So11111111111111111111111111111111111111112";
 }

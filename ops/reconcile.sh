@@ -32,7 +32,9 @@ CHIMERA_HOME="${CHIMERA_HOME:-/opt/chimera}"
 DB_PATH="${CHIMERA_HOME}/data/chimera.db"
 LOG_FILE="/var/log/chimera/reconcile.log"
 RPC_URL="${HELIUS_RPC_URL:-https://api.mainnet-beta.solana.com}"
-EPSILON="0.0001"  # Dust tolerance for amount comparisons (0.01%)
+# Amount-mismatch comparison (EPSILON tolerance) is deferred to the Rust
+# runner (operator/src/engine/reconciliation.rs); this script only checks
+# transaction existence.
 NOTIFY_ON_DISCREPANCY="${NOTIFY_ON_DISCREPANCY:-true}"
 
 # Logging function
@@ -66,14 +68,25 @@ check_transaction() {
     local signature="$1"
     local result
     
-    result=$(curl -s --max-time 30 -X POST "$RPC_URL" \
+    local result
+    if ! result=$(curl -s --max-time 30 -X POST "$RPC_URL" \
         -H "Content-Type: application/json" \
         -d '{
             "jsonrpc": "2.0",
             "id": 1,
             "method": "getTransaction",
             "params": ["'"$signature"'", {"encoding": "json", "maxSupportedTransactionVersion": 0}]
-        }' 2>/dev/null)
+        }' 2>/dev/null); then
+        # Transport failure: report ERROR so callers can skip instead of
+        # recording a false on-chain absence
+        echo "ERROR"
+        return
+    fi
+    
+    if [ -z "$result" ]; then
+        echo "ERROR"
+        return
+    fi
     
     if echo "$result" | jq -e '.result != null' > /dev/null 2>&1; then
         echo "FOUND"
@@ -91,6 +104,7 @@ reconcile() {
     local total_checked=0
     local discrepancies_found=0
     local auto_resolved=0
+    local rpc_errors=0
     
     # Query all ACTIVE and EXITING positions
     local positions
@@ -118,11 +132,17 @@ reconcile() {
     # Process each position (process substitution so counter increments
     # survive into the current shell — a pipe would run the loop in a subshell)
     while read -r position; do
-        local trade_uuid=$(echo "$position" | jq -r '.trade_uuid')
-        local entry_sig=$(echo "$position" | jq -r '.entry_tx_signature')
-        local exit_sig=$(echo "$position" | jq -r '.exit_tx_signature // empty')
-        local expected_amount=$(echo "$position" | jq -r '.entry_amount_sol')
-        local state=$(echo "$position" | jq -r '.state')
+        # Escape single quotes so DB-derived values cannot break the SQL below
+        local trade_uuid
+        trade_uuid=$(echo "$position" | jq -r '.trade_uuid' | sed "s/'/''/g")
+        local entry_sig
+        entry_sig=$(echo "$position" | jq -r '.entry_tx_signature' | sed "s/'/''/g")
+        local exit_sig
+        exit_sig=$(echo "$position" | jq -r '.exit_tx_signature // empty' | sed "s/'/''/g")
+        local expected_amount
+        expected_amount=$(echo "$position" | jq -r '.entry_amount_sol' | sed "s/'/''/g")
+        local state
+        state=$(echo "$position" | jq -r '.state' | sed "s/'/''/g")
         
         ((total_checked += 1))
         
@@ -130,11 +150,17 @@ reconcile() {
         
         # Check entry transaction
         if [[ -n "$entry_sig" && "$entry_sig" != "null" ]]; then
-            local entry_status=$(check_transaction "$entry_sig")
+            local entry_status
+            entry_status=$(check_transaction "$entry_sig")
             
-            if [[ "$entry_status" == "MISSING" ]]; then
+            if [[ "$entry_status" == "ERROR" ]]; then
+                # Transient RPC/network failure: log and skip, never record a
+                # false MISSING finding
+                log "WARN" "RPC error checking entry TX for $trade_uuid (skipping)"
+                rpc_errors=$((rpc_errors + 1))
+            elif [[ "$entry_status" == "MISSING" ]]; then
                 log "WARNING" "Entry TX missing for $trade_uuid: $entry_sig"
-                ((discrepancies_found += 1))
+                discrepancies_found=$((discrepancies_found + 1))
                 
                 # Log to reconciliation table
                 sqlite3 "$DB_PATH" "
@@ -143,23 +169,31 @@ reconcile() {
                      on_chain_tx_signature, expected_amount_sol, notes)
                     VALUES 
                     ('$trade_uuid', '$state', 'MISSING', 'MISSING_TX',
-                     '$entry_sig', $expected_amount, 'Entry transaction not found on-chain');
+                     '$entry_sig', ${expected_amount:-0}, 'Entry transaction not found on-chain');
                 "
             fi
         fi
         
         # Check exit transaction for EXITING positions
         if [[ "$state" == "EXITING" && -n "$exit_sig" && "$exit_sig" != "null" ]]; then
-            local exit_status=$(check_transaction "$exit_sig")
+            local exit_status
+            exit_status=$(check_transaction "$exit_sig")
             
-            if [[ "$exit_status" == "FOUND" ]]; then
-                # Transaction confirmed but DB still shows EXITING - auto-resolve
+            if [[ "$exit_status" == "ERROR" ]]; then
+                log "WARN" "RPC error checking exit TX for $trade_uuid (skipping)"
+                rpc_errors=$((rpc_errors + 1))
+            elif [[ "$exit_status" == "FOUND" ]]; then
+                # Transaction confirmed but DB still shows EXITING - auto-resolve.
+                # Atomic and idempotent: BEGIN IMMEDIATE + state guard so a
+                # concurrent or repeated run cannot re-close an already-CLOSED
+                # position or insert duplicate audit rows.
                 log "INFO" "Auto-resolving: $trade_uuid exit confirmed on-chain"
-                ((auto_resolved += 1))
+                auto_resolved=$((auto_resolved + 1))
                 
                 sqlite3 "$DB_PATH" "
+                    BEGIN IMMEDIATE;
                     UPDATE positions SET state = 'CLOSED', closed_at = datetime('now') 
-                    WHERE trade_uuid = '$trade_uuid';
+                    WHERE trade_uuid = '$trade_uuid' AND state = 'EXITING';
                     
                     UPDATE trades SET status = 'CLOSED', updated_at = datetime('now')
                     WHERE trade_uuid = '$trade_uuid';
@@ -170,10 +204,11 @@ reconcile() {
                     VALUES 
                     ('$trade_uuid', 'EXITING', 'FOUND', 'STATE_MISMATCH',
                      '$exit_sig', datetime('now'), 'AUTO', 'Auto-resolved: exit confirmed on-chain');
+                    COMMIT;
                 "
             elif [[ "$exit_status" == "MISSING" ]]; then
                 log "WARNING" "Exit TX missing for $trade_uuid: $exit_sig"
-                ((discrepancies_found += 1))
+                discrepancies_found=$((discrepancies_found + 1))
                 
                 sqlite3 "$DB_PATH" "
                     INSERT INTO reconciliation_log 
@@ -181,14 +216,14 @@ reconcile() {
                      on_chain_tx_signature, expected_amount_sol, notes)
                     VALUES 
                     ('$trade_uuid', 'EXITING', 'MISSING', 'MISSING_TX',
-                     '$exit_sig', $expected_amount, 'Exit transaction not found on-chain');
+                     '$exit_sig', ${expected_amount:-0}, 'Exit transaction not found on-chain');
                 "
             fi
         fi
         
         # Rate limit to avoid RPC throttling
         sleep 0.2
-    done < <(echo "$positions" | jq -c '.[]')
+        done < <(echo "$positions" | jq -c '.[]')
     
     # Check for unresolved discrepancies
     local unresolved_count
@@ -199,7 +234,7 @@ reconcile() {
     " 2>/dev/null || echo "0")
     
     # Summary
-    log "INFO" "Reconciliation complete: checked=$total_checked, discrepancies=$discrepancies_found, auto_resolved=$auto_resolved, unresolved=$unresolved_count"
+    log "INFO" "Reconciliation complete: checked=$total_checked, discrepancies=$discrepancies_found, auto_resolved=$auto_resolved, unresolved=$unresolved_count, rpc_errors=$rpc_errors"
     
     # Update metrics via API
     if [[ -n "${API_URL:-}" ]] && [[ -n "${API_KEY:-}" ]]; then
@@ -234,6 +269,13 @@ reconcile() {
         VALUES ('reconciliation_run', datetime('now'), 'SYSTEM_RECONCILE', 
                 'Checked: $total_checked, Discrepancies: $discrepancies_found, Auto-resolved: $auto_resolved');
     "
+
+    # Return non-zero when findings or RPC errors occurred so the scheduler
+    # can distinguish a clean run from a degraded one
+    if [[ $discrepancies_found -gt 0 || $rpc_errors -gt 0 ]]; then
+        return 1
+    fi
+    return 0
 }
 
 # Ensure log directory exists
@@ -250,12 +292,20 @@ if ! command -v curl &> /dev/null; then
     exit 1
 fi
 
+if ! command -v sqlite3 &> /dev/null; then
+    log "ERROR" "sqlite3 is required but not installed"
+    exit 1
+fi
+
 if [[ ! -f "$DB_PATH" ]]; then
     log "ERROR" "Database not found at $DB_PATH"
     exit 1
 fi
 
 # Run reconciliation
-reconcile
-
-exit 0
+if reconcile; then
+    exit 0
+else
+    log "WARNING" "Reconciliation completed with discrepancies or errors"
+    exit 1
+fi

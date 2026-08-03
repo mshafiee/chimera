@@ -63,14 +63,20 @@ class DexScreenerClient:
         if not self._validate_solana_address(token_address):
             import logging
             logger = logging.getLogger(__name__)
-            logger.warning(f"Invalid Solana address format: {token_address}")
+            logger.warning("Invalid Solana address format: %s", token_address)
             return None
 
         safe_address = self._safe_url_encode(token_address)
         url = f"{self.base_url}/tokens/{safe_address}"
 
+        headers = {}
+        if self.api_key:
+            # DexScreener doesn't document key-based auth on this endpoint,
+            # but pass it along in case quota tracking requires it
+            headers["X-API-KEY"] = self.api_key
+
         try:
-            response = requests.get(url, timeout=10)
+            response = requests.get(url, timeout=10, headers=headers)
             response.raise_for_status()
             data = response.json()
 
@@ -81,10 +87,16 @@ class DexScreenerClient:
             if not isinstance(pairs, list):
                 raise ValueError(f"Expected list of pairs, got {type(pairs).__name__}")
 
-            best_pair = max(
-                pairs,
-                key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0),
-            )
+            def _pair_liquidity_usd(pair):
+                liq = pair.get("liquidity")
+                if not isinstance(liq, dict):
+                    return 0.0
+                try:
+                    return float(liq.get("usd", 0) or 0)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            best_pair = max(pairs, key=_pair_liquidity_usd)
 
             liquidity_src = best_pair.get("liquidity", {})
             price_src = best_pair.get("priceUsd")
@@ -114,11 +126,11 @@ class DexScreenerClient:
         except requests.exceptions.RequestException as e:
             import logging
             logger = logging.getLogger(__name__)
-            logger.debug(f"DexScreener API request failed: {e}")
+            logger.debug("DexScreener API request failed: %s", e)
         except (ValueError, KeyError, TypeError) as e:
             import logging
             logger = logging.getLogger(__name__)
-            logger.debug(f"DexScreener response parsing failed: {e}")
+            logger.debug("DexScreener response parsing failed: %s", e)
 
         return None
 

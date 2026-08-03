@@ -132,7 +132,15 @@ impl DexComparator {
         amount_lamports: u64,
         slippage_bps: u16,
     ) -> AppResult<RouteSelection> {
-        let cache_key = format!("{}:{}:{}:{}", token_in, token_out, amount_lamports, slippage_bps);
+        let cache_key = format!(
+            "{}:{}:{}:{}:{}:{}",
+            token_in,
+            token_out,
+            amount_lamports,
+            slippage_bps,
+            self.multi_dex,
+            self.dex_labels.join(",")
+        );
         {
             let cache = self.cache.read();
             if let Some(cached) = cache.get(&cache_key) {
@@ -142,12 +150,19 @@ impl DexComparator {
             }
         }
 
+        // The v2 `/order` API cannot express a per-DEX restriction (`dexes=` is
+        // v1-only; v2 only supports `excludeDexes`), so the per-DEX fan-out
+        // only applies to v1 endpoints. On v2, query the aggregate only and
+        // label it "Jupiter" — otherwise every "restricted" query would be an
+        // identical aggregate quote mislabelled as a specific DEX.
+        let use_v2 = self.jupiter_api_url.contains("/v2") || self.jupiter_api_url.contains("swap/v2");
+
         // Build the candidate set: unrestricted aggregate + one per DEX label
-        // (only when multi-DEX comparison is enabled — otherwise aggregate-only,
-        // saving Jupiter API quota).
+        // (only when multi-DEX comparison is enabled AND the endpoint supports
+        // the per-DEX restriction — otherwise aggregate-only).
         let aggregate_fut = self.query_jupiter(token_in, token_out, amount_lamports, slippage_bps, None);
         let mut restricted_futs = Vec::new();
-        if self.multi_dex {
+        if self.multi_dex && !use_v2 {
             for label in &self.dex_labels {
                 restricted_futs.push(self.query_jupiter(
                     token_in,
@@ -260,18 +275,25 @@ impl DexComparator {
             .await
             .map_err(|e| AppError::Internal(format!("Jupiter API error: {}", e)))?;
 
+        // Check the HTTP status BEFORE parsing the body: a 4xx/5xx response
+        // with a non-JSON body (HTML error page / empty body) must surface the
+        // real status and error text, not a misleading parse failure.
         let status = response.status();
-        let quote: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to parse Jupiter response: {}", e)))?;
-
         if !status.is_success() {
-            // Log more details for debugging
-            let error_msg = quote.get("error")
-                .and_then(|v| v.as_str())
-                .or_else(|| quote.get("errorMessage").and_then(|v| v.as_str()))
-                .unwrap_or("Unknown Jupiter API error");
+            let body_text = response.text().await.unwrap_or_default();
+            let parsed: Option<serde_json::Value> = serde_json::from_str(&body_text).ok();
+            let error_msg = parsed
+                .as_ref()
+                .and_then(|v| v.get("error").and_then(|v| v.as_str()))
+                .or_else(|| parsed.as_ref().and_then(|v| v.get("errorMessage").and_then(|v| v.as_str())))
+                .unwrap_or_else(|| {
+                    let trimmed = body_text.trim();
+                    if trimmed.is_empty() {
+                        "Unknown Jupiter API error"
+                    } else {
+                        trimmed
+                    }
+                });
 
             tracing::warn!(
                 url = %url,
@@ -282,9 +304,14 @@ impl DexComparator {
             );
 
             // Return error for critical failures, but allow missing DEX labels to pass silently
-            if dexes.is_some() && (status.as_u16() == 400 || status.as_u16() == 404) {
-                // Silently skip unsupported DEX labels (Jupiter returns non-2xx for unrecognized labels)
-                return Err(AppError::Internal(format!("DEX label not supported: {}", dexes.unwrap())));
+            if let Some(label) = dexes {
+                if status.as_u16() == 400 || status.as_u16() == 404 {
+                    // Silently skip unsupported DEX labels (Jupiter returns non-2xx for unrecognized labels)
+                    return Err(AppError::Internal(format!(
+                        "DEX label not supported: {}",
+                        label
+                    )));
+                }
             }
 
             return Err(AppError::Internal(format!(
@@ -293,6 +320,11 @@ impl DexComparator {
             )));
         }
 
+        let quote: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to parse Jupiter response: {}", e)))?;
+
         // Validate it is a real quote.
         if out_amount(&quote) == 0 {
             return Err(AppError::Internal(
@@ -300,24 +332,45 @@ impl DexComparator {
             ));
         }
 
-        let selected_dex = dexes.unwrap_or("Jupiter").to_string();
+        // `dexes` is only honoured by the v1 endpoint; a v2 request that got
+        // here with a label is aggregate routing and must be labelled as such.
+        let selected_dex = match (dexes, use_v2) {
+            (Some(label), false) => label.to_string(),
+            _ => "Jupiter".to_string(),
+        };
 
         // Real per-route fee: sum of routePlan[].swapInfo.feeAmount (raw token units).
-        // Works for both v1 and v2 responses.
-        let fee_raw: u64 = quote
+        // Works for both v1 and v2 responses. Parsed as Decimal so decimal
+        // strings ("123.45") and JSON numbers are both handled.
+        let fee_raw: Decimal = quote
             .get("routePlan")
             .and_then(|rp| rp.as_array())
             .map(|hops| {
-                hops.iter()
-                    .filter_map(|h| {
-                        h.get("swapInfo")
-                            .and_then(|s| s.get("feeAmount"))
-                            .and_then(|f| f.as_str())
-                            .and_then(|s| s.parse::<u64>().ok())
-                    })
-                    .sum()
+                hops.iter().fold(Decimal::ZERO, |acc, h| {
+                    let fee = h.get("swapInfo").and_then(|s| s.get("feeAmount"));
+                    match fee {
+                        Some(f) => {
+                            let parsed = match f {
+                                serde_json::Value::String(s) => Decimal::from_str(s).ok(),
+                                serde_json::Value::Number(n) => n
+                                    .as_u64()
+                                    .map(Decimal::from)
+                                    .or_else(|| n.as_f64().and_then(Decimal::from_f64)),
+                                _ => None,
+                            };
+                            match parsed {
+                                Some(v) => acc + v,
+                                None => {
+                                    tracing::warn!(fee_amount = ?f, "Unparseable feeAmount in routePlan; ignoring");
+                                    acc
+                                }
+                            }
+                        }
+                        None => acc,
+                    }
+                })
             })
-            .unwrap_or(0);
+            .unwrap_or(Decimal::ZERO);
         let in_amount: u64 = quote
             .get("inAmount")
             .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()))
@@ -343,7 +396,7 @@ impl DexComparator {
 
         // fee fraction of the trade, expressed in SOL.
         let fee_sol = if in_amount > 0 {
-            trade_value_sol * Decimal::from(fee_raw) / Decimal::from(in_amount)
+            trade_value_sol * fee_raw / Decimal::from(in_amount)
         } else {
             Decimal::ZERO
         };
@@ -351,10 +404,28 @@ impl DexComparator {
         // Price impact handling: support both v1 and v2 formats
         // v1: priceImpactPct as string (e.g., "1.5" = 1.5%)
         // v2: priceImpact as decimal (e.g., -0.015 = -1.5%)
+        // A present-but-unparseable field is logged rather than silently
+        // reporting zero impact.
         let slippage_fraction = if let Some(pct_str) = quote.get("priceImpactPct").and_then(|v| v.as_str()) {
             // v1 format: percentage string
-            Decimal::from_str(pct_str).ok().map(|pct| pct / Decimal::from(100))
-        } else { quote.get("priceImpact").and_then(|v| v.as_f64()).map(|pct_decimal| Decimal::from_f64(pct_decimal.abs()).unwrap_or(Decimal::ZERO)) }.unwrap_or(Decimal::ZERO);
+            match Decimal::from_str(pct_str) {
+                Ok(pct) => pct / Decimal::from(100),
+                Err(_) => {
+                    tracing::warn!(price_impact_pct = %pct_str, "Unparseable priceImpactPct; assuming 0%");
+                    Decimal::ZERO
+                }
+            }
+        } else if let Some(v) = quote.get("priceImpact") {
+            match v.as_f64().and_then(Decimal::from_f64) {
+                Some(pct_decimal) => pct_decimal.abs(),
+                None => {
+                    tracing::warn!(price_impact = ?v, "Unparseable priceImpact; assuming 0%");
+                    Decimal::ZERO
+                }
+            }
+        } else {
+            Decimal::ZERO
+        };
 
         let slippage_sol = trade_value_sol * slippage_fraction;
         let total_cost_sol = fee_sol + slippage_sol;
@@ -396,6 +467,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore] // Requires a live Jupiter API key + network — covered by integration tests
     async fn test_dex_route_caching_key_includes_slippage() {
         // Exercises construction only (no network); real route behaviour is
         // covered by the #[ignore] integration tests requiring a Jupiter key.

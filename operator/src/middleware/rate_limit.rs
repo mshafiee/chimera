@@ -19,11 +19,20 @@ use axum::http::Request;
 use std::net::{IpAddr, SocketAddr};
 use tower_governor::{key_extractor::KeyExtractor, GovernorError};
 
-/// Returns true when the IP is a loopback or RFC-1918 private address.
+/// Returns true when the IP is a loopback, RFC-1918 private, unique-local,
+/// link-local, or IPv4-mapped private address (i.e., a trusted internal proxy).
 fn is_trusted_proxy(addr: &IpAddr) -> bool {
     match addr {
         IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
-        IpAddr::V6(v6) => v6.is_loopback(),
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unique_local()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local
+                || v6
+                    .to_ipv4_mapped()
+                    .map(|v4| v4.is_loopback() || v4.is_private())
+                    .unwrap_or(false)
+        }
     }
 }
 
@@ -52,21 +61,32 @@ impl KeyExtractor for ProxyAwareKeyExtractor {
             if let Some(header_value) = req.headers().get("X-Real-IP") {
                 if let Ok(ip) = header_value.to_str() {
                     let ip = ip.trim();
-                    if !ip.is_empty() && (ip.contains('.') || ip.contains(':')) {
+                    if ip.parse::<IpAddr>().is_ok() {
                         return Ok(ip.to_string());
                     }
                 }
             }
 
-            // Forwarded header (RFC 7239) - more secure than X-Forwarded-For
+            // Forwarded header (RFC 7239) - more secure than X-Forwarded-For.
+            // The last comma-separated hop is the one added by our trusted proxy;
+            // parse the `for=` parameter there (brackets/ports for IPv6 allowed).
             if let Some(header_value) = req.headers().get("Forwarded") {
                 if let Ok(header_str) = header_value.to_str() {
-                    for part in header_str.split(';') {
-                        let part = part.trim();
-                        if let Some(ip_raw) = part.strip_prefix("for=") {
-                            let ip = ip_raw.trim_matches('"').trim();
-                            if !ip.is_empty() && (ip.contains('.') || ip.contains(':')) {
-                                return Ok(ip.to_string());
+                    if let Some(last_hop) = header_str.split(',').next_back() {
+                        for part in last_hop.split(';') {
+                            let part = part.trim();
+                            if let Some(ip_raw) = part.strip_prefix("for=") {
+                                let ip = ip_raw
+                                    .trim_matches('"')
+                                    .trim()
+                                    .trim_start_matches('[')
+                                    .trim_end_matches(']');
+                                if let Ok(addr) = ip.parse::<SocketAddr>() {
+                                    return Ok(addr.ip().to_string());
+                                }
+                                if ip.parse::<IpAddr>().is_ok() {
+                                    return Ok(ip.to_string());
+                                }
                             }
                         }
                     }
@@ -82,7 +102,7 @@ impl KeyExtractor for ProxyAwareKeyExtractor {
                     // This prevents client from spoofing their IP
                     if let Some(client_ip) = header_str.split(',').next_back() {
                         let ip = client_ip.trim();
-                        if !ip.is_empty() && (ip.contains('.') || ip.contains(':')) {
+                        if ip.parse::<IpAddr>().is_ok() {
                             return Ok(ip.to_string());
                         }
                     }
@@ -90,23 +110,11 @@ impl KeyExtractor for ProxyAwareKeyExtractor {
             }
         }
 
-        // Security: Do NOT fall back to peer address for rate limiting
-        // Peer addresses are easily spoofed by attackers, allowing rate limit bypass
-        // Require authentication-based limiting (API key, JWT token, etc.) for non-proxied requests
-        // For now, return error to force proper authentication implementation
-        if peer_ip.is_some() && !from_trusted_proxy {
-            tracing::warn!(
-                peer_ip = ?peer_ip,
-                "Rate limiting requires authentication for direct connections. Peer address blocked for security."
-            );
-            return Err(GovernorError::UnableToExtractKey);
-        }
-
-        // Use peer address ONLY for trusted proxies (already handled above)
+        // Fall back to the peer address as the rate-limit key. The TCP peer
+        // socket address cannot be spoofed by a client (unlike a header), so
+        // per-peer limiting remains meaningful for direct connections.
         if let Some(ip) = peer_ip {
-            if from_trusted_proxy {
-                return Ok(ip.to_string());
-            }
+            return Ok(ip.to_string());
         }
 
         Err(GovernorError::UnableToExtractKey)

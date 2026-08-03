@@ -12,6 +12,7 @@ Usage:
 
 import json
 import logging
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -142,57 +143,75 @@ class ValidationMetricsCalculator:
         """
         try:
             conn = self._get_connection()
-            cursor = conn.cursor()
+            try:
+                cursor = conn.cursor()
 
-            # Build query with filters
-            query = """
-                SELECT
-                    id, wallet_address, prediction_timestamp, model_type,
-                    predicted_pnl_sol, actual_pnl_sol, actual_pnl_7d_sol,
-                    actual_pnl_30d_sol, match_timestamp, days_to_match,
-                    status, features_json
-                FROM ml_predictions
-                WHERE model_type = ?
-                AND status = 'MATCHED'
-            """
-            params = [model_type]
-
-            # Apply time window filter
-            if end_date:
-                query += " AND prediction_timestamp <= ?"
-                params.append(end_date)
-            elif time_window == '7d':
-                threshold = (datetime.utcnow() - timedelta(days=7)).isoformat()
-                query += " AND prediction_timestamp >= ?"
-                params.append(threshold)
-            elif time_window == '30d':
-                threshold = (datetime.utcnow() - timedelta(days=30)).isoformat()
-                query += " AND prediction_timestamp >= ?"
-                params.append(threshold)
-
-            # Apply start date if specified
-            if start_date:
-                query += " AND prediction_timestamp >= ?"
-                params.append(start_date)
-
-            query += " ORDER BY prediction_timestamp DESC"
-
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
-
-            # Get status counts
-            cursor.execute(
+                # Build query with filters
+                query = """
+                    SELECT
+                        id, wallet_address, prediction_timestamp, model_type,
+                        predicted_pnl_sol, actual_pnl_sol, actual_pnl_7d_sol,
+                        actual_pnl_30d_sol, match_timestamp, days_to_match,
+                        status, features_json
+                    FROM ml_predictions
+                    WHERE model_type = %s
+                    AND status = 'MATCHED'
                 """
-                SELECT status, COUNT(*) as count
-                FROM ml_predictions
-                WHERE model_type = ?
-                GROUP BY status
-                """,
-                (model_type,)
-            )
-            status_counts = {row['status']: row['count'] for row in cursor.fetchall()}
+                params = [model_type]
 
-            conn.close()
+                # Explicit date range replaces the time_window filter (the
+                # two are mutually exclusive so the interaction is not
+                # asymmetric/surprising)
+                if start_date or end_date:
+                    if start_date:
+                        query += " AND prediction_timestamp >= %s"
+                        params.append(start_date)
+                    if end_date:
+                        query += " AND prediction_timestamp <= %s"
+                        params.append(end_date)
+                elif time_window == '7d':
+                    threshold = (datetime.utcnow() - timedelta(days=7)).isoformat()
+                    query += " AND prediction_timestamp >= %s"
+                    params.append(threshold)
+                elif time_window == '30d':
+                    threshold = (datetime.utcnow() - timedelta(days=30)).isoformat()
+                    query += " AND prediction_timestamp >= %s"
+                    params.append(threshold)
+
+                query += " ORDER BY prediction_timestamp DESC"
+
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+
+                # Get status counts with the SAME date predicates so the
+                # reported counts are consistent with the windowed metrics
+                status_query = """
+                    SELECT status, COUNT(*) as count
+                    FROM ml_predictions
+                    WHERE model_type = %s
+                """
+                status_params = [model_type]
+                if start_date or end_date:
+                    if start_date:
+                        status_query += " AND prediction_timestamp >= %s"
+                        status_params.append(start_date)
+                    if end_date:
+                        status_query += " AND prediction_timestamp <= %s"
+                        status_params.append(end_date)
+                elif time_window == '7d':
+                    threshold = (datetime.utcnow() - timedelta(days=7)).isoformat()
+                    status_query += " AND prediction_timestamp >= %s"
+                    status_params.append(threshold)
+                elif time_window == '30d':
+                    threshold = (datetime.utcnow() - timedelta(days=30)).isoformat()
+                    status_query += " AND prediction_timestamp >= %s"
+                    status_params.append(threshold)
+                status_query += " GROUP BY status"
+
+                cursor.execute(status_query, status_params)
+                status_counts = {row['status']: row['count'] for row in cursor.fetchall()}
+            finally:
+                conn.close()
 
             matched = [dict(row) for row in rows]
 
@@ -203,10 +222,23 @@ class ValidationMetricsCalculator:
                 )
                 return None
 
+            # Only rows with BOTH predicted and actual values count: a missing
+            # actual is not evidence of zero profit
+            valid_rows = [
+                r for r in matched
+                if r['actual_pnl_sol'] is not None and r['predicted_pnl_sol'] is not None
+            ]
+            if len(valid_rows) < min_predictions:
+                logger.warning(
+                    f"Insufficient labeled predictions for {model_type}: "
+                    f"{len(valid_rows)} < {min_predictions}"
+                )
+                return None
+
             # Extract arrays for calculation
-            predicted = np.array([float(r['predicted_pnl_sol']) for r in matched])
-            actual = np.array([float(r['actual_pnl_sol'] or 0) for r in matched])
-            days_to_match = np.array([int(r['days_to_match'] or 0) for r in matched])
+            predicted = np.array([float(r['predicted_pnl_sol']) for r in valid_rows])
+            actual = np.array([float(r['actual_pnl_sol']) for r in valid_rows])
+            days_to_match = np.array([int(r['days_to_match'] or 0) for r in valid_rows])
 
             # Calculate metrics
             errors = actual - predicted
@@ -255,8 +287,8 @@ class ValidationMetricsCalculator:
             total_preds = status_counts.get('MATCHED', 0) + status_counts.get('PENDING', 0) + status_counts.get('EXPIRED', 0)
             missing_actual_rate = float(status_counts.get('PENDING', 0) / total_preds) if total_preds > 0 else 0.0
 
-            # Error distribution
-            if SCIPY_AVAILABLE:
+            # Error distribution (skew/kurtosis need at least 3 samples)
+            if SCIPY_AVAILABLE and len(errors) >= 3:
                 error_skewness = float(stats.skew(errors))
                 error_kurtosis = float(stats.kurtosis(errors))
             else:
@@ -355,10 +387,12 @@ class ValidationMetricsCalculator:
         # Get all model types
         try:
             conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT model_type FROM ml_predictions WHERE status = 'MATCHED'")
-            model_types = [row["model_type"] for row in cursor.fetchall()]
-            conn.close()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT DISTINCT model_type FROM ml_predictions WHERE status = 'MATCHED'")
+                model_types = [row["model_type"] for row in cursor.fetchall()]
+            finally:
+                conn.close()
         except Exception as e:
             logger.error(f"Failed to get model types: {e}")
             return []
@@ -397,30 +431,32 @@ class ValidationMetricsCalculator:
         """
         try:
             conn = self._get_connection()
-            cursor = conn.cursor()
+            try:
+                cursor = conn.cursor()
 
-            # Get matched predictions with features
-            query = """
-                SELECT predicted_pnl_sol, actual_pnl_sol, features_json
-                FROM ml_predictions
-                WHERE model_type = ?
-                AND status = 'MATCHED'
-                AND features_json IS NOT NULL
-            """
+                # Get matched predictions with features
+                query = """
+                    SELECT predicted_pnl_sol, actual_pnl_sol, features_json
+                    FROM ml_predictions
+                    WHERE model_type = %s
+                    AND status = 'MATCHED'
+                    AND features_json IS NOT NULL
+                """
 
-            if time_window == '7d':
-                threshold = (datetime.utcnow() - timedelta(days=7)).isoformat()
-                query += " AND prediction_timestamp >= ?"
-                cursor.execute(query, (model_type, threshold))
-            elif time_window == '30d':
-                threshold = (datetime.utcnow() - timedelta(days=30)).isoformat()
-                query += " AND prediction_timestamp >= ?"
-                cursor.execute(query, (model_type, threshold))
-            else:
-                cursor.execute(query, (model_type,))
+                if time_window == '7d':
+                    threshold = (datetime.utcnow() - timedelta(days=7)).isoformat()
+                    query += " AND prediction_timestamp >= %s"
+                    cursor.execute(query, (model_type, threshold))
+                elif time_window == '30d':
+                    threshold = (datetime.utcnow() - timedelta(days=30)).isoformat()
+                    query += " AND prediction_timestamp >= %s"
+                    cursor.execute(query, (model_type, threshold))
+                else:
+                    cursor.execute(query, (model_type,))
 
-            rows = cursor.fetchall()
-            conn.close()
+                rows = cursor.fetchall()
+            finally:
+                conn.close()
 
             if not rows:
                 return []
@@ -523,13 +559,17 @@ class ValidationMetricsCalculator:
         return results
 
 
-# Global instance
-_global_calculator = None
+# Global instances (cached per resolved db_path)
+_global_calculators = {}
+_global_calculators_lock = threading.Lock()
 
 
 def get_metrics_calculator(db_path: Optional[str] = None) -> ValidationMetricsCalculator:
-    """Get or create global metrics calculator instance."""
-    global _global_calculator
-    if _global_calculator is None:
-        _global_calculator = ValidationMetricsCalculator(db_path)
-    return _global_calculator
+    """Get or create a metrics calculator instance (cached per db_path)."""
+    if db_path is None:
+        db_path = "data/chimera.db"
+    resolved = str(Path(db_path).resolve())
+    with _global_calculators_lock:
+        if resolved not in _global_calculators:
+            _global_calculators[resolved] = ValidationMetricsCalculator(db_path)
+        return _global_calculators[resolved]

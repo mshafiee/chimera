@@ -1,1051 +1,545 @@
 //! Chaos/resilience tests for Chimera Operator
 //!
 //! Tests system behavior under failure conditions:
-//! - RPC failures and fallback
-//! - Database lock scenarios
+//! - RPC failure and fallback mode handling
+//! - Database lock scenarios (advisory-lock serialization)
 //! - Circuit breaker behavior
 //! - Queue overflow handling
+//! - Stuck-position detection
+//!
+//! Every test is deterministic and hermetic (no live network calls). Tests
+//! that previously invoked `Executor::execute` against live mainnet RPCs or
+//! merely mutated local structs were removed — they provided false confidence.
 
-#[cfg(test)]
-mod tests {
+use chimera_operator::config::AppConfig;
+use chimera_operator::db_abstraction::{Database, InsertTrade};
+use chimera_operator::engine::executor::{Executor, RpcMode};
+use chimera_operator::models::{Action, Signal, SignalPayload, Strategy};
+use rust_decimal::Decimal;
+use std::str::FromStr;
+use std::sync::Arc;
 
-    use chimera_operator::config::AppConfig;
-    use chimera_operator::db_abstraction::{create_database, Database, DatabaseConfig, DbPool};
-    use chimera_operator::engine::executor::{Executor, RpcMode};
-    use chimera_operator::models::{Action, Signal, SignalPayload, Strategy};
-    use rust_decimal::Decimal;
+#[path = "common/mod.rs"]
+mod common;
 
-    use sqlx::{Pool, Postgres};
-    use std::str::FromStr;
-    use std::sync::Arc;
-    use tempfile::TempDir;
+async fn create_test_db() -> (Arc<dyn Database>, common::TestDbGuard) {
+    common::create_test_db().await
+}
 
-    fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
-        match db.pool() {
-            DbPool::PostgreSQL(pool) => pool,
-            _ => panic!("test requires PostgreSQL backend"),
-        }
-    }
+/// Build a deterministic config (never falls back to the ambient repo
+/// config file, whose contents may differ between environments).
+fn create_test_config(jito_enabled: bool, trade_mode: &str) -> Arc<AppConfig> {
+    use config::Config;
+    let config_builder = Config::builder()
+        .set_default("server.host", "0.0.0.0")
+        .unwrap()
+        .set_default("server.port", 8080)
+        .unwrap()
+        .set_default("database.max_connections", 1)
+        .unwrap()
+        .set_default("rpc.primary_provider", "helius")
+        .unwrap()
+        .set_default("rpc.primary_url", "https://api.mainnet-beta.solana.com")
+        .unwrap()
+        .set_default("rpc.fallback_url", "https://api.mainnet-beta.solana.com")
+        .unwrap()
+        .set_default("rpc.rate_limit_per_second", 40)
+        .unwrap()
+        .set_default("rpc.timeout_ms", 2000)
+        .unwrap()
+        .set_default("rpc.max_consecutive_failures", 3)
+        .unwrap()
+        .set_default("jito.enabled", jito_enabled)
+        .unwrap()
+        .set_default("jito.tip_floor_sol", 0.001)
+        .unwrap()
+        .set_default("jito.tip_ceiling_sol", 0.01)
+        .unwrap()
+        .set_default("jito.tip_percentile", 50)
+        .unwrap()
+        .set_default("jito.tip_percent_max", 0.10)
+        .unwrap()
+        .set_default("strategy.shield_percent", 70)
+        .unwrap()
+        .set_default("strategy.spear_percent", 30)
+        .unwrap()
+        .set_default("strategy.max_position_sol", 1.0)
+        .unwrap()
+        .set_default("strategy.min_position_sol", 0.01)
+        .unwrap()
+        .set_default("queue.capacity", 1000)
+        .unwrap()
+        .set_default("queue.load_shed_threshold_percent", 80)
+        .unwrap()
+        .set_default("security.max_timestamp_drift_secs", 60)
+        .unwrap()
+        .set_default("security.webhook_rate_limit", 100)
+        .unwrap()
+        .set_default("security.webhook_burst_size", 150)
+        .unwrap()
+        .set_default("circuit_breakers.max_loss_24h_usd", 500.0)
+        .unwrap()
+        .set_default("circuit_breakers.max_consecutive_losses", 5)
+        .unwrap()
+        .set_default("circuit_breakers.max_drawdown_percent", 15.0)
+        .unwrap()
+        .set_default("circuit_breakers.cooldown_minutes", 30)
+        .unwrap()
+        .set_default("trade_mode", trade_mode)
+        .unwrap()
+        .build()
+        .unwrap();
 
-    async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
-        let temp_dir = TempDir::new().unwrap();
-        let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
-        let db = create_database(&config).await.unwrap();
-        let pool = pg_pool(&db);
+    Arc::new(config_builder.try_deserialize::<AppConfig>().unwrap())
+}
 
-        // Create minimal schema
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS trades (id SERIAL PRIMARY KEY, trade_uuid VARCHAR UNIQUE)",
+fn shield_signal(trade_uuid: &str, token: &str) -> Signal {
+    let payload = SignalPayload {
+        strategy: Strategy::Shield,
+        token: token.to_string(),
+        token_address: Some(token.to_string()),
+        action: Action::Buy,
+        amount_sol: Decimal::from_str("0.5").unwrap(),
+        wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+        trade_uuid: Some(trade_uuid.to_string()),
+        exit_fraction: None,
+    };
+    Signal::new(payload, 1_700_000_000, None)
+}
+
+#[tokio::test]
+async fn test_rpc_mode_initialization() {
+    // With jito enabled the executor must start in Jito (primary) mode and
+    // not in fallback. The fallback TRANSITION (after N consecutive RPC
+    // failures) requires injecting real RPC failures, which needs a mock
+    // RPC provider — a test hook that does not exist yet, so the
+    // transition itself is not exercised here.
+    let (db, _guard) = create_test_db().await;
+    let config = create_test_config(true, "paper");
+
+    let executor = Executor::new(config, db);
+
+    assert_eq!(executor.rpc_mode(), RpcMode::Jito);
+    assert!(!executor.is_in_fallback());
+
+    // Jito-disabled config must start in Standard mode.
+    let (db, _guard) = create_test_db().await;
+    let config = create_test_config(false, "paper");
+    let executor = Executor::new(config, db);
+    assert_eq!(executor.rpc_mode(), RpcMode::Standard);
+}
+
+#[tokio::test]
+async fn test_spear_disabled_in_fallback() {
+    // Deterministic and hermetic: with Jito disabled the executor is in
+    // Standard mode, and with trade_mode=live the Spear gate fires BEFORE
+    // any RPC call, so no network access is required.
+    let (db, _guard) = create_test_db().await;
+    let config = create_test_config(false, "live");
+
+    let executor = Executor::new(config, db);
+    assert_eq!(executor.rpc_mode(), RpcMode::Standard);
+
+    let signal = shield_signal("uuid-spear-rejected", "SPEAR111111111111111111111111111111111111111");
+    let signal = Signal {
+        payload: SignalPayload {
+            strategy: Strategy::Spear,
+            ..signal.payload
+        },
+        ..signal
+    };
+
+    let result = executor.execute(&signal).await;
+    let err = result.expect_err("Spear must be rejected in Standard (live) mode");
+    let error_str = format!("{}", err);
+    assert!(
+        error_str.contains("Spear") || error_str.contains("disabled"),
+        "Error should indicate Spear is disabled, got: {error_str}"
+    );
+}
+
+#[tokio::test]
+async fn test_circuit_breaker_trip() {
+    use chimera_operator::circuit_breaker::{CircuitBreaker, CircuitBreakerState};
+
+    let (db, _guard) = create_test_db().await;
+    let config = create_test_config(true, "paper");
+
+    let breaker = CircuitBreaker::new(
+        config.circuit_breakers.clone(),
+        db.clone(),
+        config.position_sizing.total_capital_sol,
+    );
+
+    // Starts in Active (un-tripped) state
+    assert!(
+        breaker.is_trading_allowed(),
+        "Circuit breaker must start un-tripped"
+    );
+    assert_eq!(breaker.current_state(), CircuitBreakerState::Active);
+
+    // Trip manually to simulate a threshold breach (unit-testing evaluate() would
+    // require inserting many DB loss records; manual_trip covers the state transition)
+    breaker
+        .manual_trip(
+            "test-admin",
+            "consecutive losses exceeded threshold".to_string(),
         )
-        .execute(&pool)
         .await
         .unwrap();
 
-        (db, temp_dir)
+    assert!(
+        !breaker.is_trading_allowed(),
+        "Circuit breaker must block trading after trip"
+    );
+    assert_ne!(breaker.current_state(), CircuitBreakerState::Active);
+}
+
+#[tokio::test]
+async fn test_queue_load_shedding() {
+    use chimera_operator::PriorityQueue;
+
+    let capacity = 100usize;
+    let shed_threshold = 80u32; // percent
+    let queue = PriorityQueue::new(capacity, shed_threshold);
+
+    // Fill past the 80% threshold using Shield signals (they are not shed)
+    let fill_to = (capacity * shed_threshold as usize) / 100 + 1;
+    for i in 0..fill_to {
+        let signal = shield_signal(&format!("uuid-fill-{}", i), &format!("TOK{}111111111111111111111111111111111111111", i));
+        let _ = queue.push(signal, None).await;
     }
 
-    fn create_test_config() -> Arc<AppConfig> {
-        // Try to load config, or create a minimal one for testing
-        let config = if let Ok(cfg) = AppConfig::load_config() {
-            cfg
-        } else {
-            // Create minimal test config using config builder
-            use config::Config;
-            let config_builder = Config::builder()
-                .set_default("server.host", "0.0.0.0")
-                .unwrap()
-                .set_default("server.port", 8080)
-                .unwrap()
-                .set_default("database.path", ":memory:")
-                .unwrap()
-                .set_default("database.max_connections", 1)
-                .unwrap()
-                .set_default("rpc.primary_provider", "helius")
-                .unwrap()
-                .set_default("rpc.primary_url", "https://api.mainnet-beta.solana.com")
-                .unwrap()
-                .set_default("rpc.fallback_url", "https://api.mainnet-beta.solana.com")
-                .unwrap()
-                .set_default("rpc.rate_limit_per_second", 40)
-                .unwrap()
-                .set_default("rpc.timeout_ms", 2000)
-                .unwrap()
-                .set_default("rpc.max_consecutive_failures", 3)
-                .unwrap()
-                .set_default("jito.enabled", true)
-                .unwrap()
-                .set_default("jito.tip_floor_sol", 0.001)
-                .unwrap()
-                .set_default("jito.tip_ceiling_sol", 0.01)
-                .unwrap()
-                .set_default("jito.tip_percentile", 50)
-                .unwrap()
-                .set_default("jito.tip_percent_max", 0.10)
-                .unwrap()
-                .set_default("strategy.shield_percent", 70)
-                .unwrap()
-                .set_default("strategy.spear_percent", 30)
-                .unwrap()
-                .set_default("strategy.max_position_sol", 1.0)
-                .unwrap()
-                .set_default("strategy.min_position_sol", 0.01)
-                .unwrap()
-                .set_default("queue.capacity", 1000)
-                .unwrap()
-                .set_default("queue.load_shed_threshold_percent", 80)
-                .unwrap()
-                .set_default("security.max_timestamp_drift_secs", 60)
-                .unwrap()
-                .set_default("security.webhook_rate_limit", 100)
-                .unwrap()
-                .set_default("security.webhook_burst_size", 150)
-                .unwrap()
-                .set_default("circuit_breakers.max_loss_24h_usd", 500.0)
-                .unwrap()
-                .set_default("circuit_breakers.max_consecutive_losses", 5)
-                .unwrap()
-                .set_default("circuit_breakers.max_drawdown_percent", 15.0)
-                .unwrap()
-                .set_default("circuit_breakers.cooldown_minutes", 30)
-                .unwrap()
-                .build()
-                .unwrap();
+    // A Spear signal submitted while queue > 80% must be shed (Err returned)
+    let spear_payload = SignalPayload {
+        strategy: Strategy::Spear,
+        token: "SPEAR".to_string(),
+        token_address: Some("SPEAR111111111111111111111111111111111111111".to_string()),
+        action: Action::Buy,
+        amount_sol: Decimal::from_str("0.5").unwrap(),
+        wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+        trade_uuid: Some("uuid-spear-shed".to_string()),
+        exit_fraction: None,
+    };
+    let spear_signal = Signal::new(spear_payload, 1_700_001_000_i64, None);
 
-            config_builder.try_deserialize::<AppConfig>().unwrap()
-        };
+    let result = queue.push(spear_signal, Some(50.0)).await;
+    assert!(
+        result.is_err(),
+        "Spear signal must be shed when queue > 80%"
+    );
+}
 
-        Arc::new(config)
-    }
+#[tokio::test]
+async fn test_concurrent_writes() {
+    // Test concurrent database writes don't deadlock (PostgreSQL)
+    let (db, _guard) = create_test_db().await;
+    let pool = common::pg_pool(&db);
 
-    #[tokio::test]
-    async fn test_rpc_fallback_on_failure() {
-        // Test that system switches to fallback RPC after consecutive failures
-        let (db, _temp) = create_test_db().await;
-        let config = create_test_config();
+    // Create table for concurrent writes
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS test_concurrent (
+            id SERIAL PRIMARY KEY,
+            value TEXT
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-        let executor = Executor::new(config.clone(), db);
-
-        // Initially should be in Jito mode
-        assert_eq!(executor.rpc_mode(), RpcMode::Jito);
-        assert!(!executor.is_in_fallback());
-
-        // Test that executor starts in Jito mode
-        assert_eq!(executor.rpc_mode(), RpcMode::Jito);
-        assert!(!executor.is_in_fallback());
-
-        // Test RPC mode getters
-        assert!(!executor.is_in_fallback());
-
-        // Note: switch_to_fallback is private, so we test the behavior indirectly
-        // by verifying the mode and fallback state are correctly initialized
-    }
-
-    #[tokio::test]
-    async fn test_spear_disabled_in_fallback() {
-        // Test that Spear strategy is rejected in Standard RPC mode
-        let (db, _temp) = create_test_db().await;
-
-        // Create config with Jito disabled (simulates fallback mode)
-        let config_no_jito = if let Ok(mut cfg) = AppConfig::load_config() {
-            cfg.jito.enabled = false;
-            cfg.rpc.fallback_url = Some("https://api.mainnet-beta.solana.com".to_string());
-            Arc::new(cfg)
-        } else {
-            // Fallback: create minimal config
-
-            // We can't modify Arc contents, so test with what we have
-            // The executor will be in Jito mode if jito.enabled is true
-            create_test_config()
-        };
-
-        let executor_standard = Executor::new(config_no_jito, db.clone());
-
-        // If Jito is disabled, executor should be in Standard mode
-        // Create Spear signal
-        let payload = SignalPayload {
-            strategy: Strategy::Spear,
-            token: "BONK".to_string(),
-            token_address: Some("BONK111111111111111111111111111111111111111".to_string()),
-            action: Action::Buy,
-            amount_sol: Decimal::from_str("0.5").unwrap(),
-            wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
-            trade_uuid: None,
-            exit_fraction: None,
-        };
-        let signal = Signal::new(payload, 1234567890, None);
-
-        // If executor is in Standard mode, Spear should be rejected
-        if executor_standard.rpc_mode() == RpcMode::Standard {
-            let result = executor_standard.execute(&signal).await;
-            assert!(result.is_err(), "Spear should be rejected in Standard mode");
-
-            // Verify error is SpearDisabled
-            if let Err(e) = result {
-                let error_str = format!("{}", e);
-                assert!(
-                    error_str.contains("Spear") || error_str.contains("disabled"),
-                    "Error should indicate Spear is disabled"
-                );
+    // Spawn multiple concurrent write tasks
+    let mut handles = vec![];
+    for i in 0..10 {
+        let pool_clone = pool.clone();
+        let handle = tokio::spawn(async move {
+            for j in 0..10 {
+                sqlx::query("INSERT INTO test_concurrent (value) VALUES ($1)")
+                    .bind(format!("task-{}-write-{}", i, j))
+                    .execute(&pool_clone)
+                    .await
+                    .unwrap();
             }
-        }
-
-        // Shield should work in both modes
-        let shield_payload = SignalPayload {
-            strategy: Strategy::Shield,
-            token: "BONK".to_string(),
-            token_address: Some("BONK111111111111111111111111111111111111111".to_string()),
-            action: Action::Buy,
-            amount_sol: Decimal::from_str("0.5").unwrap(),
-            wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
-            trade_uuid: None,
-            exit_fraction: None,
-        };
-        let shield_signal = Signal::new(shield_payload, 1234567890, None);
-
-        // Shield should not be rejected due to strategy (may fail for RPC reasons)
-        let shield_result = executor_standard.execute(&shield_signal).await;
-        if let Err(e) = shield_result {
-            let error_str = format!("{}", e);
-            assert!(
-                !error_str.contains("Spear") || !error_str.contains("disabled"),
-                "Shield should not be rejected for strategy reasons"
-            );
-        }
+        });
+        handles.push(handle);
     }
 
-    #[tokio::test]
-    async fn test_circuit_breaker_trip() {
-        use chimera_operator::circuit_breaker::{CircuitBreaker, CircuitBreakerState};
+    // Wait for all tasks to complete
+    for handle in handles {
+        handle.await.unwrap();
+    }
 
-        let (db, _temp) = create_test_db().await;
-        let pool = pg_pool(&db);
-        let config = create_test_config();
-
-        // manual_trip() calls log_config_change which writes to config_audit
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS config_audit (\
-             id SERIAL PRIMARY KEY, \
-             key TEXT NOT NULL, \
-             old_value TEXT, \
-             new_value TEXT NOT NULL, \
-             changed_by TEXT NOT NULL, \
-             change_reason TEXT, \
-             changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-        )
-        .execute(&pool)
+    // Verify all writes succeeded
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM test_concurrent")
+        .fetch_one(&pool)
         .await
         .unwrap();
 
-        let breaker = CircuitBreaker::new(
-            config.circuit_breakers.clone(),
-            db.clone(),
-            config.position_sizing.total_capital_sol,
-        );
+    assert_eq!(count.0, 100, "All concurrent writes should succeed");
 
-        // Starts in Active (un-tripped) state
-        assert!(
-            breaker.is_trading_allowed(),
-            "Circuit breaker must start un-tripped"
-        );
-        assert_eq!(breaker.current_state(), CircuitBreakerState::Active);
+    sqlx::query("DROP TABLE IF EXISTS test_concurrent")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
 
-        // Trip manually to simulate a threshold breach (unit-testing evaluate() would
-        // require inserting many DB loss records; manual_trip covers the state transition)
-        breaker
-            .manual_trip(
-                "test-admin",
-                "consecutive losses exceeded threshold".to_string(),
-            )
-            .await
-            .unwrap();
+#[tokio::test]
+async fn test_database_advisory_lock_serializes_opens() {
+    // The real per-key advisory lock (pg_advisory_xact_lock in
+    // activate_trade_and_open_position) must serialize concurrent position
+    // opens for the same token: exactly one may win, the other must be
+    // rejected by the duplicate-position check.
+    let (db, _guard) = create_test_db().await;
+    let token = "LOCKTOKEN111111111111111111111111111111111111";
+    let wallet = "lock-wallet-address-000000000000000000000000";
 
-        assert!(
-            !breaker.is_trading_allowed(),
-            "Circuit breaker must block trading after trip"
-        );
-        assert_ne!(breaker.current_state(), CircuitBreakerState::Active);
-    }
-
-    #[tokio::test]
-    async fn test_queue_load_shedding() {
-        use chimera_operator::PriorityQueue;
-
-        let capacity = 100usize;
-        let shed_threshold = 80u32; // percent
-        let queue = PriorityQueue::new(capacity, shed_threshold);
-
-        // Fill past the 80% threshold using Shield signals (they are not shed)
-        let fill_to = (capacity * shed_threshold as usize) / 100 + 1;
-        for i in 0..fill_to {
-            let payload = SignalPayload {
-                strategy: Strategy::Shield,
-                token: format!("TOK{}", i),
-                token_address: Some(format!("TOK{}111111111111111111111111111111111111111", i)),
-                action: Action::Buy,
-                amount_sol: Decimal::from_str("0.1").unwrap(),
-                wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
-                trade_uuid: Some(format!("uuid-fill-{}", i)),
-                exit_fraction: None,
-            };
-            let signal = Signal::new(payload, 1_700_000_000 + i as i64, None);
-            let _ = queue.push(signal, None).await;
-        }
-
-        // A Spear signal submitted while queue > 80% must be shed (Err returned)
-        let spear_payload = SignalPayload {
-            strategy: Strategy::Spear,
-            token: "SPEAR".to_string(),
-            token_address: Some("SPEAR111111111111111111111111111111111111111".to_string()),
-            action: Action::Buy,
-            amount_sol: Decimal::from_str("0.5").unwrap(),
-            wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
-            trade_uuid: Some("uuid-spear-shed".to_string()),
-            exit_fraction: None,
-        };
-        let spear_signal = Signal::new(spear_payload, 1_700_001_000_i64, None);
-
-        let result = queue.push(spear_signal, Some(50.0)).await;
-        assert!(
-            result.is_err(),
-            "Spear signal must be shed when queue > 80%"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_database_lock_retry() {
-        // Test that concurrent PostgreSQL writes do not deadlock
-        // (PostgreSQL MVCC + the per-key advisory lock on position opens)
-
-        let (db, _temp) = create_test_db().await;
-        let pool = pg_pool(&db);
-
-        // Create table
-        sqlx::query("CREATE TABLE IF NOT EXISTS test_lock (id SERIAL PRIMARY KEY, value TEXT)")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        // Test that we can write even under contention
-        let mut handles = vec![];
-        for i in 0..5 {
-            let pool_clone = pool.clone();
-            let handle = tokio::spawn(async move {
-                for j in 0..10 {
-                    sqlx::query("INSERT INTO test_lock (value) VALUES ($1)")
-                        .bind(format!("task-{}-{}", i, j))
-                        .execute(&pool_clone)
-                        .await
-                        .unwrap();
-                }
-            });
-            handles.push(handle);
-        }
-
-        // All should complete successfully
-        for handle in handles {
-            handle.await.unwrap();
-        }
-
-        // Verify writes succeeded
-        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM test_lock")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-
-        assert_eq!(count.0, 50, "All concurrent writes should succeed");
-
-        sqlx::query("DROP TABLE IF EXISTS test_lock")
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_database_lock_max_retries() {
-        // Test that database handles high contention
-        let (db, _temp) = create_test_db().await;
-        let pool = pg_pool(&db);
-
-        sqlx::query("CREATE TABLE IF NOT EXISTS test_contention (id SERIAL PRIMARY KEY)")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        // Create many concurrent transactions
-        let mut handles = vec![];
-        for _ in 0..20 {
-            let pool_clone = pool.clone();
-            let handle = tokio::spawn(async move {
-                // Each task does multiple operations
-                for _ in 0..5 {
-                    sqlx::query("INSERT INTO test_contention DEFAULT VALUES")
-                        .execute(&pool_clone)
-                        .await
-                        .unwrap();
-                }
-            });
-            handles.push(handle);
-        }
-
-        // Wait for all with timeout
-        let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            for handle in handles {
-                handle.await.unwrap();
-            }
+    for uuid in ["lock-open-1", "lock-open-2"] {
+        db.insert_trade(&InsertTrade {
+            trade_uuid: uuid.to_string(),
+            wallet_address: wallet.to_string(),
+            token_address: token.to_string(),
+            token_symbol: Some("LOCK".to_string()),
+            strategy: "SHIELD".to_string(),
+            side: "BUY".to_string(),
+            amount_sol: Decimal::from_str("1.0").unwrap(),
+            status: "PENDING".to_string(),
         })
-        .await;
-
-        assert!(
-            result.is_ok(),
-            "All operations should complete within timeout"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_database_lock_non_lock_error() {
-        // Test that non-lock errors (like syntax errors) fail immediately
-        let (db, _temp) = create_test_db().await;
-        let pool = pg_pool(&db);
-
-        // Invalid SQL should fail immediately, not retry
-        let result = sqlx::query("INVALID SQL SYNTAX").execute(&pool).await;
-
-        assert!(result.is_err(), "Invalid SQL should fail immediately");
-    }
-
-    #[tokio::test]
-    async fn test_concurrent_writes() {
-        // Test concurrent database writes don't deadlock (PostgreSQL)
-        let (db, _temp) = create_test_db().await;
-        let pool = pg_pool(&db);
-
-        // Create table for concurrent writes
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS test_concurrent (
-                id SERIAL PRIMARY KEY,
-                value TEXT
-            )",
-        )
-        .execute(&pool)
         .await
         .unwrap();
+    }
 
-        // Spawn multiple concurrent write tasks
-        let mut handles = vec![];
-        for i in 0..10 {
-            let pool_clone = pool.clone();
-            let handle = tokio::spawn(async move {
-                for j in 0..10 {
-                    sqlx::query("INSERT INTO test_concurrent (value) VALUES ($1)")
-                        .bind(format!("task-{}-write-{}", i, j))
-                        .execute(&pool_clone)
-                        .await
-                        .unwrap();
-                }
-            });
-            handles.push(handle);
-        }
+    let db1 = db.clone();
+    let db2 = db.clone();
+    let (r1, r2) = tokio::join!(
+        db1.activate_trade_and_open_position(
+            "lock-open-1",
+            wallet,
+            token,
+            None,
+            "SHIELD",
+            Decimal::from_str("1.0").unwrap(),
+            Decimal::from_str("10.0").unwrap(),
+            "sig-1",
+            None,
+            None,
+        ),
+        db2.activate_trade_and_open_position(
+            "lock-open-2",
+            wallet,
+            token,
+            None,
+            "SHIELD",
+            Decimal::from_str("1.0").unwrap(),
+            Decimal::from_str("10.0").unwrap(),
+            "sig-2",
+            None,
+            None,
+        ),
+    );
 
-        // Wait for all tasks to complete
-        for handle in handles {
-            handle.await.unwrap();
-        }
+    let wins = [r1.is_ok(), r2.is_ok()].iter().filter(|ok| **ok).count();
+    assert_eq!(wins, 1, "exactly one concurrent open must win the advisory lock");
 
-        // Verify all writes succeeded
-        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM test_concurrent")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let active = db.get_active_positions().await.unwrap();
+    assert_eq!(active.len(), 1, "exactly one ACTIVE position may exist");
+}
 
-        assert_eq!(count.0, 100, "All concurrent writes should succeed");
+#[tokio::test]
+async fn test_database_lock_non_lock_error() {
+    // Test that non-lock errors (like syntax errors) fail immediately
+    let (db, _guard) = create_test_db().await;
+    let pool = common::pg_pool(&db);
 
-        sqlx::query("DROP TABLE IF EXISTS test_concurrent")
+    // Invalid SQL should fail immediately, not retry
+    let result = sqlx::query("INVALID SQL SYNTAX").execute(&pool).await;
+
+    assert!(result.is_err(), "Invalid SQL should fail immediately");
+}
+
+#[tokio::test]
+async fn test_vacuum_operation() {
+    // Test that VACUUM operations don't block other queries (PostgreSQL
+    // MVCC: plain VACUUM never blocks readers/writers)
+    let (db, _guard) = create_test_db().await;
+    let pool = common::pg_pool(&db);
+
+    // Create table and insert data
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS test_vacuum (
+            id SERIAL PRIMARY KEY,
+            data TEXT
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Insert some data
+    for i in 0..100 {
+        sqlx::query("INSERT INTO test_vacuum (data) VALUES ($1)")
+            .bind(format!("data-{}", i))
             .execute(&pool)
             .await
             .unwrap();
     }
 
-    #[tokio::test]
-    async fn test_vacuum_operation() {
-        // Test that VACUUM operations don't block other queries (PostgreSQL
-        // MVCC: plain VACUUM never blocks readers/writers)
-        let (db, _temp) = create_test_db().await;
-        let pool = pg_pool(&db);
-
-        // Create table and insert data
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS test_vacuum (
-                id SERIAL PRIMARY KEY,
-                data TEXT
-            )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        // Insert some data
-        for i in 0..100 {
-            sqlx::query("INSERT INTO test_vacuum (data) VALUES ($1)")
-                .bind(format!("data-{}", i))
-                .execute(&pool)
-                .await
-                .unwrap();
-        }
-
-        // Run VACUUM in background
-        let pool_vacuum = pool.clone();
-        let vacuum_handle =
-            tokio::spawn(async move { sqlx::query("VACUUM test_vacuum").execute(&pool_vacuum).await });
+    // Run VACUUM in background (no binds -> simple query protocol, so it
+    // runs in autocommit, outside any transaction)
+    let pool_vacuum = pool.clone();
+    let vacuum_handle =
+        tokio::spawn(async move { sqlx::query("VACUUM test_vacuum").execute(&pool_vacuum).await });
 
         // While VACUUM is running, try to read
         let pool_read = pool.clone();
         let read_handle = tokio::spawn(async move {
             // MVCC guarantees readers are never blocked by VACUUM
-            let result: Result<Vec<(i64, String)>, _> =
-                sqlx::query_as("SELECT id, data FROM test_vacuum LIMIT 10")
-                    .fetch_all(&pool_read)
-                    .await;
-
-            result
+            sqlx::query_as::<_, (i32, String)>("SELECT id, data FROM test_vacuum LIMIT 10")
+                .fetch_all(&pool_read)
+                .await
         });
 
-        // Both should complete
-        let read_result = read_handle.await.unwrap();
-        assert!(
-            read_result.is_ok(),
-            "Reads must work during VACUUM (PostgreSQL MVCC)"
-        );
+    // Both should complete
+    let read_result = read_handle.await.unwrap();
+    assert!(
+        read_result.is_ok(),
+        "Reads must work during VACUUM (PostgreSQL MVCC)"
+    );
 
-        // Wait for VACUUM (may timeout, but that's OK for this test)
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), vacuum_handle).await;
+    // The VACUUM must actually succeed — a silently ignored failure would
+    // let this test pass for the wrong reason.
+    tokio::time::timeout(std::time::Duration::from_secs(10), vacuum_handle)
+        .await
+        .expect("VACUUM must finish within 10s")
+        .expect("VACUUM task must not panic")
+        .expect("VACUUM must succeed (simple query protocol outside a transaction)");
 
-        sqlx::query("DROP TABLE IF EXISTS test_vacuum")
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_stuck_position_recovery() {
-        // Validates that get_stuck_positions() correctly identifies EXITING positions
-        // older than the threshold. The full recovery path requires an RPC call to
-        // verify on-chain state, so we test the detection layer here.
-
-        let (db, _temp) = create_test_db().await;
-        let pool = pg_pool(&db);
-
-        // Schema required by get_stuck_positions() query
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS positions (\
-             id SERIAL PRIMARY KEY, \
-             trade_uuid TEXT NOT NULL, \
-             wallet_address TEXT NOT NULL DEFAULT 'wallet1', \
-             token_address TEXT NOT NULL, \
-             strategy TEXT NOT NULL DEFAULT 'SHIELD', \
-             state TEXT NOT NULL DEFAULT 'ACTIVE', \
-             entry_tx_signature TEXT NOT NULL DEFAULT 'sig_entry', \
-             exit_tx_signature TEXT, \
-             last_updated TEXT NOT NULL DEFAULT (datetime('now')))",
-        )
+    sqlx::query("DROP TABLE IF EXISTS test_vacuum")
         .execute(&pool)
         .await
         .unwrap();
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS trades (\
-             id SERIAL PRIMARY KEY, trade_uuid VARCHAR UNIQUE, status TEXT DEFAULT 'ACTIVE')",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        // One fresh EXITING (should not be flagged) and one stale EXITING (should be flagged)
-        sqlx::query(
-            "INSERT INTO positions (trade_uuid, token_address, state, last_updated) \
-             VALUES ('fresh-exiting', 'TOK111111111111111111111111111111111111111', \
-             'EXITING', datetime('now', '-10 seconds'))",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            "INSERT INTO positions (trade_uuid, token_address, state, last_updated) \
-             VALUES ('stuck-exiting', 'TOK222222222222222222222222222222222222222', \
-             'EXITING', datetime('now', '-300 seconds'))",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        // get_stuck_positions uses a 60-second threshold by default
-        let stuck = db.get_stuck_positions(60).await.unwrap();
-
-        assert_eq!(
-            stuck.len(),
-            1,
-            "Exactly 1 stuck position expected (300s > 60s threshold); got {}",
-            stuck.len()
-        );
-        assert_eq!(stuck[0].trade_uuid, "stuck-exiting");
-    }
-
-    #[tokio::test]
-    async fn test_webhook_replay_attack() {
-        // Verify the drift-check arithmetic that the HMAC middleware relies on.
-        // The middleware rejects when |now - timestamp| > max_drift_secs.
-        let max_drift: i64 = 60;
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-
-        let old_ts = now - max_drift - 10;
-        let drift_old = (now - old_ts).abs();
-        assert!(
-            drift_old > max_drift,
-            "Old timestamp drift {} must exceed max_drift {}",
-            drift_old,
-            max_drift
-        );
-
-        let fresh_ts = now - 5;
-        let drift_fresh = (now - fresh_ts).abs();
-        assert!(
-            drift_fresh <= max_drift,
-            "Fresh timestamp drift {} must be within max_drift {}",
-            drift_fresh,
-            max_drift
-        );
-    }
-
-    #[tokio::test]
-    async fn test_concurrent_webhook_processing() {
-        // Insert 100 unique trade rows concurrently and verify no duplicates or deadlocks.
-        let (db, _temp) = create_test_db().await;
-        let pool = pg_pool(&db);
-
-        let n: usize = 100;
-        let mut handles = vec![];
-
-        for i in 0..n {
-            let pool_clone = pool.clone();
-            handles.push(tokio::spawn(async move {
-                sqlx::query("INSERT INTO trades (trade_uuid) VALUES ($1) ON CONFLICT (trade_uuid) DO NOTHING")
-                    .bind(format!("concurrent-uuid-{}", i))
-                    .execute(&pool_clone)
-                    .await
-                    .unwrap();
-            }));
-        }
-
-        for h in handles {
-            h.await.unwrap();
-        }
-
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            count, n as i64,
-            "Exactly {} rows must exist after concurrent inserts",
-            n
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mid_trade_rpc_failure_fallback() {
-        // Test that mid-trade RPC failure triggers fallback
-        // This simulates a scenario where:
-        // 1. Trade starts with Helius (Jito mode)
-        // 2. Helius connection fails mid-execution
-        // 3. System switches to fallback RPC (QuickNode)
-        // 4. Trade completes with fallback
-
-        let (db, _temp) = create_test_db().await;
-        let config = create_test_config();
-
-        let executor = Executor::new(config.clone(), db);
-
-        // Initially should be in Jito mode
-        assert_eq!(executor.rpc_mode(), RpcMode::Jito);
-        assert!(!executor.is_in_fallback());
-
-        // Create a Shield signal (works in both modes)
-        let payload = SignalPayload {
-            strategy: Strategy::Shield,
-            token: "BONK".to_string(),
-            token_address: Some("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string()), // USDC for testing
-            action: Action::Buy,
-            amount_sol: Decimal::from_str("0.5").unwrap(),
-            wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
-            trade_uuid: Some("test-mid-trade-failure".to_string()),
-            exit_fraction: None,
-        };
-        let signal = Signal::new(payload, chrono::Utc::now().timestamp(), None);
-
-        // Simulate RPC failure by checking if executor can handle fallback
-        // Note: Actual RPC calls would require network access, so we test the logic
-
-        // Verify executor can switch modes (even if we can't trigger actual failure)
-        // The executor should maintain state correctly
-
-        // Test that executor tracks failure count
-        // After max_consecutive_failures, it should switch to fallback
-        let initial_mode = executor.rpc_mode();
-
-        // Verify executor maintains mode state
-        assert_eq!(executor.rpc_mode(), initial_mode);
-
-        // Test that if we manually set to fallback, Spear is disabled
-        // (This tests the behavior, even if we can't trigger actual RPC failure)
-        if executor.rpc_mode() == RpcMode::Standard {
-            // In Standard mode, Spear should be rejected
-            let spear_payload = SignalPayload {
-                strategy: Strategy::Spear,
-                token: "BONK".to_string(),
-                token_address: Some("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string()),
-                action: Action::Buy,
-                amount_sol: Decimal::from_str("0.5").unwrap(),
-                wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
-                trade_uuid: Some("test-spear-in-fallback".to_string()),
-                exit_fraction: None,
-            };
-            let spear_signal = Signal::new(spear_payload, chrono::Utc::now().timestamp(), None);
-
-            let result = executor.execute(&spear_signal).await;
-            assert!(
-                result.is_err(),
-                "Spear should be rejected in Standard (fallback) mode"
-            );
-        }
-
-        // Verify that Shield works in both modes
-        let shield_result = executor.execute(&signal).await;
-        // Shield may fail for RPC reasons, but should not fail due to mode
-        if let Err(e) = shield_result {
-            let error_str = format!("{}", e);
-            assert!(
-                !error_str.contains("Spear") || !error_str.contains("disabled"),
-                "Shield should not be rejected for mode reasons"
-            );
-        }
-
-        // Test that executor maintains state across mode switches
-        // The key behavior: trades started in one mode should complete in that mode
-        // New trades after mode switch use the new mode
-
-        // Verify executor state is consistent
-        let final_mode = executor.rpc_mode();
-        assert!(
-            matches!(final_mode, RpcMode::Jito | RpcMode::Standard),
-            "Executor should be in a valid RPC mode"
-        );
-    }
-
-    // ===== Jito-Specific Chaos Tests =====
-
-    #[tokio::test]
-    async fn test_jito_endpoint_failure_recovery() {
-        // Test system behavior when Jito endpoint fails and recovers
-        use chimera_operator::engine::executor::JitoHealth;
-
-        let health_initial = JitoHealth {
-            healthy: true,
-            last_check: chrono::Utc::now(),
-            latency_ms: Some(30),
-            resolution_success_rate: 0.95,
-            total_submissions: 100,
-            successful_resolutions: 95,
-        };
-
-        // Simulate endpoint failure
-        let health_failed = JitoHealth {
-            healthy: false,
-            last_check: chrono::Utc::now(),
-            latency_ms: None, // Connection timeout
-            resolution_success_rate: 0.0,
-            total_submissions: 100,
-            successful_resolutions: 95,
-        };
-
-        // Simulate recovery
-        let health_recovered = JitoHealth {
-            healthy: true,
-            last_check: chrono::Utc::now(),
-            latency_ms: Some(35),
-            resolution_success_rate: 0.92,
-            total_submissions: 105,
-            successful_resolutions: 97,
-        };
-
-        assert!(health_initial.healthy);
-        assert!(!health_failed.healthy);
-        assert!(health_recovered.healthy);
-    }
-
-    #[tokio::test]
-    async fn test_jito_high_load_stress_testing() {
-        // Test system behavior under high load (150+ signals)
-        let signals: Vec<Signal> = (0..150)
-            .map(|i| {
-                let payload = SignalPayload {
-                    strategy: Strategy::Shield,
-                    token: format!("TOK{}", i),
-                    token_address: Some(format!("TOK{}111111111111111111111111111111111111111", i)),
-                    action: Action::Buy,
-                    amount_sol: Decimal::from_str("0.1").unwrap(),
-                    wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
-                    trade_uuid: Some(format!("uuid-stress-{}", i)),
-                    exit_fraction: None,
-                };
-                Signal::new(payload, 1_700_000_000 + i as i64, None)
-            })
-            .collect();
-
-        // Verify all signals are created
-        assert_eq!(signals.len(), 150);
-
-        // Simulate processing delay
-        let start = std::time::Instant::now();
-        for signal in &signals {
-            // Simulate minimal processing time
-            let _ = signal.trade_uuid;
-        }
-        let duration = start.elapsed();
-
-        // Should complete quickly (under 10ms for 150 signals)
-        assert!(duration.as_millis() < 10);
-    }
-
-    #[tokio::test]
-    async fn test_jito_retry_logic_under_stress() {
-        // Test retry behavior when system is under stress
-        use chimera_operator::engine::executor::JitoError;
-
-        let retryable_error = JitoError::Retryable("insufficient tip".to_string());
-
-        // Simulate multiple retry attempts
-        let max_retries = 5;
-        let mut attempts = 0;
-
-        for attempt in 1..=max_retries {
-            attempts = attempt;
-            // Simulate retry logic
-            match retryable_error {
-                JitoError::Retryable(_) => {
-                    // Should retry
-                    assert!(attempt <= max_retries);
-                },
-                _ => panic!("Expected retryable error"),
-            }
-        }
-
-        assert_eq!(attempts, max_retries);
-    }
-
-    #[tokio::test]
-    async fn test_jito_mode_switching_cascading_failures() {
-        // Test mode switching under cascading failures
-        use chimera_operator::engine::executor::JitoHealth;
-
-        let mut health = JitoHealth {
-            healthy: true,
-            last_check: chrono::Utc::now(),
-            latency_ms: Some(50),
-            resolution_success_rate: 0.90,
-            total_submissions: 100,
-            successful_resolutions: 90,
-        };
-
-        // Simulate cascading failures
-        let failure_scenarios = vec![
-            (Some(100), 0.85, 100, 85), // 1st failure
-            (Some(200), 0.70, 100, 70), // 2nd failure
-            (Some(500), 0.50, 100, 50), // 3rd failure
-            (None, 0.30, 100, 30),      // 4th failure (complete)
-            (None, 0.10, 100, 10),      // 5th failure (critical)
-        ];
-
-        for (latency, success_rate, total, successful) in failure_scenarios {
-            health.latency_ms = latency;
-            health.resolution_success_rate = success_rate;
-            health.total_submissions = total;
-            health.successful_resolutions = successful;
-
-            // Health should degrade
-            if let Some(lat) = latency {
-                assert!(lat >= 100, "Latency should increase");
-            }
-            assert!(success_rate <= 0.90, "Success rate should decrease");
-        }
-
-        // Final state should be unhealthy
-        assert!(!health.healthy || health.resolution_success_rate < 0.5);
-    }
-
-    #[tokio::test]
-    async fn test_jito_concurrent_signal_processing() {
-        // Test concurrent processing of multiple signals
-        let signals: Vec<Signal> = (0..50)
-            .map(|i| {
-                let payload = SignalPayload {
-                    strategy: Strategy::Shield,
-                    token: format!("CONC{}", i),
-                    token_address: Some(format!("CONC{}22222222222222222222222222222222222222", i)),
-                    action: Action::Buy,
-                    amount_sol: Decimal::from_str("0.1").unwrap(),
-                    wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
-                    trade_uuid: Some(format!("uuid-conc-{}", i)),
-                    exit_fraction: None,
-                };
-                Signal::new(payload, 1_700_000_000 + i as i64, None)
-            })
-            .collect();
-
-        // Verify concurrent processing capability
-        let handles: Vec<_> = signals
-            .into_iter()
-            .map(|signal| {
-                tokio::spawn(async move {
-                    // Simulate signal processing
-                    let _ = signal.trade_uuid;
-                    std::time::Duration::from_micros(100);
-                    signal.trade_uuid
-                })
-            })
-            .collect();
-
-        // Wait for all tasks to complete
-        let results: Vec<_> = futures::future::join_all(handles)
-            .await
-            .into_iter()
-            .filter_map(|r| r.ok())
-            .collect();
-
-        assert_eq!(results.len(), 50);
-    }
-
-    #[tokio::test]
-    async fn test_jito_burst_traffic_handling() {
-        // Test handling of burst traffic (sudden spike in signals)
-        let mut signals: Vec<Signal> = Vec::new();
-
-        // Simulate burst of 100 signals in quick succession
-        for i in 0..100 {
-            let payload = SignalPayload {
-                strategy: Strategy::Shield,
-                token: format!("BURST{}", i),
-                token_address: Some(format!("BURST{}33333333333333333333333333333333333333", i)),
-                action: Action::Buy,
-                amount_sol: Decimal::from_str("0.1").unwrap(),
-                wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
-                trade_uuid: Some(format!("uuid-burst-{}", i)),
-                exit_fraction: None,
-            };
-            signals.push(Signal::new(payload, 1_700_000_000 + i as i64, None));
-        }
-
-        let start = std::time::Instant::now();
-
-        // Process burst
-        for signal in &signals {
-            let _ = signal.trade_uuid;
-        }
-
-        let duration = start.elapsed();
-
-        // Should handle burst efficiently
-        assert!(duration.as_millis() < 5);
-        assert_eq!(signals.len(), 100);
-    }
-
-    #[tokio::test]
-    async fn test_jito_graceful_degradation() {
-        // Test graceful degradation under stress
-        use chimera_operator::engine::executor::JitoHealth;
-
-        let mut health = JitoHealth {
-            healthy: true,
-            last_check: chrono::Utc::now(),
-            latency_ms: Some(30),
-            resolution_success_rate: 0.95,
-            total_submissions: 100,
-            successful_resolutions: 95,
-        };
-
-        // Simulate gradual degradation
-        let degradation_steps = vec![
-            (Some(50), 0.90),
-            (Some(100), 0.80),
-            (Some(200), 0.70),
-            (Some(500), 0.60),
-            (Some(1000), 0.50),
-        ];
-
-        for (latency, success_rate) in degradation_steps {
-            health.latency_ms = latency;
-            health.resolution_success_rate = success_rate;
-            health.total_submissions += 10;
-            health.successful_resolutions = (health.total_submissions as f64 * success_rate) as u64;
-
-            // Verify gradual degradation
-            if let Some(lat) = latency {
-                assert!(lat >= 30);
-            }
-            assert!(success_rate <= 0.95);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_jito_error_classification_consistency() {
-        // Test error classification remains consistent under load
-        use chimera_operator::engine::executor::JitoError;
-
-        let error_messages = vec![
-            ("insufficient tip", JitoError::Retryable("insufficient tip".to_string())),
-            ("insufficient balance", JitoError::Fatal("insufficient balance".to_string())),
-            ("endpoint unavailable", JitoError::Network("endpoint unavailable".to_string())),
-        ];
-
-        for (msg, expected_error) in error_messages {
-            let error = match msg {
-                "insufficient tip" => JitoError::Retryable(msg.to_string()),
-                "insufficient balance" => JitoError::Fatal(msg.to_string()),
-                "endpoint unavailable" => JitoError::Network(msg.to_string()),
-                _ => panic!("Unknown error message"),
-            };
-
-            match (&error, &expected_error) {
-                (JitoError::Retryable(a), JitoError::Retryable(b)) => assert_eq!(a, b),
-                (JitoError::Fatal(a), JitoError::Fatal(b)) => assert_eq!(a, b),
-                (JitoError::Network(a), JitoError::Network(b)) => assert_eq!(a, b),
-                _ => panic!("Error classification mismatch"),
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_jito_rapid_mode_switching() {
-        // Test rapid switching between Jito and fallback modes
-        let mode_switches = vec![
-            ("Jito", "Standard"),
-            ("Standard", "Jito"),
-            ("Jito", "Standard"),
-            ("Standard", "Jito"),
-            ("Jito", "Standard"),
-        ];
-
-        let mut switch_count = 0;
-        for (from, to) in mode_switches {
-            switch_count += 1;
-            // Simulate mode switch
-            assert_ne!(from, to);
-        }
-
-        assert_eq!(switch_count, 5);
-    }
 }
+
+#[tokio::test]
+async fn test_stuck_position_recovery() {
+    // Validates that get_stuck_positions() correctly identifies EXITING positions
+    // older than the threshold. The full recovery path requires an RPC call to
+    // verify on-chain state, so we test the detection layer here.
+
+    let (db, _guard) = create_test_db().await;
+    let pool = common::pg_pool(&db);
+
+    // Seed two EXITING positions through the real schema.
+    for (uuid, sig) in [
+        ("fresh-exiting", "sig_fresh_entry"),
+        ("stuck-exiting", "sig_stuck_entry"),
+    ] {
+        db.insert_trade(&InsertTrade {
+            trade_uuid: uuid.to_string(),
+            wallet_address: "wallet1".to_string(),
+            token_address: format!("TOK{uuid}"),
+            token_symbol: Some("TST".to_string()),
+            strategy: "SHIELD".to_string(),
+            side: "BUY".to_string(),
+            amount_sol: Decimal::ONE,
+            status: "EXITING".to_string(),
+        })
+        .await
+        .unwrap();
+        db.insert_position(&chimera_operator::db_abstraction::types::InsertPosition {
+            trade_uuid: uuid.to_string(),
+            wallet_address: "wallet1".to_string(),
+            token_address: format!("TOK{uuid}"),
+            token_symbol: Some("TST".to_string()),
+            strategy: "SHIELD".to_string(),
+            entry_amount_sol: Decimal::ONE,
+            entry_price: Decimal::from(10),
+            entry_tx_signature: sig.to_string(),
+        })
+        .await
+        .unwrap();
+        db.update_position(&chimera_operator::db_abstraction::types::UpdatePosition {
+            trade_uuid: uuid.to_string(),
+            current_price: Some(Decimal::from(20)),
+            unrealized_pnl_sol: None,
+            unrealized_pnl_percent: None,
+            state: Some("EXITING".to_string()),
+            exit_price: Some(Decimal::from(20)),
+            exit_tx_signature: Some(format!("sig_exit_{uuid}")),
+            realized_pnl_sol: None,
+            realized_pnl_usd: None,
+        })
+        .await
+        .unwrap();
+    }
+
+    // Backdate last_updated: the positions_updated_at trigger force-resets it on
+    // UPDATE, so disable it around the timestamp write (then re-enable).
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("ALTER TABLE positions DISABLE TRIGGER positions_updated_at")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE positions SET last_updated = $1 WHERE trade_uuid = $2")
+        .bind(chrono::Utc::now() - chrono::Duration::seconds(300))
+        .bind("stuck-exiting")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE positions ENABLE TRIGGER positions_updated_at")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    // get_stuck_positions uses a 60-second threshold by default
+    let stuck = db.get_stuck_positions(60).await.unwrap();
+
+    assert_eq!(
+        stuck.len(),
+        1,
+        "Exactly 1 stuck position expected (300s > 60s threshold); got {}",
+        stuck.len()
+    );
+    assert_eq!(stuck[0].trade_uuid, "stuck-exiting");
+}
+
+#[tokio::test]
+async fn test_concurrent_webhook_processing() {
+    // Insert 100 unique trade rows concurrently and verify no duplicates or deadlocks.
+    let (db, _guard) = create_test_db().await;
+    let pool = common::pg_pool(&db);
+
+    let n: usize = 100;
+    let mut handles = vec![];
+
+    for i in 0..n {
+        let pool_clone = pool.clone();
+        handles.push(tokio::spawn(async move {
+            // Real schema requires wallet_address/token_address (NOT NULL).
+            sqlx::query(
+                "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status) \
+                 VALUES ($1, 'wallet1', 'token1', 'SHIELD', 'BUY', 1.0, 'PENDING') \
+                 ON CONFLICT (trade_uuid) DO NOTHING",
+            )
+            .bind(format!("concurrent-uuid-{}", i))
+            .execute(&pool_clone)
+            .await
+            .unwrap();
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        count, n as i64,
+        "Exactly {} rows must exist after concurrent inserts",
+        n
+    );
+}
+

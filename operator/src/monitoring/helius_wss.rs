@@ -77,11 +77,15 @@ pub struct LaserStreamClient {
     config: LaserStreamConfig,
     circuit_breaker: Arc<CircuitBreaker>,
     token_parser: Arc<TokenParser>,
+    #[allow(dead_code)] // Retained for future rate-limiting of per-wallet processing
     rate_limiter: Arc<RateLimiter>,
+    #[allow(dead_code)] // Retained for future token-safety verification on incoming signals
     helius_client: Arc<super::HeliusClient>,
     health: Arc<WebSocketHealth>,
     subscription_manager: Arc<SubscriptionManager>,
+    #[allow(dead_code)] // Retained for future delayed-exit dispatching
     pending_exits: Arc<RwLock<Vec<super::ExitSignal>>>,
+    #[allow(dead_code)] // Retained for future exit-signal reconciliation
     exit_detector: Arc<ExitDetector>,
 }
 

@@ -18,9 +18,9 @@ Developer Plan Constraints:
 
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 import threading
 import json
@@ -182,6 +182,13 @@ class PredictiveBudgetManager:
         # Current credit state
         self._snapshot = CreditSnapshot()
 
+        # Per-day credit consumption (date string -> credits) so "today's"
+        # usage reflects actual consumption, not a month-to-date average
+        self._daily_usage: Dict[str, int] = {}
+
+        # Calendar month being tracked (for monthly rollover)
+        self._tracked_month: str = datetime.fromtimestamp(time.time()).strftime('%Y-%m')
+
         # Budget allocations (dynamic)
         self._allocations: Dict[BudgetCategory, float] = dict(
             self._config.DEFAULT_ALLOCATION
@@ -210,19 +217,38 @@ class PredictiveBudgetManager:
         with self._lock:
             # Update snapshot
             self._update_snapshot()
-            return self._snapshot
+            # Defensive copy so callers can't mutate shared state out of lock
+            return replace(self._snapshot)
 
     def _update_snapshot(self) -> None:
         """Update credit snapshot with current state."""
         now = time.time()
         current_date = datetime.fromtimestamp(now)
         day_of_month = current_date.day
+        current_month = current_date.strftime('%Y-%m')
+
+        # Monthly rollover: reset the per-category counters and daily ledger
+        # when a new calendar month starts (also covers restarts across months).
+        if self._tracked_month != current_month:
+            for category in BudgetCategory:
+                self._performance[category] = CategoryPerformance(category=category)
+            self._daily_usage.clear()
+            self._tracked_month = current_month
+            self._last_rebalance = now
 
         # Calculate total credits used from all categories
         total_used = sum(p.credits_consumed for p in self._performance.values())
 
-        # Estimate daily used (simplified - in production, track per-day)
-        daily_used = int(total_used / max(1, day_of_month))
+        # Today's actual consumption, not the month-to-date average
+        today_key = current_date.strftime('%Y-%m-%d')
+        daily_used = self._daily_usage.get(today_key, 0)
+
+        # Prune daily ledger to the last 35 days
+        if len(self._daily_usage) > 35:
+            cutoff = (current_date - timedelta(days=35)).strftime('%Y-%m-%d')
+            self._daily_usage = {
+                k: v for k, v in self._daily_usage.items() if k >= cutoff
+            }
 
         # Update snapshot
         self._snapshot.credits_used = total_used
@@ -386,6 +412,10 @@ class PredictiveBudgetManager:
             perf.operations_count += 1
             perf.last_updated = time.time()
 
+            # Track today's actual consumption for accurate daily reporting
+            today_key = datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d')
+            self._daily_usage[today_key] = self._daily_usage.get(today_key, 0) + credits
+
             logger.debug(
                 f"Recorded {credits:,} credits for {category.value} "
                 f"(total: {perf.credits_consumed:,}, value: {value:.2f})"
@@ -529,7 +559,10 @@ class PredictiveBudgetManager:
     def get_category_performance(self) -> Dict[BudgetCategory, CategoryPerformance]:
         """Get performance metrics for all categories."""
         with self._lock:
-            return dict(self._performance)
+            return {
+                category: replace(perf)
+                for category, perf in self._performance.items()
+            }
 
     def record_daily_usage(self, daily_credits: int, category_breakdown: Dict[BudgetCategory, int]) -> None:
         """
@@ -580,6 +613,12 @@ class PredictiveBudgetManager:
                 except ValueError:
                     continue
 
+            # Restore daily ledger and month tracking (monthly rollover in
+            # _update_snapshot handles the case where the month changed while
+            # the process was stopped)
+            self._daily_usage = data.get('daily_usage', {})
+            self._tracked_month = data.get('tracked_month', self._tracked_month)
+
             logger.info(f"Loaded state from {state_file}")
 
         except Exception as e:
@@ -597,6 +636,8 @@ class PredictiveBudgetManager:
                     }
                     for cat, perf in self._performance.items()
                 },
+                'daily_usage': self._daily_usage,
+                'tracked_month': self._tracked_month,
                 'last_save': time.time(),
             }
 
@@ -609,6 +650,10 @@ class PredictiveBudgetManager:
 
     def get_daily_summary(self) -> Dict[str, Any]:
         """Get daily summary of credit usage and performance."""
+        # Compute forecasts outside the lock to avoid non-reentrant lock deadlock
+        forecast_24h = self.forecast_credit_needs(24)
+        forecast_7d = self.forecast_credit_needs(168)
+
         with self._lock:
             self._update_snapshot()
 
@@ -638,7 +683,7 @@ class PredictiveBudgetManager:
                     for cat, perf in self._performance.items()
                 },
                 'forecast': {
-                    '24h_projected': self.forecast_credit_needs(24).projected_usage,
-                    '7d_projected': self.forecast_credit_needs(168).projected_usage,
+                    '24h_projected': forecast_24h.projected_usage,
+                    '7d_projected': forecast_7d.projected_usage,
                 },
             }

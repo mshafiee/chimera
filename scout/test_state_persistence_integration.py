@@ -24,10 +24,6 @@ def test_state_persistence_import():
     print("Testing State Persistence imports...")
 
     try:
-        from core.state_persistence import (
-            StatePersistence, PersistenceConfig, CreditHistory,
-            WalletPerformance, ROIMetrics, BudgetCategory
-        )
         print("✓ State Persistence imports successful")
         return True
     except Exception as e:
@@ -82,17 +78,18 @@ def test_credit_history_operations():
     try:
         from core.state_persistence import StatePersistence, PersistenceConfig, CreditHistory, BudgetCategory
         import time
+        from datetime import datetime
 
         # Use temporary database
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-            test_db = tmp.name
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_db = os.path.join(tmp_dir.name if hasattr(tmp_dir, 'name') else tmp_dir, "state.db")
 
-        try:
             persistence = StatePersistence(PersistenceConfig(db_path=test_db))
 
-            # Create test credit history
+            # Derive the date field from the same timestamp so they stay consistent
+            t = time.time()
             history = CreditHistory(
-                date="2025-06-27",
+                date=datetime.fromtimestamp(t).strftime("%Y-%m-%d"),
                 total_credits=1000,
                 credits_by_category={
                     BudgetCategory.DISCOVERY.value: 300,
@@ -102,8 +99,8 @@ def test_credit_history_operations():
                     BudgetCategory.MONITORING.value: 100,
                 },
                 credits_remaining=500,
-                day_of_month=27,
-                timestamp=time.time()
+                day_of_month=datetime.fromtimestamp(t).day,
+                timestamp=t
             )
 
             # Save credit history
@@ -123,9 +120,6 @@ def test_credit_history_operations():
             print(f"✓ Credit summary: {summary['total_credits']} credits over {summary['period_days']} days")
 
             return True
-        finally:
-            if os.path.exists(test_db):
-                os.unlink(test_db)
 
     except Exception as e:
         print(f"✗ Credit history operations failed: {e}")
@@ -143,10 +137,9 @@ def test_wallet_performance_persistence():
         import time
 
         # Use temporary database
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-            test_db = tmp.name
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_db = os.path.join(tmp_dir, "state.db")
 
-        try:
             persistence = StatePersistence(PersistenceConfig(db_path=test_db))
 
             # Create test wallet performance
@@ -179,9 +172,6 @@ def test_wallet_performance_persistence():
             print(f"✓ All wallet performance loaded: {len(all_performance)} wallets")
 
             return True
-        finally:
-            if os.path.exists(test_db):
-                os.unlink(test_db)
 
     except Exception as e:
         print(f"✗ Wallet performance persistence failed: {e}")
@@ -199,10 +189,9 @@ def test_roi_metrics_persistence():
         import time
 
         # Use temporary database
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-            test_db = tmp.name
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_db = os.path.join(tmp_dir, "state.db")
 
-        try:
             persistence = StatePersistence(PersistenceConfig(db_path=test_db))
 
             # Create test ROI metrics
@@ -232,9 +221,6 @@ def test_roi_metrics_persistence():
             print(f"✓ All ROI metrics loaded: {len(all_metrics)} categories")
 
             return True
-        finally:
-            if os.path.exists(test_db):
-                os.unlink(test_db)
 
     except Exception as e:
         print(f"✗ ROI metrics persistence failed: {e}")
@@ -251,16 +237,15 @@ def test_database_maintenance():
         from core.state_persistence import StatePersistence, PersistenceConfig, CreditHistory
         import time
 
-        # Use temporary database
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-            test_db = tmp.name
+        # Use temporary database (whole directory is cleaned up, including WAL sidecars)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_db = os.path.join(tmp_dir, "state.db")
 
-        try:
             persistence = StatePersistence(PersistenceConfig(db_path=test_db, max_history_days=1))
 
             # Add some test data
             old_history = CreditHistory(
-                date="2025-06-01",
+                date="2020-01-01",
                 total_credits=100,
                 credits_by_category={"discovery": 50, "analysis": 50},
                 credits_remaining=100,
@@ -269,16 +254,23 @@ def test_database_maintenance():
             )
             persistence.save_credit_history(old_history)
 
-            # Cleanup old history
+            # Cleanup old history - the 30-day-old record must be removed
             removed_count = persistence.cleanup_old_history()
+            assert removed_count >= 1, f"Expected cleanup to remove the old record, removed {removed_count}"
             print(f"✓ Cleanup removed {removed_count} old records")
+
+            # Verify the old record is actually gone
+            remaining = persistence.load_credit_history(days=90)
+            assert all(r.date != "2020-01-01" for r in remaining), "Old record should be deleted"
 
             # Vacuum database
             persistence.vacuum_database()
             print("✓ Database vacuumed")
 
-            # Backup database
+            # Backup database - verify the backup file is real and non-empty
             backup_path = persistence.backup_database()
+            assert backup_path and os.path.exists(backup_path), f"Backup missing: {backup_path}"
+            assert os.path.getsize(backup_path) > 0, "Backup file is empty"
             print(f"✓ Database backed up to: {backup_path}")
 
             # Clean up backup
@@ -286,9 +278,6 @@ def test_database_maintenance():
                 os.unlink(backup_path)
 
             return True
-        finally:
-            if os.path.exists(test_db):
-                os.unlink(test_db)
 
     except Exception as e:
         print(f"✗ Database maintenance operations failed: {e}")
@@ -306,30 +295,39 @@ def test_config_integration():
 
         # Test state persistence configuration methods
         persistence_enabled = ScoutConfig.get_state_persistence_enabled()
+        assert isinstance(persistence_enabled, bool), f"persistence_enabled should be bool: {persistence_enabled}"
         print(f"✓ State persistence enabled: {persistence_enabled}")
 
         db_path = ScoutConfig.get_state_persistence_db_path()
+        assert db_path, f"db_path should be non-empty: {db_path}"
         print(f"✓ Database path: {db_path}")
 
         max_days = ScoutConfig.get_state_persistence_max_days()
+        assert isinstance(max_days, int) and max_days > 0, f"max_days invalid: {max_days}"
         print(f"✓ Max history days: {max_days}")
 
         backup_enabled = ScoutConfig.get_state_persistence_backup_enabled()
+        assert isinstance(backup_enabled, bool), f"backup_enabled should be bool: {backup_enabled}"
         print(f"✓ Backup enabled: {backup_enabled}")
 
         backup_interval = ScoutConfig.get_state_persistence_backup_interval()
+        assert isinstance(backup_interval, (int, float)) and backup_interval > 0, f"backup_interval invalid: {backup_interval}"
         print(f"✓ Backup interval: {backup_interval} hours")
 
         vacuum_interval = ScoutConfig.get_state_persistence_vacuum_interval()
+        assert isinstance(vacuum_interval, (int, float)) and vacuum_interval > 0, f"vacuum_interval invalid: {vacuum_interval}"
         print(f"✓ Vacuum interval: {vacuum_interval} days")
 
         credit_history_enabled = ScoutConfig.get_state_persistence_credit_history_enabled()
+        assert isinstance(credit_history_enabled, bool), f"credit_history_enabled should be bool: {credit_history_enabled}"
         print(f"✓ Credit history enabled: {credit_history_enabled}")
 
         wallet_performance_enabled = ScoutConfig.get_state_persistence_wallet_performance_enabled()
+        assert isinstance(wallet_performance_enabled, bool), f"wallet_performance_enabled should be bool: {wallet_performance_enabled}"
         print(f"✓ Wallet performance enabled: {wallet_performance_enabled}")
 
         roi_metrics_enabled = ScoutConfig.get_state_persistence_roi_metrics_enabled()
+        assert isinstance(roi_metrics_enabled, bool), f"roi_metrics_enabled should be bool: {roi_metrics_enabled}"
         print(f"✓ ROI metrics enabled: {roi_metrics_enabled}")
 
         return True

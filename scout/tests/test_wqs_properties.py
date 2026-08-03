@@ -7,7 +7,7 @@ Uses Hypothesis to test that WQS properties hold for all valid inputs.
 from hypothesis import given, strategies as st, example
 from typing import Optional
 from decimal import Decimal
-from scout.core.wqs import calculate_wqs, WalletMetrics
+from core.wqs import calculate_wqs, WalletMetrics
 
 
 def create_test_metrics(
@@ -61,9 +61,9 @@ class TestWQSProperties:
         wqs_low = calculate_wqs(metrics_low)
         wqs_high = calculate_wqs(metrics_high)
 
-        # Allow some tolerance for penalties that might affect high ROI wallets
-        # But generally, higher ROI should not result in significantly lower WQS
-        assert wqs_high >= wqs_low - 10.0, (
+        # Higher ROI must not produce a materially lower WQS (strict-ish bound:
+        # discrete ROI bonus steps are at most a few points)
+        assert wqs_high >= wqs_low - 5.0, (
             f"WQS not monotonic: roi_30d {roi_30d_low} -> {wqs_low}, "
             f"roi_30d {roi_30d_high} -> {wqs_high}"
         )
@@ -83,7 +83,7 @@ class TestWQSProperties:
         wqs_low = calculate_wqs(metrics_low)
         wqs_high = calculate_wqs(metrics_high)
 
-        assert wqs_high >= wqs_low - 5.0, (
+        assert wqs_high >= wqs_low - 3.0, (
             f"WQS not monotonic for win rate: {win_rate_low} -> {wqs_low}, "
             f"{win_rate_high} -> {wqs_high}"
         )
@@ -120,14 +120,13 @@ class TestWQSProperties:
         wqs_low = calculate_wqs(metrics_low)
         wqs_high = calculate_wqs(metrics_high)
 
-        # Low trade count should generally result in lower WQS
-        # But allow some tolerance since other factors also matter
-        if trade_count_low < 20 and trade_count_high >= 20:
-            assert wqs_high >= wqs_low - 10.0, (
-                f"Statistical significance penalty not working: "
-                f"low_count={trade_count_low} -> {wqs_low}, "
-                f"high_count={trade_count_high} -> {wqs_high}"
-            )
+        # Low trade count must not outscore a 20+ trade wallet by a large margin
+        # (the given strategies already guarantee low in [0,19] and high in [20,1000])
+        assert wqs_high >= wqs_low - 5.0, (
+            f"Statistical significance penalty not working: "
+            f"low_count={trade_count_low} -> {wqs_low}, "
+            f"high_count={trade_count_high} -> {wqs_high}"
+        )
 
     @given(
         drawdown=st.floats(min_value=0.0, max_value=100.0, allow_nan=False, allow_infinity=False),
@@ -222,7 +221,7 @@ class TestWQSProperties:
         # The wallet with roi_7d=4.0 should not get an unfair momentum bonus
         # over the wallet with roi_7d=0.001 when roi_30d is near-zero.
         # Both should be close since roi_30d < 1.0 blocks the recency path.
-        assert abs(wqs_with - wqs_without) < 15.0, (
+        assert abs(wqs_with - wqs_without) < 3.0, (
             f"Near-zero roi_30d should not trigger momentum bonus: "
             f"wqs_with_7d={wqs_with:.1f}, wqs_without={wqs_without:.1f}"
         )
@@ -236,14 +235,27 @@ class TestWQSProperties:
             trade_count_30d=100,
             win_rate=0.7,
             max_drawdown_30d=0.0,
+            avg_trade_size_sol=Decimal('1.0'),  # avoid the dust-trader confound
         )
         wqs = calculate_wqs(metrics)
-        # With pump-spike detection active and roi_30d near-zero + roi_7d > 10,
-        # the _is_pump_spike flag should be True, penalizing the wallet.
-        # Verify score is not inflated despite the high roi_7d.
+
+        # Equivalent wallet with a modest 7d ROI (no spike) as the baseline
+        baseline = calculate_wqs(WalletMetrics(
+            address="test3b",
+            roi_30d=0.001,
+            roi_7d=4.0,
+            trade_count_30d=100,
+            win_rate=0.7,
+            max_drawdown_30d=0.0,
+            avg_trade_size_sol=Decimal('1.0'),
+        ))
+
+        # The pump spike (roi_7d=50 on a near-zero baseline) must penalize the
+        # wallet relative to the non-spike baseline
         assert 0 <= wqs <= 100
-        # A 50% 7d ROI with near-zero baseline should be heavily penalized
-        assert wqs < 60.0, f"Expected pump-spike penalty for near-zero baseline, got WQS={wqs:.1f}"
+        assert wqs < baseline, (
+            f"Pump-spike wallet ({wqs:.1f}) must score below the non-spike baseline ({baseline:.1f})"
+        )
 
     def test_wqs_profit_factor_graduated(self):
         """Phase 2a/Quick Win: PF cliff at 1.2 is graduated."""

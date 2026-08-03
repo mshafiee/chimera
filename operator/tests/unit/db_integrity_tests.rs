@@ -1,39 +1,36 @@
 //! Database Integrity Unit Tests
 //!
 //! Tests silent failure patterns in db.rs that can corrupt trade state or PnL:
-//! - update_trade_status() returns Ok(()) even when UUID does not exist
+//! - update_trade_status() returns Err(NotFound) when the UUID does not exist [FIXED]
 //! - close_position() with multiple active positions closes all (not just one) [M3 FIXED]
 //! - close_position() with exit_price=0 records -100% loss [M11 FIXED]
 //! - open_position() with entry_price=0 creates untrackable position [M4 FIXED]
 //! - update_trade_costs() accumulates on retry (M10 FIXED)
-//! - PnL precision with f64 round-trip
-//! - Orphaned position after trade deleted
+//! - PnL precision round-trip
+//! - Cascade semantics of trades -> positions (ON DELETE CASCADE)
 
-use chimera_operator::db_abstraction::{
-    create_database, Database, DatabaseConfig, DbPool, InsertTrade, UpdateTradeStatus,
-};
+use chimera_operator::db_abstraction::{Database, DbPool, InsertTrade, UpdateTradeStatus};
 use rust_decimal::Decimal;
 use sqlx::Pool;
 use sqlx::Postgres;
 use std::str::FromStr;
 use std::sync::Arc;
-use tempfile::TempDir;
+
+#[path = "../common/mod.rs"]
+mod common;
 
 fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
-    match db.pool() {
-        DbPool::PostgreSQL(pool) => pool,
-        _ => panic!("test requires PostgreSQL backend"),
-    }
+    // DbPool is PostgreSQL-only (single variant): irrefutable destructure, no
+    // fallback panic arm (which would be unreachable).
+    let DbPool::PostgreSQL(pool) = db.pool();
+    pool
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
-    let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
-    let db = create_database(&config).await.unwrap();
-    db.run_migrations().await.unwrap();
-    (db, temp_dir)
+/// Each test gets its own isolated database (dropped on teardown).
+async fn create_test_db() -> (Arc<dyn Database>, common::TestDbGuard) {
+    common::create_test_pg_db().await
 }
 
 /// Insert a trade and return its UUID.
@@ -55,10 +52,10 @@ async fn setup_trade(db: &Arc<dyn Database>, uuid: &str) {
 // ─── Test 39 (plan) ── update_trade_status silently ok on missing UUID ────────
 
 #[tokio::test]
-async fn test_update_trade_status_nonexistent_uuid_silent_success() {
-    // BUG DOCUMENTED: update_trade_status returns Ok(()) even when 0 rows were updated.
-    // The caller cannot distinguish "updated successfully" from "UUID not found".
-    // This allows phantom state transitions that leave the actual trade stuck in PENDING.
+async fn test_update_trade_status_nonexistent_uuid_returns_error() {
+    // FIXED: update_trade_status returns Err(NotFound) when 0 rows were updated.
+    // This lets the caller distinguish "updated successfully" from "UUID not found"
+    // and prevents phantom state transitions that leave the actual trade stuck in PENDING.
 
     let (db, _tmp) = create_test_db().await;
 
@@ -91,9 +88,7 @@ async fn test_update_trade_status_nonexistent_uuid_silent_success() {
 
 #[tokio::test]
 async fn test_update_trade_status_real_trade_affects_exactly_one_row() {
-    // Positive case: updating a real trade must affect exactly 1 row.
-    // The function currently returns Ok(()) in both cases — callers must
-    // independently verify row count by re-querying.
+    // Positive case: updating a real trade must succeed and affect exactly 1 row.
 
     let (db, _tmp) = create_test_db().await;
     let pool = pg_pool(&db);
@@ -134,7 +129,6 @@ async fn test_close_position_closes_only_specified_position() {
     let pool = pg_pool(&db);
 
     // Insert two trades for the same wallet but different tokens
-    // (activate_trade_and_open_position enforces one ACTIVE position per token)
     let uuid1 = "uuid-pos-1";
     let uuid2 = "uuid-pos-2";
     for (uuid, token) in [("uuid-pos-1", "token_A"), ("uuid-pos-2", "token_B")] {
@@ -392,41 +386,30 @@ async fn test_trade_costs_accumulate_on_retry() {
     .await
     .unwrap();
 
-    let (jito_str, total_str): (String, String) =
+    let (jito, total): (Decimal, Decimal) =
         sqlx::query_as("SELECT jito_tip_sol, total_cost_sol FROM trades WHERE trade_uuid = $1")
             .bind(uuid)
             .fetch_one(&pool)
             .await
             .unwrap();
-    let jito: f64 = jito_str.parse().unwrap_or(0.0);
-    let total: f64 = total_str.parse().unwrap_or(0.0);
 
     // Accumulated: jito = 0.001 + 0.002 = 0.003, total = 0.0017 + 0.0034 = 0.0051
-    assert!(
-        (jito - 0.003).abs() < 1e-9,
-        "Accumulated jito_tip_sol should be 0.003, got {}",
-        jito
-    );
-    assert!(
-        (total - 0.0051).abs() < 1e-9,
-        "Accumulated total cost should be 0.0051, got {}",
-        total
-    );
+    assert_eq!(jito, Decimal::from_str("0.003").unwrap());
+    assert_eq!(total, Decimal::from_str("0.0051").unwrap());
 }
 
-// ─── Test 45 (plan) ── orphaned position after trade deleted ─────────────────
+// ─── Test 45 (plan) ── trade delete cascades to positions ────────────────────
 
 #[tokio::test]
-async fn test_position_can_become_orphaned_after_trade_delete() {
-    // Documents: SQLite foreign key constraints PREVENT accidental orphaning via normal DELETE.
-    // The schema sets `PRAGMA foreign_keys = ON` per connection; positions.trade_uuid
-    // references trades — deleting a trade with an active position fails.
+async fn test_position_deleted_with_trade_via_cascade() {
+    // The PostgreSQL schema declares `FOREIGN KEY (trade_uuid) REFERENCES
+    // trades(trade_uuid) ON DELETE CASCADE` (0001_full_schema.sql), so deleting
+    // a trade silently deletes its child position. This pins that contract —
+    // if the schema ever switches to RESTRICT, this test must change too.
     //
-    // Orphaning risk: a direct SQLite file edit (`sqlite3 chimera.db "DELETE FROM trades ..."`),
-    // a script that disables FK per-connection, or a schema migration that drops FK constraints
-    // could create orphaned positions undetectable by the Operator's normal queries.
-    //
-    // This test confirms: normal application DELETE is blocked (FK works as designed).
+    // NOTE: this also documents the orphaning risk IN REVERSE: a cleanup DELETE
+    // of FAILED/DEAD_LETTER trades silently destroys position history, so
+    // trade cleanup must only run on trades with no position rows.
 
     let (db, _tmp) = create_test_db().await;
     let pool = pg_pool(&db);
@@ -459,32 +442,26 @@ async fn test_position_can_become_orphaned_after_trade_delete() {
     .await
     .unwrap();
 
-    // FK constraint PREVENTS the trade from being deleted
+    // Schema uses ON DELETE CASCADE: deleting the trade also deletes its position.
     let delete_result = sqlx::query("DELETE FROM trades WHERE trade_uuid = $1")
         .bind(uuid)
         .execute(&pool)
         .await;
 
     assert!(
-        delete_result.is_err(),
-        "FK constraint must block trade deletion when a child position exists"
+        delete_result.is_ok(),
+        "trade deletion should succeed (FK is ON DELETE CASCADE)"
     );
-
-    // Position is still intact — trade deletion was blocked
     let pos_count: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM positions WHERE trade_uuid = $1 AND state = 'ACTIVE'")
+        sqlx::query_as("SELECT COUNT(*) FROM positions WHERE trade_uuid = $1")
             .bind(uuid)
             .fetch_one(&pool)
             .await
             .unwrap();
     assert_eq!(
-        pos_count.0, 1,
-        "Position must survive the blocked trade delete — FK enforcement confirmed"
+        pos_count.0, 0,
+        "cascade should remove the child position"
     );
-
-    // DOCUMENTED RISK: A direct sqlite3 CLI edit or per-connection PRAGMA foreign_keys=OFF
-    // bypasses this protection and could create orphaned positions. The Operator has no
-    // runtime check for orphaned positions beyond the reconciliation job.
 }
 
 // ─── Test 46 (plan) ── PnL precision f64 round-trip ─────────────────────────
@@ -529,20 +506,18 @@ async fn test_pnl_precision_f64_roundtrip() {
     .await
     .unwrap();
 
-    let stored: (String,) =
+    // NUMERIC(30,18) round-trips the full 15 significant digits losslessly —
+    // decode as Decimal and compare exactly.
+    let (stored,): (Decimal,) =
         sqlx::query_as("SELECT entry_price FROM positions WHERE trade_uuid = $1")
             .bind(uuid)
             .fetch_one(&pool)
             .await
             .unwrap();
 
-    let recovered = Decimal::from_str(&stored.0).unwrap_or(Decimal::ZERO);
-
-    let diff = (precise_entry - recovered).abs();
-    assert!(
-        diff < Decimal::from_str("0.000001").unwrap(),
-        "f64 round-trip precision loss should be < 1e-6 SOL, got diff={}",
-        diff
+    assert_eq!(
+        stored, precise_entry,
+        "entry_price must round-trip with EXACT precision through NUMERIC"
     );
 }
 
@@ -550,10 +525,9 @@ async fn test_pnl_precision_f64_roundtrip() {
 
 #[tokio::test]
 async fn test_close_position_no_active_positions_returns_ok_silently() {
-    // BUG DOCUMENTED: When close_position() finds no active positions, it returns
-    // Ok(()) with only a WARN log. The caller has no way to detect a missed close.
-    // This can happen if: duplicate exit signal arrives after position was already closed,
-    // OR if the state machine advanced the position to EXITING before close_position ran.
+    // CONTRACT: close_position_full() returns Ok(false) when no active position
+    // matched (e.g. a duplicate exit signal after the position was already
+    // closed). Callers that need to detect a missed close must check the bool.
 
     let (db, _tmp) = create_test_db().await;
 
@@ -632,7 +606,7 @@ async fn test_close_position_unconfirmed_sets_exiting_state() {
 
     assert!(result.is_ok());
 
-    let (state, closed_at): (String, Option<String>) =
+    let (state, closed_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
         sqlx::query_as("SELECT state, closed_at FROM positions WHERE trade_uuid = $1")
             .bind(uuid)
             .fetch_one(&pool)
@@ -717,19 +691,27 @@ async fn test_revert_position_exit_restores_state_and_amount() {
     .await
     .unwrap();
 
-    // Verify DB states after unconfirmed partial close
-    let (state_before, amount_str, exit_price_str, exit_sig_before, pnl_str): (String, String, Option<String>, Option<String>, Option<String>) =
-        sqlx::query_as("SELECT state, entry_amount_sol, exit_price, exit_tx_signature, realized_pnl_sol FROM positions WHERE trade_uuid = $1")
-            .bind(entry_uuid)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    let amount_before: f64 = amount_str.parse().unwrap_or(0.0);
-    let exit_price_before: Option<f64> = exit_price_str.and_then(|s| s.parse().ok());
-    let pnl_before: Option<f64> = pnl_str.and_then(|s| s.parse().ok());
+    // Verify DB states after unconfirmed partial close (NUMERIC columns decoded as Decimal)
+    let (state_before, amount_before, exit_price_before, exit_sig_before, pnl_before): (
+        String,
+        Decimal,
+        Option<Decimal>,
+        Option<String>,
+        Option<Decimal>,
+    ) = sqlx::query_as(
+        "SELECT state, entry_amount_sol, exit_price, exit_tx_signature, realized_pnl_sol FROM positions WHERE trade_uuid = $1",
+    )
+    .bind(entry_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     assert_eq!(state_before, "EXITING");
-    assert!((amount_before - 1.0).abs() < 1e-6); // Decremented from 1.5 to 1.0
+    // 1.5 - (1.5 × 0.33333333) = 1.000000005 — within 1e-6 of 1.0
+    assert!(
+        (amount_before - Decimal::ONE).abs() < Decimal::from_str("0.000001").unwrap(),
+        "amount should be ~1.0 after the partial close, got {amount_before}"
+    );
     assert!(exit_price_before.is_some());
     assert_eq!(exit_sig_before, Some("sig_revert_sell".to_string()));
     assert!(pnl_before.is_some());
@@ -739,18 +721,22 @@ async fn test_revert_position_exit_restores_state_and_amount() {
     assert!(revert_res.is_ok());
 
     // Verify DB states after reversion
-    let (state_after, amount_after_str, exit_price_after_str, exit_sig_after, pnl_after_str): (String, String, Option<String>, Option<String>, Option<String>) =
-        sqlx::query_as("SELECT state, entry_amount_sol, exit_price, exit_tx_signature, realized_pnl_sol FROM positions WHERE trade_uuid = $1")
-            .bind(entry_uuid)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    let amount_after: f64 = amount_after_str.parse().unwrap_or(0.0);
-    let exit_price_after: Option<f64> = exit_price_after_str.and_then(|s| s.parse().ok());
-    let pnl_after: Option<f64> = pnl_after_str.and_then(|s| s.parse().ok());
+    let (state_after, amount_after, exit_price_after, exit_sig_after, pnl_after): (
+        String,
+        Decimal,
+        Option<Decimal>,
+        Option<String>,
+        Option<Decimal>,
+    ) = sqlx::query_as(
+        "SELECT state, entry_amount_sol, exit_price, exit_tx_signature, realized_pnl_sol FROM positions WHERE trade_uuid = $1",
+    )
+    .bind(entry_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     assert_eq!(state_after, "ACTIVE");
-    assert!((amount_after - 1.5).abs() < 1e-6); // Restored back to 1.5
+    assert_eq!(amount_after, Decimal::from_str("1.5").unwrap()); // Restored back to 1.5
     assert!(exit_price_after.is_none());
     assert!(exit_sig_after.is_none());
     assert!(pnl_after.is_none());

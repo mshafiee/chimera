@@ -45,8 +45,12 @@ export function WebhookActionMenu({
       {isOpen && (
         <>
           <div
+            role="presentation"
             className="fixed inset-0 z-10"
             onClick={() => setIsOpen(false)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setIsOpen(false)
+            }}
           />
           <div className="absolute right-0 top-8 z-20 w-48 bg-surface border border-border rounded-lg shadow-lg py-1">
             <button

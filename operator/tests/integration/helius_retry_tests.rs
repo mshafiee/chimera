@@ -1,13 +1,10 @@
 //! Integration tests for Helius retry logic
 //!
-//! Tests that Helius API client properly implements:
+//! Tests that the retry module properly implements:
 //! - Exponential backoff with ±25% jitter
 //! - 30-second maximum backoff cap
 //! - Correct error classification (retryable vs non-retryable)
-//! - 5 retry attempts by default
-
-use std::time::Duration;
-use tokio::time::sleep;
+//! - Retry attempts by default
 
 // Import retry module for testing backoff calculation
 use chimera_operator::retry::{calculate_backoff, is_retryable_status};
@@ -104,22 +101,19 @@ fn test_jitter_variation() {
         backoffs.push(calculate_backoff(2).as_secs_f64());
     }
 
-    // With ±25% jitter, we should see variation
+    // Base is 4s with ±25% jitter: every sample must fall inside [3s, 5s],
+    // and 20 samples should show variation.
     let min = backoffs.iter().cloned().fold(f64::INFINITY, f64::min);
     let max = backoffs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-    // Base is 4s, so range should be roughly 3s to 5s
     assert!(
         min < max,
         "Jitter should produce variation in backoff times"
     );
 
-    // Verify the range is reasonable (with some tolerance for randomness)
-    let range = max - min;
     assert!(
-        range >= 1.0,
-        "Jitter range should be at least 1 second, got {}",
-        range
+        min >= 3.0 && max <= 5.0,
+        "Jittered backoff must stay inside [3s, 5s] (base 4s ± 25%), got [{min}, {max}]"
     );
 }
 
@@ -186,7 +180,9 @@ async fn test_retry_with_backoff_immediate_fail_on_non_retryable() {
         let counter = counter_clone.clone();
         async move {
             counter.fetch_add(1, Ordering::SeqCst);
-            // Simulate a 404 error - non-retryable
+            // A plain (non-reqwest) error carries status 0 — the retry policy
+            // treats unknown/non-HTTP errors as permanent (they are usually
+            // programming errors) and fails immediately instead of retrying.
             Err(anyhow::anyhow!("HTTP 404"))
         }
     };
@@ -220,7 +216,7 @@ async fn test_retry_timing_with_jitter() {
         let counter = counter_clone.clone();
         async move {
             let count = counter.fetch_add(1, Ordering::SeqCst);
-            if count < 3 {
+            if count < 2 {
                 Err(anyhow::anyhow!("Simulated transient error"))
             } else {
                 Ok::<(), anyhow::Error>(())
@@ -232,9 +228,11 @@ async fn test_retry_timing_with_jitter() {
     let _ = retry_with_backoff(operation, 5).await;
     let elapsed = start.elapsed();
 
-    // Should have: 1st attempt (fail) + backoff1 + 2nd attempt (fail) + backoff2 + 3rd attempt (success)
-    // With exponential backoff: ~1s + ~2s = ~3s total wait time (plus execution time)
-    // Allow generous tolerance for jitter and execution time
+    // 1st attempt (fail) + backoff1 (~1s) + 2nd attempt (fail) + backoff2 (~2s)
+    // + 3rd attempt (success) → ~2.25-3.75s total wait. The generous 2-6s
+    // window keeps CI noise from flaking the assertion; the attempt COUNT
+    // (== 3, asserted in test_retry_with_backoff_success_after_retries) is the
+    // deterministic part of this behavior.
     assert!(
         elapsed.as_secs() >= 2 && elapsed.as_secs() <= 6,
         "Total time with retries should be roughly 3 seconds (1s + 2s), got {}s",

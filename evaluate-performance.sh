@@ -3,6 +3,7 @@
 # Evaluates logs and performance metrics for the Chimera trading bot
 
 set -e
+set -o pipefail
 
 # Colors
 GREEN='\033[0;32m'
@@ -39,11 +40,24 @@ log_section() {
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 DB_PATH="$PROJECT_ROOT/data/chimera.db"
 
+for tool in curl sqlite3 python3 docker column; do
+    if ! command -v "$tool" > /dev/null 2>&1; then
+        echo -e "${RED}[✗]${NC} Required tool not found: $tool" >&2
+        exit 1
+    fi
+done
+
+# Initialize counters so they are never unset
+TOTAL=0
+ACTIVE=0
+CANDIDATE=0
+REJECTED=0
+
 log_section "Chimera Performance Evaluation"
 
 # 1. System Health
 log_section "1. System Health Status"
-HEALTH=$(curl -s http://localhost:8080/api/v1/health 2>/dev/null)
+HEALTH=$(curl -s --max-time 10 http://localhost:8080/api/v1/health 2>/dev/null || true)
 if [ -n "$HEALTH" ]; then
     echo "$HEALTH" | python3 -m json.tool 2>/dev/null || echo "$HEALTH"
 else
@@ -75,7 +89,7 @@ fi
 
 # 3. Trading Performance
 log_section "3. Trading Performance Metrics"
-PERF=$(curl -s http://localhost:8080/api/v1/metrics/performance 2>/dev/null)
+PERF=$(curl -s --max-time 10 http://localhost:8080/api/v1/metrics/performance 2>/dev/null || true)
 if [ -n "$PERF" ]; then
     echo "$PERF" | python3 -m json.tool 2>/dev/null || echo "$PERF"
 else
@@ -84,7 +98,7 @@ fi
 
 # 4. Cost Analysis
 log_section "4. Cost Metrics (30-day)"
-COSTS=$(curl -s http://localhost:8080/api/v1/metrics/costs 2>/dev/null)
+COSTS=$(curl -s --max-time 10 http://localhost:8080/api/v1/metrics/costs 2>/dev/null || true)
 if [ -n "$COSTS" ]; then
     echo "$COSTS" | python3 -m json.tool 2>/dev/null || echo "$COSTS"
 else
@@ -93,12 +107,12 @@ fi
 
 # 5. Recent Trades
 log_section "5. Recent Trading Activity"
-TRADES=$(curl -s "http://localhost:8080/api/v1/trades?limit=10" 2>/dev/null)
+TRADES=$(curl -s --max-time 10 "http://localhost:8080/api/v1/trades?limit=10" 2>/dev/null || true)
 if [ -n "$TRADES" ]; then
     TRADE_COUNT=$(echo "$TRADES" | python3 -c "import sys, json; data=json.load(sys.stdin); print(len(data.get('trades', [])))" 2>/dev/null || echo "0")
     log_info "Recent trades: $TRADE_COUNT"
     if [ "$TRADE_COUNT" -gt 0 ]; then
-        echo "$TRADES" | python3 -m json.tool 2>/dev/null | head -50 || echo "$TRADES" | head -30
+        if ! echo "$TRADES" | python3 -m json.tool 2>/dev/null; then echo "$TRADES" | head -30; fi
     else
         log_info "No trades yet - bot is waiting for signals"
     fi
@@ -108,11 +122,11 @@ fi
 
 # 6. Error Analysis
 log_section "6. Error Analysis (Last 50 lines)"
-ERRORS=$(docker logs chimera-operator --tail 50 2>&1 | grep -iE "ERROR|WARN" | tail -20)
-if [ -n "$ERRORS" ]; then
-    echo "$ERRORS"
-    ERROR_COUNT=$(echo "$ERRORS" | grep -i "ERROR" | wc -l | tr -d ' ')
-    WARN_COUNT=$(echo "$ERRORS" | grep -i "WARN" | wc -l | tr -d ' ')
+ALL_ERRORS=$(docker logs chimera-operator --tail 50 2>&1 | grep -iE "ERROR|WARN" || true)
+if [ -n "$ALL_ERRORS" ]; then
+    echo "$ALL_ERRORS" | tail -20
+    ERROR_COUNT=$(echo "$ALL_ERRORS" | grep -ci "ERROR" || true)
+    WARN_COUNT=$(echo "$ALL_ERRORS" | grep -ci "WARN" || true)
     log_info "Errors in last 50 lines: $ERROR_COUNT"
     log_info "Warnings in last 50 lines: $WARN_COUNT"
 else

@@ -8,7 +8,7 @@
 //! - Performance indicators
 
 use prometheus::{
-    Gauge, Histogram, IntCounter, IntGauge, Registry,
+    Gauge, Histogram, HistogramVec, IntCounter, IntGauge, Registry,
 };
 use std::sync::Arc;
 use parking_lot::RwLock;
@@ -32,7 +32,7 @@ pub struct JupiterMetrics {
     /// Jupiter API request duration in seconds
     jupiter_request_duration_seconds: Histogram,
     /// Jupiter API request duration by endpoint
-    jupiter_request_duration_by_endpoint_seconds: Histogram,
+    jupiter_request_duration_by_endpoint_seconds: HistogramVec,
 
     // Error metrics
     /// Jupiter API errors by type
@@ -98,6 +98,12 @@ pub struct JupiterMetrics {
     custom_metrics: Arc<RwLock<HashMap<String, f64>>>,
 }
 
+impl Default for JupiterMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl JupiterMetrics {
     /// Create new Jupiter metrics
     pub fn new() -> Self {
@@ -125,12 +131,12 @@ impl JupiterMetrics {
             ).buckets(vec![0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0]),
         ).unwrap();
 
-        let jupiter_request_duration_by_endpoint_seconds = Histogram::with_opts(
+        let jupiter_request_duration_by_endpoint_seconds = HistogramVec::new(
             prometheus::HistogramOpts::new(
                 "jupiter_request_duration_by_endpoint_seconds",
                 "Jupiter API request duration by endpoint"
-            ).buckets(vec![0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0])
-                .const_label("endpoint", "unknown"),
+            ).buckets(vec![0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0]),
+            &["endpoint"],
         ).unwrap();
 
         // Error metrics
@@ -298,8 +304,7 @@ impl JupiterMetrics {
     }
 
     /// Record a Jupiter API request
-    pub fn record_request(&self, _endpoint: &str, duration_secs: f64, success: bool) {
-        self.jupiter_requests_total.inc();
+    pub fn record_request(&self, endpoint: &str, duration_secs: f64, success: bool) {        self.jupiter_requests_total.inc();
 
         if success {
             self.jupiter_requests_success_total.inc();
@@ -308,6 +313,10 @@ impl JupiterMetrics {
         }
 
         self.jupiter_request_duration_seconds.observe(duration_secs);
+        let endpoint_label = if endpoint.is_empty() { "unknown" } else { endpoint };
+        self.jupiter_request_duration_by_endpoint_seconds
+            .with_label_values(&[endpoint_label])
+            .observe(duration_secs);
     }
 
     /// Record a Jupiter API error

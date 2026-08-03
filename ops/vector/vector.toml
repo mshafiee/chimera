@@ -1,6 +1,8 @@
 # Vector Configuration for Chimera 10-Day Evaluation
 # ARM64-compatible log aggregation - Simple working version
 
+data_dir = "/var/lib/vector"
+
 # ===================================================================
 # Sources - Log Collection from Chimera Services
 # ===================================================================
@@ -11,42 +13,38 @@
 type = "file"
 include = ["/host/data/logs/operator.log*"]
 read_from = "beginning"
-ignore_older_secs = 86400
+decoding.codec = "json"
 
 # Scout Logs - Python wallet intelligence layer logs
 [sources.scout_logs]
 type = "file"
 include = ["/host/data/logs/scout.log*"]
 read_from = "beginning"
-ignore_older_secs = 86400
+decoding.codec = "json"
 
 # Web Dashboard Logs
 [sources.web_logs]
 type = "file"
-include = ["/host/data/logs/web.log"]
+include = ["/host/data/logs/web.log*"]
 read_from = "beginning"
-ignore_older_secs = 86400
 
 # Database Logs
 [sources.database_logs]
 type = "file"
-include = ["/host/data/logs/database.log"]
+include = ["/host/data/logs/database.log*"]
 read_from = "beginning"
-ignore_older_secs = 86400
 
 # Backup Logs
 [sources.backup_logs]
 type = "file"
-include = ["/host/data/logs/backup.log"]
+include = ["/host/data/logs/backup.log*"]
 read_from = "beginning"
-ignore_older_secs = 86400
 
 # Reconciliation Logs
 [sources.reconcile_logs]
 type = "file"
-include = ["/host/data/logs/reconcile.log"]
+include = ["/host/data/logs/reconcile.log*"]
 read_from = "beginning"
-ignore_older_secs = 86400
 
 # ===================================================================
 # Sinks - Output to Evaluation Storage

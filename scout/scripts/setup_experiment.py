@@ -50,17 +50,29 @@ def setup_experiment(
     
     existing = cursor.fetchone()
     if existing and not force:
-        print(f"❌ Error: Experiment already running")
+        print("❌ Error: Experiment already running")
         print(f"Run ID: {existing[0]}")
         print(f"Status: {existing[1]}")
         print(f"Started: {existing[2]}")
         print("Use --force to override")
         sys.exit(1)
-    
+
+    if existing and force:
+        print(f"⚠️  Superseding existing running experiment: {existing[0]}")
+        cursor.execute("""
+            UPDATE experiment_manifest SET status = 'superseded', end_time = ?
+            WHERE status = 'running'
+        """, (datetime.utcnow().isoformat(),))
+
     # Load experiment configuration
     print("✓ Loading experiment configuration...")
-    with open(config_path) as f:
-        config = json.load(f)
+    config_path_obj = Path(config_path)
+    with open(config_path_obj) as f:
+        if config_path_obj.suffix.lower() in ('.yaml', '.yml'):
+            import yaml
+            config = yaml.safe_load(f)
+        else:
+            config = json.load(f)
     
     experiment_config = config.get('experiment', {})
     
@@ -70,11 +82,17 @@ def setup_experiment(
     
     # Freeze roster snapshot
     print("✓ Freezing roster snapshot...")
-    cursor.execute("SELECT address, wqs_score, roi FROM wallets ORDER BY wqs_score DESC LIMIT 100")
+    cursor.execute("SELECT address, wqs_score, roi FROM wallets ORDER BY created_at ASC LIMIT 100")
     roster_snapshot = [
         {'address': row[0], 'wqs_score': row[1], 'roi': row[2]}
         for row in cursor.fetchall()
     ]
+
+    if not roster_snapshot:
+        print("❌ Error: wallets table is empty - cannot set up experiment")
+        print("Populate the roster (e.g. run scout) before starting the experiment")
+        conn.close()
+        sys.exit(1)
     
     # Apply chronological anti-look-ahead split
     print("✓ Applying chronological anti-look-ahead split...")
@@ -148,7 +166,7 @@ def setup_experiment(
     print(f"Credit Budget: {monthly_budget:,} credits/month")
     print("="*60)
     print("\n🎯 Ready to start experiment")
-    print(f"Run: ./run-forward-test.sh")
+    print("Run: ./run-forward-test.sh")
     print(f"Or: operator/target/release/chimera_operator --config {config_path} --mode paper --experiment-enabled")
     
     return run_id

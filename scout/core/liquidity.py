@@ -112,7 +112,7 @@ class LiquidityProvider:
             db_path: Path to SQLite database for historical liquidity storage
             mode: 'real' (default) or 'simulated' (for testing/dev)
         """
-        self.mode = mode.lower() or os.getenv("SCOUT_LIQUIDITY_MODE", "real").lower()
+        self.mode = (mode or os.getenv("SCOUT_LIQUIDITY_MODE", "real")).lower()
         self.cache_ttl = cache_ttl_seconds or int(os.getenv("SCOUT_LIQUIDITY_CACHE_TTL_SECONDS", "60"))
         self.db_path = db_path or os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
         
@@ -208,21 +208,18 @@ class LiquidityProvider:
 
         Ensures we don't exceed rate limits for external APIs by enforcing
         a minimum delay between requests. Uses asyncio.sleep instead of time.sleep.
+        The next slot is reserved under the lock BEFORE sleeping so concurrent
+        callers get distinct slots.
         """
         with self._rate_limit_lock:
             current_time = time.time()
-            time_since_last = current_time - self._last_request_time
-            if time_since_last < self._rate_limit_delay:
-                delay = self._rate_limit_delay - time_since_last
-                # Release lock during sleep to allow other threads to check
-            else:
-                delay = 0
+            wait_until = max(current_time, self._last_request_time + self._rate_limit_delay)
+            # Reserve the slot now (inside the lock)
+            self._last_request_time = wait_until
+            delay = wait_until - current_time
         if delay > 0:
             import asyncio
             await asyncio.sleep(delay)
-            # Update last request time after sleep
-            with self._rate_limit_lock:
-                self._last_request_time = time.time()
 
     def _cleanup_async_client_session(self, client):
         """Close and clear an async client's session to prevent resource leaks.
@@ -406,11 +403,15 @@ class LiquidityProvider:
             if not (self.mode == "real" and self.birdeye_client):
                 return None
 
-        # Try Birdeye API if available (real mode)
+        # Try Birdeye API if available (real mode).
+        # get_historical_liquidity is a coroutine — run it through
+        # _run_async_coro so the result is awaited (and the session cleaned up).
         if self.mode == "real" and self.birdeye_client:
             try:
                 self._rate_limit()
-                birdeye_data = self.birdeye_client.get_historical_liquidity(token_address, timestamp)
+                birdeye_data = self._run_async_coro(
+                    self.birdeye_client.get_historical_liquidity(token_address, timestamp)
+                )
                 if birdeye_data:
                     # Check if within tolerance
                     time_diff = abs((birdeye_data.timestamp - timestamp).total_seconds() / 3600)
@@ -420,6 +421,8 @@ class LiquidityProvider:
                         return birdeye_data
             except Exception as e:
                 logger.debug(f"Birdeye historical liquidity failed: {e}")
+            finally:
+                self._cleanup_async_client_session(self.birdeye_client)
 
         # Don't fallback to simulation - return None if no historical data
         return None
@@ -554,8 +557,9 @@ class LiquidityProvider:
                 confidence_haircut = 0.3 + (1.0 - overall_confidence) * 0.4  # 30-70% haircut
                 confidence_penalty_liquidity = current.liquidity_usd * (1.0 - confidence_haircut)
 
-                # Cap to prevent survivorship bias
-                max_fallback = 10000.0 if strategy == "SHIELD" else 5000.0
+                # Cap to prevent survivorship bias. Conservative SHIELD gets
+                # the LOWER cap (less credited fallback liquidity); SPEAR the higher.
+                max_fallback = 5000.0 if strategy == "SHIELD" else 10000.0
                 safe_fallback_liquidity = min(confidence_penalty_liquidity, max_fallback)
 
                 logger.info(
@@ -622,25 +626,27 @@ class LiquidityProvider:
 
         try:
             conn = self._get_database_connection()
-            cursor = conn.cursor()
+            try:
+                cursor = conn.cursor()
 
-            # Query for data within tolerance of requested timestamp
-            time_start = timestamp - timedelta(hours=tolerance_hours)
-            time_end = timestamp + timedelta(hours=tolerance_hours)
+                # Query for data within tolerance of requested timestamp
+                time_start = timestamp - timedelta(hours=tolerance_hours)
+                time_end = timestamp + timedelta(hours=tolerance_hours)
 
-            cursor.execute(
-                """
-                SELECT liquidity_usd, price_usd, volume_24h_usd, timestamp, source
-                FROM historical_liquidity
-                WHERE token_address = %s AND timestamp BETWEEN %s AND %s
-                ORDER BY ABS(EXTRACT(EPOCH FROM timestamp) - EXTRACT(EPOCH FROM %s::timestamptz))
-                LIMIT 1
-                """,
-                (token_address, time_start.isoformat(), time_end.isoformat(), timestamp.isoformat()),
-            )
+                cursor.execute(
+                    """
+                    SELECT liquidity_usd, price_usd, volume_24h_usd, timestamp, source
+                    FROM historical_liquidity
+                    WHERE token_address = %s AND timestamp BETWEEN %s AND %s
+                    ORDER BY ABS(EXTRACT(EPOCH FROM timestamp) - EXTRACT(EPOCH FROM %s::timestamptz))
+                    LIMIT 1
+                    """,
+                    (token_address, time_start.isoformat(), time_end.isoformat(), timestamp.isoformat()),
+                )
 
-            row = cursor.fetchone()
-            conn.close()
+                row = cursor.fetchone()
+            finally:
+                conn.close()
 
             if row:
                 # psycopg3 connection pool uses the dict_row factory, so rows
@@ -651,6 +657,11 @@ class LiquidityProvider:
                     row_timestamp = datetime.fromisoformat(row["timestamp"].replace('Z', '+00:00'))
                 else:
                     row_timestamp = row["timestamp"]
+
+                # Normalize naive DB timestamps to aware when the caller's
+                # timestamp is aware (TIMESTAMP columns return naive datetimes)
+                if row_timestamp.tzinfo is None and timestamp.tzinfo is not None:
+                    row_timestamp = row_timestamp.replace(tzinfo=timezone.utc)
 
                 # Verify it's within tolerance
                 time_diff = abs((row_timestamp - timestamp).total_seconds() / 3600)
@@ -681,42 +692,44 @@ class LiquidityProvider:
 
         try:
             conn = self._get_database_connection()
-            cursor = conn.cursor()
+            try:
+                cursor = conn.cursor()
 
-            # Ensure table exists
-            cursor.execute(translate_ddl("""
-                CREATE TABLE IF NOT EXISTS historical_liquidity (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    token_address TEXT NOT NULL,
-                    liquidity_usd REAL NOT NULL,
-                    price_usd REAL,
-                    volume_24h_usd REAL,
-                    timestamp TIMESTAMP NOT NULL,
-                    source TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(token_address, timestamp)
+                # Ensure table exists
+                cursor.execute(translate_ddl("""
+                    CREATE TABLE IF NOT EXISTS historical_liquidity (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        token_address TEXT NOT NULL,
+                        liquidity_usd REAL NOT NULL,
+                        price_usd REAL,
+                        volume_24h_usd REAL,
+                        timestamp TIMESTAMP NOT NULL,
+                        source TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(token_address, timestamp)
+                    )
+                """))
+                
+                cursor.execute(
+                    """
+                    INSERT INTO historical_liquidity
+                    (token_address, liquidity_usd, price_usd, volume_24h_usd, timestamp, source)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (token_address, timestamp) DO NOTHING
+                    """,
+                    (
+                        liquidity_data.token_address,
+                        liquidity_data.liquidity_usd,
+                        liquidity_data.price_usd,
+                        liquidity_data.volume_24h_usd,
+                        liquidity_data.timestamp.isoformat() if isinstance(liquidity_data.timestamp, datetime) else liquidity_data.timestamp,
+                        liquidity_data.source,
+                    ),
                 )
-            """))
-            
-            cursor.execute(
-                """
-                INSERT INTO historical_liquidity
-                (token_address, liquidity_usd, price_usd, volume_24h_usd, timestamp, source)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (token_address, timestamp) DO NOTHING
-                """,
-                (
-                    liquidity_data.token_address,
-                    liquidity_data.liquidity_usd,
-                    liquidity_data.price_usd,
-                    liquidity_data.volume_24h_usd,
-                    liquidity_data.timestamp.isoformat() if isinstance(liquidity_data.timestamp, datetime) else liquidity_data.timestamp,
-                    liquidity_data.source,
-                ),
-            )
 
-            conn.commit()
-            conn.close()
+                conn.commit()
+            finally:
+                conn.close()
             return True
         except Exception as e:
             import logging
@@ -742,51 +755,53 @@ class LiquidityProvider:
 
         try:
             conn = self._get_database_connection()
-            cursor = conn.cursor()
+            try:
+                cursor = conn.cursor()
 
-            # Ensure table exists
-            cursor.execute(translate_ddl("""
-                CREATE TABLE IF NOT EXISTS historical_liquidity (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    token_address TEXT NOT NULL,
-                    liquidity_usd REAL NOT NULL,
-                    price_usd REAL,
-                    volume_24h_usd REAL,
-                    timestamp TIMESTAMP NOT NULL,
-                    source TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(token_address, timestamp)
-                )
-            """))
-            
-            stored_count = 0
-            for liquidity_data in liquidity_data_list:
-                try:
-                    cursor.execute(
-                        """
-                        INSERT INTO historical_liquidity
-                        (token_address, liquidity_usd, price_usd, volume_24h_usd, timestamp, source)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (token_address, timestamp) DO NOTHING
-                        """,
-                        (
-                            liquidity_data.token_address,
-                            liquidity_data.liquidity_usd,
-                            liquidity_data.price_usd,
-                            liquidity_data.volume_24h_usd,
-                            liquidity_data.timestamp.isoformat() if isinstance(liquidity_data.timestamp, datetime) else liquidity_data.timestamp,
-                            liquidity_data.source,
-                        ),
+                # Ensure table exists
+                cursor.execute(translate_ddl("""
+                    CREATE TABLE IF NOT EXISTS historical_liquidity (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        token_address TEXT NOT NULL,
+                        liquidity_usd REAL NOT NULL,
+                        price_usd REAL,
+                        volume_24h_usd REAL,
+                        timestamp TIMESTAMP NOT NULL,
+                        source TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(token_address, timestamp)
                     )
-                    stored_count += 1
-                except Exception as e:
-                    import logging
-                    logger = logging.getLogger(__name__)
-                    logger.warning(f"Failed to store liquidity data for {liquidity_data.token_address[:8]}...: {e}")
-                    continue
+                """))
+                
+                stored_count = 0
+                for liquidity_data in liquidity_data_list:
+                    try:
+                        cursor.execute(
+                            """
+                            INSERT INTO historical_liquidity
+                            (token_address, liquidity_usd, price_usd, volume_24h_usd, timestamp, source)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (token_address, timestamp) DO NOTHING
+                            """,
+                            (
+                                liquidity_data.token_address,
+                                liquidity_data.liquidity_usd,
+                                liquidity_data.price_usd,
+                                liquidity_data.volume_24h_usd,
+                                liquidity_data.timestamp.isoformat() if isinstance(liquidity_data.timestamp, datetime) else liquidity_data.timestamp,
+                                liquidity_data.source,
+                            ),
+                        )
+                        stored_count += 1
+                    except Exception as e:
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.warning(f"Failed to store liquidity data for {liquidity_data.token_address[:8]}...: {e}")
+                        continue
 
-            conn.commit()
-            conn.close()
+                conn.commit()
+            finally:
+                conn.close()
             return stored_count
         except Exception as e:
             import logging
@@ -828,9 +843,11 @@ class LiquidityProvider:
 
         trade_value_usd = amount_sol * sol_price_usd
 
-        # Check config for slippage model
-        from config import ScoutConfig
-        use_cpmm = ScoutConfig.get_use_cpmm_slippage()
+        # Check config for slippage model (guarded import — this module
+        # supports environments without the config package)
+        use_cpmm = False
+        if CONFIG_AVAILABLE and ScoutConfig:
+            use_cpmm = ScoutConfig.get_use_cpmm_slippage()
 
         if use_cpmm:
             # CPMM model: base_slippage = trade_value / (token_reserve + trade_value)
@@ -1114,10 +1131,16 @@ class LiquidityProvider:
         self._cache[token_address] = (data, utcnow())
     
     def clear_cache(self) -> None:
-        """Clear the liquidity cache (Redis and in-memory)."""
+        """Clear the liquidity cache (Redis liquidity: keys and in-memory)."""
         if self.redis_client and self.redis_client.is_available():
             try:
-                self.redis_client.clear()
+                # Delete only this provider's keys — never the whole Redis DB
+                keys = [
+                    k for k in getattr(self.redis_client, '_keys', set())
+                    if isinstance(k, str) and k.startswith("liquidity:")
+                ]
+                for key in keys:
+                    self.redis_client.delete(key)
             except Exception as e:
                 logger.debug(f"Redis cache clear failed: {e}")
         self._cache.clear()

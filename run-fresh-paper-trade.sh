@@ -19,6 +19,9 @@ DOCKER_SCRIPT="$PROJECT_ROOT/docker/docker-compose.sh"
 DATA_DIR="$PROJECT_ROOT/data"
 DB_PATH="$DATA_DIR/chimera.db"
 
+# Admin token must not be a committed default; read from env or local file
+ADMIN_TOKEN="${ADMIN_TOKEN:-$(cat "$PROJECT_ROOT/.admin-token" 2>/dev/null || true)}"
+
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
 }
@@ -48,16 +51,35 @@ clean_database() {
     log_section "Step 1: Cleaning Database"
     
     log_info "Stopping services first..."
-    bash "$DOCKER_SCRIPT" stop "$PROFILE" 2>/dev/null || true
-    sleep 2
+    if bash "$DOCKER_SCRIPT" stop "$PROFILE" >/dev/null 2>&1; then
+        log_info "Services stopped"
+    else
+        log_warning "Could not stop services (may not be running)"
+    fi
     
+    # Wait until the SQLite files are actually gone so WAL/SHM handles are released
     if [ -f "$DB_PATH" ]; then
         log_warning "Database exists at $DB_PATH"
         log_info "Removing old database..."
-        rm -f "$DB_PATH" "$DB_PATH-shm" "$DB_PATH-wal" 2>/dev/null || true
+        rm -f "$DB_PATH" "$DB_PATH-shm" "$DB_PATH-wal" "$DB_PATH-journal" 2>/dev/null || true
+        for i in $(seq 1 15); do
+            [ ! -e "$DB_PATH" ] && [ ! -e "$DB_PATH-wal" ] && [ ! -e "$DB_PATH-shm" ] && break
+            sleep 1
+        done
         log_success "Old database removed"
     else
         log_info "No existing database found"
+    fi
+    
+    # If the operator uses PostgreSQL, deleting the SQLite file does not reset
+    # trading state; clear the live tables instead.
+    DB_MODE=$(grep -E '^CHIMERA_DB_MODE=' "$PROJECT_ROOT/docker/env.mainnet-paper" 2>/dev/null | tail -1 | cut -d= -f2 || true)
+    DB_MODE="${DB_MODE:-postgres}"
+    if [ "$DB_MODE" != "sqlite" ]; then
+        log_info "Operator uses $DB_MODE backend; truncating trading tables..."
+        (cd "$PROJECT_ROOT" && docker compose --profile "$PROFILE" exec -T postgres psql -U chimera -d chimera \
+            -c "TRUNCATE trades, positions, dead_letter_queue RESTART IDENTITY CASCADE;" 2>/dev/null) \
+            || log_warning "Could not truncate PostgreSQL tables (is postgres running?)"
     fi
     
     log_info "Initializing fresh database..."
@@ -81,6 +103,10 @@ start_paper_trading_bot() {
     
     log_info "Building images if needed..."
     bash "$DOCKER_SCRIPT" build "$PROFILE" 2>&1 | grep -E "(Building|Successfully|ERROR)" || true
+    if [ ${PIPESTATUS[0]} -ne 0 ]; then
+        log_error "Docker build failed"
+        exit 1
+    fi
     
     log_info "Starting services for $PROFILE..."
     if bash "$DOCKER_SCRIPT" start "$PROFILE"; then
@@ -95,17 +121,17 @@ start_paper_trading_bot() {
     local attempt=0
     
     while [ $attempt -lt $max_attempts ]; do
-        if curl -s http://localhost:8080/api/v1/health > /dev/null 2>&1; then
+        if curl -sf --max-time 5 http://localhost:8080/api/v1/health > /dev/null 2>&1; then
             log_success "Operator is healthy and ready"
             break
         fi
         attempt=$((attempt + 1))
         if [ $attempt -eq $max_attempts ]; then
-            log_warning "Operator health check timeout (may still be starting)"
-        else
-            log_info "Waiting for operator... ($attempt/$max_attempts)"
-            sleep 2
+            log_error "Operator did not become healthy within ${max_attempts} attempts"
+            exit 1
         fi
+        log_info "Waiting for operator... ($attempt/$max_attempts)"
+        sleep 2
     done
     
     # Show service status
@@ -120,10 +146,10 @@ run_scout_discovery() {
     log_info "Running scout with wallet discovery enabled..."
     log_info "This may take several minutes..."
     
-    # Run scout in the scout container
-    if docker exec chimera-scout python main.py \
+    # Run scout in the scout container, capturing its real exit status
+    if (cd "$PROJECT_ROOT" && docker compose --profile "$PROFILE" exec -T scout python main.py \
         --output /app/data/roster_new.db \
-        --verbose 2>&1 | tee /tmp/scout-output.log; then
+        --verbose > /tmp/scout-output.log 2>&1); then
         log_success "Scout completed wallet discovery"
         
         # Check if roster_new.db was created
@@ -138,21 +164,20 @@ run_scout_discovery() {
             
             # Merge roster into main database
             log_info "Merging roster into main database..."
-            if curl -s -X POST http://localhost:8080/api/v1/roster/merge \
+            if curl -sf -X POST http://localhost:8080/api/v1/roster/merge \
                 -H "Content-Type: application/json" \
-                -H "Authorization: Bearer dev-admin-key" \
+                -H "Authorization: Bearer $ADMIN_TOKEN" \
                 -d '{}' > /dev/null 2>&1; then
                 log_success "Roster merged successfully"
             else
                 log_warning "Roster merge API call failed (may need manual merge)"
-                log_info "You can manually merge with: kill -HUP \$(pgrep chimera_operator)"
             fi
         else
             log_warning "Roster file not created - scout may have failed"
         fi
     else
         log_error "Scout execution failed"
-        log_info "Check logs with: docker logs chimera-scout"
+        log_info "Check logs with: docker compose logs scout"
         return 1
     fi
 }
@@ -162,7 +187,7 @@ verify_trading_active() {
     log_section "Step 4: Verifying Trading is Active"
     
     log_info "Checking operator health..."
-    HEALTH=$(curl -s http://localhost:8080/api/v1/health 2>/dev/null)
+    HEALTH=$(curl -fsS --max-time 5 http://localhost:8080/api/v1/health 2>/dev/null || true)
     if echo "$HEALTH" | grep -q '"status".*"healthy"'; then
         log_success "Operator is healthy"
         echo "$HEALTH" | python3 -m json.tool 2>/dev/null | head -15 || echo "$HEALTH" | head -10
@@ -172,7 +197,7 @@ verify_trading_active() {
     fi
     
     log_info "Checking roster status..."
-    ROSTER=$(curl -s http://localhost:8080/api/v1/roster 2>/dev/null)
+    ROSTER=$(curl -fsS --max-time 5 http://localhost:8080/api/v1/roster 2>/dev/null || true)
     if [ -n "$ROSTER" ]; then
         WALLET_COUNT=$(echo "$ROSTER" | python3 -c "import sys, json; data=json.load(sys.stdin); print(len(data.get('wallets', [])))" 2>/dev/null || echo "unknown")
         log_info "Wallets in roster: $WALLET_COUNT"
@@ -184,7 +209,7 @@ verify_trading_active() {
     fi
     
     log_info "Checking recent trades..."
-    TRADES=$(curl -s "http://localhost:8080/api/v1/trades?limit=5" 2>/dev/null)
+    TRADES=$(curl -fsS --max-time 5 "http://localhost:8080/api/v1/trades?limit=5" 2>/dev/null || true)
     if [ -n "$TRADES" ]; then
         TRADE_COUNT=$(echo "$TRADES" | python3 -c "import sys, json; data=json.load(sys.stdin); print(len(data.get('trades', [])))" 2>/dev/null || echo "0")
         log_info "Recent trades: $TRADE_COUNT"
@@ -199,7 +224,7 @@ evaluate_performance() {
     
     # Get performance metrics from API
     log_info "Performance Metrics (24H, 7D, 30D):"
-    PERF=$(curl -s http://localhost:8080/api/v1/metrics/performance 2>/dev/null)
+    PERF=$(curl -fsS --max-time 5 http://localhost:8080/api/v1/metrics/performance 2>/dev/null || true)
     if [ -n "$PERF" ]; then
         echo "$PERF" | python3 -m json.tool 2>/dev/null || echo "$PERF"
     else
@@ -208,7 +233,7 @@ evaluate_performance() {
     
     echo ""
     log_info "Cost Metrics (30-day):"
-    COSTS=$(curl -s http://localhost:8080/api/v1/metrics/costs 2>/dev/null)
+    COSTS=$(curl -fsS --max-time 5 http://localhost:8080/api/v1/metrics/costs 2>/dev/null || true)
     if [ -n "$COSTS" ]; then
         echo "$COSTS" | python3 -m json.tool 2>/dev/null || echo "$COSTS"
     else
@@ -217,11 +242,11 @@ evaluate_performance() {
     
     echo ""
     log_info "Recent Operator Logs (last 20 lines):"
-    docker logs chimera-operator --tail 20 2>&1 | tail -20 || log_warning "Could not fetch operator logs"
+    (cd "$PROJECT_ROOT" && docker compose --profile "$PROFILE" logs operator --tail 20 2>&1 | tail -20) || log_warning "Could not fetch operator logs"
     
     echo ""
     log_info "Recent Scout Logs (last 10 lines):"
-    docker logs chimera-scout --tail 10 2>&1 | tail -10 || log_warning "Could not fetch scout logs"
+    (cd "$PROJECT_ROOT" && docker compose --profile "$PROFILE" logs scout --tail 10 2>&1 | tail -10) || log_warning "Could not fetch scout logs"
     
     echo ""
     log_info "Service Resource Usage:"
@@ -238,14 +263,19 @@ evaluate_performance() {
     echo "  ./docker/docker-compose.sh logs $PROFILE -f"
     echo ""
     log_info "View operator logs:"
-    echo "  docker logs chimera-operator -f"
+    echo "  docker compose --profile $PROFILE logs operator -f"
     echo ""
     log_info "View scout logs:"
-    echo "  docker logs chimera-scout -f"
+    echo "  docker compose --profile $PROFILE logs scout -f"
 }
 
 # Main execution
 main() {
+    if [ -z "$ADMIN_TOKEN" ]; then
+        log_error "No admin token available: set ADMIN_TOKEN or create $PROJECT_ROOT/.admin-token"
+        exit 1
+    fi
+
     log_section "Chimera Fresh Paper Trading Session"
     log_info "This will:"
     log_info "  1. Clean the database"

@@ -12,6 +12,7 @@ Usage:
 """
 
 import logging
+import threading
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
@@ -93,7 +94,8 @@ class PredictionMatcher:
         lookback_days: int = 7,
         model_type: Optional[str] = None,
         match_window_days: int = 14,
-        dry_run: bool = False
+        dry_run: bool = False,
+        pnl_horizon_days: Optional[int] = None
     ) -> MatchingResults:
         """
         Match pending predictions to actual PnL from correlation table.
@@ -103,11 +105,17 @@ class PredictionMatcher:
             model_type: Optional model type filter
             match_window_days: Maximum days between prediction and actual result
             dry_run: If True, don't actually update predictions
+            pnl_horizon_days: PnL horizon used for scoring (7/30/90/all).
+                Defaults to lookback_days for backward compatibility, but the
+                two are distinct concepts and should be passed separately.
 
         Returns:
             MatchingResults with statistics
         """
         start_time = datetime.utcnow()
+
+        if pnl_horizon_days is None:
+            pnl_horizon_days = lookback_days
 
         logger.info(f"Starting prediction matching (lookback: {lookback_days}d, window: {match_window_days}d)")
 
@@ -195,42 +203,57 @@ class PredictionMatcher:
                 )
 
                 if best_match:
-                    # Determine which actual PnL to use based on time window
+                    # Determine which actual PnL to use based on the PnL
+                    # horizon (independent of how far back we looked)
                     actual_pnl = self._select_actual_pnl(
                         best_match,
                         prediction,
-                        lookback_days
+                        pnl_horizon_days
+                    )
+
+                    # A missing actual (no realized PnL data) is not evidence
+                    # of zero profit — skip rather than score against 0
+                    if actual_pnl.get('total') is None:
+                        skipped_count += 1
+                        continue
+
+                    # PnL columns are TEXT (Decimal strings), so coerce to
+                    # floats before any arithmetic.
+                    actual_total = float(actual_pnl['total'])
+                    predicted_total = float(prediction.predicted_pnl_sol)
+
+                    # Build the matched record FIRST so construction failures
+                    # (bad timestamps, None values) never mark the prediction
+                    # as matched and then fail — rows that can't be scored
+                    # must stay retryable.
+                    matched_pred = MatchedPrediction(
+                        prediction_id=prediction.id,
+                        wallet_address=prediction.wallet_address,
+                        model_type=prediction.model_type,
+                        predicted_pnl_sol=predicted_total,
+                        actual_pnl_sol=actual_total,
+                        prediction_timestamp=prediction.prediction_timestamp,
+                        match_timestamp=datetime.utcnow().isoformat(),
+                        days_to_match=(datetime.utcnow() - datetime.fromisoformat(prediction.prediction_timestamp)).days,
+                        error=actual_total - predicted_total,
+                        abs_error=abs(actual_total - predicted_total),
+                        direction_correct=self._check_direction_correct(
+                            predicted_total,
+                            actual_total
+                        )
                     )
 
                     if not dry_run:
                         # Update the prediction
                         success = self.prediction_logger.mark_matched(
                             prediction_id=prediction.id,
-                            actual_pnl_sol=actual_pnl['total'],
+                            actual_pnl_sol=actual_total,
                             actual_pnl_7d_sol=actual_pnl.get('7d'),
                             actual_pnl_30d_sol=actual_pnl.get('30d')
                         )
 
                         if success:
                             matched_count += 1
-
-                            # Create matched prediction record
-                            matched_pred = MatchedPrediction(
-                                prediction_id=prediction.id,
-                                wallet_address=prediction.wallet_address,
-                                model_type=prediction.model_type,
-                                predicted_pnl_sol=prediction.predicted_pnl_sol,
-                                actual_pnl_sol=actual_pnl['total'],
-                                prediction_timestamp=prediction.prediction_timestamp,
-                                match_timestamp=datetime.utcnow().isoformat(),
-                                days_to_match=(datetime.utcnow() - datetime.fromisoformat(prediction.prediction_timestamp)).days,
-                                error=actual_pnl['total'] - prediction.predicted_pnl_sol,
-                                abs_error=abs(actual_pnl['total'] - prediction.predicted_pnl_sol),
-                                direction_correct=self._check_direction_correct(
-                                    prediction.predicted_pnl_sol,
-                                    actual_pnl['total']
-                                )
-                            )
                             matched_predictions.append(matched_pred)
                         else:
                             failed_count += 1
@@ -289,8 +312,11 @@ class PredictionMatcher:
             try:
                 promoted_at = datetime.fromisoformat(record.promoted_at)
 
-                # Calculate time difference
-                days_diff = abs((promoted_at - pred_timestamp).days)
+                # Sub-day resolution so a record 14 days + 23 hours after the
+                # prediction is NOT silently accepted (timedelta.days
+                # truncation made the window ~1 day looser than documented)
+                time_diff = abs(promoted_at - pred_timestamp)
+                days_diff = time_diff.total_seconds() / 86400.0
 
                 # Check if within window
                 if days_diff <= match_window_days:
@@ -310,39 +336,41 @@ class PredictionMatcher:
         correlation_record: WqsCorrelationRecord,
         prediction: PredictionRecord,
         lookback_days: int
-    ) -> Dict[str, float]:
+    ) -> Dict[str, Optional[float]]:
         """
         Select the appropriate actual PnL based on time window.
 
         Args:
             correlation_record: The matched correlation record
             prediction: The prediction being matched
-            lookback_days: Target time window
+            lookback_days: PnL horizon window
 
         Returns:
-            Dict with 'total', '7d', and '30d' PnL values
+            Dict with 'total', '7d', and '30d' PnL values (None = no data —
+            never coerced to 0, since a missing value is not zero profit)
         """
-        result = {}
+        result: Dict[str, Optional[float]] = {}
 
         # Use 7d PnL for 7-day window, 30d for 30-day window
         if lookback_days <= 7:
-            result['7d'] = correlation_record.actual_copy_pnl_7d_sol or 0.0
+            result['7d'] = correlation_record.actual_copy_pnl_7d_sol
             result['total'] = result['7d']
         elif lookback_days <= 30:
-            result['30d'] = correlation_record.actual_copy_pnl_30d_sol or 0.0
+            result['30d'] = correlation_record.actual_copy_pnl_30d_sol
             result['total'] = result['30d']
         else:
             # Use all-time PnL
-            result['total'] = correlation_record.actual_copy_pnl_all_sol or 0.0
+            result['total'] = correlation_record.actual_copy_pnl_all_sol
 
-        # Fill in other values if available
-        if correlation_record.actual_copy_pnl_7d_sol is not None:
+        # Fill in other values if available (never overwrite a chosen total
+        # with None)
+        if correlation_record.actual_copy_pnl_7d_sol is not None and '7d' not in result:
             result['7d'] = correlation_record.actual_copy_pnl_7d_sol
 
-        if correlation_record.actual_copy_pnl_30d_sol is not None:
+        if correlation_record.actual_copy_pnl_30d_sol is not None and '30d' not in result:
             result['30d'] = correlation_record.actual_copy_pnl_30d_sol
 
-        if correlation_record.actual_copy_pnl_all_sol is not None and 'total' not in result:
+        if result.get('total') is None and correlation_record.actual_copy_pnl_all_sol is not None:
             result['total'] = correlation_record.actual_copy_pnl_all_sol
 
         return result
@@ -369,48 +397,50 @@ class PredictionMatcher:
         """
         try:
             conn = get_connection(str(self.db_path))
-            cursor = conn.cursor()
+            try:
+                cursor = conn.cursor()
 
-            query = """
-                SELECT * FROM ml_predictions
-                WHERE status = 'MATCHED'
-            """
-            params = []
+                query = """
+                    SELECT * FROM ml_predictions
+                    WHERE status = 'MATCHED'
+                """
+                params = []
 
-            if model_type:
-                query += " AND model_type = ?"
-                params.append(model_type)
+                if model_type:
+                    query += " AND model_type = %s"
+                    params.append(model_type)
 
-            query += " ORDER BY match_timestamp DESC"
+                query += " ORDER BY match_timestamp DESC"
 
-            if limit:
-                query += " LIMIT ?"
-                params.append(limit)
+                if limit:
+                    query += " LIMIT %s"
+                    params.append(limit)
 
-            cursor.execute(query, params)
+                cursor.execute(query, params)
 
-            matched_predictions = []
-            for row in cursor.fetchall():
-                row_dict = dict(row)
-                actual_pnl = float(row_dict.get('actual_pnl_sol') or 0.0)
-                predicted_pnl = float(row_dict.get('predicted_pnl_sol') or 0.0)
+                matched_predictions = []
+                for row in cursor.fetchall():
+                    row_dict = dict(row)
+                    actual_pnl = float(row_dict.get('actual_pnl_sol') or 0.0)
+                    predicted_pnl = float(row_dict.get('predicted_pnl_sol') or 0.0)
 
-                matched_predictions.append(MatchedPrediction(
-                    prediction_id=row_dict['id'],
-                    wallet_address=row_dict['wallet_address'],
-                    model_type=row_dict['model_type'],
-                    predicted_pnl_sol=predicted_pnl,
-                    actual_pnl_sol=actual_pnl,
-                    prediction_timestamp=row_dict['prediction_timestamp'],
-                    match_timestamp=row_dict.get('match_timestamp', ''),
-                    days_to_match=row_dict.get('days_to_match', 0),
-                    error=actual_pnl - predicted_pnl,
-                    abs_error=abs(actual_pnl - predicted_pnl),
-                    direction_correct=(predicted_pnl > 0 and actual_pnl > 0) or (predicted_pnl < 0 and actual_pnl < 0)
-                ))
+                    matched_predictions.append(MatchedPrediction(
+                        prediction_id=row_dict['id'],
+                        wallet_address=row_dict['wallet_address'],
+                        model_type=row_dict['model_type'],
+                        predicted_pnl_sol=predicted_pnl,
+                        actual_pnl_sol=actual_pnl,
+                        prediction_timestamp=row_dict['prediction_timestamp'],
+                        match_timestamp=row_dict.get('match_timestamp', ''),
+                        days_to_match=row_dict.get('days_to_match', 0),
+                        error=actual_pnl - predicted_pnl,
+                        abs_error=abs(actual_pnl - predicted_pnl),
+                        direction_correct=(predicted_pnl > 0 and actual_pnl > 0) or (predicted_pnl < 0 and actual_pnl < 0)
+                    ))
 
-            conn.close()
-            return matched_predictions
+                return matched_predictions
+            finally:
+                conn.close()
 
         except Exception as e:
             logger.error(f"Failed to get matched predictions: {e}")
@@ -436,9 +466,12 @@ class PredictionMatcher:
                 'total_matched': 0,
                 'mean_error': 0.0,
                 'mean_abs_error': 0.0,
+                'std_error': 0.0,
                 'direction_accuracy': 0.0,
                 'positive_predictions': 0,
                 'negative_predictions': 0,
+                'mean_predicted_pnl': 0.0,
+                'mean_actual_pnl': 0.0,
             }
 
         import numpy as np
@@ -463,13 +496,17 @@ class PredictionMatcher:
         }
 
 
-# Global instance
-_global_matcher = None
+# Global instances (cached per resolved db_path; lock-guarded)
+_global_matchers = {}
+_global_matchers_lock = threading.Lock()
 
 
 def get_prediction_matcher(db_path: Optional[str] = None) -> PredictionMatcher:
-    """Get or create global prediction matcher instance."""
-    global _global_matcher
-    if _global_matcher is None:
-        _global_matcher = PredictionMatcher(db_path)
-    return _global_matcher
+    """Get or create a prediction matcher instance (cached per db_path)."""
+    if db_path is None:
+        db_path = "data/chimera.db"
+    resolved = str(Path(db_path).resolve())
+    with _global_matchers_lock:
+        if resolved not in _global_matchers:
+            _global_matchers[resolved] = PredictionMatcher(db_path)
+        return _global_matchers[resolved]
