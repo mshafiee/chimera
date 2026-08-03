@@ -2893,7 +2893,8 @@ async fn main() -> anyhow::Result<()> {
         .with_dexscreener(dexscreener_client.clone())
         .with_toxic_detector(toxic_flow_detector.clone())
         .with_decision_recorder(decision_recorder.clone())
-        .with_shadow_fill_opt(shadow_quote_client.clone(), latency_tracker.clone()),
+        .with_shadow_fill_opt(shadow_quote_client.clone(), latency_tracker.clone())
+        .with_wallet_performance(wallet_performance_tracker.clone()),
     );
 
     let webhook_state = Arc::new(WebhookState {

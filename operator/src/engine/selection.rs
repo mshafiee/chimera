@@ -218,6 +218,8 @@ pub struct SelectionService {
     decision_recorder: Option<Arc<crate::engine::DecisionRecorder>>,
     quote_client: Option<Arc<crate::engine::transaction_builder::TransactionBuilder>>,
     latency_tracker: Option<Arc<crate::engine::LatencyTracker>>,
+    /// Optional wallet-performance tracker for per-wallet copy-performance sizing.
+    wallet_performance: Option<Arc<crate::monitoring::WalletPerformanceTracker>>,
     config: SelectionConfig,
     config_hash: String,
 }
@@ -248,6 +250,7 @@ impl SelectionService {
             decision_recorder: None,
             quote_client: None,
             latency_tracker: None,
+            wallet_performance: None,
             config,
             config_hash,
         }
@@ -259,6 +262,16 @@ impl SelectionService {
         client: Arc<crate::monitoring::dexscreener::DexScreenerClient>,
     ) -> Self {
         self.dexscreener = Some(client);
+        self
+    }
+
+    /// Attach the wallet-performance tracker for tiered copy-performance sizing
+    /// (proven wallets get a larger allocation). No-op if not attached (floor sizing applies).
+    pub fn with_wallet_performance(
+        mut self,
+        tracker: Arc<crate::monitoring::WalletPerformanceTracker>,
+    ) -> Self {
+        self.wallet_performance = Some(tracker);
         self
     }
 
