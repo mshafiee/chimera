@@ -65,6 +65,10 @@ pub async fn record_speculative_activity(db: std::sync::Arc<dyn Database>, walle
 }
 
 /// Main monitoring state
+/// TTL cache of ACTIVE wallet addresses — avoids a DB query per webhook event.
+pub type ActiveWalletCache =
+    Arc<parking_lot::RwLock<Option<(std::time::Instant, std::collections::HashSet<String>)>>>;
+
 pub struct MonitoringState {
     pub db: Arc<dyn Database>,
     pub engine: EngineHandle,
@@ -86,6 +90,11 @@ pub struct MonitoringState {
     /// Prevents processing the same transaction delivered by multiple
     /// orphaned webhooks.
     pub processed_signatures: Arc<parking_lot::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    /// TTL cache of ACTIVE wallet addresses (refreshed every 30s). The webhook
+    /// handler receives 10K+ events/hour; without this, each event triggered a
+    /// `get_wallets_by_status("ACTIVE")` DB query — the dominant DB load and a
+    /// cause of connection churn. Now the DB is hit once per 30s, not per event.
+    pub active_wallet_cache: ActiveWalletCache,
     /// Unified selection engine (B1): shared BUY/SELL decision pipeline used
     /// by both this monitoring path and the direct webhook handler.
     pub selection: Option<Arc<crate::engine::SelectionService>>,
@@ -195,6 +204,7 @@ impl MonitoringState {
             processed_signatures: Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            active_wallet_cache: Arc::new(parking_lot::RwLock::new(None)),
             selection: None,
             helius_auth_header,
             helius_auth_enforce,

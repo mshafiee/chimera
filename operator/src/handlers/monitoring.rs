@@ -133,19 +133,41 @@ pub async fn helius_webhook_handler(
             }
         }
 
-        // Resolve tracked wallet address: match userAccount entries against ACTIVE wallets
-        let tracked_wallet = {
-            let active_wallets = match state.db.get_wallets_by_status("ACTIVE").await {
-                Ok(w) => w,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to query active wallets, falling back to no filter");
-                    vec![]
+        // Resolve tracked wallet address: match userAccount entries against ACTIVE wallets.
+        // Uses a 30s TTL cache to avoid a `get_wallets_by_status("ACTIVE")` DB query
+        // per webhook event (10K+ events/hour — the dominant DB load before this cache).
+        let active_wallet_addresses: std::collections::HashSet<String> = {
+            // Cache read scoped to its own block — guard drops before any await.
+            let cached_set: Option<std::collections::HashSet<String>> = {
+                let cache = state.active_wallet_cache.read();
+                match cache.as_ref() {
+                    Some((loaded_at, set)) if loaded_at.elapsed().as_secs() < 30 => {
+                        Some(set.clone())
+                    }
+                    _ => None,
                 }
             };
 
-            let active_wallet_addresses: std::collections::HashSet<String> =
-                active_wallets.into_iter().map(|w| w.address).collect();
+            match cached_set {
+                Some(set) => set,
+                None => {
+                    let wallets = match state.db.get_wallets_by_status("ACTIVE").await {
+                        Ok(w) => w,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to query active wallets, falling back to no filter");
+                            vec![]
+                        }
+                    };
+                    let set: std::collections::HashSet<String> =
+                        wallets.into_iter().map(|w| w.address).collect();
+                    *state.active_wallet_cache.write() =
+                        Some((std::time::Instant::now(), set.clone()));
+                    set
+                }
+            }
+        };
 
+        let tracked_wallet = {
             let mut matched_wallet: Option<String> = None;
             for account in &event.account_data {
                 if let Some(token_changes) = &account.token_balance_changes {

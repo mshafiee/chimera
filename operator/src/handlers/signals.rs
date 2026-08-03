@@ -622,7 +622,7 @@ pub async fn get_signal_sources(
         SELECT
             t.wallet_address as source,
             COUNT(*) as signal_count,
-            COALESCE(w.wqs_score, 50.0) as average_quality,
+            COALESCE(MAX(w.wqs_score), 50.0) as average_quality,
             CAST(COUNT(CASE WHEN t.status IN ('ACTIVE', 'CLOSED') THEN 1 END) AS DOUBLE PRECISION) / CAST(COUNT(*) AS DOUBLE PRECISION) as acceptance_rate,
             MAX(t.created_at)::text as last_signal_at
         FROM trades t
