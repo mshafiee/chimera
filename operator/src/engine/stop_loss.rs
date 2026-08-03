@@ -452,6 +452,26 @@ impl StopLossManager {
                     return StopLossAction::Exit;
                 }
 
+                // Large-loss override: a sustained loss beyond
+                // wick_protection_max_loss_percent is a genuine dump, not an
+                // entry wick — exit even within the grace period. Without this,
+                // fast pump.fun dumps ride unprotected through the first 60s
+                // (only the -25% hard stop applied), producing -10%..-14% losses.
+                if loss_percent <= self.config.wick_protection_max_loss_percent {
+                    tracing::warn!(
+                        trade_uuid = %trade_uuid,
+                        token_address = token_address,
+                        current_price = %current_price,
+                        entry_price = %entry_price,
+                        loss_percent = %loss_percent,
+                        wick_protection_max_loss_percent = %self.config.wick_protection_max_loss_percent,
+                        wick_elapsed_secs = elapsed_secs,
+                        exit_signal = ?StopLossAction::Exit,
+                        "Large loss during wick-protection window — overriding grace period (genuine dump, not entry wick)"
+                    );
+                    return StopLossAction::Exit;
+                }
+
                 tracing::info!(
                     trade_uuid = %trade_uuid,
                     elapsed_secs,

@@ -221,6 +221,7 @@ profit_management:
   losing_time_exit_hours_shield: 12  # Give SHIELD positions 12h to recover
   losing_time_exit_hours_spear: 4
   wick_protection_secs: 60
+  wick_protection_max_loss_percent: -10.0  # Override wick grace: exit if loss reaches -10% during the first 60s (genuine dump, not entry wick)
   recovery_gate_secs: 90            # Exit losers at 90s if not recovered (winners recover < 48s)
   recovery_gate_threshold: -1.5     # Exit if PnL below -1.5% at gate time (tightened from -2.5; sits in winner(>-1%)/loser(<-2.5%) gap at 90s)
 

@@ -1895,6 +1895,13 @@ pub struct ProfitManagementConfig {
     /// exposed to extended crashes. A hard -25% stop always bypasses this grace period.
     #[serde(default = "default_wick_protection_secs")]
     pub wick_protection_secs: u64,
+    /// Large-loss override for wick protection: if an open position's loss
+    /// reaches this percentage during the wick-protection grace period, exit
+    /// anyway (a sustained −X% drop is a genuine dump, not an entry wick).
+    /// Default −10.0. Only the −25% hard stop bypassed wick protection before,
+    /// which let fast pump.fun dumps ride to −12%…−14% in the first 60s.
+    #[serde(default = "default_wick_protection_max_loss_percent")]
+    pub wick_protection_max_loss_percent: Decimal,
     /// Losing time-based exit for Shield strategy (hours)
     #[serde(default = "default_losing_time_exit_hours_shield")]
     pub losing_time_exit_hours_shield: u64,
@@ -1986,6 +1993,10 @@ fn default_wick_protection_secs() -> u64 {
     10
 }
 
+fn default_wick_protection_max_loss_percent() -> Decimal {
+    Decimal::new(-100, 1) // -10.0
+}
+
 fn default_losing_time_exit_hours_shield() -> u64 {
     4
 }
@@ -2010,6 +2021,7 @@ impl Default for ProfitManagementConfig {
             max_stop_loss_distance: default_max_stop_loss_distance(),
             time_exit_hours: default_time_exit_hours(),
             wick_protection_secs: default_wick_protection_secs(),
+            wick_protection_max_loss_percent: default_wick_protection_max_loss_percent(),
             losing_time_exit_hours_shield: default_losing_time_exit_hours_shield(),
             losing_time_exit_hours_spear: default_losing_time_exit_hours_spear(),
             losing_time_exit_threshold_percent: default_losing_time_exit_threshold(),

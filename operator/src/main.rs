@@ -3573,4 +3573,15 @@ mod tests {
         assert_eq!(m.wallet_boost_size_sol, rust_decimal::Decimal::new(50, 2)); // 0.50
         assert_eq!(m.wallet_boost_min_net_sol, rust_decimal::Decimal::new(1, 2)); // 0.01
     }
+
+    #[test]
+    fn test_wick_protection_max_loss_default() {
+        // The large-loss wick override must default to -10% so fast pump.fun
+        // dumps in the first 60s don't ride unprotected to -12%..-14%.
+        let pm = chimera_operator::config::ProfitManagementConfig::default();
+        assert_eq!(
+            pm.wick_protection_max_loss_percent,
+            rust_decimal::Decimal::new(-100, 1) // -10.0
+        );
+    }
 }
