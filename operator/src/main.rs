@@ -3559,4 +3559,17 @@ mod tests {
         assert_eq!(m.auto_promote_max_age_days, 7);
         assert_eq!(m.max_active_wallets, 20);
     }
+
+    #[test]
+    fn test_wallet_boost_config_defaults() {
+        let m = chimera_operator::config::MonitoringConfig::default();
+        assert!(!m.wallet_boost_enabled, "wallet_boost must default to false");
+        assert_eq!(m.wallet_boost_min_sample, 15);
+        assert_eq!(m.wallet_boost_window_trades, 20);
+        assert_eq!(m.wallet_boost_window_days, 30);
+        assert_eq!(m.wallet_boost_min_winrate, 0.40);
+        assert_eq!(m.wallet_boost_recency_days, 7);
+        assert_eq!(m.wallet_boost_size_sol, rust_decimal::Decimal::new(50, 2)); // 0.50
+        assert_eq!(m.wallet_boost_min_net_sol, rust_decimal::Decimal::new(1, 2)); // 0.01
+    }
 }

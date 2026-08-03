@@ -1449,6 +1449,32 @@ pub struct MonitoringConfig {
     /// slots for active candidates.
     #[serde(default = "default_auto_promote_max_age_days")]
     pub auto_promote_max_age_days: i64,
+    /// Enable tiered per-wallet copy-performance sizing. Proven wallets (those
+    /// passing the sample, recency, win-rate, and net-PnL gates) get a larger
+    /// allocation; others stay at the floor. Default OFF (opt-in).
+    #[serde(default = "default_false")]
+    pub wallet_boost_enabled: bool,
+    /// Minimum CLOSED copy trades in the window to be eligible for a boost.
+    #[serde(default = "default_wallet_boost_min_sample")]
+    pub wallet_boost_min_sample: u32,
+    /// Window: consider the last N copy trades.
+    #[serde(default = "default_wallet_boost_window_trades")]
+    pub wallet_boost_window_trades: u32,
+    /// Window: ignore copy trades older than this many days.
+    #[serde(default = "default_wallet_boost_window_days")]
+    pub wallet_boost_window_days: i64,
+    /// Minimum net PnL (SOL) over the window to qualify.
+    #[serde(default = "default_wallet_boost_min_net_sol")]
+    pub wallet_boost_min_net_sol: rust_decimal::Decimal,
+    /// Minimum win rate over the window (0.0–1.0).
+    #[serde(default = "default_wallet_boost_min_winrate")]
+    pub wallet_boost_min_winrate: f64,
+    /// A wallet whose last copy trade is older than this many days loses its boost.
+    #[serde(default = "default_wallet_boost_recency_days")]
+    pub wallet_boost_recency_days: i64,
+    /// The BOOSTED target size (SOL). Hard cap; the floor still applies below it.
+    #[serde(default = "default_wallet_boost_size_sol")]
+    pub wallet_boost_size_sol: rust_decimal::Decimal,
     /// Webhook lifecycle management configuration
     #[serde(default)]
     pub webhook_lifecycle: Option<WebhookLifecycleConfig>,
@@ -1640,6 +1666,34 @@ fn default_auto_promote_max_age_days() -> i64 {
     7
 }
 
+fn default_wallet_boost_min_sample() -> u32 {
+    15
+}
+
+fn default_wallet_boost_window_trades() -> u32 {
+    20
+}
+
+fn default_wallet_boost_window_days() -> i64 {
+    30
+}
+
+fn default_wallet_boost_min_net_sol() -> rust_decimal::Decimal {
+    rust_decimal::Decimal::new(1, 2) // 0.01
+}
+
+fn default_wallet_boost_min_winrate() -> f64 {
+    0.40
+}
+
+fn default_wallet_boost_recency_days() -> i64 {
+    7
+}
+
+fn default_wallet_boost_size_sol() -> rust_decimal::Decimal {
+    rust_decimal::Decimal::new(50, 2) // 0.50
+}
+
 impl Default for MonitoringConfig {
     fn default() -> Self {
         // Keep in sync with the serde default fns (enabled, rate limits).
@@ -1665,6 +1719,14 @@ impl Default for MonitoringConfig {
             auto_promote_min_wqs: default_auto_promote_min_wqs(),
             auto_promote_ttl_hours: default_auto_promote_ttl_hours(),
             auto_promote_max_age_days: default_auto_promote_max_age_days(),
+            wallet_boost_enabled: default_false(),
+            wallet_boost_min_sample: default_wallet_boost_min_sample(),
+            wallet_boost_window_trades: default_wallet_boost_window_trades(),
+            wallet_boost_window_days: default_wallet_boost_window_days(),
+            wallet_boost_min_net_sol: default_wallet_boost_min_net_sol(),
+            wallet_boost_min_winrate: default_wallet_boost_min_winrate(),
+            wallet_boost_recency_days: default_wallet_boost_recency_days(),
+            wallet_boost_size_sol: default_wallet_boost_size_sol(),
             webhook_lifecycle: None,
             use_websocket: false,
             helius_websocket_url: None,
