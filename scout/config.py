@@ -1455,15 +1455,21 @@ class ScoutConfig:
             else:
                 warnings.append(msg)
 
-        # Database path validation (use the same path the app actually uses)
-        db_path = ScoutConfig.get_db_path()
-        db_dir = Path(db_path).parent
-        if not db_dir.exists() and strict:
-            # Try to create it
-            try:
-                db_dir.mkdir(parents=True, exist_ok=True)
-            except Exception as e:
-                errors.append(f"Cannot create database directory {db_dir}: {e}")
+        # Database path validation — only relevant for local SQLite/file mode.
+        # In postgres/postgresql mode the app connects via DATABASE_URL and the
+        # local file path is unused. Validating (and mkdir-ing) it there is both
+        # pointless and fragile: get_db_path()'s default '../data/chimera.db' is
+        # CWD-relative and resolves to an unwritable /data in the container.
+        db_mode = os.getenv("CHIMERA_DB_MODE", "postgres").lower()
+        if db_mode in ("sqlite", "file"):
+            db_path = ScoutConfig.get_db_path()
+            db_dir = Path(db_path).parent
+            if not db_dir.exists() and strict:
+                # Try to create it
+                try:
+                    db_dir.mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    errors.append(f"Cannot create database directory {db_dir}: {e}")
 
         # Log warnings first
         for warning in warnings:
