@@ -818,7 +818,7 @@ impl Database for PostgresBackend {
             FROM wallets
             WHERE status = 'CANDIDATE'
               AND wqs_score >= $1
-              AND last_trade_at > NOW() - make_interval(days => $2)
+              AND last_trade_at > NOW() - make_interval(days => $2::integer)
             ORDER BY last_trade_at DESC NULLS LAST, wqs_score DESC
             LIMIT $3
             "#,
@@ -846,7 +846,7 @@ impl Database for PostgresBackend {
                 updated_at = CURRENT_TIMESTAMP
             WHERE status = 'ACTIVE'
               AND last_trade_at IS NOT NULL
-              AND last_trade_at <= NOW() - make_interval(days => $1)
+              AND last_trade_at <= NOW() - make_interval(days => $1::integer)
             "#,
         )
         .bind(max_age_days)
