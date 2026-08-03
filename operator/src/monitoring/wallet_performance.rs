@@ -12,6 +12,43 @@ use rust_decimal::prelude::*;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Per-wallet copy-performance tier driving position sizing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyTier {
+    /// Default — size at the position floor.
+    Base,
+    /// Proven recent copy profitability — size at the boost target.
+    Boosted,
+}
+
+/// Pure classification of a wallet's recent copy performance into a sizing tier.
+/// All gates (enabled flag, sample size, net PnL, win rate, recency) must pass
+/// for `Boosted`; otherwise `Base`. Kept pure (no DB) so it is unit-testable.
+pub fn classify_copy_tier(
+    sample_count: u32,
+    net_sol: rust_decimal::Decimal,
+    winrate: f64,
+    days_since_last_trade: i64,
+    cfg: &crate::config::MonitoringConfig,
+) -> CopyTier {
+    if !cfg.wallet_boost_enabled {
+        return CopyTier::Base;
+    }
+    if sample_count < cfg.wallet_boost_min_sample {
+        return CopyTier::Base;
+    }
+    if net_sol <= cfg.wallet_boost_min_net_sol {
+        return CopyTier::Base;
+    }
+    if winrate < cfg.wallet_boost_min_winrate {
+        return CopyTier::Base;
+    }
+    if days_since_last_trade > cfg.wallet_boost_recency_days {
+        return CopyTier::Base;
+    }
+    CopyTier::Boosted
+}
+
 /// Why a wallet should be demoted. `should_demote` returns this so callers can
 /// apply the correct demotion policy (inactivity rotation vs copy-PnL
 /// underperformance) instead of conflating the two reasons — which previously
@@ -416,6 +453,84 @@ impl WalletPerformanceTracker {
     /// expected (based on original ROI) continuously for 7+ days, else `None`.
     /// The 7-day timer starts when performance first breaches the threshold and is stored in
     /// `breach_started_at`; it is NOT reset on every trade close (that was the old bug).
+    pub async fn compute_copy_tier(&self, wallet: &str) -> CopyTier {
+        let cfg = match self.config.monitoring.as_ref() {
+            Some(m) => m,
+            None => return CopyTier::Base,
+        };
+        if !cfg.wallet_boost_enabled {
+            return CopyTier::Base;
+        }
+        let window_days = cfg.wallet_boost_window_days;
+        let window_trades = cfg.wallet_boost_window_trades;
+        let from = chrono::Utc::now() - chrono::Duration::days(window_days);
+        let from_str = from.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+        let trades = match self
+            .db
+            .get_trades_filtered(
+                Some(&from_str),
+                None,
+                Some("CLOSED"),
+                None,
+                Some(wallet),
+                window_trades as i64,
+                0,
+            )
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    wallet = %wallet,
+                    "compute_copy_tier: query failed -> Base"
+                );
+                return CopyTier::Base;
+            }
+        };
+
+        // Most-recent first, then take the window.
+        let mut sorted: Vec<_> = trades.into_iter().collect();
+        sorted.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        let recent: Vec<_> = sorted.into_iter().take(window_trades as usize).collect();
+
+        let count = recent.len() as u32;
+        let net: rust_decimal::Decimal = recent.iter().filter_map(|t| t.net_pnl_sol).sum();
+        let wins = recent
+            .iter()
+            .filter(|t| {
+                t.net_pnl_sol
+                    .map(|p| p > rust_decimal::Decimal::ZERO)
+                    .unwrap_or(false)
+            })
+            .count();
+        let winrate = if count > 0 {
+            wins as f64 / count as f64
+        } else {
+            0.0
+        };
+        // TradeDetail.created_at is a String (ISO/RFC3339); parse for the
+        // recency computation. ISO-8601 strings sort chronologically, so the
+        // String `max()` is the most-recent trade.
+        let last_trade_str = recent.iter().map(|t| t.created_at.as_str()).max();
+        let days_since = last_trade_str
+            .and_then(|s| {
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .or_else(|| chrono::DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%:z").ok())
+            })
+            .map(|dt| {
+                chrono::Utc::now()
+                    .signed_duration_since(dt.with_timezone(&chrono::Utc))
+                    .num_days()
+                    .max(0)
+            })
+            .unwrap_or(i64::MAX);
+
+        classify_copy_tier(count, net, winrate, days_since, cfg)
+    }
+
     pub async fn should_demote(&self, wallet_address: &str) -> Option<DemotionReason> {
         // Phase 1: Inactivity-based rotation
         if let Some(monitoring_config) = &self.config.monitoring {
@@ -526,5 +641,69 @@ impl WalletPerformanceTracker {
             }
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+    use rust_decimal::Decimal;
+
+    fn cfg() -> crate::config::MonitoringConfig {
+        let mut c = crate::config::MonitoringConfig::default();
+        c.wallet_boost_enabled = true;
+        c
+    }
+
+    #[test]
+    fn boosted_when_all_gates_pass() {
+        // count 20>=15, net 0.5>0.01, wr 0.5>=0.4, age 1<=7
+        assert_eq!(
+            classify_copy_tier(20, Decimal::new(5, 1), 0.50, 1, &cfg()),
+            CopyTier::Boosted
+        );
+    }
+
+    #[test]
+    fn base_when_sample_too_small() {
+        assert_eq!(
+            classify_copy_tier(14, Decimal::new(5, 1), 0.50, 1, &cfg()),
+            CopyTier::Base
+        );
+    }
+
+    #[test]
+    fn base_when_net_not_positive_enough() {
+        // net 0.01 is not strictly greater than min 0.01
+        assert_eq!(
+            classify_copy_tier(20, Decimal::new(1, 2), 0.50, 1, &cfg()),
+            CopyTier::Base
+        );
+    }
+
+    #[test]
+    fn base_when_winrate_below_threshold() {
+        assert_eq!(
+            classify_copy_tier(20, Decimal::new(5, 1), 0.39, 1, &cfg()),
+            CopyTier::Base
+        );
+    }
+
+    #[test]
+    fn base_when_dormant() {
+        // 8 > 7 recency days
+        assert_eq!(
+            classify_copy_tier(20, Decimal::new(5, 1), 0.50, 8, &cfg()),
+            CopyTier::Base
+        );
+    }
+
+    #[test]
+    fn base_when_disabled() {
+        let c = crate::config::MonitoringConfig::default(); // wallet_boost_enabled = false
+        assert_eq!(
+            classify_copy_tier(20, Decimal::new(5, 1), 0.50, 1, &c),
+            CopyTier::Base
+        );
     }
 }
