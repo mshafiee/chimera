@@ -2452,7 +2452,8 @@ async def main_async():
             from core.prediction_matcher import PredictionMatcher
             from core.validation_metrics import ValidationMetricsCalculator
             matcher = PredictionMatcher()
-            matched_count = matcher.match_predictions_to_actuals()
+            match_results = matcher.match_predictions_to_actuals()
+            matched_count = match_results.matched_count if match_results else 0
             if matched_count > 0:
                 print(f"[Scout] Prediction matching: {matched_count} predictions matched to actual PnL")
                 metrics_calc = ValidationMetricsCalculator()
@@ -2461,7 +2462,14 @@ async def main_async():
                     print(f"[Scout] Model accuracy: RMSE={vm.rmse:.4f}, "
                           f"direction_accuracy={vm.direction_accuracy:.1%}")
             elif os.getenv("SCOUT_PREDICTION_MATCHING_ENABLED") == "true":
-                print("[Scout] Prediction matching: no unmatched predictions found")
+                print(f"[Scout] Prediction matching: no predictions matched "
+                      f"({getattr(match_results, 'skipped_count', 0)} skipped)")
+            # Log the recurring "0 matched / N skipped" at INFO so it's clear the
+            # matcher is an orthogonal validation step, not a write gate.
+            if match_results and (match_results.skipped_count > 0 or match_results.failed_count > 0):
+                print(f"[Scout] Prediction matcher (validation only, does not gate wallet writes): "
+                      f"{match_results.matched_count} matched, {match_results.skipped_count} skipped, "
+                      f"{match_results.failed_count} failed")
         except Exception as e:
             if args.verbose:
                 print(f"[Scout] Prediction matching skipped: {e}")
@@ -2478,9 +2486,12 @@ async def main_async():
                 print(f"  Mean WQS at promotion: {corr_stats.mean_wqs_at_promotion:.1f}")
 
                 # WQS-to-PnL predictiveness check (Pearson correlation)
-                records = cr.get_all_records(min_trades=1)
+                # NOTE: use a distinct name (`corr_records`) — shadowing the outer
+                # `records` (the wallet-write list) here would corrupt the DB write
+                # at end-of-run, silently producing 0 successful writes.
+                corr_records = cr.get_all_records(min_trades=1)
                 pairs = [(r.wqs_score_at_promotion, r.actual_copy_pnl_30d_sol)
-                         for r in records if r.actual_copy_pnl_30d_sol is not None]
+                         for r in corr_records if r.actual_copy_pnl_30d_sol is not None]
                 if len(pairs) >= 5:
                     n = len(pairs)
                     mean_w = sum(p[0] for p in pairs) / n
