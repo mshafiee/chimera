@@ -467,7 +467,7 @@ impl SignalProcessor {
                 let heat = registry.get_portfolio_heat();
                 let new_exposure = heat.total_exposure_sol + signal.payload.amount_sol;
                 let capital = self.config.position_sizing.total_capital_sol;
-                let max_heat = capital * Decimal::from(20u32) / Decimal::from(100u32);
+                let max_heat = capital * Decimal::from(30u32) / Decimal::from(100u32);
                 tracing::debug!(
                     trade_uuid = %trade_uuid,
                     exposure_sol = %heat.total_exposure_sol,
@@ -515,7 +515,7 @@ impl SignalProcessor {
                     }
                 };
                 let capital = self.config.position_sizing.total_capital_sol;
-                let max_heat = capital * Decimal::from(20u32) / Decimal::from(100u32);
+                let max_heat = capital * Decimal::from(30u32) / Decimal::from(100u32);
                 let reason = format!(
                     "Portfolio heat limit reached: {} SOL + {} SOL > {} SOL max (20% of capital)",
                     heat.total_exposure_sol, signal.payload.amount_sol, max_heat
@@ -1064,7 +1064,7 @@ impl SignalProcessor {
                     }
 
                     let max_heat_sol = self.config.position_sizing.total_capital_sol
-                        * rust_decimal::Decimal::from_f64_retain(0.20)
+                        * rust_decimal::Decimal::from_f64_retain(0.30)
                             .unwrap_or(rust_decimal::Decimal::ZERO);
 
                     match self

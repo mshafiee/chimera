@@ -93,7 +93,7 @@ token_safety:
     - "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"  # USDT
     - "So11111111111111111111111111111111111111112"   # Wrapped SOL
   # Minimum liquidity thresholds (USD) - with 20% buffer for safety
-  min_liquidity_shield_usd: 8000  # Shield floor: $8K (admits borderline-liquidity active-trader tokens; cost gate 5% backstops slippage)
+  min_liquidity_shield_usd: 5000  # Shield floor: $5K (cost gate 5% backstops slippage; admits more pump.fun tokens)
   min_liquidity_spear_usd: 10000   # Aggressive throughput: $10K floor
   min_liquidity_pumpfun_usd: 5000  # Pump.fun floor: $5K (was default $25K, blocking all pump.fun signals)
   # Enable honeypot detection via transaction simulation
@@ -149,11 +149,11 @@ monitoring:
   rpc_poll_interval_secs: 8  # Legacy single interval (used if tiered_polling_enabled: false)
   rpc_poll_batch_size: 6
   rpc_poll_rate_limit: 40
-  max_active_wallets: 20
+  max_active_wallets: 30
   auto_demote_wallets: true  # Enable automatic wallet demotion based on copy performance
   inactivity_rotation_enabled: true  # Demote wallets that haven't traded recently
   auto_promote_enabled: true  # Refill ACTIVE roster from high-WQS CANDIDATEs (counterbalances auto-demote)
-  auto_promote_min_wqs: 40.0  # Admit "emerging+" wallets (WQS>=40) that actually trade; quality gate 0.30 filters their signals
+  auto_promote_min_wqs: 30.0  # Admit WQS>=30 wallets (was 40; more wallets = more trading opportunities; quality gate 0.30 filters signals)
   auto_promote_ttl_hours: 168  # 7-day TTL on auto-promoted wallets; auto-demote re-evaluates them
   auto_promote_max_age_days: 7  # Only promote/demote by recency: candidates must have traded within 7d; ACTIVE wallets dormant >7d are demoted
   wallet_boost_enabled: false  # Tiered per-wallet copy-performance sizing (opt-in; see docs/superpowers/specs/2026-08-03-wallet-performance-sizing-design.md)
