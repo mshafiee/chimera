@@ -391,6 +391,10 @@ impl Engine {
             executor = executor.with_price_cache(price_cache.clone());
         }
 
+        if let Some(ref metrics) = metrics {
+            executor = executor.with_metrics(metrics.clone());
+        }
+
         let executor_arc = Arc::new(tokio::sync::RwLock::new(executor));
         let shutdown_token = CancellationToken::new();
         let handle = EngineHandle {

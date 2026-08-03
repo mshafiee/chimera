@@ -737,13 +737,25 @@ async fn main() -> anyhow::Result<()> {
 
     let verdict_cache = Arc::new(tokio::sync::RwLock::new(None));
 
+    // Create metrics state early so the engine executor can wire Prometheus
+    // gauges (jito_health, circuit_breaker, etc.). Created before the engine
+    // because the executor's metrics handle is set at construction time and
+    // cannot be retrofitted once the engine is spawned.
+    let metrics_state = match MetricsState::new() {
+        Ok(state) => Arc::new(state),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to initialize metrics system — /metrics endpoint unavailable, core service will continue");
+            return Err(anyhow::anyhow!("Metrics initialization failed: {}", e));
+        }
+    };
+
     // Create engine
     let (engine, _engine_handle) =
         engine::Engine::new_with_extras_tip_manager_price_cache_and_token_parser(
             config.clone(),
             db_pool.clone(),
             notifier.clone(),
-            None,
+            Some(metrics_state.clone()),
             Some(ws_state.clone()),
             Some(tip_manager.clone()),
             Some(price_cache.clone()),
@@ -1688,18 +1700,6 @@ async fn main() -> anyhow::Result<()> {
     // FIX [B-M3]: Removed duplicate wallet TTL expiration task (3600s interval).
     // The 60s interval task above (around line 505) already handles TTL expiration.
     // Having a second task at 60-minute intervals duplicated demote_wallet calls.
-
-    // Create metrics state (shared between task and router)
-    // If metrics initialization fails, we log the error and continue with a degraded state.
-    // The /metrics endpoint will return an error, but the core service remains functional.
-    let metrics_state = match MetricsState::new() {
-        Ok(state) => Arc::new(state),
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to initialize metrics system — /metrics endpoint unavailable, core service will continue");
-            // Return early since we can't run without metrics state
-            return Err(anyhow::anyhow!("Metrics initialization failed: {}", e));
-        }
-    };
 
     // Wire Prometheus metrics into circuit breaker for event-driven updates
     circuit_breaker.set_metrics(
