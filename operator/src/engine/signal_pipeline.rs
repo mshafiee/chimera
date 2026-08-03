@@ -749,6 +749,25 @@ impl SignalProcessor {
                 .await
             {
                 Ok(Some(existing_uuid)) => {
+                    if existing_uuid == trade_uuid {
+                        // Self-redelivery: Helius re-delivered the SAME on-chain
+                        // trade (deterministic trade_uuid) while its first
+                        // delivery is still in flight (PENDING/EXECUTING). This
+                        // is NOT a different concurrent BUY — the in-flight
+                        // delivery will complete (or the stale-trade reaper will
+                        // reap it). Skipping here prevents a trade from rejecting
+                        // its OWN in-flight row on every redelivery, which was
+                        // blocking every BUY once the liquidity floor let them
+                        // through. (Redeliveries of an already-COMPLETED trade
+                        // are caught earlier by the monitoring-signal dedup.)
+                        tracing::info!(
+                            trade_uuid = %trade_uuid,
+                            wallet = %signal.payload.wallet_address,
+                            token = %signal.payload.token,
+                            "BUY self-redelivery (same trade_uuid in flight) — skipping; in-flight delivery completes it"
+                        );
+                        return;
+                    }
                     tracing::warn!(
                         trade_uuid = %trade_uuid,
                         existing_trade_uuid = %existing_uuid,
