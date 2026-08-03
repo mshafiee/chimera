@@ -1480,6 +1480,27 @@ class HeliusClient:
                                  category=CacheCategory.WALLET_METRICS)
                     return result
 
+            # VALIDATION CRITERIA 2b: Currently-active requirement.
+            # Beyond trading within `days_back`, require at least one trade in
+            # the recent window (default 48h) so discovery surfaces wallets
+            # trading NOW rather than wallets that were active a week ago then
+            # went dormant. Historical-only ranking otherwise promotes dormant
+            # high-WQS wallets that generate no copy signals.
+            recency_hours = int(os.getenv("SCOUT_ACTIVITY_RECENCY_HOURS", "48"))
+            if recency_hours > 0:
+                recency_cutoff = time.time() - (recency_hours * 3600)
+                has_recent_trade = any(
+                    tx.get("timestamp", 0) >= recency_cutoff for tx in transactions
+                )
+                if not has_recent_trade:
+                    result = False
+                    if CACHE_AVAILABLE:
+                        cache = get_cache()
+                        cache_key = f"{wallet_address}:{min_trades}:{days_back}"
+                        cache.set("wallet_validation", wallet_address, result, cache_key,
+                                 category=CacheCategory.WALLET_METRICS)
+                    return result
+
             # VALIDATION CRITERIA 3: SOL balance check
             # Filter out programs and vaults that have zero SOL balance
             min_sol_balance = float(os.getenv("SCOUT_MIN_SOL_BALANCE", "0.001"))
@@ -2676,7 +2697,12 @@ class HeliusClient:
             except Exception as e:
                 print(f"[Helius]   Wallet age filter skipped (error: {e})")
 
-        # Optional: Validate wallet activity in parallel (Item 8 — batch validation)
+        # Validate wallet activity in parallel (Item 8 — batch validation).
+        # Opt-in via SCOUT_VALIDATE_WALLET_ACTIVITY (enabled in production via
+        # docker-compose env, default off to keep tests/standalone runs stable).
+        # When on, the inner _validate_wallet_activity enforces >= min_trades in
+        # days_back PLUS a recent-trade requirement (SCOUT_ACTIVITY_RECENCY_HOURS)
+        # so discovery surfaces wallets trading NOW, not dormant ones.
         validate_activity = os.getenv("SCOUT_VALIDATE_WALLET_ACTIVITY", "false").lower() == "true"
         if validate_activity:
             print("[Helius] Validating wallet activity (batch)...")

@@ -848,6 +848,7 @@ class WalletAnalyzer:
                                 SELECT DISTINCT address, archetype, last_arb_check_at
                                 FROM wallets
                                 WHERE status IN ('ACTIVE', 'CANDIDATE')
+                                AND (last_trade_at IS NULL OR last_trade_at > NOW() - INTERVAL '72 hours')
                                 AND (archetype != 'ARBITRAGE' OR last_arb_check_at IS NULL OR last_arb_check_at < NOW() - INTERVAL '24 hours')
                                 ORDER BY wqs_score DESC NULLS LAST
                                 LIMIT %s

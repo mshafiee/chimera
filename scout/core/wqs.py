@@ -872,16 +872,27 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
             if last_trade.tzinfo is None:
                 now = now.replace(tzinfo=None)
             days_since_trade = (now - last_trade).days
-            
+
+            # Recency scoring — surfaces currently-active wallets over dormant
+            # ones. Historically the 5-14d band was a dead zone (no signal) and
+            # the >14d penalty (-10) was too weak vs ROI bonuses (+25/+10),
+            # so dormant high-historical-WQS wallets ranked high and got
+            # promoted without generating copy signals. Bands now escalate.
             if days_since_trade <= 2:
                 logger.debug("[WQS] bonus recency_score +10.00 addr=%s days_since_trade=%d", addr, days_since_trade)
                 tracker.add_pos("recency_score", 10.0)
             elif days_since_trade <= 5:
                 logger.debug("[WQS] bonus recency_score +5.00 addr=%s days_since_trade=%d", addr, days_since_trade)
                 tracker.add_pos("recency_score", 5.0)
-            elif days_since_trade > 14:
-                logger.debug("[WQS] penalty recency_score -10.00 addr=%s days_since_trade=%d", addr, days_since_trade)
-                tracker.add_neg("recency_score", 10.0)
+            elif days_since_trade <= 14:
+                logger.debug("[WQS] penalty recency_score -8.00 addr=%s days_since_trade=%d", addr, days_since_trade)
+                tracker.add_neg("recency_score", 8.0)
+            elif days_since_trade <= 21:
+                logger.debug("[WQS] penalty recency_score -25.00 addr=%s days_since_trade=%d", addr, days_since_trade)
+                tracker.add_neg("recency_score", 25.0)
+            else:
+                logger.debug("[WQS] penalty recency_score -35.00 addr=%s days_since_trade=%d", addr, days_since_trade)
+                tracker.add_neg("recency_score", 35.0)
                 
             wmi = _compute_wmi(roi_7d, roi_30d, count)
             if wmi > 0.5:

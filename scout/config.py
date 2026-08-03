@@ -304,6 +304,15 @@ class ScoutConfig:
         return int(os.getenv("SCOUT_DISCOVERY_TRENDING_HOURS", "4"))
 
     @staticmethod
+    def get_activity_recency_hours() -> int:
+        """Currently-active requirement: a discovered wallet must have >=1 trade
+        within this recent window (default 48h) to pass activity validation.
+        Surfaces wallets trading NOW instead of dormant high-historical-WQS
+        wallets. Set 0 to disable the recency sub-check (keep only the
+        min-trades-in-days_back gate)."""
+        return int(os.getenv("SCOUT_ACTIVITY_RECENCY_HOURS", "48"))
+
+    @staticmethod
     def get_discovery_timeout_seconds() -> int:
         """Timeout per discovery strategy (deep/fast/trending)."""
         return int(os.getenv("SCOUT_DISCOVERY_TIMEOUT_SECONDS", "300"))

@@ -801,6 +801,41 @@ def test_roi_momentum_bonus_requires_recent_trade_and_both_roi_positive():
     )
 
 
+def test_wqs_recency_penalizes_dormant_wallets():
+    """Strengthened recency bands: a HIGH-WQS wallet that goes dormant (>21d)
+    scores materially lower than the same wallet still active within 2d, so
+    dormant high-historical-WQS wallets no longer dominate ranking / get
+    promoted without trading. Uses strong stats so both scores stay positive
+    and the full +10 vs -35 recency gap (~45) is visible (not just clamping)."""
+    from datetime import datetime, timedelta
+
+    base = dict(address="w", roi_30d=200.0, roi_7d=100.0,
+                trade_count_30d=60, win_rate=0.65, max_drawdown_30d=3.0,
+                win_streak_consistency=0.7)
+
+    active = (datetime.utcnow() - timedelta(days=1)).isoformat()
+    dormant = (datetime.utcnow() - timedelta(days=25)).isoformat()
+
+    score_active = calculate_wqs(WalletMetrics(**base, last_trade_at=active))
+    score_dormant = calculate_wqs(WalletMetrics(**base, last_trade_at=dormant))
+
+    assert score_active > score_dormant, (
+        f"Active wallet should outscore dormant: {score_active} vs {score_dormant}"
+    )
+    # Both stay positive (strong base) so the gap reflects the recency bands:
+    # +10 (active, <=2d) vs -35 (dormant, >21d) = ~45 raw pts at confidence 1.0.
+    # The old bands (+10 vs -10) would only give ~20 — assert >=30 to confirm
+    # the strengthening, with margin for any scaling.
+    assert score_active - score_dormant >= 30.0, (
+        f"Dormancy penalty too weak (expected >=30 gap): {score_active - score_dormant:.1f}"
+    )
+    # And the dormant high-WQS wallet must drop below the ACTIVE admission
+    # threshold (75) so it won't be auto-admitted/promoted while dormant.
+    assert score_dormant < 75.0, (
+        f"Dormant wallet still scores >=75 (would be wrongly promoted): {score_dormant}"
+    )
+
+
 def test_wqs_thin_history_roi_guard(monkeypatch):
     """The thin-history ROI guard must cap ROI contributions for wallets with
     few trades: a 1-trade wallet with astronomical ROI must not saturate the
