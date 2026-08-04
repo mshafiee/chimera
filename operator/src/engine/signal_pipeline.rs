@@ -702,6 +702,37 @@ impl SignalProcessor {
         }
         }
 
+        // Per-token loss cooldown: skip re-entry if this token had a >3% loss
+        // within the last 30 minutes (prevents chasing a dumping token).
+        if signal.payload.action == Action::Buy {
+            if let Some(ref token_addr) = signal.payload.token_address {
+                match self.db.has_recent_token_loss(token_addr, 30).await {
+                    Ok(true) => {
+                        let reason = "Token recently lost >3% — 30min cooldown".to_string();
+                        tracing::info!(
+                            trade_uuid = %trade_uuid,
+                            token = %signal.payload.token,
+                            token_address = %token_addr,
+                            "Signal rejected: per-token loss cooldown"
+                        );
+                        let _ = self
+                            .db
+                            .mark_trade_dead_letter(
+                                &trade_uuid,
+                                &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                                &reason,
+                            )
+                            .await;
+                        return;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Cooldown check failed — proceeding");
+                    }
+                }
+            }
+        }
+
         // Ensure token_decimals is populated — required by executor's convert_fill_price().
         // The monitoring handler and polling task may not have set it.
         if signal.token_decimals.is_none() {

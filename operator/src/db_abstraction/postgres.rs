@@ -2557,6 +2557,28 @@ impl Database for PostgresBackend {
         Ok(())
     }
 
+    async fn has_recent_token_loss(
+        &self,
+        token_address: &str,
+        within_minutes: i64,
+    ) -> AppResult<bool> {
+        let count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM trades
+            WHERE token_address = $1
+              AND status = 'CLOSED'
+              AND pnl_sol < 0
+              AND pnl_sol / amount_sol * 100 < -3.0
+              AND closed_at > NOW() - ($2 || ' minutes')::interval
+            "#,
+        )
+        .bind(token_address)
+        .bind(within_minutes)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count > 0)
+    }
+
     async fn get_wallet_monitoring(
         &self,
         wallet_address: &str,

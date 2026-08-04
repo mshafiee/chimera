@@ -492,6 +492,14 @@ pub trait Database: Send + Sync {
     /// Demote a wallet from ACTIVE to CANDIDATE (for TTL expiration)
     async fn demote_wallet(&self, address: &str, reason: &str) -> AppResult<()>;
 
+    /// Check if a token had a significant losing trade closed within the
+    /// cooldown window. Used to prevent re-entering tokens that just dumped.
+    async fn has_recent_token_loss(
+        &self,
+        token_address: &str,
+        within_minutes: i64,
+    ) -> AppResult<bool>;
+
     // ========================================================================
     // WALLET MONITORING
     // ========================================================================
