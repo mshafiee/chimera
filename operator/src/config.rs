@@ -720,7 +720,10 @@ fn default_jito_enabled() -> bool {
 }
 
 fn default_jito_searcher_endpoint() -> Option<String> {
-    Some("https://mainnet.block-engine.jito.wtf".to_string())
+    // Regional endpoint: global mainnet.block-engine.jito.wtf was unreachable
+    // from all networks (DNS resolves but connection times out), while
+    // regional endpoints (ny/amsterdam/frankfurt/tokyo) respond normally.
+    Some("https://ny.mainnet.block-engine.jito.wtf".to_string())
 }
 
 fn default_helius_fallback() -> bool {
