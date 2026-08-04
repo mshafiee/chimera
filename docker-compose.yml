@@ -54,7 +54,10 @@ services:
       - "-c"
       - "wal_keep_size=256MB"
       - "-c"
-      - "log_statement=all"
+      # log_statement=all floods docker logs (924K lines/10min measured) with
+      # every sqlx query + parameters, generates heavy I/O that spiked page
+      # cache toward the mem_limit, and leaks sensitive trade data to logs.
+      - "log_statement=none"
       - "-c"
       - "hba_file=/var/lib/postgresql/pg_hba.conf"
       - "-c"
@@ -69,7 +72,8 @@ services:
       start_period: 30s
     # Hard memory cap — prevents unbounded growth that triggered host OOM
     # backend kills (observed killing postgres processes every 30-90 min).
-    mem_limit: 18g
+    # Real RSS is ~1.3GB; 24g leaves headroom for transient page-cache spikes.
+    mem_limit: 24g
     networks:
       - chimera-network
     profiles:
