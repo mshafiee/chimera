@@ -201,8 +201,8 @@ services:
       - BIRDEYE_API_KEY=${BIRDEYE_API_KEY:-}
       # Improved Discovery Configuration
       - SCOUT_MIN_TRADE_COUNT=1
-      - SCOUT_MAX_WALLETS=300
-      - SCOUT_DISCOVERY_HOURS=168
+      - SCOUT_MAX_WALLETS=500
+      - SCOUT_DISCOVERY_HOURS=72
       - SCOUT_LIQUIDITY_MODE=${SCOUT_LIQUIDITY_MODE:-simulated}
       # Historical liquidity fallback: 'flexible' uses current liquidity with confidence
       # penalty when historical data is missing (instead of strict rejection)
@@ -213,7 +213,7 @@ services:
       - SCOUT_DISCOVERY_MIN_SOL=0.05                             # Increased from 0.01 (filter spam)
       - SCOUT_MIN_WALLET_AGE_DAYS=7                               # Filter out wallets < 7 days old
       - SCOUT_VALIDATE_WALLET_ACTIVITY=true                       # Require recent trades at discovery (filter dormant wallets)
-      - SCOUT_ACTIVITY_RECENCY_HOURS=48                           # Discovered wallet must have >=1 trade in last 48h
+      - SCOUT_ACTIVITY_RECENCY_HOURS=24                           # Discovered wallet must have >=1 trade in last 24h (was 48h — fresher wallets)
       # WQS Thresholds (relaxed for paper trading)
       - SCOUT_MIN_WQS_ACTIVE=15.0
       - SCOUT_MIN_WQS_CANDIDATE=10.0
@@ -282,12 +282,14 @@ services:
         condition: service_healthy
     networks:
         - chimera-network
-    # Run scout in continuous mode with 6-hour cycles (memecoin wallets go stale fast).
+    # Run scout in continuous mode with 2-hour cycles (memecoin wallets go stale
+    # fast; shorter cycles surface fresh active wallets sooner, refilling the
+    # ACTIVE roster so the operator gets more signals).
     # Using --continuous keeps the Python process alive, so the Prometheus metrics
     # server (daemon thread) stays up between runs instead of dying when main.py exits.
     command: >
         sh -c "
-          python main.py --continuous --continuous-interval 21600
+          python main.py --continuous --continuous-interval 7200
         "
     profiles:
        - devnet
