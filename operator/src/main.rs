@@ -880,6 +880,9 @@ async fn main() -> anyhow::Result<()> {
     let toxic_flow_detector = Arc::new(
         chimera_operator::experiment::ToxicFlowDetector::new(config.experiment.clone()),
     );
+    let rejection_mute_detector = Arc::new(
+        crate::engine::rejection_mute::RejectionMuteDetector::new(config.rejection_mute.clone()),
+    );
     tracing::info!(
         toxic_threshold = config.experiment.toxic_threshold_percent,
         "Toxic flow detector + wallet performance tracker initialized"
@@ -2928,6 +2931,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_dexscreener(dexscreener_client.clone())
         .with_toxic_detector(toxic_flow_detector.clone())
+        .with_mute_detector(rejection_mute_detector.clone())
         .with_decision_recorder(decision_recorder.clone())
         .with_shadow_fill_opt(shadow_quote_client.clone(), latency_tracker.clone())
         .with_wallet_performance(wallet_performance_tracker.clone())
@@ -3184,6 +3188,16 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Rejection-rate mute: load active mutes from database on startup
+    {
+        use chimera_operator::db_abstraction::DbPool;
+        if let DbPool::PostgreSQL(pg_pool) = db_pool.pool() {
+            if let Err(e) = rejection_mute_detector.load_from_database(&pg_pool).await {
+                tracing::warn!(error = %e, "Failed to load muted wallets on startup");
+            }
+        }
+    }
+
     // B3: Periodic toxic-wallet persistence (every 5 minutes)
     {
         let persist_detector = toxic_flow_detector.clone();
@@ -3201,6 +3215,31 @@ async fn main() -> anyhow::Result<()> {
                             let run_id = format!("v{}", env!("CARGO_PKG_VERSION"));
                             if let Err(e) = persist_detector.persist_to_database(&pg_pool, &run_id).await {
                                 tracing::warn!(error = %e, "Periodic toxic wallet persist failed");
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Rejection-rate mute: periodic persistence (every 5 minutes)
+    {
+        let persist_mute = rejection_mute_detector.clone();
+        let persist_db = db_pool.clone();
+        let persist_token = cancel_token.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            interval.tick().await; // consume first immediate tick
+            loop {
+                tokio::select! {
+                    _ = persist_token.cancelled() => break,
+                    _ = interval.tick() => {
+                        use chimera_operator::db_abstraction::DbPool;
+                        if let DbPool::PostgreSQL(pg_pool) = persist_db.pool() {
+                            let run_id = format!("v{}", env!("CARGO_PKG_VERSION"));
+                            if let Err(e) = persist_mute.persist_to_database(&pg_pool, &run_id).await {
+                                tracing::warn!(error = %e, "Periodic muted-wallet persist failed");
                             }
                         }
                     }
@@ -3257,6 +3296,17 @@ async fn main() -> anyhow::Result<()> {
                 tracing::warn!(error = %e, "Final toxic wallet persist failed on shutdown");
             } else {
                 tracing::info!("Toxic wallet state persisted on shutdown");
+            }
+        }
+    }
+
+    // Rejection-rate mute: final persistence on shutdown
+    {
+        use chimera_operator::db_abstraction::DbPool;
+        if let DbPool::PostgreSQL(pg_pool) = db_pool.pool() {
+            let run_id = format!("v{}", env!("CARGO_PKG_VERSION"));
+            if let Err(e) = rejection_mute_detector.persist_to_database(&pg_pool, &run_id).await {
+                tracing::warn!(error = %e, "Final muted-wallet persist failed on shutdown");
             }
         }
     }
