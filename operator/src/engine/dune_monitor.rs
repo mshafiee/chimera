@@ -157,7 +157,7 @@ impl DunePnlMonitor {
 
     /// Poll execution status, then download CSV results.
     async fn poll_and_fetch_csv(&self, execution_id: &str) -> AppResult<String> {
-        let status_url = format!("{DUNE_API_BASE}/execution/{execution_id}");
+        let status_url = format!("{DUNE_API_BASE}/execution/{execution_id}/status");
         let csv_url = format!("{DUNE_API_BASE}/execution/{execution_id}/results/csv");
 
         for _ in 0..MAX_POLLS {
