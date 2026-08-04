@@ -17,6 +17,7 @@ pub mod portfolio_heat;
 pub mod position_sizer;
 pub mod profit_targets;
 pub mod recovery;
+pub mod rejection_mute;
 pub mod reconciliation;
 mod rent_scavenger;
 pub mod rpc_cache;

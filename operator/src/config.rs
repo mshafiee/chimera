@@ -2298,7 +2298,7 @@ impl Default for ExperimentConfig {
 }
 
 /// ── Rejection-rate wallet mute ──────────────────────────────────────────
-
+///
 /// Mutes wallets whose BUY signals are overwhelmingly rejected for hard,
 /// structural reasons (non-speculative / unsafe / illiquid pump.fun tokens).
 /// Prevents wasted decision processing on wallets that can never produce an
