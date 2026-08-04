@@ -434,10 +434,17 @@ impl DunePnlMonitor {
             return Ok(0);
         }
 
-        // 3. Find which profitable wallets are CANDIDATE in our system.
+        // 3. Find which profitable wallets are CANDIDATE in our system, plus
+        //    ACTIVE wallets missing a webhook (retry failed registrations).
         let addresses: Vec<String> = profitable.iter().map(|w| w.address.clone()).collect();
         let candidates: Vec<String> = sqlx::query_scalar(
-            r#"SELECT address FROM wallets WHERE address = ANY($1) AND status = 'CANDIDATE'"#,
+            r#"SELECT address FROM wallets
+               WHERE address = ANY($1)
+                 AND (status = 'CANDIDATE'
+                      OR (status = 'ACTIVE' AND NOT EXISTS (
+                          SELECT 1 FROM wallet_monitoring wm
+                          WHERE wm.wallet_address = wallets.address
+                            AND wm.helius_webhook_id IS NOT NULL)))"#,
         )
         .bind(&addresses)
         .fetch_all(&pool)
@@ -480,7 +487,7 @@ impl DunePnlMonitor {
                 }
             }
 
-            // Status update: CANDIDATE -> ACTIVE.
+            // Status update: CANDIDATE -> ACTIVE (no-op for already-ACTIVE).
             match self
                 .db
                 .update_wallet_status_ext(address, "ACTIVE", None, Some(&reason))
@@ -503,6 +510,26 @@ impl DunePnlMonitor {
                 Err(e) => {
                     warn!(wallet = %address, error = %e, "Dune promotion: status update failed");
                     continue;
+                }
+            }
+
+            // Dune-verified: set WQS to 80 so the selection WQS gate
+            // (min_wqs_score 15) lets BUY signals through. These wallets were
+            // never scout-evaluated, so their stored WQS is 0.0 which silently
+            // blocked every signal (WQS_TOO_LOW rejections).
+            {
+                let DbPool::PostgreSQL(pool) = self.db.pool();
+                if let Err(e) = sqlx::query(
+                    r#"UPDATE wallets
+                       SET wqs_score = GREATEST(COALESCE(wqs_score, 0), 80.0),
+                           notes = COALESCE(notes, '') || ' | Dune-verified: WQS floor 80'
+                       WHERE address = $1"#,
+                )
+                .bind(address)
+                .execute(&pool)
+                .await
+                {
+                    warn!(wallet = %address, error = %e, "Dune promotion: WQS update failed");
                 }
             }
 
