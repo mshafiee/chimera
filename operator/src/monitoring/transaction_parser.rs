@@ -559,28 +559,42 @@ pub fn parse_helius_webhook(
         }
     }
 
-    // Find the traded non-SOL token (the one with a significant net delta).
-    // For multi-hop routes, only the final destination token has a non-zero net delta.
+    // Find the traded speculative token (largest abs delta among non-SOL,
+    // non-stablecoin mints) and the quote token (the stablecoin/SOL side).
+    // Previously the largest-delta non-SOL token was chosen, which for
+    // USDC-quoted swaps picked USDC itself — turning every real BUY into a
+    // "Sell USDC" (dropped as NO_ACTIVE_POSITION) and every SELL into a
+    // "Buy USDC" (rejected NON_SPECULATIVE_TOKEN). That made stablecoin-
+    // quoted DEX wallets (Meteora/Raydium/Orca) completely invisible.
+    const STABLECOIN_MINTS: [&str; 2] = [
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
+    ];
     let mut traded_token: Option<(String, Decimal)> = None;
+    let mut quote_mint: Option<String> = None;
+    let mut quote_delta: Decimal = Decimal::ZERO;
     for (mint, delta) in &token_deltas {
-        if mint == SOL_MINT {
+        if delta.abs() <= Decimal::new(1, 6) {
             continue;
         }
-        // Significant threshold filters dust from rounding/fees.
-        if delta.abs() > Decimal::new(1, 6) {
-            // 0.000001
-            // If we already found a token, prefer the one with the larger absolute delta
-            // (the actual traded token, not a residual intermediate).
-            match &traded_token {
-                Some((_, prev_delta)) if prev_delta.abs() >= delta.abs() => {}
-                _ => traded_token = Some((mint.clone(), *delta)),
+        if mint == SOL_MINT || STABLECOIN_MINTS.contains(&mint.as_str()) {
+            // Stablecoin/SOL side is the quote leg.
+            if quote_delta.abs() < delta.abs() {
+                quote_mint = Some(mint.clone());
+                quote_delta = *delta;
             }
+            continue;
+        }
+        // Speculative token: prefer the larger absolute delta.
+        match &traded_token {
+            Some((_, prev_delta)) if prev_delta.abs() >= delta.abs() => {}
+            _ => traded_token = Some((mint.clone(), *delta)),
         }
     }
 
     let (token_mint, token_delta) = match traded_token {
         Some(v) => v,
-        None => return Ok(None), // No traded token found (SOL-only or not a swap)
+        None => return Ok(None), // no speculative token (pure stablecoin/dust swap)
     };
 
     // Direction: positive token delta = received tokens = BUY; negative = SELL.
@@ -616,23 +630,37 @@ pub fn parse_helius_webhook(
         sol_amount = token_delta.abs();
     }
 
+    // Quote leg amount: stablecoin delta when USDC/USDT-quoted, else SOL amount.
+    let quote_amount = match &quote_mint {
+        Some(mint) if mint != SOL_MINT => quote_delta.abs(),
+        _ => sol_amount,
+    };
+    let quote_mint = quote_mint.unwrap_or_else(|| SOL_MINT.to_string());
+
     // Detect DEX from webhook payload heuristics (best-effort; enriched webhooks
     // don't include instruction details, so this is approximate).
     let dex = detect_dex_from_payload(payload);
 
     Ok(Some(ParsedSwap {
         token_in: if direction == SwapDirection::Buy {
-            SOL_MINT.to_string()
+            quote_mint.clone()
         } else {
             token_mint.clone()
         },
         token_out: if direction == SwapDirection::Buy {
-            token_mint.clone()
+            token_mint
         } else {
-            SOL_MINT.to_string()
+            quote_mint
+        },        amount_in: if direction == SwapDirection::Buy {
+            quote_amount
+        } else {
+            token_delta.abs()
         },
-        amount_in: sol_amount,
-        amount_out: token_delta.abs(),
+        amount_out: if direction == SwapDirection::Buy {
+            token_delta.abs()
+        } else {
+            quote_amount
+        },
         direction,
         dex,
         slippage: None,
@@ -908,5 +936,75 @@ mod tests {
         assert_eq!(swap.token_in, SOL_MINT);
         assert_eq!(swap.token_out, token);
         assert_eq!(swap.amount_out, Decimal::from_str(amount).unwrap());
+    }
+
+    #[test]
+    fn test_webhook_usdc_quoted_buy_picks_token_not_usdc() {
+        // USDC-quoted BUY: wallet spends USDC, receives TOKEN.
+        // The parser must resolve the speculative TOKEN (not USDC) as the
+        // traded token and label it a Buy — previously this became
+        // "Sell USDC" (NO_ACTIVE_POSITION) and the signal was lost.
+        let wallet = "Wallet111111111111111111111111111111111111";
+        let token = "TokA111111111111111111111111111111111111111";
+        let usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+        // USDC has the LARGER absolute delta (decimal 6 vs token decimal 9)
+        let payload = make_payload(
+            vec![AccountData {
+                account: wallet.to_string(),
+                native_balance_change: None,
+                token_balance_changes: Some(vec![
+                    token_change(usdc, "-1000000", wallet),  // -1 USDC (6 decimals)
+                    token_change(token, "1000000000000", wallet), // +1M tokens
+                ]),
+            }],
+            vec![],
+        );
+
+        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("should parse");
+        assert_eq!(swap.direction, SwapDirection::Buy);
+        assert_eq!(swap.token_in, usdc);
+        assert_eq!(swap.token_out, token);
+    }
+
+    #[test]
+    fn test_webhook_usdc_quoted_sell_picks_token_not_usdc() {
+        // USDC-quoted SELL: wallet spends TOKEN, receives USDC.
+        let wallet = "Wallet111111111111111111111111111111111111";
+        let token = "TokA111111111111111111111111111111111111111";
+        let usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+        let payload = make_payload(
+            vec![AccountData {
+                account: wallet.to_string(),
+                native_balance_change: None,
+                token_balance_changes: Some(vec![
+                    token_change(usdc, "2000000", wallet),        // +2 USDC
+                    token_change(token, "-1000000000000", wallet), // -1M tokens
+                ]),
+            }],
+            vec![],
+        );
+
+        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("should parse");
+        assert_eq!(swap.direction, SwapDirection::Sell);
+        assert_eq!(swap.token_in, token);
+        assert_eq!(swap.token_out, usdc);
+    }
+
+    #[test]
+    fn test_webhook_sol_to_usdc_dust_returns_none() {
+        // SOL -> USDC swap has no speculative token: must return None
+        // (previously produced "Buy USDC" NON_SPECULATIVE noise).
+        let wallet = "Wallet111111111111111111111111111111111111";
+        let usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+        let payload = make_payload(
+            vec![AccountData {
+                account: wallet.to_string(),
+                native_balance_change: Some(-100_000_000), // -0.1 SOL
+                token_balance_changes: Some(vec![token_change(usdc, "100000", wallet)]),
+            }],
+            vec![],
+        );
+
+        assert!(parse_helius_webhook(&payload, Some(wallet)).unwrap().is_none());
     }
 }
