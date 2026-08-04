@@ -258,3 +258,10 @@ rejection_mute:
   min_window_samples: 20    # need >=20 decisions before muting
   hard_rejection_threshold: 0.90  # mute at >=90% hard-rejection rate
   mute_duration_hours: 6    # mute for 6h, then re-evaluate
+
+# Dune Analytics integration for wallet PnL monitoring
+# API key read from DUNE_API_KEY env var
+dune:
+  enabled: true
+  pnl_query_id: 8221776     # Dune query: 24h wallet PnL monitor
+  check_interval_secs: 3600 # hourly check

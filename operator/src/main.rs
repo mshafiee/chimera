@@ -883,9 +883,14 @@ async fn main() -> anyhow::Result<()> {
     let rejection_mute_detector = Arc::new(
         crate::engine::rejection_mute::RejectionMuteDetector::new(config.rejection_mute.clone()),
     );
+    let dune_pnl_monitor = crate::engine::dune_monitor::DunePnlMonitor::new(
+        &config.dune,
+        db_pool.clone(),
+    );
     tracing::info!(
         toxic_threshold = config.experiment.toxic_threshold_percent,
-        "Toxic flow detector + wallet performance tracker initialized"
+        dune_enabled = config.dune.enabled,
+        "Toxic flow detector + wallet performance tracker + Dune monitor initialized"
     );
 
     let verdict_cache = Arc::new(tokio::sync::RwLock::new(None));
@@ -3245,6 +3250,15 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+        });
+    }
+
+    // Dune PnL monitor: periodic check for losing ACTIVE wallets
+    if config.dune.enabled {
+        let dune_monitor = dune_pnl_monitor;
+        let dune_token = cancel_token.clone();
+        tokio::spawn(async move {
+            dune_monitor.run(dune_token).await;
         });
     }
 

@@ -6,6 +6,7 @@ mod channel;
 mod degradation;
 pub mod decision_recorder;
 pub mod dex_comparator;
+pub mod dune_monitor;
 pub mod executor;
 mod execution_lock;
 pub mod jito_searcher;

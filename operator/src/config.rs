@@ -135,6 +135,9 @@ pub struct AppConfig {
     /// Rejection-rate wallet mute configuration
     #[serde(default)]
     pub rejection_mute: RejectionMuteConfig,
+    /// Dune Analytics integration configuration
+    #[serde(default)]
+    pub dune: DuneConfig,
 }
 
 /// HTTP server configuration
@@ -2347,6 +2350,38 @@ impl Default for RejectionMuteConfig {
             min_window_samples: default_rejection_mute_min_samples(),
             hard_rejection_threshold: default_rejection_mute_threshold(),
             mute_duration_hours: default_rejection_mute_duration_hours(),
+        }
+    }
+}
+
+/// Dune Analytics integration for wallet PnL monitoring and fast demotion.
+/// API key is read from the `DUNE_API_KEY` environment variable.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DuneConfig {
+    /// Master switch for Dune integration.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Dune query ID for the 24h wallet PnL monitor.
+    #[serde(default = "default_dune_pnl_query_id")]
+    pub pnl_query_id: u64,
+    /// How often (in seconds) to poll Dune for wallet PnL. Default: 1 hour.
+    #[serde(default = "default_dune_check_interval_secs")]
+    pub check_interval_secs: u64,
+}
+
+fn default_dune_pnl_query_id() -> u64 {
+    8221776
+}
+fn default_dune_check_interval_secs() -> u64 {
+    3600
+}
+
+impl Default for DuneConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            pnl_query_id: default_dune_pnl_query_id(),
+            check_interval_secs: default_dune_check_interval_secs(),
         }
     }
 }
