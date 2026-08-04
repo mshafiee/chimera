@@ -214,7 +214,7 @@ monitoring:
 # Profit management configuration
 profit_management:
   targets: []               # No fixed take-profit ceiling — let winners run on trailing stop only
-  tiered_exit_percent: 0    # Disabled (no targets to tier against)
+  tiered_exit_percent: 1    # Minimal (validation requires >0); never triggered with empty targets
   trailing_stop_activation: 5   # Activate trailing at +5%
   trailing_stop_distance: 3     # Trail 3% below peak (captures ~70% of peak vs ~30%)
   hard_stop_loss: -8              # Tightened from -25: cap tail risk, avg loser already exits ~-8%
