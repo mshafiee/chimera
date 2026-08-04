@@ -220,6 +220,8 @@ pub struct SelectionService {
     latency_tracker: Option<Arc<crate::engine::LatencyTracker>>,
     /// Optional wallet-performance tracker for per-wallet copy-performance sizing.
     wallet_performance: Option<Arc<crate::monitoring::WalletPerformanceTracker>>,
+    /// Shadow paper trader: trades every signal for evaluation.
+    shadow_trader: Option<Arc<crate::engine::ShadowTrader>>,
     config: SelectionConfig,
     config_hash: String,
 }
@@ -251,6 +253,7 @@ impl SelectionService {
             quote_client: None,
             latency_tracker: None,
             wallet_performance: None,
+            shadow_trader: None,
             config,
             config_hash,
         }
@@ -322,6 +325,12 @@ impl SelectionService {
         self
     }
 
+    /// Attach the ShadowTrader (paper trades every signal for evaluation).
+    pub fn with_shadow_trader(mut self, trader: Arc<crate::engine::ShadowTrader>) -> Self {
+        self.shadow_trader = Some(trader);
+        self
+    }
+
     pub fn config_hash(&self) -> &str {
         &self.config_hash
     }
@@ -361,6 +370,10 @@ impl SelectionService {
             // inserted (the Helius path derives it from the decision size, so
             // it is not available here). See DecisionRecorder::link_trade.
             recorder.record(&decision, req, None, received_at);
+        }
+        // Shadow paper trader: fork every signal (fire-and-forget).
+        if let Some(ref shadow) = self.shadow_trader {
+            shadow.on_signal(&decision, req);
         }
         // C3: shadow-fill calibration for admitted decisions (fire-and-forget).
         if decision.admitted

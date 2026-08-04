@@ -605,6 +605,21 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
 
+    // Shadow paper trader: trades every signal for later evaluation
+    let shadow_trader = Arc::new(chimera_operator::engine::ShadowTrader::new(
+        db_pool.clone(),
+        price_cache.clone(),
+        chimera_operator::engine::ShadowConfig::from_env(
+            Arc::new(config.profit_management.clone()),
+            run_context.run_id.clone(),
+        ),
+    ));
+    if shadow_trader.is_enabled() {
+        tracing::info!(run_id = %run_context.run_id, "Shadow paper trader enabled");
+    } else {
+        tracing::info!("Shadow paper trader disabled");
+    }
+
     // Shared VolumeCache — fed by DexScreener client (B3), consumed by
     // MomentumExit for volume-drop detection and SelectionService.
     let shared_volume_cache = Arc::new(engine::volume_cache::VolumeCache::new());
@@ -1838,6 +1853,27 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Position monitoring task started");
     }
 
+    // Shadow position monitor: checks exit strategies for paper positions
+    {
+        let shadow_monitor = shadow_trader.clone();
+        let shadow_token = cancel_token.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+            loop {
+                tokio::select! {
+                    _ = shadow_token.cancelled() => {
+                        tracing::info!("Shadow position monitor shutting down");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        shadow_monitor.check_exits().await;
+                    }
+                }
+            }
+        });
+        tracing::info!("Shadow position monitor task started");
+    }
+
     // FIX [B-M3]: Removed duplicate wallet TTL expiration task (3600s interval).
     // The 60s interval task above (around line 505) already handles TTL expiration.
     // Having a second task at 60-minute intervals duplicated demote_wallet calls.
@@ -2894,7 +2930,8 @@ async fn main() -> anyhow::Result<()> {
         .with_toxic_detector(toxic_flow_detector.clone())
         .with_decision_recorder(decision_recorder.clone())
         .with_shadow_fill_opt(shadow_quote_client.clone(), latency_tracker.clone())
-        .with_wallet_performance(wallet_performance_tracker.clone()),
+        .with_wallet_performance(wallet_performance_tracker.clone())
+        .with_shadow_trader(shadow_trader.clone()),
     );
 
     let webhook_state = Arc::new(WebhookState {
