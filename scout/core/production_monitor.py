@@ -296,24 +296,6 @@ class ProductionMonitor:
                 )
             """)
 
-            # Create metrics table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS metrics (
-                    timestamp REAL PRIMARY KEY,
-                    cpu_percent REAL,
-                    memory_percent REAL,
-                    memory_used_mb REAL,
-                    disk_usage_percent REAL,
-                    active_threads INTEGER,
-                    open_files INTEGER,
-                    network_connections INTEGER,
-                    wallets_analyzed INTEGER,
-                    requests_made INTEGER,
-                    cache_hit_rate REAL,
-                    avg_response_time_ms REAL
-                )
-            """)
-
             # Create health_checks table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS health_checks (
@@ -438,9 +420,6 @@ class ProductionMonitor:
                 if len(self._metrics_history) > self._max_metrics_history:
                     self._metrics_history.pop(0)
 
-            # Store in database
-            self._store_metrics(metrics)
-
             return metrics
 
         except Exception as e:
@@ -484,46 +463,6 @@ class ProductionMonitor:
             conn.close()
         except Exception as e:
             logger.debug(f"Failed to store health check: {e}")
-
-    def _store_metrics(self, metrics: PerformanceMetrics):
-        """Store metrics in database."""
-        try:
-            conn = get_connection(self._db_path)
-            cursor = conn.cursor()
-
-            cursor.execute("""
-                INSERT INTO metrics VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (timestamp) DO UPDATE SET
-                    cpu_percent = EXCLUDED.cpu_percent,
-                    memory_percent = EXCLUDED.memory_percent,
-                    memory_used_mb = EXCLUDED.memory_used_mb,
-                    disk_usage_percent = EXCLUDED.disk_usage_percent,
-                    active_threads = EXCLUDED.active_threads,
-                    open_files = EXCLUDED.open_files,
-                    network_connections = EXCLUDED.network_connections,
-                    wallets_analyzed = EXCLUDED.wallets_analyzed,
-                    requests_made = EXCLUDED.requests_made,
-                    cache_hit_rate = EXCLUDED.cache_hit_rate,
-                    avg_response_time_ms = EXCLUDED.avg_response_time_ms
-            """, (
-                metrics.timestamp,
-                metrics.cpu_percent,
-                metrics.memory_percent,
-                metrics.memory_used_mb,
-                metrics.disk_usage_percent,
-                metrics.active_threads,
-                metrics.open_files,
-                metrics.network_connections,
-                metrics.wallets_analyzed,
-                metrics.requests_made,
-                metrics.cache_hit_rate,
-                metrics.avg_response_time_ms,
-            ))
-
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            logger.debug(f"Failed to store metrics: {e}")
 
     def create_alert(self, severity: AlertSeverity, title: str, message: str,
                     source: str = "scout", details: Dict[str, Any] = None) -> Alert:
