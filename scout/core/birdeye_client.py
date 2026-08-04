@@ -32,9 +32,19 @@ class BirdeyeClient:
         self._own_session = False
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create aiohttp session (single pooled session)."""
+        """Get or create aiohttp session.
+
+        Sessions are bound to the event loop they were created on. When this
+        client is used across loops (main loop + threads spawned by
+        _run_async_coro/asyncio.run), reusing a session from a dead loop hangs
+        forever. Create a fresh session when the running loop differs.
+        """
+        loop = asyncio.get_running_loop()
         with self._session_lock:
-            if self._session is None:
+            if (
+                self._session is None
+                or getattr(self._session, "_loop", None) is not loop
+            ):
                 self._session = aiohttp.ClientSession()
                 self._own_session = True
         return self._session
@@ -43,19 +53,33 @@ class BirdeyeClient:
         """Close session if we own it."""
         with self._session_lock:
             if self._own_session and self._session:
-                await self._session.close()
+                try:
+                    await self._session.close()
+                except Exception:
+                    pass
                 self._session = None
                 self._own_session = False
 
     async def _rate_limit(self):
-        """Ensure we don't exceed rate limits."""
+        """Ensure we don't exceed rate limits.
+
+        The next slot is reserved under the lock BEFORE sleeping so concurrent
+        callers get distinct slots. The lock is released before the sleep:
+        awaiting while holding a threading.Lock deadlocks the main event loop
+        when another thread's coroutine blocks on the same lock.
+        """
         with self._rate_limit_lock:
             current_time = time.time()
             time_since_last = current_time - self.last_request_time
             if time_since_last < self.rate_limit_delay:
-                await asyncio.sleep(self.rate_limit_delay - time_since_last)
-            # Stamp BEFORE the sleep so concurrent callers reserve distinct slots
-            self.last_request_time = time.time()
+                delay = self.rate_limit_delay - time_since_last
+                # Reserve the slot now (inside the lock)
+                self.last_request_time = time.time() + delay
+            else:
+                delay = 0
+                self.last_request_time = time.time()
+        if delay > 0:
+            await asyncio.sleep(delay)
 
     async def _make_request(self, endpoint: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
