@@ -296,19 +296,6 @@ class ProductionMonitor:
                 )
             """)
 
-            # Create health_checks table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS health_checks (
-                    name TEXT,
-                    status TEXT,
-                    message TEXT,
-                    timestamp REAL,
-                    details TEXT,
-                    response_time_ms REAL,
-                    PRIMARY KEY (name, timestamp)
-                )
-            """)
-
             conn.commit()
             conn.close()
 
@@ -364,9 +351,6 @@ class ProductionMonitor:
                     result.response_time_ms = response_time
 
                 results.append(result)
-
-                # Store in database
-                self._store_health_check(result)
 
             except Exception as e:
                 logger.error(f"Health check failed: {name} - {e}")
@@ -434,35 +418,6 @@ class ProductionMonitor:
                 open_files=0,
                 network_connections=0,
             )
-
-    def _store_health_check(self, check: HealthCheck):
-        """Store health check result in database."""
-        try:
-            conn = get_connection(self._db_path)
-            cursor = conn.cursor()
-
-            cursor.execute("""
-                INSERT INTO health_checks
-                (name, status, message, timestamp, details, response_time_ms)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (name, timestamp) DO UPDATE SET
-                    status = EXCLUDED.status,
-                    message = EXCLUDED.message,
-                    details = EXCLUDED.details,
-                    response_time_ms = EXCLUDED.response_time_ms
-            """, (
-                check.name,
-                check.status.value,
-                check.message,
-                check.timestamp,
-                json.dumps(check.details),
-                check.response_time_ms
-            ))
-
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            logger.debug(f"Failed to store health check: {e}")
 
     def create_alert(self, severity: AlertSeverity, title: str, message: str,
                     source: str = "scout", details: Dict[str, Any] = None) -> Alert:
