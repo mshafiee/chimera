@@ -1,10 +1,104 @@
-# Seed wallet addresses for wallet discovery
-# Known active trading wallets on Solana mainnet
-# Scout queries these wallets' transactions to find related traders
+# Seed wallets: Top 100 Solana traders (last day)
+# Added 2026-08-04 from external trader ranking
+# Scout fetches their transactions to discover counterparties
 
-# High-activity wallets (examples - replace with verified active traders)
-5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1
-9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM
- 7TYb32qkwYgrkUZfCbzRFRw7PWcqXX5kNYyFW8m3NpzR
-
-
+9Jb67GEEMAJ4eX4U4hGkPUeGV9Dpv9gdUyM2p1T1vJRo  # ROI=0.58 wins=10
+4pQzoESepUFbCtdpqBMrx6ZU8CKQbkZDY3JQEqxBsSxh  # ROI=0.55 wins=13
+9UGNAQWB5TtdU8zJ9oSuuDbwfRx3VLcCi7Du72mcbmwi  # ROI=0.21 wins=25
+ARD4VTksAAX14zawq9CAVkqtaYKKeVTByLiLm1VMzTTp  # ROI=0.45 wins=40
+5bi92NQUYHKyZtKRpCakmvQxPeojFnVyyfMB3esWJjmX  # ROI=1.18 wins=4
+ChHLuMTdwcv2oUKfoWzxotDs9q6881xnR8uGwUAqBQVE  # ROI=1.35 wins=9
+EeT4WgeJqAp4NrVREiwJ4v6SGikcGCwhxpbtFSsCxS4M  # ROI=0.27 wins=32
+A7dWYy3HZUjywK9KeFKxD4yfb54txaF5jmznocpiAELG  # ROI=0.60 wins=5
+CJBZKAFocCLYT8mKRmWHj95Dk7mCyDMXWZ5y9xfUFEYF  # ROI=0.59 wins=43
+Aqje5DsN4u2PHmQxGF9PKfpsDGwQRCBhWeLKHCFhSMXk  # ROI=0.76 wins=38
+9hwLkUCy8fqyJ7ukL5JETeZpDyiyJCboZCyaDtn3gBY6  # ROI=0.21 wins=36
+7BB5en6YWZNchbtcVbabWbhywQmKnaK7bi2Gxh6jaaeU  # ROI=0.19 wins=12
+AptBkEhtQ8dfVWZeCeQrobnY6JmeD8VcxEP4fsznFrMs  # ROI=0.64 wins=4
+7HrbKX8Dygk8wmBYnSAKhf6sd4R5TRGQtMmuGmTdc2g  # ROI=1.04 wins=52
+CqZKq8ekXG9CbBdtJNBU71rgy1W5156yw1LGvZriRmgy  # ROI=0.05 wins=103
+9rDMVCH7mQ9N2PkyHw8KT8wraMhF8tyMz9R631yyL1df  # ROI=0.45 wins=27
+EK2jmNwVtnv8cHuQKELbMKF8Y7t75aJ9jduayvpCbC6W  # ROI=0.10 wins=77
+E6pqEwqrdvNXiTWtiGFd2BQ6eUa6Hw2aTsu3De7LdTzy  # ROI=0.34 wins=36
+29yFzeBZgxf5zqrAkKXwgZtQehRf4pL8WbV2nRJikbw8  # ROI=0.57 wins=98
+GFA2t9fZVY3jC7wDBPDB8FdsVNzLWgK44J4q7XpP476a  # ROI=0.34 wins=12
+9WTdV3HKWiE9hcK4hwZoyzU9bU2uxF5KyqQPAYtkTpGh  # ROI=1.02 wins=6
+AeXLK61ToeAQg96BY2M41cA9j4Yza19DCVDSZAVSetwF  # ROI=0.79 wins=3
+DpMAPALsdC6UDLLZYke6L4FvH5sdzatj2D8yKEWfsncc  # ROI=0.13 wins=30
+GmBvsSfV96qnKvv8tK7RWFd5F2eoy9BacZWP5HNV9eGH  # ROI=1.37 wins=3
+FawxDcriNU2MbYxqLSJevDDRd6vpvaiMoJQPiCH2iTyv  # ROI=1.33 wins=4
+9NBCt6wsxogWTuuDUGFQJFv4aRYGf6h7cJh3Hi4KbXeQ  # ROI=0.44 wins=8
+3iTuHEp24JupUmoUbJfi4zGGk3fGsn5rVRfJKAchBWff  # ROI=0.12 wins=67
+FiwwHe2obYsFoxprUXRWdAgHxMfKwK7ca9YB3g8bmX13  # ROI=0.92 wins=40
+5949hDDDHaxoXemTJmVHArL6avYXUxKY8Ad7Tz43GnCg  # ROI=0.81 wins=14
+FiFawHqxeTVBhv6YbqbLwDVuvokRpPUM1bNwAyxhGc6W  # ROI=0.18 wins=118
+CaBjQPwsvdWkCEQqaf3g9USpNcvJPXuy6Wk3tmWj2UEy  # ROI=0.62 wins=19
+D9Z4gmwaP8F4CxGq4XZWQtv4rDP9CxdztGeiWNLsAfk  # ROI=0.22 wins=64
+2Fvso6VsKXza48DW5bkZUN7axLpfRBjzDyTfpNNBExDJ  # ROI=0.85 wins=3
+42Zs1Y3jsGQpqXjNCuCuGaS1WVCUMXVnxHvtzWQk1bQQ  # ROI=0.68 wins=14
+7dENChJBEhAo5uTEVW4YN3ZKHpfCBzeawRivRsAJsc3G  # ROI=0.11 wins=60
+3Sfme9Wt5S3NPzhc7xZpxwByn3EVYUXgkbHXi9im93An  # ROI=0.09 wins=31
+2i4uXqSWNVY3gnk5kRYFNNAth79A6aXQDMu9GwDTnbop  # ROI=0.38 wins=27
+BoEVpctnMRtB7XhaJ99gNRGhP88HojtPvJ76BwX1gUwQ  # ROI=0.31 wins=16
+EfYaAhR8bLGd5Hc8xRtt7nFGA37rFqmuTLeQU3egZNbs  # ROI=0.30 wins=8
+Ecwzx5QjW6zzycpEgDZWehYn738bHsaCJAA73WaZCJwp  # ROI=2.89 wins=20
+4yFAz7dp5WwuZs3vbWKedbRiUmSFxTVGCdsLAxfEQrG3  # ROI=0.19 wins=90
+CDmFtQfpLgbeUzD34wtMVHtpF5bPt4FCs7xFCqh2KnAf  # ROI=0.34 wins=26
+34Wouqx7ZpeFb4fa331XYyrARGARZj2CSpoPbRv7B63Q  # ROI=0.69 wins=2
+7moqFjvm2MwAiMtCZoqYoTAPzRBxxMRT2ddyHThQuWjr  # ROI=0.50 wins=17
+2oRCV4mxhzdRkAChAeRsbY2Cz1WNdkFswk6zCtVkKqyJ  # ROI=0.28 wins=22
+5hvjfSgvTLbSY9vpABDApeGbMfizAdB3G96rG2f9bRv9  # ROI=0.06 wins=46
+AV7PjXHL5JXZ1YoYRoN9Dsstg1x2UciBupMCXcJP8gUz  # ROI=0.10 wins=34
+CJzdSpdfHQoQ3jMneVHGfjb63h8zDPQd4s8SDGn81Kh3  # ROI=0.99 wins=28
+CqHAAwRg4yfGFy4Qp8WC1wUPCxxYYDAAm4LaBsD5BhHU  # ROI=0.66 wins=17
+CGMRykiaYyjTGNjfJrsfg2CKa5AvHjYVC4AgKXEWcWeA  # ROI=0.84 wins=2
+rzyTyP3gNnAwmkutS1FY7Wv2RdSFzZi5BbzmU4Cw73t  # ROI=0.12 wins=12
+DqeVuNmymZEqzNQmFUvMGAL6xaB49TN7yCmx3h3FpYaK  # ROI=0.37 wins=46
+82Bo1Mac8UwDaWFRDCGFpFWfbzFK3wvZMuXX3xka3Emd  # ROI=0.88 wins=8
+5fL9RpMwQzozVeCRAxCicmjUziX9by3ZY2NEdLw1xST3  # ROI=0.53 wins=17
+G7NvZKjoVqBDWciSYtWWgUPB7DA1iJavdvH5jty2FAmM  # ROI=0.09 wins=34
+GvR8iyhUMmz5HLnxGHPdRb9w7p4UfFwXgiySV4GkD2U4  # ROI=0.34 wins=13
+BhaTqNzmSZpsmRKAsXSeN5ZQ8N9zrXVCF1vkdNEAmYgD  # ROI=0.17 wins=31
+AMuz7qBVVANg5fmjzZLZ6aSRLG5NQ8F88StaxqyuT9FR  # ROI=1.58 wins=2
+FhzxJbLzd3ZKv5XEBNkyKxfJ6hDzCvSJ7NcmXicoSA6T  # ROI=0.40 wins=5
+6fx16jjDDnuQa4Z89MmCm9uvZhgoHSFc8Yu98zzbRcVQ  # ROI=0.90 wins=3
+4Mqk1a6XNGfn5Bj85RBXc1hfpYNdJy1mvcDLJNwCYyv3  # ROI=0.25 wins=3
+3yhbf9PB63KEiC21oUapjGYtB5ibxuk27uFd44G946n7  # ROI=2.58 wins=3
+2dE3XMa3y4um1XXstv1ZUdNk96NctLW1cP5ewnLBUsRV  # ROI=0.33 wins=25
+BHTp82S8GYKWEwcQBuW5zme3GpcT1bkCcA7N4vyTuJL9  # ROI=0.15 wins=40
+9Q27kHAzwH793kXV86QuBpTVXjLbHmHjQa487o7AcU1A  # ROI=0.42 wins=10
+ETroz4qu4C6E9HJvYx8G3RjwwhtffSLaBy3yPjYm8THL  # ROI=0.20 wins=138
+37uM1rp8TK7eVURVRnjtaxGkdJyXjgA9uz83DjApcHvq  # ROI=0.70 wins=34
+DGgXEAg6iXP6LCogbPB1MeYu3o1xeDhanbxb8AszTqcv  # ROI=0.30 wins=9
+EUA3BRvTAWPKEcxhm7tCEppuNoevSBMCfKLaXAiAPNKA  # ROI=1.20 wins=2
+GuxaupNoEBy5AefhmNjCHfGNLa8619EL43egqdikBa2k  # ROI=0.61 wins=5
+28eGXeTNGrhWm4cAL3feEnu5gpuxSsbtxv6iXnrRUfUv  # ROI=0.21 wins=41
+Epij2QYgr9xpwaLoMwaNBvLbpgbmc1JrfHTLxHJ3Y62C  # ROI=0.21 wins=15
+7GhWwhaMgbKiRWxF93Bud6HnHMci6NCLTJyTxG8zFH51  # ROI=0.10 wins=14
+A43w4EmVXfPd2NN1Cob9jHHPSjuVSCFX2joADC93YWyy  # ROI=0.48 wins=4
+4QwJ4AXMtSjnCwgM9kiDpsGtXmjEd3hAVRkDg3o3bDQs  # ROI=1.54 wins=3
+5st7H8QtPEVfovSwLmdJDjbUAQivVZJGzbHCir6dZxGc  # ROI=0.07 wins=72
+2Fjv46pK7tYXgDLLhXcPmzEtpP5xY8GZa93Qdgg4zeiL  # ROI=0.16 wins=50
+7Jcd536CXi6XVShSnu4Z1WYK3yDSHe2ejZDT2Rn5UXyT  # ROI=2.44 wins=6
+6p9AKca8UkEpuWNfWXWvEiPnqEchNQLrmPBgMP8wUop8  # ROI=0.77 wins=13
+6bqbSJXwMrmu8BHPcMp3mHrqqMS9CTL5LM1SdT7Hs82K  # ROI=0.25 wins=10
+HcrgHm8SRVMGusPxrimAzK4oNMgLeibPrxwj3tkcHnR3  # ROI=1.15 wins=9
+EAGMLuuVrv2EEXLGLGsDUb2TVXzCH2LwueATPoeu3t5L  # ROI=0.66 wins=8
+DC99qH3jXiq5pPWQd6PjjJcCxTV593s58CLPxWGpEywt  # ROI=0.43 wins=34
+FTQagRATw9jAqXLZjw3cbav82Aax8LrMifz7z3AF97JZ  # ROI=0.28 wins=3
+F5XvCe4233m6mHRbkkq2ZsFvqrPAnRrDBExeQy2fwagQ  # ROI=0.88 wins=40
+5ZuV8eqkvzYFVEKbLvGBdexL2tFv7E5BCd2HZpjqbdg  # ROI=0.32 wins=8
+5zifjnAFfUcHxggKKHaZ6NkGRzyY9GALtdTHKcVnJiPC  # ROI=0.84 wins=3
+2KH4ezDL3AVVBTfgbfh8T5s4UFc6kyB8NW7PzkyGBYWK  # ROI=0.10 wins=35
+66GZHFDmVZPKNevqJENQmydgqBXpZGTDA7RkyDtNqZV6  # ROI=0.40 wins=2
+JDQKDrc1TQgBRvdFh56tkta5sYcDj1SoP52Eiu64rSrT  # ROI=0.80 wins=31
+BKRjg7X9pjZBkzWKxHupteRBRybCJEgsvrRQpTYPGfAM  # ROI=1.22 wins=1
+E1zGzPY1WdJoHSzf928NWTkZjcAhnUaN1xzF6BhCTsvS  # ROI=0.52 wins=1
+EBx24uAPtaS1SvHwRhKEktSgzaXdiVEyHuSVpAMVwrcD  # ROI=0.52 wins=58
+9ncm3MfxC3b2HYxP8NrijRZSeE36vFfxgJvGRd16Buwi  # ROI=0.54 wins=41
+4sWPwW2BwGgGX7L4eGe5XCsAe4fLVU8yCjusH1icH6MW  # ROI=0.11 wins=88
+3fKF8cbyWKU56fpFkrQ1E6zJoAh4mqArdsPoUE6ycTKL  # ROI=1.40 wins=1
+GBWjSsmw9MLbKh5UvarGA5CTdCPNujAh4RpQZkJRteu3  # ROI=0.73 wins=9
+HAibKhn6xZmijLFS3Cer59xe9bRFdFqX4Dei6Dggwptq  # ROI=0.11 wins=52
+3CQnNpEiGBMhb8Y7zogR5Rf1HK3V5zpLZRZg4BNA4ZXw  # ROI=0.38 wins=33
+HjByh6gvmWZBcWbeg4ChpukBaf9qihH1yeqqeSk8VSTz  # ROI=0.15 wins=50
