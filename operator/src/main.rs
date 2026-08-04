@@ -883,7 +883,7 @@ async fn main() -> anyhow::Result<()> {
     let rejection_mute_detector = Arc::new(
         crate::engine::rejection_mute::RejectionMuteDetector::new(config.rejection_mute.clone()),
     );
-    let dune_pnl_monitor = crate::engine::dune_monitor::DunePnlMonitor::new(
+    let mut dune_pnl_monitor = crate::engine::dune_monitor::DunePnlMonitor::new(
         &config.dune,
         db_pool.clone(),
     );
@@ -3256,8 +3256,30 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Dune PnL monitor: periodic check for losing ACTIVE wallets
+    // Dune PnL monitor: periodic demotion of losing wallets + promotion of
+    // Dune-verified profitable CANDIDATE wallets
     if config.dune.enabled {
+        use chimera_operator::engine::dune_monitor::DunePromotionContext;
+        use chimera_operator::monitoring::webhook_lifecycle::WebhookLifecycleConfig as MonitorWebhookConfig;
+        let monitor_wl_config = config.monitoring.as_ref().and_then(|m| {
+            m.webhook_lifecycle.as_ref().map(|wl| MonitorWebhookConfig {
+                auto_register_enabled: wl.auto_register_enabled,
+                auto_cleanup_enabled: wl.auto_cleanup_enabled,
+                health_check_interval_secs: wl.health_check_interval_secs,
+                stale_threshold_days: wl.stale_threshold_days,
+                max_registration_retries: wl.max_registration_retries,
+                webhook_url: m.helius_webhook_url.clone().unwrap_or_default(),
+                helius_dry_run: wl.helius_dry_run,
+                auth_header: m.resolved_helius_auth_header(),
+            })
+        });
+        dune_pnl_monitor = dune_pnl_monitor.with_promotion_context(Some(DunePromotionContext {
+            helius_client: helius_client.clone(),
+            webhook_rate_limiter: Some(webhook_api_rate_limiter.clone()),
+            webhook_lifecycle_config: monitor_wl_config,
+            toxic_detector: Some(toxic_flow_detector.clone()),
+        }));
+
         let dune_monitor = dune_pnl_monitor;
         let dune_token = cancel_token.clone();
         tokio::spawn(async move {

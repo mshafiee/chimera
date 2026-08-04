@@ -264,5 +264,10 @@ rejection_mute:
 # API key read from DUNE_API_KEY env var
 dune:
   enabled: true
-  pnl_query_id: 8221776     # Dune query: 24h wallet PnL monitor
+  pnl_query_id: 8221776     # Dune query: 24h wallet PnL monitor (losers -> demote)
   check_interval_secs: 3600 # hourly check
+  promote_enabled: true     # promote Dune-verified profitable CANDIDATE wallets
+  promote_query_id: 8221520 # Dune query: top profitable traders (7d)
+  promote_min_roi: 1.2      # min ROI (net PnL / buy volume) to promote
+  promote_max_per_cycle: 10 # max promotions per hourly cycle
+  promote_max_active_total: 50  # skip promotion when ACTIVE count >= this

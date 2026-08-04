@@ -4,7 +4,12 @@
 //! ACTIVE wallets with significant negative PnL are auto-demoted to CANDIDATE
 //! — a fast feedback loop that catches failing wallets before the
 //! WalletPerformanceTracker (which requires 4+ admitted losing trades).
+//!
+//! Also promotes Dune-verified profitable CANDIDATE wallets to ACTIVE with
+//! webhook registration — closing the gap where scout's WQS evaluation
+//! rejects ground-truth profitable traders (WQS 0.0 despite positive net PnL).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,6 +20,10 @@ use tracing::{info, warn};
 use crate::config::DuneConfig;
 use crate::db_abstraction::{Database, DbPool};
 use crate::error::{AppError, AppResult};
+use crate::experiment::ToxicFlowDetector;
+use crate::monitoring::helius::HeliusClient;
+use crate::monitoring::rate_limiter::RateLimiter;
+use crate::monitoring::webhook_lifecycle::{WebhookLifecycleConfig, WebhookLifecycleManager};
 
 const DUNE_API_BASE: &str = "https://api.dune.com/api/v1";
 const POLL_INTERVAL_SECS: u64 = 10;
@@ -28,13 +37,38 @@ struct LosingWallet {
     margin_pct: f64,
 }
 
-/// Periodic Dune PnL monitor that auto-demotes losing ACTIVE wallets.
+/// A Dune-verified profitable wallet, parsed from the top-traders CSV result.
+#[derive(Debug)]
+struct ProfitableWallet {
+    address: String,
+    trade_count: i64,
+    net_pnl_usd: f64,
+    roi: f64,
+}
+
+/// Components needed to promote Dune-verified wallets (webhook + toxic baseline).
+#[derive(Clone)]
+pub struct DunePromotionContext {
+    pub helius_client: Option<Arc<HeliusClient>>,
+    pub webhook_rate_limiter: Option<Arc<RateLimiter>>,
+    pub webhook_lifecycle_config: Option<WebhookLifecycleConfig>,
+    pub toxic_detector: Option<Arc<ToxicFlowDetector>>,
+}
+
+/// Periodic Dune PnL monitor that auto-demotes losing ACTIVE wallets and
+/// promotes Dune-verified profitable CANDIDATE wallets.
 pub struct DunePnlMonitor {
     api_key: String,
     query_id: u64,
     check_interval_secs: u64,
     db: Arc<dyn Database>,
     http: reqwest::Client,
+    promote_enabled: bool,
+    promote_query_id: u64,
+    promote_min_roi: f64,
+    promote_max_per_cycle: u32,
+    promote_max_active_total: u32,
+    promotion_ctx: Option<DunePromotionContext>,
 }
 
 #[derive(Deserialize)]
@@ -69,7 +103,19 @@ impl DunePnlMonitor {
                 .timeout(Duration::from_secs(30))
                 .build()
                 .unwrap_or_default(),
+            promote_enabled: config.promote_enabled,
+            promote_query_id: config.promote_query_id,
+            promote_min_roi: config.promote_min_roi,
+            promote_max_per_cycle: config.promote_max_per_cycle,
+            promote_max_active_total: config.promote_max_active_total,
+            promotion_ctx: None,
         }
+    }
+
+    /// Attach webhook registration + toxic baseline components for promotion.
+    pub fn with_promotion_context(mut self, ctx: Option<DunePromotionContext>) -> Self {
+        self.promotion_ctx = ctx;
+        self
     }
 
     /// Run the periodic monitor loop until the cancel token fires.
@@ -81,6 +127,7 @@ impl DunePnlMonitor {
 
         info!(
             query_id = self.query_id,
+            promote_query_id = self.promote_query_id,
             interval_secs = self.check_interval_secs,
             "Dune PnL monitor started"
         );
@@ -99,6 +146,9 @@ impl DunePnlMonitor {
                     if let Err(e) = self.run_check().await {
                         warn!(error = %e, "Dune PnL monitor check failed");
                     }
+                    if let Err(e) = self.promote_dune_verified().await {
+                        warn!(error = %e, "Dune PnL monitor promotion failed");
+                    }
                 }
             }
         }
@@ -109,7 +159,7 @@ impl DunePnlMonitor {
         let started = std::time::Instant::now();
 
         // 1. Execute the Dune query.
-        let execution_id = self.execute_query().await?;
+        let execution_id = self.execute_query(self.query_id).await?;
 
         // 2. Poll until complete, then fetch CSV.
         let csv = self.poll_and_fetch_csv(&execution_id).await?;
@@ -136,9 +186,9 @@ impl DunePnlMonitor {
         Ok(())
     }
 
-    /// Trigger execution of the configured Dune query.
-    async fn execute_query(&self) -> AppResult<String> {
-        let url = format!("{DUNE_API_BASE}/query/{}/execute", self.query_id);
+    /// Trigger execution of a Dune query.
+    async fn execute_query(&self, query_id: u64) -> AppResult<String> {
+        let url = format!("{DUNE_API_BASE}/query/{query_id}/execute");
         let resp = self
             .http
             .post(&url)
@@ -295,6 +345,195 @@ impl DunePnlMonitor {
 
         Ok(demoted)
     }
+
+    /// Parse the Dune top-traders CSV into profitable wallets.
+    /// Expected columns: wallet,trade_count,total_volume_usd,sell_volume_usd,
+    /// buy_volume_usd,net_pnl_usd,roi,unique_tokens
+    fn parse_profitable_csv(csv: &str, min_roi: f64) -> Vec<ProfitableWallet> {
+        let mut result = Vec::new();
+        for (i, line) in csv.lines().enumerate() {
+            if i == 0 {
+                continue; // skip header
+            }
+            let cols: Vec<&str> = line.split(',').collect();
+            if cols.len() < 7 {
+                continue;
+            }
+            let address = cols[0].trim().to_string();
+            if address.len() < 32 {
+                continue;
+            }
+            let trade_count = cols[1].trim().parse::<i64>().unwrap_or(0);
+            let net_pnl_usd = cols[5].trim().parse::<f64>().unwrap_or(0.0);
+            let roi = cols[6].trim().parse::<f64>().unwrap_or(0.0);
+            if roi.is_nan() || roi < min_roi || net_pnl_usd <= 0.0 || trade_count < 5 {
+                continue;
+            }
+            result.push(ProfitableWallet {
+                address,
+                trade_count,
+                net_pnl_usd,
+                roi,
+            });
+        }
+        result
+    }
+
+    /// Promote Dune-verified profitable CANDIDATE wallets to ACTIVE with
+    /// webhook registration. Overrides scout's WQS rejection (which scores
+    /// ground-truth profitable traders 0.0) — the missing "promote" half of
+    /// the Dune integration.
+    async fn promote_dune_verified(&self) -> AppResult<usize> {
+        if !self.promote_enabled || self.api_key.is_empty() {
+            return Ok(0);
+        }
+
+        let started = std::time::Instant::now();
+
+        // 1. Execute the Dune top-traders query.
+        let execution_id = self.execute_query(self.promote_query_id).await?;
+        let csv = self.poll_and_fetch_csv(&execution_id).await?;
+        let profitable = Self::parse_profitable_csv(&csv, self.promote_min_roi);
+        if profitable.is_empty() {
+            return Ok(0);
+        }
+
+        // 2. Respect the ACTIVE total cap (same as scout's max_active_wallets).
+        let DbPool::PostgreSQL(pool) = self.db.pool();
+        let active_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE'")
+            .fetch_one(&pool)
+            .await?;
+        if active_total as u32 >= self.promote_max_active_total {
+            info!(
+                active_total,
+                cap = self.promote_max_active_total,
+                "Dune promotion: ACTIVE cap reached, skipping promotion cycle"
+            );
+            return Ok(0);
+        }
+
+        // 3. Find which profitable wallets are CANDIDATE in our system.
+        let addresses: Vec<String> = profitable.iter().map(|w| w.address.clone()).collect();
+        let candidates: Vec<String> = sqlx::query_scalar(
+            r#"SELECT address FROM wallets WHERE address = ANY($1) AND status = 'CANDIDATE'"#,
+        )
+        .bind(&addresses)
+        .fetch_all(&pool)
+        .await?;
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+
+        let pnl_map: HashMap<&str, &ProfitableWallet> =
+            profitable.iter().map(|w| (w.address.as_str(), w)).collect();
+
+        // 4. Promote (capped per cycle).
+        let mut promoted = 0;
+        for address in candidates
+            .iter()
+            .take(self.promote_max_per_cycle as usize)
+        {
+            let w = pnl_map.get(address.as_str());
+            let (roi, net_pnl, trades) = w
+                .map(|w| (w.roi, w.net_pnl_usd, w.trade_count))
+                .unwrap_or((0.0, 0.0, 0));
+            let reason = format!(
+                "Dune-verified profitable trader: ROI={:.2}, net PnL=${:.0}, {} trades (7d)",
+                roi, net_pnl, trades
+            );
+
+            // Toxic baseline so the detector can track post-promotion ROI.
+            if let Some(ctx) = &self.promotion_ctx {
+                if let Some(td) = &ctx.toxic_detector {
+                    if let Err(e) = td
+                        .register_wallet_promotion(address.clone(), roi)
+                        .await
+                    {
+                        warn!(
+                            wallet = %address,
+                            error = %e,
+                            "Dune promotion: toxic baseline registration failed"
+                        );
+                    }
+                }
+            }
+
+            // Status update: CANDIDATE -> ACTIVE.
+            match self
+                .db
+                .update_wallet_status_ext(address, "ACTIVE", None, Some(&reason))
+                .await
+            {
+                Ok(true) => {
+                    promoted += 1;
+                    info!(
+                        wallet = %address,
+                        roi,
+                        net_pnl_usd = net_pnl,
+                        trades,
+                        "Dune promotion: CANDIDATE -> ACTIVE"
+                    );
+                }
+                Ok(false) => {
+                    warn!(wallet = %address, "Dune promotion: status update returned false");
+                    continue;
+                }
+                Err(e) => {
+                    warn!(wallet = %address, error = %e, "Dune promotion: status update failed");
+                    continue;
+                }
+            }
+
+            // Webhook registration so signals start flowing.
+            if let Some(ctx) = &self.promotion_ctx {
+                if let (Some(helius), Some(limiter), Some(wl_config)) = (
+                    &ctx.helius_client,
+                    &ctx.webhook_rate_limiter,
+                    &ctx.webhook_lifecycle_config,
+                ) {
+                    let manager = WebhookLifecycleManager::new(
+                        self.db.clone(),
+                        helius.clone(),
+                        limiter.clone(),
+                        wl_config.clone(),
+                    );
+                    match manager.register_wallet_webhook(address).await {
+                        Ok(r) if r.success => {
+                            info!(
+                                wallet = %address,
+                                webhook_id = %r.webhook_id,
+                                "Dune promotion: webhook registered"
+                            );
+                        }
+                        Ok(r) => {
+                            warn!(
+                                wallet = %address,
+                                error = ?r.error_message,
+                                "Dune promotion: webhook registration failed"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                wallet = %address,
+                                error = %e,
+                                "Dune promotion: webhook registration error"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        if promoted > 0 {
+            warn!(
+                promoted,
+                eligible = candidates.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "Dune PnL monitor: promoted verified profitable wallets"
+            );
+        }
+        Ok(promoted)
+    }
 }
 
 #[cfg(test)]
@@ -318,5 +557,32 @@ mod tests {
     fn test_parse_csv_empty() {
         assert!(DunePnlMonitor::parse_csv("wallet,trades_24h,net_pnl_usd,volume_usd,margin_pct\n").is_empty());
         assert!(DunePnlMonitor::parse_csv("").is_empty());
+    }
+
+    #[test]
+    fn test_parse_profitable_csv_filters() {
+        let csv = "wallet,trade_count,total_volume_usd,sell_volume_usd,buy_volume_usd,net_pnl_usd,roi,unique_tokens\n\
+            7oLDfykjJVDmR8ZKcgoehW6z4zhnBnGC8mGUFLhDHxxg,50,50000,40000,10000,30000,3.0,9\n\
+            9HsFJKqobLFZ6QLT7xXhS3ggDfSGTJPUh2Rfug4VFGWh,3,1000,800,200,600,3.0,2\n\
+            badroi,50,50000,40000,10000,30000,0.5,9\n\
+            short,50,50000,40000,10000,30000,3.0,9\n\
+            A6Wch1mJJ1PyooNSAUtctcNmQTxqtkcWManMBQPmKceM,25,5000,4000,1000,2000,2.0,4\n";
+
+        let wallets = DunePnlMonitor::parse_profitable_csv(csv, 1.2);
+        // 7oLD: ROI 3.0 >= 1.2, 50 trades >= 5, net PnL > 0 -> kept
+        // 9HsFJKqo: 3 trades < 5 -> filtered
+        // badroi: ROI 0.5 < 1.2 -> filtered
+        // short: < 32 chars -> filtered
+        // A6Wch1mJ: ROI 2.0, 25 trades -> kept
+        assert_eq!(wallets.len(), 2);
+        assert_eq!(wallets[0].address, "7oLDfykjJVDmR8ZKcgoehW6z4zhnBnGC8mGUFLhDHxxg");
+        assert_eq!(wallets[1].address, "A6Wch1mJJ1PyooNSAUtctcNmQTxqtkcWManMBQPmKceM");
+    }
+
+    #[test]
+    fn test_parse_profitable_csv_nan_roi() {
+        let csv = "wallet,trade_count,total_volume_usd,sell_volume_usd,buy_volume_usd,net_pnl_usd,roi,unique_tokens\n\
+            7oLDfykjJVDmR8ZKcgoehW6z4zhnBnGC8mGUFLhDHxxg,50,50000,40000,0,30000,NaN,9\n";
+        assert!(DunePnlMonitor::parse_profitable_csv(csv, 1.2).is_empty());
     }
 }

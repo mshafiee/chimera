@@ -2365,12 +2365,27 @@ pub struct DuneConfig {
     /// Master switch for Dune integration.
     #[serde(default)]
     pub enabled: bool,
-    /// Dune query ID for the 24h wallet PnL monitor.
+    /// Dune query ID for the 24h wallet PnL monitor (losing wallets).
     #[serde(default = "default_dune_pnl_query_id")]
     pub pnl_query_id: u64,
     /// How often (in seconds) to poll Dune for wallet PnL. Default: 1 hour.
     #[serde(default = "default_dune_check_interval_secs")]
     pub check_interval_secs: u64,
+    /// Promote Dune-verified profitable CANDIDATE wallets to ACTIVE.
+    #[serde(default = "default_dune_promote_enabled")]
+    pub promote_enabled: bool,
+    /// Dune query ID for the top profitable traders query.
+    #[serde(default = "default_dune_promote_query_id")]
+    pub promote_query_id: u64,
+    /// Minimum ROI (net PnL / buy volume) for a wallet to be promoted.
+    #[serde(default = "default_dune_promote_min_roi")]
+    pub promote_min_roi: f64,
+    /// Max wallets promoted per cycle (avoids flooding webhook registration).
+    #[serde(default = "default_dune_promote_max_per_cycle")]
+    pub promote_max_per_cycle: u32,
+    /// Skip promotion when ACTIVE wallet count is at or above this cap.
+    #[serde(default = "default_dune_promote_max_active_total")]
+    pub promote_max_active_total: u32,
 }
 
 fn default_dune_pnl_query_id() -> u64 {
@@ -2379,6 +2394,21 @@ fn default_dune_pnl_query_id() -> u64 {
 fn default_dune_check_interval_secs() -> u64 {
     3600
 }
+fn default_dune_promote_enabled() -> bool {
+    true
+}
+fn default_dune_promote_query_id() -> u64 {
+    8221520
+}
+fn default_dune_promote_min_roi() -> f64 {
+    1.2
+}
+fn default_dune_promote_max_per_cycle() -> u32 {
+    10
+}
+fn default_dune_promote_max_active_total() -> u32 {
+    50
+}
 
 impl Default for DuneConfig {
     fn default() -> Self {
@@ -2386,6 +2416,11 @@ impl Default for DuneConfig {
             enabled: false,
             pnl_query_id: default_dune_pnl_query_id(),
             check_interval_secs: default_dune_check_interval_secs(),
+            promote_enabled: default_dune_promote_enabled(),
+            promote_query_id: default_dune_promote_query_id(),
+            promote_min_roi: default_dune_promote_min_roi(),
+            promote_max_per_cycle: default_dune_promote_max_per_cycle(),
+            promote_max_active_total: default_dune_promote_max_active_total(),
         }
     }
 }
