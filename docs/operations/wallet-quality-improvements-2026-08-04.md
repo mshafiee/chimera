@@ -527,3 +527,258 @@ Scout Discovery Pipeline (expanded):
 
   → WQS scoring → CANDIDATE → auto_promote → ACTIVE (cap: 50)
 ```
+
+---
+
+## 8. Dune Profitability Strategies
+
+Six strategies for leveraging Dune Analytics to improve system profitability, ranked by priority.
+
+### Priority Matrix
+
+| Priority | Strategy | Effort | Impact | Dune Query ID |
+|----------|----------|--------|--------|---------------|
+| 1 | Wallet PnL scoring (fast demotion) | Low | High | TBD |
+| 2 | Token pre-screening cache | Medium | High | TBD |
+| 3 | MEV bot exclusion | Low | Medium | TBD |
+| 4 | Entry timing analysis | Medium | High | TBD |
+| 5 | Token holder concentration | Medium | Medium | TBD |
+| 6 | Consensus smart money clusters | High | Medium | TBD |
+
+---
+
+### Strategy 1: Real-Time Wallet PnL Scoring (Fast Demotion Loop)
+
+**Problem:** `WalletPerformanceTracker` only fires after 4+ admitted losing trades. By then money is already lost. WQS recomputes every 2h via expensive Helius RPC calls.
+
+**Solution:** Compute every ACTIVE wallet's 24h rolling PnL cheaply from `dex_solana.trades`. If PnL turns negative, demote immediately — before the next admitted trade loses money.
+
+**Integration:** Run hourly via Dune API. Any ACTIVE wallet with negative 24h PnL gets auto-demoted. This catches failing wallets 2-4 hours before the current performance tracker would.
+
+```sql
+-- Active wallet 24h PnL monitor (run hourly)
+WITH wallet_pnl AS (
+    SELECT
+        trader_id AS wallet,
+        COUNT(*) AS trades_24h,
+        ROUND(SUM(CASE WHEN token_sold_symbol IN ('SOL','WSOL','USDC','USDT')
+            THEN amount_usd ELSE 0 END) -
+        SUM(CASE WHEN token_bought_symbol IN ('SOL','WSOL','USDC','USDT')
+            THEN amount_usd ELSE 0 END), 0) AS net_pnl_usd,
+        ROUND(SUM(amount_usd), 0) AS volume_usd
+    FROM dex_solana.trades
+    WHERE block_time > NOW() - INTERVAL '24' HOUR
+      AND project IN ('meteora', 'raydium', 'whirlpool', 'pumpswap')
+      AND amount_usd > 10
+    GROUP BY trader_id
+    HAVING SUM(amount_usd) > 100
+)
+SELECT wallet, trades_24h, net_pnl_usd, volume_usd,
+       ROUND(net_pnl_usd * 100.0 / NULLIF(volume_usd, 0), 2) AS margin_pct
+FROM wallet_pnl
+WHERE net_pnl_usd < -50  -- losing more than $50 in 24h
+ORDER BY net_pnl_usd ASC
+LIMIT 100
+```
+
+**Operator integration:** Poll Dune API hourly → demote any ACTIVE wallet appearing in results.
+
+---
+
+### Strategy 2: Token Pre-Screening Gate (Kill Rugs Before Entry)
+
+**Problem:** `TOKEN_UNSAFE` and `PUMPFUN_INSUFFICIENT_LIQUIDITY` gates reject ~87% of signals, but they still consume RPC calls, liquidity checks, and latency before rejection.
+
+**Solution:** Build a daily-refreshed token quality cache from Dune. Before even checking token safety via RPC, look up the token in the cache.
+
+```sql
+-- Token quality screen (run daily, cache top 5000 tokens)
+SELECT
+    COALESCE(token_bought_mint_address, token_sold_mint_address) AS token_mint,
+    MAX(COALESCE(token_bought_symbol, token_sold_symbol)) AS symbol,
+    COUNT(*) AS swap_count_24h,
+    ROUND(SUM(amount_usd), 0) AS volume_usd_24h,
+    COUNT(DISTINCT trader_id) AS unique_traders,
+    MAX(block_time) AS last_trade,
+    ROUND(SUM(amount_usd) / NULLIF(COUNT(*), 0), 0) AS avg_trade_size,
+    SUM(CASE WHEN project IN ('meteora','raydium','whirlpool') THEN 1 ELSE 0 END) AS dex_venue_trades,
+    SUM(CASE WHEN project = 'pumpdotfun' THEN 1 ELSE 0 END) AS bonding_curve_trades
+FROM dex_solana.trades
+WHERE block_time > NOW() - INTERVAL '24' HOUR
+  AND amount_usd > 1
+GROUP BY 1
+HAVING SUM(amount_usd) > 500
+ORDER BY volume_usd_24h DESC
+LIMIT 5000
+```
+
+**Operator integration:** Cache top 5000 tokens daily in a `token_quality_cache` table. In `selection.rs`, add a fast pre-gate: if token not in cache OR `dex_venue_trades = 0`, reject instantly as `TOKEN_NO_DEX_LIQUIDITY` — no RPC call needed.
+
+---
+
+### Strategy 3: MEV Bot & Wash Trader Exclusion
+
+**Problem:** MEV bots and wash traders generate signals that look profitable but are uncopyable. Their trades are sandwich attacks or self-trades, not directional bets.
+
+**Solution:** Detect and blacklist them weekly.
+
+```sql
+-- Detect MEV/sandwich bots
+-- Pattern: trades within 1 slot of large swaps (front-running)
+WITH large_swaps AS (
+    SELECT block_slot, trader_id, amount_usd, token_bought_mint_address
+    FROM dex_solana.trades
+    WHERE block_time > NOW() - INTERVAL '24' HOUR
+      AND amount_usd > 5000
+),
+sandwich_bots AS (
+    SELECT s.trader_id, COUNT(*) AS sandwich_count
+    FROM dex_solana.trades s
+    JOIN large_swaps l
+      ON s.block_slot BETWEEN l.block_slot - 1 AND l.block_slot + 1
+     AND s.trader_id != l.trader_id
+     AND s.amount_usd > 100
+    WHERE s.block_time > NOW() - INTERVAL '24' HOUR
+    GROUP BY s.trader_id
+    HAVING COUNT(*) > 20
+)
+SELECT trader_id AS wallet, sandwich_count
+FROM sandwich_bots
+ORDER BY sandwich_count DESC
+```
+
+**Operator integration:** Run weekly. Add detected wallets to a `dune_blacklist` table. The rejection-mute detector or a new pre-gate checks this list before processing signals.
+
+---
+
+### Strategy 4: Profitable Entry Timing Analysis (Personalized Exits)
+
+**Problem:** Fixed exit strategies (1h, 4h, 24h) don't match each wallet's actual trading rhythm. `7oLD` hits profit targets in ~8 minutes on bounces, but bleeds over 1h.
+
+**Solution:** Analyze each tracked wallet's historical entry-to-exit timing to set personalized exit strategies.
+
+```sql
+-- Per-wallet optimal hold time
+-- Pairs buys and sells of the same token by the same wallet
+WITH buys AS (
+    SELECT trader_id, token_bought_mint_address AS token,
+           block_time AS buy_time, amount_usd AS buy_usd
+    FROM dex_solana.trades
+    WHERE block_time > NOW() - INTERVAL '7' DAY
+      AND token_bought_symbol IN ('SOL','WSOL','USDC','USDT')
+      AND project IN ('meteora','raydium','whirlpool')
+),
+sells AS (
+    SELECT trader_id, token_sold_mint_address AS token,
+           block_time AS sell_time, amount_usd AS sell_usd
+    FROM dex_solana.trades
+    WHERE block_time > NOW() - INTERVAL '7' DAY
+      AND token_sold_symbol IN ('SOL','WSOL','USDC','USDT')
+      AND project IN ('meteora','raydium','whirlpool')
+)
+SELECT
+    b.trader_id AS wallet,
+    ROUND(AVG(DATE_DIFF('minute', b.buy_time, s.sell_time)), 0) AS avg_hold_min,
+    ROUND(AVG(s.sell_usd - b.buy_usd), 0) AS avg_pnl_usd,
+    ROUND(AVG(CASE WHEN s.sell_usd > b.buy_usd THEN 1.0 ELSE 0.0 END) * 100, 1) AS win_rate_pct,
+    COUNT(*) AS round_trips
+FROM buys b
+JOIN sells s ON b.trader_id = s.trader_id
+    AND b.token = s.token
+    AND s.sell_time > b.buy_time
+    AND DATE_DIFF('hour', b.buy_time, s.sell_time) < 48
+GROUP BY b.trader_id
+HAVING COUNT(*) >= 5
+ORDER BY avg_pnl_usd DESC
+LIMIT 100
+```
+
+**Operator integration:** Use `avg_hold_min` per wallet to set personalized exit strategies instead of fixed 1h/4h/24h. A wallet that profits in 15 minutes gets a 20-minute exit; a swing trader gets 4h.
+
+---
+
+### Strategy 5: Token Holder Concentration (Rug Risk Screening)
+
+**Problem:** Can't easily check if top holders control most of supply — this requires expensive per-token RPC calls.
+
+**Solution:** Batch-compute holder concentration from Dune trade volumes as a proxy.
+
+```sql
+-- Token holder concentration (rug risk indicator)
+WITH holder_volume AS (
+    SELECT
+        COALESCE(token_bought_mint_address, token_sold_mint_address) AS token,
+        trader_id,
+        SUM(CASE WHEN token_bought_amount > 0 THEN amount_usd ELSE 0 END) AS buy_usd
+    FROM dex_solana.trades
+    WHERE block_time > NOW() - INTERVAL '7' DAY
+      AND project IN ('meteora','raydium','whirlpool')
+      AND amount_usd > 10
+    GROUP BY 1, 2
+),
+ranked AS (
+    SELECT token, trader_id, buy_usd,
+           ROW_NUMBER() OVER (PARTITION BY token ORDER BY buy_usd DESC) AS holder_rank,
+           SUM(buy_usd) OVER (PARTITION BY token) AS total_buy_usd
+    FROM holder_volume
+)
+SELECT
+    token,
+    ROUND(SUM(CASE WHEN holder_rank <= 3 THEN buy_usd ELSE 0 END) * 100.0
+          / NULLIF(MAX(total_buy_usd), 0), 1) AS top3_concentration_pct,
+    COUNT(DISTINCT trader_id) AS total_holders,
+    MAX(total_buy_usd) AS total_volume
+FROM ranked
+GROUP BY token
+HAVING MAX(total_buy_usd) > 1000
+ORDER BY top3_concentration_pct DESC
+LIMIT 500
+```
+
+**Operator integration:** If `top3_concentration_pct > 70%`, flag token as `HIGH_HOLDER_CONCENTRATION` — reject or reduce position size. Top 3 holders dumping = guaranteed rug.
+
+---
+
+### Strategy 6: Consensus Smart Money (Wallet Clusters)
+
+**Problem:** Individual wallet signals are noisy. But when 3+ profitable wallets buy the same token within minutes, that's high conviction.
+
+**Solution:** Find wallets that consistently co-trade profitably and weight their consensus signals higher.
+
+```sql
+-- Find co-trading profitable wallet clusters
+-- Wallets that buy the same token within 10 minutes of each other
+WITH timed_buys AS (
+    SELECT
+        trader_id AS wallet,
+        token_bought_mint_address AS token,
+        block_time,
+        amount_usd,
+        DATE_TRUNC('minute', block_time) AS buy_minute
+    FROM dex_solana.trades
+    WHERE block_time > NOW() - INTERVAL '24' HOUR
+      AND token_bought_symbol IN ('SOL','WSOL','USDC','USDT')
+      AND project IN ('meteora','raydium','whirlpool')
+      AND amount_usd > 100
+),
+co_buys AS (
+    SELECT
+        a.token,
+        a.wallet AS wallet_a,
+        b.wallet AS wallet_b,
+        ABS(DATE_DIFF('second', a.block_time, b.block_time)) AS time_delta_sec
+    FROM timed_buys a
+    JOIN timed_buys b ON a.token = b.token
+      AND a.wallet < b.wallet
+      AND a.buy_minute = b.buy_minute
+)
+SELECT wallet_a, wallet_b, COUNT(*) AS co_trade_count
+FROM co_buys
+WHERE time_delta_sec < 600  -- within 10 minutes
+GROUP BY wallet_a, wallet_b
+HAVING COUNT(*) >= 3  -- co-traded 3+ times in 24h
+ORDER BY co_trade_count DESC
+LIMIT 50
+```
+
+**Operator integration:** When 2+ wallets from the same cluster signal on the same token, boost the signal's quality score. This turns existing consensus detection into a profitability-weighted consensus.
