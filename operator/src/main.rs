@@ -3280,7 +3280,7 @@ async fn main() -> anyhow::Result<()> {
             toxic_detector: Some(toxic_flow_detector.clone()),
         }));
 
-        let dune_monitor = dune_pnl_monitor;
+        let dune_monitor = std::sync::Arc::new(dune_pnl_monitor);
         let dune_token = cancel_token.clone();
         tokio::spawn(async move {
             dune_monitor.run(dune_token).await;

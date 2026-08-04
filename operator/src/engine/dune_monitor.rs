@@ -119,7 +119,7 @@ impl DunePnlMonitor {
     }
 
     /// Run the periodic monitor loop until the cancel token fires.
-    pub async fn run(&self, cancel_token: CancellationToken) {
+    pub async fn run(self: Arc<Self>, cancel_token: CancellationToken) {
         if self.api_key.is_empty() {
             warn!("Dune PnL monitor disabled — DUNE_API_KEY not set");
             return;
@@ -131,6 +131,28 @@ impl DunePnlMonitor {
             interval_secs = self.check_interval_secs,
             "Dune PnL monitor started"
         );
+
+        // Run one catch-up cycle ~30s after startup (so promotions/demotions
+        // resume immediately after a restart instead of waiting a full
+        // interval), then every interval thereafter. The 30s delay lets other
+        // startup tasks (webhook management check, etc.) settle first.
+        {
+            let startup_token = cancel_token.clone();
+            let startup_self = self.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = startup_token.cancelled() => {}
+                    _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                        if let Err(e) = startup_self.run_check().await {
+                            warn!(error = %e, "Dune PnL monitor startup check failed");
+                        }
+                        if let Err(e) = startup_self.promote_dune_verified().await {
+                            warn!(error = %e, "Dune PnL monitor startup promotion failed");
+                        }
+                    }
+                }
+            });
+        }
 
         let mut interval =
             tokio::time::interval(Duration::from_secs(self.check_interval_secs));
