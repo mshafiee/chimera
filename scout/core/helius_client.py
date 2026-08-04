@@ -3768,8 +3768,10 @@ class HeliusClient:
             # Orca
             "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc": "orca",
             "9WzaBBWQNqAghxSAfKUUx3ZkhBBFCkTUvJJJcjF2oG4": "orca",
-            # Raydium
-            "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So": "raydium",
+            # Raydium AMM v4
+            "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8": "raydium",
+            # Meteora DLMM
+            "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo": "meteora",
             # Other
             "swoQ1Yx4kK_7d9pNVbDiVSe7XPqTc2nRvEmMuXelNhk": "swap",
             # OKX DEX Router
