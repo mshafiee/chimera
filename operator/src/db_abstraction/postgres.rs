@@ -42,13 +42,17 @@ impl PostgresBackend {
             .map_err(AppError::Database)?
             // Application name for monitoring
             .application_name("chimera-operator")
-            // Disable the prepared-statement cache. PostgreSQL raises
-            // `cached plan must not change result type` when a migration
-            // ALTERs a table column while a prepared statement for that table
-            // is still live in the pool. Clearing the cache (capacity 0) makes
-            // every query re-Parse/Bind/Execute, trading a few hundred
-            // microseconds per query for immunity to that class of error.
-            .statement_cache_capacity(0);
+            // Bounded prepared-statement cache. Historically the cache was
+            // disabled (capacity 0) to dodge `cached plan must not change
+            // result type` errors when migrations ALTER columns while cached
+            // statements are live. But capacity 0 made every query prepare a
+            // NEW server-side statement that postgres retains per session,
+            // growing each backend ~75MB/min (~2GB within an hour) until the
+            // container OOM-killed backends every ~30 min. A bounded cache
+            // (1000) fixes the leak; the migration concern is handled by
+            // sqlx deallocating evicted statements and migrations running at
+            // startup before heavy query load.
+            .statement_cache_capacity(1000);
 
         let pool = PgPoolOptions::new()
             .max_connections(config.max_connections)
