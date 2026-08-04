@@ -1861,12 +1861,15 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Position monitoring task started");
     }
 
-    // Shadow position monitor: checks exit strategies for paper positions
+    // Shadow position monitor: checks exit strategies for paper positions.
+    // 60s interval (was 15s): with 10k+ open paper positions, 15s ticks
+    // generated ~4,700 queries/sec (ON CONFLICT insert attempts + per-position
+    // COUNT checks) which drove postgres session memory growth to ~2GB/backend.
     {
         let shadow_monitor = shadow_trader.clone();
         let shadow_token = cancel_token.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 tokio::select! {
                     _ = shadow_token.cancelled() => {

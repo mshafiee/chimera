@@ -162,6 +162,10 @@ services:
        - CHIMERA_TRADE_MODE=paper
        # Dune Analytics API key for wallet PnL monitoring
        - DUNE_API_KEY=${DUNE_API_KEY:-}
+       # Shadow paper trader: close positions after 24h (was 168h default) so
+       # the open-position set stays bounded — 10k+ open positions caused a
+       # ~4.7k qps monitor loop that inflated postgres session memory
+       - CHIMERA_SHADOW_MAX_LIFETIME_HOURS=${CHIMERA_SHADOW_MAX_LIFETIME_HOURS:-24}
     env_file:
       - .env
     depends_on:
