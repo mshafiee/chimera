@@ -119,8 +119,30 @@ impl ShadowTrader {
         peaks: &Arc<tokio::sync::Mutex<HashMap<String, Decimal>>>,
     ) {
         let shadow_id = uuid::Uuid::new_v4().to_string();
-        let entry_price = price_cache.get_price_usd(&req.token_address);
         let sol_price = price_cache.get_sol_price_usd();
+
+        // Track the token in the price cache so the background updater keeps a
+        // live price for the shadow monitor loop. Without this, get_price_usd
+        // always returns None for tokens the main system has never opened a
+        // position on (e.g. rejected signals), so every shadow position was
+        // recorded with no entry price and no evaluable PnL.
+        price_cache.track_token(&req.token_address);
+
+        // Eagerly fetch a fresh price — mirrors the main system's behavior
+        // after opening a position (signal_pipeline.rs). Waits briefly for the
+        // async fetch to land so the entry price is the live decision-time
+        // price, not a stale/None value.
+        let mut entry_price = price_cache.get_price_usd(&req.token_address);
+        if entry_price.is_none() {
+            price_cache.eager_fetch_token(&req.token_address).await;
+            for _ in 0..10 {
+                if let Some(p) = price_cache.get_price_usd(&req.token_address) {
+                    entry_price = Some(p);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
 
         let entry_price_usd = match entry_price {
             Some(p) => p,
@@ -129,7 +151,7 @@ impl ShadowTrader {
                     shadow_id = %shadow_id,
                     token = %req.token_address,
                     wallet = %req.wallet_address,
-                    "Shadow: no price in cache, skipping position"
+                    "Shadow: no price available even after eager fetch, skipping position"
                 );
                 Self::insert_no_price_exits(&db, &shadow_id, decision, req, &config.run_id, config.position_size_sol).await;
                 return;
@@ -365,9 +387,21 @@ impl ShadowTrader {
         pool: &sqlx::PgPool,
         pos: &ShadowPositionRow,
     ) {
+        // Ensure the token stays tracked so the background updater refreshes
+        // its price (e.g. after a restart, tracked set is empty).
+        self.price_cache.track_token(&pos.token_address);
         let current_price = match self.price_cache.get_price_usd(&pos.token_address) {
             Some(p) => p,
-            None => return,
+            None => {
+                // No cached price this tick — try an eager fetch once, then
+                // defer to the next 15s tick if it still fails (matches the
+                // main system's position monitor behavior).
+                self.price_cache.eager_fetch_token(&pos.token_address).await;
+                match self.price_cache.get_price_usd(&pos.token_address) {
+                    Some(p) => p,
+                    None => return,
+                }
+            }
         };
         let sol_price = self.price_cache.get_sol_price_usd();
         let now = Utc::now();
