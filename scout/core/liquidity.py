@@ -222,22 +222,21 @@ class LiquidityProvider:
             await asyncio.sleep(delay)
 
     def _cleanup_async_client_session(self, client):
-        """Close and clear an async client's session to prevent resource leaks.
+        """Drop an async client's session without closing it across loops.
 
         Async clients (Birdeye, Jupiter) create aiohttp sessions that are
         tied to the event loop they were created in. When called from
         synchronous code via _run_async_coro (which creates a fresh event
-        loop each time), the session's connector leaks across loop
-        boundaries. Close it after each call.
+        loop each time), the session's connector is bound to a loop that has
+        already been closed. Calling session.close() on such a session hangs
+        forever — the connector waits on a dead loop — which deadlocks the
+        whole scout (the caller blocks on executor shutdown). So we drop the
+        reference and let GC reclaim the connector instead.
         """
         if client is None:
             return
         session = getattr(client, '_session', None)
-        if session is not None and not getattr(session, 'closed', True):
-            try:
-                self._run_async_coro(client._close_session())
-            except Exception:
-                pass
+        if session is not None:
             client._session = None
             client._own_session = False
 
@@ -245,12 +244,21 @@ class LiquidityProvider:
         """Run an async coroutine from synchronous code.
 
         Handles both contexts: with and without a running event loop.
+        Never blocks on executor shutdown: a hung coroutine (e.g. an aiohttp
+        session bound to a closed loop) must not deadlock the caller.
         """
         try:
             return asyncio.run(coro)
         except RuntimeError:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                return executor.submit(asyncio.run, coro).result(timeout=30)
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(asyncio.run, coro)
+            try:
+                return future.result(timeout=30)
+            except concurrent.futures.TimeoutError:
+                # Coroutine hung. shutdown(wait=True) would block forever
+                # waiting for it — use wait=False so the caller returns.
+                executor.shutdown(wait=False)
+                return None
 
     def get_current_liquidity(self, token_address: str) -> Optional[LiquidityData]:
         """
