@@ -2471,6 +2471,23 @@ impl AppConfig {
             *prev = Self::resolve_env_placeholder(prev, "CHIMERA_SECURITY__WEBHOOK_SECRET_PREVIOUS");
         }
 
+        // Resolve ${HELIUS_API_KEY} placeholders in RPC URLs (config crate does
+        // not interpolate ${VAR} in YAML files, and CHIMERA_RPC__* env overrides
+        // are unreliable in config 0.15 — the file is the source of truth).
+        if config.rpc.primary_url.starts_with("${") {
+            let key = std::env::var("HELIUS_API_KEY").unwrap_or_default();
+            config.rpc.primary_url = config
+                .rpc
+                .primary_url
+                .replacen("${HELIUS_API_KEY}", &key, 1);
+        }
+        if let Some(fallback) = config.rpc.fallback_url.as_mut() {
+            if fallback.starts_with("${") {
+                let key = std::env::var("HELIUS_API_KEY").unwrap_or_default();
+                *fallback = fallback.replacen("${HELIUS_API_KEY}", &key, 1);
+            }
+        }
+
         Ok(config)
     }
 
