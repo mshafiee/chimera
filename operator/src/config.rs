@@ -132,6 +132,9 @@ pub struct AppConfig {
     /// Profitability gate configuration for live trading enforcement
     #[serde(default)]
     pub profitability_gate: ProfitabilityGateConfig,
+    /// Rejection-rate wallet mute configuration
+    #[serde(default)]
+    pub rejection_mute: RejectionMuteConfig,
 }
 
 /// HTTP server configuration
@@ -2290,6 +2293,60 @@ impl Default for ExperimentConfig {
             toxic_threshold_percent: default_toxic_threshold_percent(),
             local_top_decline_pct: default_local_top_decline_pct(),
             shakedown_mode: false,
+        }
+    }
+}
+
+/// ── Rejection-rate wallet mute ──────────────────────────────────────────
+
+/// Mutes wallets whose BUY signals are overwhelmingly rejected for hard,
+/// structural reasons (non-speculative / unsafe / illiquid pump.fun tokens).
+/// Prevents wasted decision processing on wallets that can never produce an
+/// actionable trade.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RejectionMuteConfig {
+    /// Master switch. When false, the mute gate and recording are no-ops.
+    #[serde(default = "default_rejection_mute_enabled")]
+    pub enabled: bool,
+    /// Rolling window size: number of most-recent BUY decisions tracked.
+    #[serde(default = "default_rejection_mute_window_size")]
+    pub window_size: u32,
+    /// Minimum samples in the window before a wallet can be muted
+    /// (avoids muting on tiny sample sizes).
+    #[serde(default = "default_rejection_mute_min_samples")]
+    pub min_window_samples: u32,
+    /// Hard-rejection rate threshold (0.0–1.0) that triggers a mute.
+    #[serde(default = "default_rejection_mute_threshold")]
+    pub hard_rejection_threshold: f64,
+    /// How long (in hours) a wallet stays muted before re-evaluation.
+    #[serde(default = "default_rejection_mute_duration_hours")]
+    pub mute_duration_hours: u32,
+}
+
+fn default_rejection_mute_enabled() -> bool {
+    true
+}
+fn default_rejection_mute_window_size() -> u32 {
+    50
+}
+fn default_rejection_mute_min_samples() -> u32 {
+    20
+}
+fn default_rejection_mute_threshold() -> f64 {
+    0.90
+}
+fn default_rejection_mute_duration_hours() -> u32 {
+    6
+}
+
+impl Default for RejectionMuteConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_rejection_mute_enabled(),
+            window_size: default_rejection_mute_window_size(),
+            min_window_samples: default_rejection_mute_min_samples(),
+            hard_rejection_threshold: default_rejection_mute_threshold(),
+            mute_duration_hours: default_rejection_mute_duration_hours(),
         }
     }
 }
