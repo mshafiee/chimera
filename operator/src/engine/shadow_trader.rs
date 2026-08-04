@@ -43,8 +43,8 @@ impl ShadowConfig {
         let position_size_sol = std::env::var("CHIMERA_SHADOW_POSITION_SIZE_SOL")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
-            .map(|v| Decimal::from_f64_retain(v).unwrap_or(dec!(0.1)))
-            .unwrap_or(dec!(0.1));
+            .map(|v| Decimal::from_f64_retain(v).unwrap_or(dec!(1.0)))
+            .unwrap_or(dec!(1.0));
 
         let max_lifetime_hours = std::env::var("CHIMERA_SHADOW_MAX_LIFETIME_HOURS")
             .ok()
