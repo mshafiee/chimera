@@ -149,7 +149,7 @@ monitoring:
   rpc_poll_interval_secs: 8  # Legacy single interval (used if tiered_polling_enabled: false)
   rpc_poll_batch_size: 6
   rpc_poll_rate_limit: 40
-  max_active_wallets: 30
+  max_active_wallets: 50
   auto_demote_wallets: true  # Enable automatic wallet demotion based on copy performance
   inactivity_rotation_enabled: true  # Demote wallets that haven't traded recently
   auto_promote_enabled: true  # Refill ACTIVE roster from high-WQS CANDIDATEs (counterbalances auto-demote)
