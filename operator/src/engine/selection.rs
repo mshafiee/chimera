@@ -222,6 +222,8 @@ pub struct SelectionService {
     wallet_performance: Option<Arc<crate::monitoring::WalletPerformanceTracker>>,
     /// Shadow paper trader: trades every signal for evaluation.
     shadow_trader: Option<Arc<crate::engine::ShadowTrader>>,
+    /// Rejection-rate wallet mute detector.
+    mute_detector: Option<Arc<crate::engine::rejection_mute::RejectionMuteDetector>>,
     config: SelectionConfig,
     config_hash: String,
 }
@@ -254,6 +256,7 @@ impl SelectionService {
             latency_tracker: None,
             wallet_performance: None,
             shadow_trader: None,
+            mute_detector: None,
             config,
             config_hash,
         }
@@ -331,6 +334,15 @@ impl SelectionService {
         self
     }
 
+    /// Attach the RejectionMuteDetector for rejection-rate-based wallet muting.
+    pub fn with_mute_detector(
+        mut self,
+        detector: Arc<crate::engine::rejection_mute::RejectionMuteDetector>,
+    ) -> Self {
+        self.mute_detector = Some(detector);
+        self
+    }
+
     pub fn config_hash(&self) -> &str {
         &self.config_hash
     }
@@ -374,6 +386,20 @@ impl SelectionService {
         // Shadow paper trader: fork every signal (fire-and-forget).
         if let Some(ref shadow) = self.shadow_trader {
             shadow.on_signal(&decision, req);
+        }
+        // Rejection-rate mute detector: record BUY decision outcomes for
+        // rolling-window rejection-rate tracking. Only BUY decisions are
+        // meaningful (SELL rejections have different semantics).
+        if let Some(ref mute) = self.mute_detector {
+            if matches!(req.action, Action::Buy) {
+                let _ = mute
+                    .record_decision(
+                        &req.wallet_address,
+                        decision.admitted,
+                        decision.rejection_code,
+                    )
+                    .await;
+            }
         }
         // C3: shadow-fill calibration for admitted decisions (fire-and-forget).
         if decision.admitted
@@ -661,6 +687,28 @@ impl SelectionService {
                     req,
                     &self.config_hash,
                     "TOXIC_WALLET",
+                    reason,
+                );
+            }
+        }
+
+        // Rejection-rate mute gate — short-circuit wallets with overwhelming
+        // hard-rejection rates (non-speculative / unsafe / illiquid pump.fun).
+        if let Some(ref detector) = self.mute_detector {
+            if detector.is_wallet_muted(&req.wallet_address).await {
+                let reason = "Wallet muted — sustained high hard-rejection rate".to_string();
+                tracing::info!(
+                    ingress = ?req.ingress,
+                    decision = "BUY",
+                    token = %req.token_address,
+                    wallet = %req.wallet_address,
+                    rejection_code = "WALLET_MUTED",
+                    "selection: BUY rejected by rejection-mute gate"
+                );
+                return BuyDecision::rejected(
+                    req,
+                    &self.config_hash,
+                    "WALLET_MUTED",
                     reason,
                 );
             }
