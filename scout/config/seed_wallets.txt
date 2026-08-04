@@ -102,3 +102,77 @@ GBWjSsmw9MLbKh5UvarGA5CTdCPNujAh4RpQZkJRteu3  # ROI=0.73 wins=9
 HAibKhn6xZmijLFS3Cer59xe9bRFdFqX4Dei6Dggwptq  # ROI=0.11 wins=52
 3CQnNpEiGBMhb8Y7zogR5Rf1HK3V5zpLZRZg4BNA4ZXw  # ROI=0.38 wins=33
 HjByh6gvmWZBcWbeg4ChpukBaf9qihH1yeqqeSk8VSTz  # ROI=0.15 wins=50
+
+# === Dune-discovered: Top Solana DEX traders (Meteora/Raydium/Orca) ===
+# Added 2026-08-04 from Dune query 8221520. 7-day lookback, ROI>1.1, net PnL>0.
+2bhkQ6uVn32ddiG4Fe3DVbLsrExdb3ubaY6i1G4szEmq  # dune ROI=213.40 pnl=$3349401 trades=1357
+9HsFJKqobLFZ6QLT7xXhS3ggDfSGTJPUh2Rfug4VFGWh  # dune ROI=2.34 pnl=$1017626 trades=23
+5txAxwAzEQYnt3u9TVCGaT3i7QZVzfXXG7BxcT9bxPaB  # dune ROI=2.41 pnl=$956070 trades=54
+A6Wch1mJJ1PyooNSAUtctcNmQTxqtkcWManMBQPmKceM  # dune ROI=222.03 pnl=$491627 trades=25
+AL53kAnidTERkCADTAeyxJB6fTTgtNSAtHfGj44zuzb5  # dune ROI=1.97 pnl=$476536 trades=8
+FKNgqDeVuqxkqxUx2cy6ksaTTEnvWPrL4abWVEwVCEqs  # dune ROI=1.15 pnl=$382408 trades=138
+HsXLpvfpABXZFJuDEjAVmczKtRRnsiPY6Rts5PHHXYys  # dune ROI=1.44 pnl=$263034 trades=1176
+G2ECanqA4Cq296xHPGouPLA74CksqqWCxmpcJ1KFEyfv  # dune ROI=9.44 pnl=$245869 trades=39
+A1titudNpCEqUCLnwDGGZ4f4LDHC5nbdCC1nB27c6TLo  # dune ROI=111.21 pnl=$227474 trades=35
+9tMYeexrdB4oZzYfhdwJ8xuANYZL8KoTWc2HAUtNoGK5  # dune ROI=52.73 pnl=$209693 trades=105
+Gm65WGNxuBqkKbPu6qshpvJusU6cAhGd69b7ESVoZPYe  # dune ROI=3.65 pnl=$208923 trades=32
+HDG5LNixJxMA6i4dSQ4Dhiz4BqPzoSU2fGnEXpSp7XcY  # dune ROI=2.10 pnl=$156134 trades=12
+3nMNd89AxwHUa1AFvQGqohRkxFEQsTsgiEyEyqXFHyyH  # dune ROI=4.26 pnl=$151316 trades=315
+Aaa4v5anYmDymZPgvKe6A94f6MMMPzPLK7cSyZ61LFAa  # dune ROI=5.03 pnl=$147298 trades=113
+GQP9XKoRfwo229MA8iDq8GsC4piAruxrg578QbTNQuqD  # dune ROI=11.51 pnl=$144874 trades=392
+DAqCpTpQN1JNCDYLXWir28q1J2eXSufiNNADsSnUQTBZ  # dune ROI=1.90 pnl=$125316 trades=1621
+12gsvKA5KiHHMCt1UegtzXYVaq6F1zdabZcEYHBdNGtJ  # dune ROI=1.95 pnl=$120693 trades=648
+YubFizptp3MXUAtZmqkRS9DyCkMeZaVwiaRCGBTxayo  # dune ROI=1.17 pnl=$117270 trades=275
+9YFeuz8q9WMSJpeNhNHj6LSbZnQ6BvDt5u9CV2ALhPWv  # dune ROI=19.60 pnl=$110247 trades=11
+9i5YrZsPUefPLP8DFSCatwzvoDsK7yNiEYzjAQSEyYbg  # dune ROI=10.46 pnl=$109994 trades=480
+HKkLK1HLzNuKxcwsjhutGfxRgTgpNV5ieyH7VsAJbR6R  # dune ROI=11.28 pnl=$103066 trades=21
+A3ZcnXcCnLDWsCgxMDryqFPLCP6dpMGEs5eaHHwjm6Sg  # dune ROI=17.43 pnl=$91851 trades=906
+9jZdJu2eWsd6617a2EkiLqQ3ASxQWSz5nnWog6B4NHyc  # dune ROI=8.05 pnl=$91583 trades=349
+J4Xa1iTcioLfwu6o53xk1AyNCaMgF214TqeXg8piEHh  # dune ROI=358.07 pnl=$88828 trades=11
+2mq1q2zGQopmarh9EcBWM57h7XLc7fZYbGQYjwKLtY1d  # dune ROI=2.49 pnl=$87613 trades=30
+bpfe9tJukfJWf4M8SPVR1kzby6NCfH45zA87vbYgtG5  # dune ROI=2.03 pnl=$86869 trades=218
+HUddkuDbL5JwUnyf8CLCWx8muKtAYSf3Q47MgyYhnXff  # dune ROI=21.78 pnl=$85925 trades=15
+7dm9am6Qx7cH64RB99Mzf7ZsLbEfmXM7ihXXCvMiT2X1  # dune ROI=3.26 pnl=$85805 trades=133
+1337a697ggPX4QY9bqt9xqTG9U1x33Rdnzu3U3MAuAQn  # dune ROI=3.99 pnl=$80474 trades=74
+2snHHreXbpJ7UwZxPe37gnUNf7Wx7wv6UKDSR2JckKuS  # dune ROI=2.41 pnl=$79225 trades=152
+4DcK1tjjPDyEx1qMCezdezroDDPjTq8mEpZ9MuQ3wgeA  # dune ROI=3.37 pnl=$76445 trades=8
+HPGSoaK4WHuMNym7TpLqozRHkA6fRg3qGMDtqVsndL7h  # dune ROI=23.66 pnl=$76082 trades=13
+HUzaPMwnnoMMHjRJ5kzxXC5B7cyWBJJVFCLUGPoNbEG9  # dune ROI=2.62 pnl=$73513 trades=257
+95itKSFYGzy9NChPTW6N9aFRxxCmvmncT7GBydw2dw4s  # dune ROI=6.02 pnl=$69531 trades=271
+7gEQ6syDZmyPE4JdfJm4qatawnDqvqdh6i8jJjCXio6h  # dune ROI=14.45 pnl=$68978 trades=993
+GfwNkC2aYB56bS7YtkfU7vEVfUFV5rfxVSxB44P3iJK  # dune ROI=129.74 pnl=$68949 trades=19
+4zE89peo3f1f98myimkfabskXTxYq8pxD99Zs35qBJuA  # dune ROI=1.28 pnl=$68616 trades=701
+DzrYVeiKz55ASsP2GiUxBpZrGsRxhjKpv6jVdpRwYWE1  # dune ROI=294.99 pnl=$68224 trades=8
+D4KULoD4xxHJaea3yrx2mf5avkSEJVm25KqFW3XUpUkW  # dune ROI=2.58 pnl=$67080 trades=463
+6Z4TPLnLkzshjDGFXFbFZusbvJC9iPMRUBep2W1z6C4n  # dune ROI=18.47 pnl=$64706 trades=20
+F2TxjUCo1bXMcSLzUhKS5dhL7jkqWE4K5qUPhbMgQVn2  # dune ROI=11.00 pnl=$62338 trades=89
+55GsB1ZbqFT2H29rA4ye63PErpHiTzCGrwEYNAwzuLdk  # dune ROI=2.21 pnl=$60360 trades=45
+9s7e1JPBAdGniNGJHHQ9C6PhgGWf4oKXRKtDkywbG312  # dune ROI=3.11 pnl=$57795 trades=1064
+6GTxWLC6RbUNrBDnbVqn5tTAEUupZ9cqPPrawYSmgG14  # dune ROI=5.40 pnl=$57488 trades=57
+4FHkyBLQiUdPSZdkBW6HbSTZmtvy3tVsUssa6YN4TML3  # dune ROI=6.37 pnl=$55984 trades=217
+EdesqukXbLM8Y9PxQv8joCFBLWUEG2hMJqwWQUYpZs85  # dune ROI=45.64 pnl=$53260 trades=82
+FTkVLG8wPCrzYrxhLk5WtushEoNmq6nQBL83q1y5EJBv  # dune ROI=248.35 pnl=$49684 trades=5
+6KFzMzxTwuwvsVcuBRm8jmykBpvMhYjrvTd53qWcHoxu  # dune ROI=26.40 pnl=$47502 trades=42
+E9UJGKW7QnsBmdwXxuVsanQVPzP5V8jwpvRabiDcgqcc  # dune ROI=5.59 pnl=$46966 trades=187
+ExTRqfSij77AR7VUpHJswbYro3qqP3qxedW3aW2WeGKW  # dune ROI=21.14 pnl=$45699 trades=9
+4qvhbPxpEn1dsfxMB6zJ219mDx9pn5wvijn8cUmGGmKd  # dune ROI=13.76 pnl=$45584 trades=8
+GzVSmqCod3mLDVjX7JDmzT5JbE1vWT1bMy48KkgFSG1x  # dune ROI=1.15 pnl=$45075 trades=538
+EESZjkYnRqoTwm98QXzeNdYbfigb8kt4fhAUb8LVxiuj  # dune ROI=71.01 pnl=$44894 trades=43
+HgPFzrUm7XbAczu4nbSZcWtHLHjoyxNeK3UqCnMEGJaX  # dune ROI=1.53 pnl=$44823 trades=248
+4AB1vGcGd5Kc3CLonMYLZkkzD4qY61SUsFogxk6bSRJE  # dune ROI=17.41 pnl=$44461 trades=33
+ACAGhW1oJnfRY9ndATShMKaGWobFwmvGpR3QzzAALjPE  # dune ROI=1.12 pnl=$44251 trades=462
+4ogY5vE5g1jrQ29fQbGxFSzHG4zAS7iW1vNw6kuwWyv3  # dune ROI=1.29 pnl=$43384 trades=1100
+riDi6z4Lzch9FvcEzmkkx9gqCoPniMrTMFchbGaikGq  # dune ROI=1.55 pnl=$42893 trades=936
+HUdPDaWft2PC3zE1JrmJDbxz8c1xwBjEao3txk3Ph248  # dune ROI=1.15 pnl=$42649 trades=8
+9MQPSxmFE1Ef7QsUs3oXuLED7C3YE2vpiqBW63BifMvJ  # dune ROI=8.69 pnl=$42561 trades=52
+3CZ2Ub8oGmdRhZYZZ16e3U6SirviQHb3dVeVvEDH9Ei2  # dune ROI=1.21 pnl=$42078 trades=652
+F7yD9Uk47rhxRwet5xh7t8rZS4wN5iE16y2o64KoiQYX  # dune ROI=1.31 pnl=$40886 trades=880
+3bor7nUUKP58SxrwmWatpRS212eyETKCykgJz58jYC61  # dune ROI=1.13 pnl=$40818 trades=917
+HJN6zr4YS6ApaVsSFRdMayr6sUEijrKmoR86MoZ1chWi  # dune ROI=2.31 pnl=$40260 trades=51
+HEUdcnYsFQs62NUFoY45s7kFe1GDCkvYzUXx1VZ8EV8c  # dune ROI=1.61 pnl=$39365 trades=64
+8zEAooBj6VqpQSi77QMhJzFf5Ddjugrk4PqT4Z7eAGgx  # dune ROI=1.32 pnl=$39342 trades=15
+4PKPogzkHanZbVWuZc3eqn44pjGfohRVo5Exf6Qd5QLc  # dune ROI=24.04 pnl=$36361 trades=16
+edNqeePrkeTKgtxpPyUZFUvQJV7uctqzCbfaoJa8UGC  # dune ROI=72.97 pnl=$35966 trades=21
+CKNm8ndFinxuiTm9B3fHjWSHbXdySHZnWXzCgEkWsCQJ  # dune ROI=17.69 pnl=$34969 trades=5
+AsrQTPLjRqHm7Ujdny8p3zDqadsApkzpRYqRxRDv8UPR  # dune ROI=24.20 pnl=$33427 trades=33
+CrH7p2YkA7X2VkX1U6B1fZuXw7ti8EMrKifXcefUsL6N  # dune ROI=4.82 pnl=$33288 trades=38
