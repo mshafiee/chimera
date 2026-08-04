@@ -249,3 +249,12 @@ execution_lock:
   enabled: true                    # Enable execution-level locking (prevents duplicate processing)
   lock_timeout_seconds: 120        # Lock timeout in seconds (auto-expiration for crash safety)
   cleanup_interval_seconds: 30    # Background cleanup interval in seconds
+
+# Rejection-rate wallet mute: suppresses signal intake from wallets whose
+# BUY signals are overwhelmingly rejected for structural reasons.
+rejection_mute:
+  enabled: true
+  window_size: 50           # track last 50 BUY decisions per wallet
+  min_window_samples: 20    # need >=20 decisions before muting
+  hard_rejection_threshold: 0.90  # mute at >=90% hard-rejection rate
+  mute_duration_hours: 6    # mute for 6h, then re-evaluate
