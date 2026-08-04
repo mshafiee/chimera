@@ -138,6 +138,11 @@ services:
        - CHIMERA_JUPITER__API_KEY=${JUPITER_API_KEY:?JUPITER_API_KEY is required}
        # Helius API key (config crate reads CHIMERA_ prefix, not raw HELIUS_API_KEY)
        - CHIMERA_MONITORING__HELIUS_API_KEY=${HELIUS_API_KEY}
+       # RPC endpoints: use Helius RPC (reliable from this network) instead of
+       # the public Solana RPC, which has proven unreachable here (DNS rotates
+       # to IPs that time out, taking the health check down -> HAProxy 503).
+       - CHIMERA_RPC__PRIMARY_URL=${CHIMERA_RPC__PRIMARY_URL:-https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}}
+       - CHIMERA_RPC__FALLBACK_URL=${CHIMERA_RPC__FALLBACK_URL:-https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}}
        # Minimum WQS for signal admission
        - CHIMERA_SELECTION__MIN_WQS_SCORE=15.0
        # Position cap for low-WQS wallets (WQS < 40 → max 0.25 SOL = min_size_sol)
