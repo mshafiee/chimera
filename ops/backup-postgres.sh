@@ -9,6 +9,7 @@ POSTGRES_HOST="${POSTGRES_HOST:-postgres}"
 POSTGRES_PORT="${POSTGRES_PORT:-5432}"
 POSTGRES_USER="${POSTGRES_USER:-chimera}"
 POSTGRES_DB="${POSTGRES_DB:-chimera}"
+POSTGRES_CONTAINER="${POSTGRES_CONTAINER:-chimera-postgres}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BACKUP_FILE="$BACKUP_DIR/chimera_${TIMESTAMP}.sql.gz"
 
@@ -22,15 +23,17 @@ mkdir -p "$BACKUP_DIR"
 # The dump contains the full database contents; never leave it world-readable
 umask 077
 
-# Check if PostgreSQL is reachable (via pg_isready, which is compose-version agnostic)
-if ! docker-compose exec -T postgres pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" > /dev/null 2>&1; then
+# Check if PostgreSQL is reachable (direct docker exec by container name —
+# the old docker-compose (hyphenated) binary does not exist on the server,
+# so every scheduled backup was failing with "not reachable")
+if ! docker exec "$POSTGRES_CONTAINER" pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" > /dev/null 2>&1; then
     echo "❌ PostgreSQL is not reachable"
     exit 1
 fi
 
 # Create backup
 echo "Creating PostgreSQL backup..."
-if docker-compose exec -T postgres pg_dump -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" "$POSTGRES_DB" | gzip > "$BACKUP_FILE"; then
+if docker exec "$POSTGRES_CONTAINER" pg_dump -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" "$POSTGRES_DB" | gzip > "$BACKUP_FILE"; then
     echo "✓ Backup created successfully"
 else
     echo "❌ Backup failed"

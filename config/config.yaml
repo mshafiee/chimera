@@ -59,7 +59,7 @@ strategy:
 
 jito:
   enabled: true  # Overridden by CHIMERA_JITO__ENABLED env var for mainnet-paper
-  searcher_endpoint: "https://ny.mainnet.block-engine.jito.wtf"  # Regional endpoint; global mainnet.* was unreachable
+  searcher_endpoint: "https://tokyo.mainnet.block-engine.jito.wtf"  # Only region reachable from prod server (global/ny/amsterdam/frankfurt time out)
   tip_floor_sol: 0.0003
   tip_ceiling_sol: 0.001
   tip_percentile: 50
