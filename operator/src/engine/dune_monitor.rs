@@ -162,6 +162,9 @@ impl DunePnlMonitor {
                         if let Err(e) = startup_self.demote_shadow_losers().await {
                             warn!(error = %e, "Shadow quality startup check failed");
                         }
+                        if let Err(e) = startup_self.audit_actives_onchain().await {
+                            warn!(error = %e, "On-chain audit startup check failed");
+                        }
                     }
                 }
             });
@@ -186,6 +189,9 @@ impl DunePnlMonitor {
                     }
                     if let Err(e) = self.demote_shadow_losers().await {
                         warn!(error = %e, "Shadow quality check failed");
+                    }
+                    if let Err(e) = self.audit_actives_onchain().await {
+                        warn!(error = %e, "On-chain audit check failed");
                     }
                 }
             }
@@ -817,6 +823,116 @@ impl DunePnlMonitor {
                 demoted,
                 eligible = losers.len(),
                 "Shadow quality monitor: demoted wallets with consistently negative shadow PnL"
+            );
+        }
+        Ok(demoted)
+    }
+
+    /// Retroactive on-chain audit of the ACTIVE roster.
+    ///
+    /// Assesses ACTIVE wallets with recent trade activity using the same
+    /// round-trip expectancy analysis used for admission, and demotes those
+    /// that fail it (fewer than `min_round_trips` completed round trips or
+    /// non-positive expectancy). Catches wallets admitted under the old
+    /// criteria — e.g. 2snHHreXbp with 13 round trips at -89% expectancy
+    /// that remained ACTIVE and trading. WQS is floored below the
+    /// auto-promote threshold so the refill cannot instantly re-promote.
+    ///
+    /// API-cost control: only the `audit_max_per_cycle` most-active wallets
+    /// are assessed per cycle, so the sweep spreads over a few cycles.
+    async fn audit_actives_onchain(&self) -> AppResult<usize> {
+        if !self.onchain_config.enabled
+            || !self.onchain_config.audit_actives_enabled
+            || self.api_key.is_empty()
+        {
+            return Ok(0);
+        }
+        let Some(ctx) = &self.promotion_ctx else {
+            return Ok(0);
+        };
+        let Some(helius) = &ctx.helius_client else {
+            return Ok(0);
+        };
+
+        let DbPool::PostgreSQL(pool) = self.db.pool();
+
+        let actives: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT w.address FROM wallets w
+            WHERE w.status = 'ACTIVE'
+              AND EXISTS (SELECT 1 FROM decision_records dr
+                          WHERE dr.wallet_address = w.address
+                            AND dr.decided_at > NOW() - INTERVAL '24 hours')
+            ORDER BY (SELECT count(*) FROM decision_records dr2
+                      WHERE dr2.wallet_address = w.address
+                        AND dr2.decided_at > NOW() - INTERVAL '24 hours') DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(self.onchain_config.audit_max_per_cycle as i64)
+        .fetch_all(&pool)
+        .await?;
+
+        if actives.is_empty() {
+            return Ok(0);
+        }
+
+        let assessor = crate::engine::onchain_assessment::OnchainAssessor::new(helius.clone());
+        let mut demoted = 0;
+        for wallet in &actives {
+            match assessor
+                .assess_wallet(wallet, self.onchain_config.tx_limit)
+                .await
+            {
+                Ok(a) => {
+                    let pass = a.round_trips >= self.onchain_config.min_round_trips
+                        && a.expectancy_pct > self.onchain_config.min_expectancy_pct;
+                    info!(
+                        wallet = %wallet,
+                        round_trips = a.round_trips,
+                        win_rate = a.win_rate_pct,
+                        expectancy = a.expectancy_pct,
+                        pass,
+                        "On-chain audit of ACTIVE wallet"
+                    );
+                    if !pass {
+                        let reason = format!(
+                            "On-chain audit: {} round trips, expectancy {:.2}% — no proven copy-trading edge",
+                            a.round_trips, a.expectancy_pct
+                        );
+                        match self.db.demote_wallet(wallet, &reason).await {
+                            Ok(_) => {
+                                let _ = sqlx::query(
+                                    "UPDATE wallets SET wqs_score = LEAST(COALESCE(wqs_score, 0), 10.0) WHERE address = $1",
+                                )
+                                .bind(wallet)
+                                .execute(&pool)
+                                .await;
+                                demoted += 1;
+                                warn!(
+                                    wallet = %wallet,
+                                    round_trips = a.round_trips,
+                                    expectancy = a.expectancy_pct,
+                                    "On-chain audit: demoted ACTIVE wallet (no proven edge)"
+                                );
+                            }
+                            Err(e) => {
+                                warn!(wallet = %wallet, error = %e, "On-chain audit demote failed");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(wallet = %wallet, error = %e, "On-chain audit assessment failed");
+                }
+            }
+        }
+
+        if demoted > 0 {
+            warn!(
+                demoted,
+                audited = actives.len(),
+                "On-chain audit: demoted wallets without proven round-trip edge"
             );
         }
         Ok(demoted)

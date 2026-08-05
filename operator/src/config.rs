@@ -2428,6 +2428,14 @@ pub struct OnchainAssessmentConfig {
     /// Max SWAP transactions fetched per wallet.
     #[serde(default = "default_onchain_assessment_tx_limit")]
     pub tx_limit: usize,
+    /// Retroactive audit: assess ACTIVE wallets with recent activity and
+    /// demote those failing the same round-trip expectancy bar used for
+    /// admission (catches wallets admitted under the old criteria).
+    #[serde(default = "default_onchain_audit_actives_enabled")]
+    pub audit_actives_enabled: bool,
+    /// Max ACTIVE wallets audited per cycle (API cost control).
+    #[serde(default = "default_onchain_audit_max_per_cycle")]
+    pub audit_max_per_cycle: usize,
 }
 
 fn default_onchain_assessment_enabled() -> bool {
@@ -2442,6 +2450,12 @@ fn default_onchain_assessment_min_expectancy_pct() -> f64 {
 fn default_onchain_assessment_tx_limit() -> usize {
     200
 }
+fn default_onchain_audit_actives_enabled() -> bool {
+    true
+}
+fn default_onchain_audit_max_per_cycle() -> usize {
+    10
+}
 
 impl Default for OnchainAssessmentConfig {
     fn default() -> Self {
@@ -2450,6 +2464,8 @@ impl Default for OnchainAssessmentConfig {
             min_round_trips: default_onchain_assessment_min_round_trips(),
             min_expectancy_pct: default_onchain_assessment_min_expectancy_pct(),
             tx_limit: default_onchain_assessment_tx_limit(),
+            audit_actives_enabled: default_onchain_audit_actives_enabled(),
+            audit_max_per_cycle: default_onchain_audit_max_per_cycle(),
         }
     }
 }

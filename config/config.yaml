@@ -293,3 +293,5 @@ dune:
     min_round_trips: 10        # completed round trips required
     min_expectancy_pct: 0.0    # avg round-trip PnL% must be > 0
     tx_limit: 200              # SWAP transactions fetched per wallet
+    audit_actives_enabled: true  # retroactive audit: demote ACTIVE wallets without proven edge
+    audit_max_per_cycle: 10    # ACTIVE wallets audited per cycle (API cost control)
