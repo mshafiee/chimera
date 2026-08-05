@@ -2510,7 +2510,8 @@ impl Database for PostgresBackend {
             SET status = $1,
                 promoted_at = COALESCE($2, promoted_at),
                 ttl_expires_at = $3,
-                notes = COALESCE($4, notes)
+                notes = COALESCE($4, notes),
+                demoted_at = CASE WHEN $1 = 'ACTIVE' THEN NULL ELSE demoted_at END
             WHERE address = $5
             "#,
         )
@@ -2546,6 +2547,7 @@ impl Database for PostgresBackend {
             UPDATE wallets
             SET status = 'CANDIDATE',
                 ttl_expires_at = NULL,
+                demoted_at = NOW(),
                 notes = $1
             WHERE address = $2
             "#,

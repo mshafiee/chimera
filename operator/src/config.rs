@@ -2615,6 +2615,12 @@ pub struct DuneConfig {
     /// Skip promotion when ACTIVE wallet count is at or above this cap.
     #[serde(default = "default_dune_promote_max_active_total")]
     pub promote_max_active_total: u32,
+    /// Wallets demoted within this many hours are ineligible for Dune
+    /// promotion. Prevents the churn loop where shadow quality demotes a
+    /// wallet on recent 48h signal performance and Dune re-promotes it
+    /// minutes later on historical 7d PnL. Default: 24h.
+    #[serde(default = "default_dune_promote_demote_cooldown_hours")]
+    pub promote_demote_cooldown_hours: i64,
     /// Demote ACTIVE wallets whose admitted DEX signals lose money under our
     /// own exit logic (shadow mirror_main, rolling window).
     #[serde(default = "default_shadow_quality_enabled")]
@@ -2663,6 +2669,9 @@ fn default_dune_promote_max_per_cycle() -> u32 {
 fn default_dune_promote_max_active_total() -> u32 {
     50
 }
+fn default_dune_promote_demote_cooldown_hours() -> i64 {
+    24
+}
 fn default_shadow_quality_enabled() -> bool {
     true
 }
@@ -2689,6 +2698,7 @@ impl Default for DuneConfig {
             promote_min_roi: default_dune_promote_min_roi(),
             promote_max_per_cycle: default_dune_promote_max_per_cycle(),
             promote_max_active_total: default_dune_promote_max_active_total(),
+            promote_demote_cooldown_hours: default_dune_promote_demote_cooldown_hours(),
             shadow_quality_enabled: default_shadow_quality_enabled(),
             shadow_quality_min_samples: default_shadow_quality_min_samples(),
             shadow_quality_demote_threshold_pct: default_shadow_quality_demote_threshold_pct(),

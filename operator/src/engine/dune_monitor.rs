@@ -70,6 +70,7 @@ pub struct DunePnlMonitor {
     promote_min_roi: f64,
     promote_max_per_cycle: u32,
     promote_max_active_total: u32,
+    promote_demote_cooldown_hours: i64,
     shadow_quality_enabled: bool,
     shadow_quality_min_samples: i64,
     shadow_quality_demote_threshold_pct: f64,
@@ -118,6 +119,7 @@ impl DunePnlMonitor {
             promote_min_roi: config.promote_min_roi,
             promote_max_per_cycle: config.promote_max_per_cycle,
             promote_max_active_total: config.promote_max_active_total,
+            promote_demote_cooldown_hours: config.promote_demote_cooldown_hours,
             shadow_quality_enabled: config.shadow_quality_enabled,
             shadow_quality_min_samples: config.shadow_quality_min_samples,
             shadow_quality_demote_threshold_pct: config.shadow_quality_demote_threshold_pct,
@@ -577,10 +579,14 @@ impl DunePnlMonitor {
 
         // 3. Find which profitable wallets are CANDIDATE in our system, plus
         //    ACTIVE wallets missing a webhook (retry failed registrations).
+        //    Wallets demoted within the cooldown window are skipped — a
+        //    recent demotion (e.g. shadow quality on 48h signal PnL) must not
+        //    be overridden by historical 7d Dune PnL minutes later.
         let addresses: Vec<String> = profitable.iter().map(|w| w.address.clone()).collect();
         let candidates: Vec<String> = sqlx::query_scalar(
             r#"SELECT address FROM wallets
                WHERE address = ANY($1)
+                 AND COALESCE(demoted_at, '-infinity') < NOW() - ($2 || ' hours')::interval
                  AND (status = 'CANDIDATE'
                       OR (status = 'ACTIVE' AND NOT EXISTS (
                           SELECT 1 FROM wallet_monitoring wm
@@ -588,6 +594,7 @@ impl DunePnlMonitor {
                             AND wm.helius_webhook_id IS NOT NULL)))"#,
         )
         .bind(&addresses)
+        .bind(self.promote_demote_cooldown_hours)
         .fetch_all(&pool)
         .await?;
         if candidates.is_empty() {
