@@ -346,12 +346,20 @@ class MultiTimeframeDiscovery:
         logger.info(f"[MultiTimeframeDiscovery] Executing {timeframe.value} scan ({config.hours_back}h)")
 
         try:
-            # Execute discovery using helius_client
+            # Execute discovery using helius_client. Wrapped in asyncio.wait_for
+            # so a hung Helius call (no timeout in the client, observed 2026-08-05:
+            # deep scan started 00:56, never completed — scout stuck at 0% CPU for
+            # the rest of the day, blocking wallet discovery AND the analysis loop)
+            # cannot block the whole scout forever. On timeout the scan fails, the
+            # exception propagates, and the scout continues with the next cycle.
             if self._helius_client:
-                wallet_counts = await self._helius_client.discover_wallets(
-                    hours_back=config.hours_back,
-                    max_wallets=config.max_wallets,
-                    limit_per_token=config.limit_per_token
+                wallet_counts = await asyncio.wait_for(
+                    self._helius_client.discover_wallets(
+                        hours_back=config.hours_back,
+                        max_wallets=config.max_wallets,
+                        limit_per_token=config.limit_per_token,
+                    ),
+                    timeout=600,  # 10 min hard cap per timeframe scan
                 )
             else:
                 # Fallback: simulate discovery for testing

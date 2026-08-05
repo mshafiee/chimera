@@ -219,6 +219,11 @@ services:
       - SCOUT_MIN_TRADE_COUNT=1
       - SCOUT_MAX_WALLETS=500
       - SCOUT_DISCOVERY_HOURS=72
+      # Deep scan capped at 7d (was 720h): 30-day scan hung on 2026-08-05
+      # (started 00:56, never completed — scout stuck at 0% CPU all day,
+      # blocking discovery + analysis). 7d is enough to find active traders
+      # at a fraction of the API cost and hang risk.
+      - SCOUT_DEEP_SCAN_HOURS=168
       - SCOUT_LIQUIDITY_MODE=${SCOUT_LIQUIDITY_MODE:-simulated}
       # Historical liquidity fallback: 'flexible' uses current liquidity with confidence
       # penalty when historical data is missing (instead of strict rejection)
