@@ -274,8 +274,13 @@ shadow_blacklist:
 # API key read from DUNE_API_KEY env var
 dune:
   enabled: true
+  # Dune 24h-PnL demote-losers monitor. Disabled — redundant with shadow
+  # quality demote + on-chain audit, and aggregate Dune PnL masks per-signal
+  # losses. Re-enable only for investigation.
+  demote_losers_enabled: false
   pnl_query_id: 8221776     # Dune query: 24h wallet PnL monitor (losers -> demote)
-  check_interval_secs: 3600 # hourly check
+  check_interval_secs: 7200 # shadow quality demote cadence (local DB, 2h)
+  promote_check_interval_secs: 21600  # Dune promote + on-chain audit (6h)
   promote_enabled: true     # promote Dune-verified profitable CANDIDATE wallets
   promote_query_id: 8221520 # Dune query: top profitable traders (7d)
   promote_min_roi: 1.2      # min ROI (net PnL / buy volume) to promote

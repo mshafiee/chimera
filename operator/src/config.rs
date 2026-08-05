@@ -2480,9 +2480,19 @@ pub struct DuneConfig {
     /// Dune query ID for the 24h wallet PnL monitor (losing wallets).
     #[serde(default = "default_dune_pnl_query_id")]
     pub pnl_query_id: u64,
-    /// How often (in seconds) to poll Dune for wallet PnL. Default: 1 hour.
+    /// How often (in seconds) to poll Dune for wallet PnL. Default: 2 hours.
     #[serde(default = "default_dune_check_interval_secs")]
     pub check_interval_secs: u64,
+    /// How often (in seconds) to run the Dune promote query + on-chain audit
+    /// of ACTIVE wallets. Both are expensive (Dune + Helius API credits).
+    /// Default: 6 hours.
+    #[serde(default = "default_promote_check_interval_secs")]
+    pub promote_check_interval_secs: u64,
+    /// Dune 24h-PnL demote-losers monitor. Disabled by default — redundant
+    /// with shadow-quality demote + on-chain audit, and aggregate Dune PnL
+    /// masks per-signal losses. Re-enable only for investigation.
+    #[serde(default)]
+    pub demote_losers_enabled: bool,
     /// Promote Dune-verified profitable CANDIDATE wallets to ACTIVE.
     #[serde(default = "default_dune_promote_enabled")]
     pub promote_enabled: bool,
@@ -2521,7 +2531,10 @@ fn default_dune_pnl_query_id() -> u64 {
     8221776
 }
 fn default_dune_check_interval_secs() -> u64 {
-    3600
+    7200
+}
+fn default_promote_check_interval_secs() -> u64 {
+    21600
 }
 fn default_dune_promote_enabled() -> bool {
     true
@@ -2557,6 +2570,8 @@ impl Default for DuneConfig {
             enabled: false,
             pnl_query_id: default_dune_pnl_query_id(),
             check_interval_secs: default_dune_check_interval_secs(),
+            promote_check_interval_secs: default_promote_check_interval_secs(),
+            demote_losers_enabled: false,
             promote_enabled: default_dune_promote_enabled(),
             promote_query_id: default_dune_promote_query_id(),
             promote_min_roi: default_dune_promote_min_roi(),

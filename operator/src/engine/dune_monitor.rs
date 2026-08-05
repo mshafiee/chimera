@@ -61,6 +61,8 @@ pub struct DunePnlMonitor {
     api_key: String,
     query_id: u64,
     check_interval_secs: u64,
+    promote_check_interval_secs: u64,
+    demote_losers_enabled: bool,
     db: Arc<dyn Database>,
     http: reqwest::Client,
     promote_enabled: bool,
@@ -103,6 +105,8 @@ impl DunePnlMonitor {
             api_key,
             query_id: config.pnl_query_id,
             check_interval_secs: config.check_interval_secs,
+            promote_check_interval_secs: config.promote_check_interval_secs,
+            demote_losers_enabled: config.demote_losers_enabled,
             db,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
@@ -128,74 +132,122 @@ impl DunePnlMonitor {
         self
     }
 
-    /// Run the periodic monitor loop until the cancel token fires.
+    /// Run the periodic monitor loops until the cancel token fires.
+    ///
+    /// Two independent timers, decoupled from each other:
+    /// - Shadow quality demote (local DB, no external API) — every
+    ///   `check_interval_secs` (default 2h). Runs even without a Dune key.
+    /// - Dune promote + on-chain audit (Dune + Helius API) — every
+    ///   `promote_check_interval_secs` (default 6h). The Dune promote query
+    ///   needs a Dune key; the on-chain audit only needs Helius, so it keeps
+    ///   running (and protecting the roster) even if the Dune key is unset.
     pub async fn run(self: Arc<Self>, cancel_token: CancellationToken) {
-        if self.api_key.is_empty() {
-            warn!("Dune PnL monitor disabled — DUNE_API_KEY not set");
-            return;
-        }
-
         info!(
             query_id = self.query_id,
             promote_query_id = self.promote_query_id,
-            interval_secs = self.check_interval_secs,
+            shadow_interval_secs = self.check_interval_secs,
+            promote_interval_secs = self.promote_check_interval_secs,
+            demote_losers_enabled = self.demote_losers_enabled,
             "Dune PnL monitor started"
         );
 
-        // Run one catch-up cycle ~30s after startup (so promotions/demotions
-        // resume immediately after a restart instead of waiting a full
-        // interval), then every interval thereafter. The 30s delay lets other
-        // startup tasks (webhook management check, etc.) settle first.
+        // --- Timer 1: shadow quality demote (local DB only) ---
         {
-            let startup_token = cancel_token.clone();
-            let startup_self = self.clone();
+            let task_token = cancel_token.clone();
+            let task_self = self.clone();
             tokio::spawn(async move {
+                // Catch-up cycle ~30s after startup so demotions resume
+                // immediately after a restart instead of waiting a full
+                // interval. The 30s delay lets other startup tasks (webhook
+                // management check, etc.) settle first.
                 tokio::select! {
-                    _ = startup_token.cancelled() => {}
+                    _ = task_token.cancelled() => return,
                     _ = tokio::time::sleep(Duration::from_secs(30)) => {
-                        if let Err(e) = startup_self.run_check().await {
-                            warn!(error = %e, "Dune PnL monitor startup check failed");
-                        }
-                        if let Err(e) = startup_self.promote_dune_verified().await {
-                            warn!(error = %e, "Dune PnL monitor startup promotion failed");
-                        }
-                        if let Err(e) = startup_self.demote_shadow_losers().await {
+                        if let Err(e) = task_self.demote_shadow_losers().await {
                             warn!(error = %e, "Shadow quality startup check failed");
                         }
-                        if let Err(e) = startup_self.audit_actives_onchain().await {
-                            warn!(error = %e, "On-chain audit startup check failed");
+                    }
+                }
+
+                let mut interval =
+                    tokio::time::interval(Duration::from_secs(task_self.check_interval_secs));
+                interval.tick().await; // consume first immediate tick
+
+                loop {
+                    tokio::select! {
+                        _ = task_token.cancelled() => break,
+                        _ = interval.tick() => {
+                            if let Err(e) = task_self.demote_shadow_losers().await {
+                                warn!(error = %e, "Shadow quality check failed");
+                            }
                         }
                     }
                 }
             });
         }
 
-        let mut interval =
-            tokio::time::interval(Duration::from_secs(self.check_interval_secs));
-        interval.tick().await; // consume first immediate tick
+        // --- Timer 2: Dune promote + on-chain audit (external APIs) ---
+        {
+            let task_token = cancel_token.clone();
+            let task_self = self.clone();
+            tokio::spawn(async move {
+                let has_key = !task_self.api_key.is_empty();
+                if !has_key {
+                    warn!("Dune promote disabled — DUNE_API_KEY not set (on-chain audit still runs)");
+                }
 
-        loop {
-            tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    info!("Dune PnL monitor shutting down");
-                    break;
+                // Catch-up cycle ~30s after startup.
+                tokio::select! {
+                    _ = task_token.cancelled() => return,
+                    _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                        if has_key {
+                            if task_self.demote_losers_enabled {
+                                if let Err(e) = task_self.run_check().await {
+                                    warn!(error = %e, "Dune PnL monitor startup check failed");
+                                }
+                            }
+                            if let Err(e) = task_self.promote_dune_verified().await {
+                                warn!(error = %e, "Dune PnL monitor startup promotion failed");
+                            }
+                        }
+                        if let Err(e) = task_self.audit_actives_onchain().await {
+                            warn!(error = %e, "On-chain audit startup check failed");
+                        }
+                    }
                 }
-                _ = interval.tick() => {
-                    if let Err(e) = self.run_check().await {
-                        warn!(error = %e, "Dune PnL monitor check failed");
-                    }
-                    if let Err(e) = self.promote_dune_verified().await {
-                        warn!(error = %e, "Dune PnL monitor promotion failed");
-                    }
-                    if let Err(e) = self.demote_shadow_losers().await {
-                        warn!(error = %e, "Shadow quality check failed");
-                    }
-                    if let Err(e) = self.audit_actives_onchain().await {
-                        warn!(error = %e, "On-chain audit check failed");
+
+                let mut interval = tokio::time::interval(Duration::from_secs(
+                    task_self.promote_check_interval_secs,
+                ));
+                interval.tick().await; // consume first immediate tick
+
+                loop {
+                    tokio::select! {
+                        _ = task_token.cancelled() => break,
+                        _ = interval.tick() => {
+                            if has_key {
+                                if task_self.demote_losers_enabled {
+                                    if let Err(e) = task_self.run_check().await {
+                                        warn!(error = %e, "Dune PnL monitor check failed");
+                                    }
+                                }
+                                if let Err(e) = task_self.promote_dune_verified().await {
+                                    warn!(error = %e, "Dune PnL monitor promotion failed");
+                                }
+                            }
+                            if let Err(e) = task_self.audit_actives_onchain().await {
+                                warn!(error = %e, "On-chain audit check failed");
+                            }
+                        }
                     }
                 }
-            }
+            });
         }
+
+        // Keep run() alive until cancellation (both timer tasks are spawned
+        // independently and die with the shared token).
+        let _ = cancel_token.cancelled().await;
+        info!("Dune PnL monitor shutting down");
     }
 
     /// Execute one full check cycle: query Dune → parse → demote.
@@ -734,7 +786,9 @@ impl DunePnlMonitor {
     /// PnL on admitted DEX signals are demoted, with WQS lowered below the
     /// auto-promote threshold so the refill does not instantly re-promote.
     async fn demote_shadow_losers(&self) -> AppResult<usize> {
-        if !self.shadow_quality_enabled || self.api_key.is_empty() {
+        // Local DB only — no Dune API, so no Dune-key guard (a missing
+        // DUNE_API_KEY must not silently disable shadow quality demotion).
+        if !self.shadow_quality_enabled {
             return Ok(0);
         }
 
@@ -841,10 +895,9 @@ impl DunePnlMonitor {
     /// API-cost control: only the `audit_max_per_cycle` most-active wallets
     /// are assessed per cycle, so the sweep spreads over a few cycles.
     async fn audit_actives_onchain(&self) -> AppResult<usize> {
-        if !self.onchain_config.enabled
-            || !self.onchain_config.audit_actives_enabled
-            || self.api_key.is_empty()
-        {
+        // Helius API only — no Dune API, so no Dune-key guard (a missing
+        // DUNE_API_KEY must not silently disable the retroactive audit).
+        if !self.onchain_config.enabled || !self.onchain_config.audit_actives_enabled {
             return Ok(0);
         }
         let Some(ctx) = &self.promotion_ctx else {
