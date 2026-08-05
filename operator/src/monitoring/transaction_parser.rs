@@ -586,7 +586,22 @@ fn parse_from_swap_event(
 
     let (token_mint, _token_amount, is_output) = match spec_token {
         Some(v) => v,
-        None => return Ok(None), // pure SOL/stablecoin swap, no speculative token
+        None => {
+            // Diagnostic: log what legs we saw so we can see why no
+            // speculative token was found.
+            let leg_summary: Vec<String> = legs
+                .iter()
+                .map(|(m, a, out)| format!("{}={}({})", &m[..m.len().min(8)], a, if *out { "out" } else { "in" }))
+                .collect();
+            tracing::debug!(
+                _sig = _signature,
+                legs = leg_summary.join(", "),
+                sol_in = %sol_in,
+                sol_out = %sol_out,
+                "parse_from_swap_event: no speculative token found — see legs"
+            );
+            return Ok(None);
+        }
     };
 
     // Direction: received (output) = BUY, given (input) = SELL.
