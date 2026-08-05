@@ -214,6 +214,9 @@ impl DunePnlMonitor {
                                 warn!(error = %e, "Dune PnL monitor startup promotion failed");
                             }
                         }
+                        if let Err(e) = task_self.promote_active_candidates_onchain().await {
+                            warn!(error = %e, "Candidate promotion startup check failed");
+                        }
                         if let Err(e) = task_self.audit_actives_onchain().await {
                             warn!(error = %e, "On-chain audit startup check failed");
                         }
@@ -238,6 +241,9 @@ impl DunePnlMonitor {
                                 if let Err(e) = task_self.promote_dune_verified().await {
                                     warn!(error = %e, "Dune PnL monitor promotion failed");
                                 }
+                            }
+                            if let Err(e) = task_self.promote_active_candidates_onchain().await {
+                                warn!(error = %e, "Candidate promotion check failed");
                             }
                             if let Err(e) = task_self.audit_actives_onchain().await {
                                 warn!(error = %e, "On-chain audit check failed");
@@ -793,6 +799,210 @@ impl DunePnlMonitor {
                 eligible = candidates.len(),
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "Dune PnL monitor: promoted verified profitable wallets"
+            );
+        }
+        Ok(promoted)
+    }
+
+    /// Promote CANDIDATE wallets with recent detected activity whose on-chain
+    /// round-trip expectancy proves a copy-trading edge.
+    ///
+    /// Why: the Dune promote query only covers wallets on its own 7d list.
+    /// The 11K+ CANDIDATE pool contains actively-trading wallets that never
+    /// appear on Dune — their swaps are detected by our webhooks/parser and
+    /// shadow-traded, but they never get promoted because they're not on
+    /// Dune's radar. This cycle finds them by their OWN decision activity
+    /// (shadow positions record every signal, CANDIDATE included) and runs
+    /// the same on-chain assessment used for Dune admission.
+    ///
+    /// Selection: CANDIDATE wallets with >=1 decision in the last 24h,
+    /// ordered by activity, capped at `promote_max_per_cycle` per cycle.
+    /// Respects the same `promote_max_active_total` cap and demotion
+    /// cooldown as the Dune path.
+    async fn promote_active_candidates_onchain(&self) -> AppResult<usize> {
+        // Helius API only — no Dune API, so no Dune-key guard.
+        if !self.onchain_config.enabled {
+            return Ok(0);
+        }
+        let Some(ctx) = &self.promotion_ctx else {
+            return Ok(0);
+        };
+        let Some(helius) = &ctx.helius_client else {
+            return Ok(0);
+        };
+        let DbPool::PostgreSQL(pool) = self.db.pool();
+
+        // Respect the ACTIVE total cap (same as the Dune path).
+        let active_total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE'")
+                .fetch_one(&pool)
+                .await?;
+        if active_total as u32 >= self.promote_max_active_total {
+            info!(
+                active_total,
+                cap = self.promote_max_active_total,
+                "Candidate promotion: ACTIVE cap reached, skipping cycle"
+            );
+            return Ok(0);
+        }
+
+        // Find CANDIDATE wallets that produced decisions in the last 24h
+        // (shadow records decisions for all signals) and are not within the
+        // demotion cooldown. Order by decision count so the most-active get
+        // assessed first.
+        let candidates: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT dr.wallet_address
+            FROM decision_records dr
+            JOIN wallets w ON w.address = dr.wallet_address
+            WHERE w.status = 'CANDIDATE'
+              AND dr.created_at > NOW() - INTERVAL '24 hours'
+              AND COALESCE(w.demoted_at, '-infinity') < NOW() - ($2 || ' hours')::interval
+            GROUP BY dr.wallet_address
+            ORDER BY COUNT(*) DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(self.promote_max_per_cycle as i64)
+        .bind(self.promote_demote_cooldown_hours)
+        .fetch_all(&pool)
+        .await?;
+
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+
+        let assessor = crate::engine::onchain_assessment::OnchainAssessor::new(helius.clone());
+        let mut promoted = 0;
+        for addr in &candidates {
+            // Re-check the cap inside the loop (other promotion paths may
+            // have advanced it between iterations).
+            let active_total: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE'")
+                    .fetch_one(&pool)
+                    .await?;
+            if active_total as u32 >= self.promote_max_active_total {
+                info!(
+                    active_total,
+                    cap = self.promote_max_active_total,
+                    "Candidate promotion: ACTIVE cap reached mid-cycle"
+                );
+                break;
+            }
+
+            match assessor
+                .assess_wallet(addr, self.onchain_config.tx_limit)
+                .await
+            {
+                Ok(a) => {
+                    // Persist the per-wallet exit profile (reuses fetched txs).
+                    {
+                        let stats =
+                            crate::engine::exit_profile::WalletExitStats::from_assessment(&a);
+                        if let Err(e) =
+                            crate::engine::exit_profile::upsert_exit_profile(&pool, addr, &stats)
+                                .await
+                        {
+                            warn!(wallet = %addr, error = %e, "Candidate promotion: exit profile upsert failed");
+                        }
+                    }
+                    let pass = a.round_trips >= self.onchain_config.min_round_trips
+                        && a.expectancy_pct > self.onchain_config.min_expectancy_pct;
+                    info!(
+                        wallet = %addr,
+                        txs_fetched = a.txs_fetched,
+                        round_trips = a.round_trips,
+                        win_rate = a.win_rate_pct,
+                        expectancy = a.expectancy_pct,
+                        pass,
+                        "On-chain assessment for active CANDIDATE promotion"
+                    );
+                    if !pass {
+                        continue;
+                    }
+
+                    // Promote: CANDIDATE -> ACTIVE with the same treatment as
+                    // the Dune path (WQS floor, webhook registration, toxic
+                    // baseline) so signals flow immediately.
+                    let reason = format!(
+                        "On-chain verified: {} round trips, expectancy {:.2}%, win rate {:.1}%",
+                        a.round_trips, a.expectancy_pct, a.win_rate_pct
+                    );
+                    match self
+                        .db
+                        .update_wallet_status_ext(addr, "ACTIVE", None, Some(&reason))
+                        .await
+                    {
+                        Ok(true) => {
+                            promoted += 1;
+                            info!(wallet = %addr, reason = %reason, "Candidate promotion: CANDIDATE -> ACTIVE");
+                        }
+                        Ok(false) => {
+                            warn!(wallet = %addr, "Candidate promotion: status update returned false");
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!(wallet = %addr, error = %e, "Candidate promotion: status update failed");
+                            continue;
+                        }
+                    }
+
+                    // WQS floor so the selection WQS gate lets signals through.
+                    if let Err(e) = sqlx::query(
+                        r#"UPDATE wallets
+                           SET wqs_score = GREATEST(COALESCE(wqs_score, 0), 80.0),
+                               notes = COALESCE(notes, '') || ' | On-chain verified: WQS floor 80'
+                           WHERE address = $1"#,
+                    )
+                    .bind(addr)
+                    .execute(&pool)
+                    .await
+                    {
+                        warn!(wallet = %addr, error = %e, "Candidate promotion: WQS update failed");
+                    }
+
+                    // Toxic baseline so the detector can track post-promotion ROI.
+                    if let Some(td) = &ctx.toxic_detector {
+                        if let Err(e) = td.register_wallet_promotion(addr.clone(), 0.0).await {
+                            warn!(wallet = %addr, error = %e, "Candidate promotion: toxic baseline registration failed");
+                        }
+                    }
+
+                    // Webhook registration so signals start flowing.
+                    if let (Some(limiter), Some(wl_config)) = (
+                        &ctx.webhook_rate_limiter,
+                        &ctx.webhook_lifecycle_config,
+                    ) {
+                        let manager = WebhookLifecycleManager::new(
+                            self.db.clone(),
+                            helius.clone(),
+                            limiter.clone(),
+                            wl_config.clone(),
+                        );
+                        match manager.register_wallet_webhook(addr).await {
+                            Ok(r) if r.success => {
+                                info!(wallet = %addr, webhook_id = %r.webhook_id, "Candidate promotion: webhook registered");
+                            }
+                            Ok(r) => {
+                                warn!(wallet = %addr, error = ?r.error_message, "Candidate promotion: webhook registration failed");
+                            }
+                            Err(e) => {
+                                warn!(wallet = %addr, error = %e, "Candidate promotion: webhook registration error");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(wallet = %addr, error = %e, "Candidate promotion: assessment failed");
+                }
+            }
+        }
+
+        if promoted > 0 {
+            warn!(
+                promoted,
+                eligible = candidates.len(),
+                "Candidate promotion: promoted on-chain verified wallets"
             );
         }
         Ok(promoted)
