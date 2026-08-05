@@ -144,8 +144,12 @@ services:
        # Redis configuration
        - REDIS_ENABLED=${REDIS_ENABLED:-true}
        - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-       # Jupiter API (required for production)
-       - CHIMERA_JUPITER__API_KEY=${JUPITER_API_KEY:?JUPITER_API_KEY is required}
+        # Jupiter API (optional: an INVALID key returns 401 on every request,
+        # fail-closing the honeypot check + price fetches + swap execution —
+        # observed 2026-08-06: the configured key 401'd 5/5 while keyless
+        # requests returned 200. Keyless works (rate-limited); keep unset
+        # until a valid key is available.)
+        - CHIMERA_JUPITER__API_KEY=${JUPITER_API_KEY:-}
        # Helius API key (config crate reads CHIMERA_ prefix, not raw HELIUS_API_KEY)
        - CHIMERA_MONITORING__HELIUS_API_KEY=${HELIUS_API_KEY}
        # RPC endpoints: use Helius RPC (reliable from this network) instead of
