@@ -186,8 +186,14 @@ impl DunePnlMonitor {
         // 2. Poll until complete, then fetch CSV.
         let csv = self.poll_and_fetch_csv(&execution_id).await?;
 
-        // 3. Parse losing wallets.
-        let losing = Self::parse_csv(&csv);
+        // 3. Parse losing wallets. Fall back to JSON results if the CSV
+        //    endpoint returned an empty body (intermittent Dune flakiness).
+        let mut losing = Self::parse_csv(&csv);
+        if losing.is_empty() {
+            if let Ok(rows) = self.fetch_completed_json_rows(&execution_id).await {
+                losing = Self::parse_csv(&Self::rows_to_csv(&rows));
+            }
+        }
         info!(
             losing_wallets = losing.len(),
             elapsed_ms = started.elapsed().as_millis() as u64,
@@ -283,6 +289,56 @@ impl DunePnlMonitor {
         Err(AppError::Internal(format!(
             "Dune query timed out after {} polls"
         , MAX_POLLS)))
+    }
+
+    /// Fetch JSON result rows for an already-COMPLETED execution.
+    /// Used as a fallback when the CSV endpoint returns an empty body
+    /// (observed: `/results/csv` intermittently returns nothing while
+    /// `/results` returns 200 rows — silently zeroing promotion cycles).
+    async fn fetch_completed_json_rows(
+        &self,
+        execution_id: &str,
+    ) -> AppResult<Vec<serde_json::Value>> {
+        let results_url = format!("{DUNE_API_BASE}/execution/{execution_id}/results");
+        let resp = self
+            .http
+            .get(&results_url)
+            .header("X-Dune-Api-Key", &self.api_key)
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("Dune JSON results request failed: {e}")))?;
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Internal(format!("Dune JSON results parse failed: {e}")))?;
+
+        Ok(body
+            .get("result")
+            .and_then(|r| r.get("rows"))
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Convert JSON result rows into CSV text so the existing CSV parsers
+    /// (parse_csv / parse_profitable_csv) can be reused for both formats.
+    fn rows_to_csv(rows: &[serde_json::Value]) -> String {
+        let mut out = String::new();
+        if let Some(first) = rows.first() {
+            if let Some(obj) = first.as_object() {
+                out.push_str(&obj.keys().cloned().collect::<Vec<_>>().join(","));
+                out.push('\n');
+            }
+        }
+        for row in rows {
+            if let Some(obj) = row.as_object() {
+                let vals: Vec<String> = obj.values().map(|v| v.to_string()).collect();
+                out.push_str(&vals.join(","));
+                out.push('\n');
+            }
+        }
+        out
     }
 
     /// Parse the Dune CSV result into a list of losing wallets.
@@ -415,7 +471,16 @@ impl DunePnlMonitor {
         // 1. Execute the Dune top-traders query.
         let execution_id = self.execute_query(self.promote_query_id).await?;
         let csv = self.poll_and_fetch_csv(&execution_id).await?;
-        let profitable = Self::parse_profitable_csv(&csv, self.promote_min_roi);
+        let mut profitable = Self::parse_profitable_csv(&csv, self.promote_min_roi);
+        if profitable.is_empty() {
+            // CSV endpoint flaky — fall back to JSON results.
+            if let Ok(rows) = self.fetch_completed_json_rows(&execution_id).await {
+                profitable = Self::parse_profitable_csv(
+                    &Self::rows_to_csv(&rows),
+                    self.promote_min_roi,
+                );
+            }
+        }
         if profitable.is_empty() {
             return Ok(0);
         }
