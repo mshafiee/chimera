@@ -2386,6 +2386,19 @@ pub struct DuneConfig {
     /// Skip promotion when ACTIVE wallet count is at or above this cap.
     #[serde(default = "default_dune_promote_max_active_total")]
     pub promote_max_active_total: u32,
+    /// Demote ACTIVE wallets whose admitted DEX signals lose money under our
+    /// own exit logic (shadow mirror_main, rolling window).
+    #[serde(default = "default_shadow_quality_enabled")]
+    pub shadow_quality_enabled: bool,
+    /// Minimum shadow exits before a wallet can be demoted on quality.
+    #[serde(default = "default_shadow_quality_min_samples")]
+    pub shadow_quality_min_samples: i64,
+    /// Demote when average shadow PnL% is below this threshold.
+    #[serde(default = "default_shadow_quality_demote_threshold_pct")]
+    pub shadow_quality_demote_threshold_pct: f64,
+    /// Rolling window (hours) for shadow quality evaluation.
+    #[serde(default = "default_shadow_quality_window_hours")]
+    pub shadow_quality_window_hours: i64,
 }
 
 fn default_dune_pnl_query_id() -> u64 {
@@ -2409,6 +2422,18 @@ fn default_dune_promote_max_per_cycle() -> u32 {
 fn default_dune_promote_max_active_total() -> u32 {
     50
 }
+fn default_shadow_quality_enabled() -> bool {
+    true
+}
+fn default_shadow_quality_min_samples() -> i64 {
+    5
+}
+fn default_shadow_quality_demote_threshold_pct() -> f64 {
+    -1.5
+}
+fn default_shadow_quality_window_hours() -> i64 {
+    48
+}
 
 impl Default for DuneConfig {
     fn default() -> Self {
@@ -2421,6 +2446,10 @@ impl Default for DuneConfig {
             promote_min_roi: default_dune_promote_min_roi(),
             promote_max_per_cycle: default_dune_promote_max_per_cycle(),
             promote_max_active_total: default_dune_promote_max_active_total(),
+            shadow_quality_enabled: default_shadow_quality_enabled(),
+            shadow_quality_min_samples: default_shadow_quality_min_samples(),
+            shadow_quality_demote_threshold_pct: default_shadow_quality_demote_threshold_pct(),
+            shadow_quality_window_hours: default_shadow_quality_window_hours(),
         }
     }
 }

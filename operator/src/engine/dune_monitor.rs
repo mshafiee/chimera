@@ -68,6 +68,10 @@ pub struct DunePnlMonitor {
     promote_min_roi: f64,
     promote_max_per_cycle: u32,
     promote_max_active_total: u32,
+    shadow_quality_enabled: bool,
+    shadow_quality_min_samples: i64,
+    shadow_quality_demote_threshold_pct: f64,
+    shadow_quality_window_hours: i64,
     promotion_ctx: Option<DunePromotionContext>,
 }
 
@@ -108,6 +112,10 @@ impl DunePnlMonitor {
             promote_min_roi: config.promote_min_roi,
             promote_max_per_cycle: config.promote_max_per_cycle,
             promote_max_active_total: config.promote_max_active_total,
+            shadow_quality_enabled: config.shadow_quality_enabled,
+            shadow_quality_min_samples: config.shadow_quality_min_samples,
+            shadow_quality_demote_threshold_pct: config.shadow_quality_demote_threshold_pct,
+            shadow_quality_window_hours: config.shadow_quality_window_hours,
             promotion_ctx: None,
         }
     }
@@ -149,6 +157,9 @@ impl DunePnlMonitor {
                         if let Err(e) = startup_self.promote_dune_verified().await {
                             warn!(error = %e, "Dune PnL monitor startup promotion failed");
                         }
+                        if let Err(e) = startup_self.demote_shadow_losers().await {
+                            warn!(error = %e, "Shadow quality startup check failed");
+                        }
                     }
                 }
             });
@@ -170,6 +181,9 @@ impl DunePnlMonitor {
                     }
                     if let Err(e) = self.promote_dune_verified().await {
                         warn!(error = %e, "Dune PnL monitor promotion failed");
+                    }
+                    if let Err(e) = self.demote_shadow_losers().await {
+                        warn!(error = %e, "Shadow quality check failed");
                     }
                 }
             }
@@ -647,6 +661,110 @@ impl DunePnlMonitor {
             );
         }
         Ok(promoted)
+    }
+
+    /// Demote ACTIVE wallets whose admitted DEX signals lose money under our
+    /// own exit logic (shadow `mirror_main` exits over a rolling window).
+    ///
+    /// Rationale: a wallet's own behavior (wallet_sell) can diverge wildly
+    /// from what we would realize (Grxr6m: mirror +2.2% vs wallet_sell
+    /// -25.9%). What matters for OUR PnL is how its signals perform with OUR
+    /// exits — mirror_main. Wallets with consistently negative mirror_main
+    /// PnL on admitted DEX signals are demoted, with WQS lowered below the
+    /// auto-promote threshold so the refill does not instantly re-promote.
+    async fn demote_shadow_losers(&self) -> AppResult<usize> {
+        if !self.shadow_quality_enabled || self.api_key.is_empty() {
+            return Ok(0);
+        }
+
+        let DbPool::PostgreSQL(pool) = self.db.pool();
+
+        #[derive(Debug, sqlx::FromRow)]
+        struct ShadowLoser {
+            wallet_address: String,
+            n: i64,
+            avg_pnl: f64,
+        }
+
+        let losers: Vec<ShadowLoser> = sqlx::query_as(
+            r#"
+            SELECT sp.wallet_address, COUNT(*) AS n, AVG(se.pnl_pct)::float8 AS avg_pnl
+            FROM shadow_exits se
+            JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
+            WHERE sp.opened_at > NOW() - ($1 || ' hours')::interval
+              AND se.exit_strategy = 'mirror_main'
+              AND sp.token_address NOT LIKE '%pump'
+              AND sp.main_admitted = true
+            GROUP BY sp.wallet_address
+            HAVING COUNT(*) >= $2 AND AVG(se.pnl_pct) < $3
+            "#,
+        )
+        .bind(self.shadow_quality_window_hours)
+        .bind(self.shadow_quality_min_samples)
+        .bind(self.shadow_quality_demote_threshold_pct)
+        .fetch_all(&pool)
+        .await?;
+
+        if losers.is_empty() {
+            return Ok(0);
+        }
+
+        let mut demoted = 0;
+        for l in &losers {
+            // Only demote wallets that are still ACTIVE.
+            let is_active: Option<String> = sqlx::query_scalar(
+                "SELECT address FROM wallets WHERE address = $1 AND status = 'ACTIVE'",
+            )
+            .bind(&l.wallet_address)
+            .fetch_optional(&pool)
+            .await?;
+            if is_active.is_none() {
+                continue;
+            }
+
+            let reason = format!(
+                "Shadow quality: {} admitted DEX signals avg {:.2}% over {}h (threshold {:.1}%)",
+                l.n,
+                l.avg_pnl,
+                self.shadow_quality_window_hours,
+                self.shadow_quality_demote_threshold_pct
+            );
+            match self.db.demote_wallet(&l.wallet_address, &reason).await {
+                Ok(_) => {
+                    // Lower WQS below the auto-promote threshold (30) so the
+                    // refill does not instantly re-promote this wallet.
+                    let _ = sqlx::query(
+                        "UPDATE wallets SET wqs_score = LEAST(COALESCE(wqs_score, 0), 10.0) WHERE address = $1",
+                    )
+                    .bind(&l.wallet_address)
+                    .execute(&pool)
+                    .await;
+                    demoted += 1;
+                    warn!(
+                        wallet = %l.wallet_address,
+                        avg_pnl = l.avg_pnl,
+                        samples = l.n,
+                        "Shadow quality: demoted negative-EV wallet"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        wallet = %l.wallet_address,
+                        error = %e,
+                        "Shadow quality demote failed"
+                    );
+                }
+            }
+        }
+
+        if demoted > 0 {
+            warn!(
+                demoted,
+                eligible = losers.len(),
+                "Shadow quality monitor: demoted wallets with consistently negative shadow PnL"
+            );
+        }
+        Ok(demoted)
     }
 }
 

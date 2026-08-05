@@ -271,3 +271,7 @@ dune:
   promote_min_roi: 1.2      # min ROI (net PnL / buy volume) to promote
   promote_max_per_cycle: 10 # max promotions per hourly cycle
   promote_max_active_total: 60  # Dune-verified promotions take priority above auto-promote cap (50)
+  shadow_quality_enabled: true  # demote wallets with negative shadow PnL on admitted DEX signals
+  shadow_quality_min_samples: 5 # min mirror_main exits before demoting
+  shadow_quality_demote_threshold_pct: -1.5  # avg PnL% below this triggers demotion
+  shadow_quality_window_hours: 48
