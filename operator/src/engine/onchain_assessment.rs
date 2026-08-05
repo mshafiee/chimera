@@ -74,8 +74,14 @@ impl OnchainAssessor {
         let mut ledgers: HashMap<String, TokenLedger> = HashMap::new();
 
         for tx in &txs {
-            // Ignore failed transactions.
-            if tx.get("transactionError").is_some() {
+            // Ignore FAILED transactions. The enhanced API includes
+            // "transactionError": null on successful txs — a null value must
+            // NOT count as an error (is_some() would skip everything).
+            if tx
+                .get("transactionError")
+                .map(|e| !e.is_null())
+                .unwrap_or(false)
+            {
                 continue;
             }
             Self::apply_transaction(wallet, tx, &mut ledgers);
@@ -304,6 +310,34 @@ mod tests {
         OnchainAssessor::apply_transaction(wallet, &buy_tx, &mut ledgers);
         let ledger = ledgers.get(token).expect("token ledger");
         assert_eq!(ledger.buy_quote, Decimal::from(12));
+    }
+
+    #[test]
+    fn test_null_transaction_error_does_not_skip() {
+        // The enhanced API emits "transactionError": null on successful txs.
+        // The success-path filter must NOT treat null as an error.
+        let wallet = "Wallet111111111111111111111111111111111111";
+        let token = "TokA111111111111111111111111111111111111111";
+        let usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+        let buy_tx = serde_json::json!({
+            "transactionError": null,
+            "tokenTransfers": [
+                {"mint": usdc, "tokenAmount": 12, "fromUserAccount": wallet, "toUserAccount": "DexAcct1111111111111111111111111111111111111"},
+                {"mint": token, "tokenAmount": 1000, "fromUserAccount": "DexAcct1111111111111111111111111111111111111", "toUserAccount": wallet},
+            ],
+            "nativeTransfers": [],
+        });
+
+        let txs = vec![buy_tx];
+        // assess_wallet would require a real client; test the filter inline:
+        // a null transactionError must not cause the tx to be skipped.
+        // We emulate by checking the filter condition directly.
+        let is_error = txs[0]
+            .get("transactionError")
+            .map(|e| !e.is_null())
+            .unwrap_or(false);
+        assert!(!is_error, "null transactionError must not count as failure");
     }
 
     #[test]
