@@ -47,8 +47,8 @@ strategy:
   spear_percent: 50
   max_position_sol: 1.0
   min_position_sol: 0.01
-  shield_signal_quality_threshold: 0.30  # Drop net-negative 0.20-0.30 quality band (-0.057 SOL, 20% WR)
-  spear_signal_quality_threshold: 0.30  # Drop net-negative 0.20-0.30 quality band (-0.057 SOL, 20% WR)
+  shield_signal_quality_threshold: 0.40  # Raised from 0.30: data shows only the 0.50+ quality band is gross-profitable (+0.06 SOL); 0.30-0.50 lost -0.53 SOL. 0.40 drops the worst sub-0.40 band (-0.37 SOL).
+  spear_signal_quality_threshold: 0.40  # Raised from 0.30: same data — sub-0.40 signals are net-negative.
   dex_fee_rate: 0.003             # Default Raydium/Orca fee rate (0.3%)
   shield_max_total_cost_percent: 0.025  # Rejects Shield trades if costs exceed 2.5% of trade size (was 5%: too loose for a ~0% edge — 5% cost = guaranteed loss)
   spear_max_total_cost_percent: 0.03   # Rejects Spear trades if costs exceed 3% of trade size (was 8%: even with the 1.5x regime expansion that's 12% effective)
@@ -103,8 +103,8 @@ token_safety:
   cache_capacity: 1000
   cache_ttl_seconds: 3600  # 1 hour
   # Minimum token age in hours to allow a BUY signal (0 disables the check)
-  min_token_age_hours: 0.0         # Disabled — $10K liquidity floor is the primary safety filter
-  min_token_age_pumpfun_hours: 0.0 # Disabled — liquidity check filters rugs
+  min_token_age_hours: 0.5         # Minimum 30min token age — filters instant rug pulls while still catching early moves (was 0.0 disabled, originally 2h)
+  min_token_age_pumpfun_hours: 0.5 # Same: 30min minimum for pump.fun tokens
   # Allow pump.fun tokens >2h old. With signal-based exit management (copy_wallet_sells: false),
   # positions are managed by profit targets/stop-loss instead of copying wallet sells.
   allow_graduated_pumpfun: false  # Block ALL pump.fun tokens — 70% of trades, 17% win rate, negative EV
