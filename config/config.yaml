@@ -325,7 +325,11 @@ dune:
   onchain_assessment:
     enabled: true
     min_round_trips: 10        # completed round trips required
-    min_expectancy_pct: 0.0    # avg round-trip PnL% must be > 0
+    # Expectancy must clear our round-trip trading costs (~0.72%: jito 0.48%
+    # + dex fee 0.24% at 0.5 SOL) plus a margin — a wallet at +0.5% expectancy
+    # is net-negative to copy. Raised from 0.0 after shadow-vs-live analysis
+    # (2026-08-05: shadow mirror -0.83% on admitted signals, live ~2% worse).
+    min_expectancy_pct: 1.5    # avg round-trip PnL% must be > 1.5
     tx_limit: 200              # SWAP transactions fetched per wallet
     audit_actives_enabled: true  # retroactive audit: demote ACTIVE wallets without proven edge
     audit_max_per_cycle: 10    # ACTIVE wallets audited per cycle (API cost control)
