@@ -543,13 +543,6 @@ fn parse_from_swap_event(
     for leg in &swap.token_inputs {
         if let Some(rta) = &leg.raw_token_amount {
             let amount = Decimal::from_str(&rta.token_amount).unwrap_or(Decimal::ZERO);
-            tracing::debug!(
-                mint = %leg.mint,
-                raw_token_amount = %rta.token_amount,
-                parsed_amount = %amount,
-                direction = "input",
-                "swap_event leg parsed"
-            );
             if amount.abs() > Decimal::new(1, 6) {
                 legs.push((leg.mint.clone(), amount, false)); // given
             }
@@ -558,13 +551,6 @@ fn parse_from_swap_event(
     for leg in &swap.token_outputs {
         if let Some(rta) = &leg.raw_token_amount {
             let amount = Decimal::from_str(&rta.token_amount).unwrap_or(Decimal::ZERO);
-            tracing::debug!(
-                mint = %leg.mint,
-                raw_token_amount = %rta.token_amount,
-                parsed_amount = %amount,
-                direction = "output",
-                "swap_event leg parsed"
-            );
             if amount.abs() > Decimal::new(1, 6) {
                 legs.push((leg.mint.clone(), amount, true)); // received
             }
@@ -600,22 +586,7 @@ fn parse_from_swap_event(
 
     let (token_mint, _token_amount, is_output) = match spec_token {
         Some(v) => v,
-        None => {
-            // Diagnostic: log what legs we saw so we can see why no
-            // speculative token was found.
-            let leg_summary: Vec<String> = legs
-                .iter()
-                .map(|(m, a, out)| format!("{}={}({})", &m[..m.len().min(8)], a, if *out { "out" } else { "in" }))
-                .collect();
-            tracing::debug!(
-                _sig = _signature,
-                legs = leg_summary.join(", "),
-                sol_in = %sol_in,
-                sol_out = %sol_out,
-                "parse_from_swap_event: no speculative token found — see legs"
-            );
-            return Ok(None);
-        }
+        None => return Ok(None), // pure SOL/stablecoin swap, no speculative token
     };
 
     // Direction: received (output) = BUY, given (input) = SELL.
@@ -650,14 +621,6 @@ fn parse_from_swap_event(
     };
 
     let dex = "Unknown";
-
-    tracing::info!(
-        token_mint = %token_mint,
-        direction = ?direction,
-        quote_mint = %quote_mint,
-        quote_amount = %quote_amount,
-        "parse_from_swap_event SUCCESS — returning ParsedSwap"
-    );
 
     Ok(Some(ParsedSwap {
         token_in: if direction == SwapDirection::Buy {
@@ -703,17 +666,6 @@ pub fn parse_helius_webhook(
     // Before this fix, ~98% of tracked-wallet SWAP events parsed as
     // Ok(None) because the speculative token's user_account didn't match.
     if let Some(swap_event) = &payload.events.swap {
-        let in_mints: Vec<String> = swap_event.token_inputs.iter().map(|l| format!("{}({})", &l.mint[..l.mint.len().min(8)], l.raw_token_amount.is_some())).collect();
-        let out_mints: Vec<String> = swap_event.token_outputs.iter().map(|l| format!("{}({})", &l.mint[..l.mint.len().min(8)], l.raw_token_amount.is_some())).collect();
-        tracing::debug!(
-            signature = %payload.signature,
-            has_events_swap = true,
-            token_inputs = swap_event.token_inputs.len(),
-            token_outputs = swap_event.token_outputs.len(),
-            in_mints = in_mints.join(","),
-            out_mints = out_mints.join(","),
-            "events.swap present — using primary parse path"
-        );
         if let Some(parsed) = parse_from_swap_event(
             swap_event,
             &payload.signature,
@@ -723,12 +675,6 @@ pub fn parse_helius_webhook(
         )? {
             return Ok(Some(parsed));
         }
-    } else if tracked_wallet.is_some() {
-        tracing::debug!(
-            signature = %payload.signature,
-            has_events_swap = false,
-            "events.swap absent — falling back to tokenBalanceChanges"
-        );
     }
 
     // Fallback: infer from token balance changes (original path).
@@ -781,25 +727,7 @@ pub fn parse_helius_webhook(
 
     let (token_mint, token_delta) = match traded_token {
         Some(v) => v,
-        None => {
-            // Diagnostic: 98% of tracked-wallet SWAP events return Ok(None)
-            // here. Log the token_deltas map so we can see WHY no speculative
-            // token was found (all SOL/stablecoin? amounts parsing as zero?
-            // user_account filter removing all changes?).
-            if tracked_wallet.is_some() && !token_deltas.is_empty() {
-                let delta_summary: Vec<String> = token_deltas
-                    .iter()
-                    .map(|(m, d)| format!("{}={}", &m[..m.len().min(8)], d))
-                    .collect();
-                tracing::warn!(
-                    signature = %payload.signature,
-                    tracked_wallet = ?tracked_wallet,
-                    token_deltas = delta_summary.join(", "),
-                    "PARSE_FAIL: tracked wallet SWAP but no speculative token found — see deltas"
-                );
-            }
-            return Ok(None); // no speculative token (pure stablecoin/dust swap)
-        }
+        None => return Ok(None), // no speculative token (pure stablecoin/dust swap)
     };
 
     // Direction: positive token delta = received tokens = BUY; negative = SELL.
