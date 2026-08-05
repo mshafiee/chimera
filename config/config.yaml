@@ -306,6 +306,7 @@ dune:
   promote_check_interval_secs: 21600  # Dune promote + on-chain audit (6h)
   promote_enabled: true     # promote Dune-verified profitable CANDIDATE wallets
   promote_query_id: 8221520 # Dune query: top profitable traders (7d)
+  promote_query_id_24h: 8235367 # Dune query: top profitable traders (24h active) — finds wallets trading RIGHT NOW, prioritized over 7d-only wallets
   promote_min_roi: 1.2      # min ROI (net PnL / buy volume) to promote
   promote_max_per_cycle: 10 # max promotions per hourly cycle
   promote_max_active_total: 60  # Dune-verified promotions take priority above auto-promote cap (50)

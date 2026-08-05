@@ -67,6 +67,7 @@ pub struct DunePnlMonitor {
     http: reqwest::Client,
     promote_enabled: bool,
     promote_query_id: u64,
+    promote_query_id_24h: u64,
     promote_min_roi: f64,
     promote_max_per_cycle: u32,
     promote_max_active_total: u32,
@@ -116,6 +117,7 @@ impl DunePnlMonitor {
                 .unwrap_or_default(),
             promote_enabled: config.promote_enabled,
             promote_query_id: config.promote_query_id,
+            promote_query_id_24h: config.promote_query_id_24h,
             promote_min_roi: config.promote_min_roi,
             promote_max_per_cycle: config.promote_max_per_cycle,
             promote_max_active_total: config.promote_max_active_total,
@@ -149,6 +151,7 @@ impl DunePnlMonitor {
         info!(
             query_id = self.query_id,
             promote_query_id = self.promote_query_id,
+            promote_query_id_24h = self.promote_query_id_24h,
             shadow_interval_secs = self.check_interval_secs,
             promote_interval_secs = self.promote_check_interval_secs,
             demote_losers_enabled = self.demote_losers_enabled,
@@ -552,17 +555,46 @@ impl DunePnlMonitor {
 
         let started = std::time::Instant::now();
 
-        // 1. Execute the Dune top-traders query.
-        let execution_id = self.execute_query(self.promote_query_id).await?;
-        let csv = self.poll_and_fetch_csv(&execution_id).await?;
-        let mut profitable = Self::parse_profitable_csv(&csv, self.promote_min_roi);
-        if profitable.is_empty() {
-            // CSV endpoint flaky — fall back to JSON results.
-            if let Ok(rows) = self.fetch_completed_json_rows(&execution_id).await {
-                profitable = Self::parse_profitable_csv(
-                    &Self::rows_to_csv(&rows),
-                    self.promote_min_roi,
-                );
+        // 1. Execute the Dune top-traders queries: the 7d query plus the 24h
+        //    active query. The 7d list promotes wallets that may have STOPPED
+        //    trading (observed: 21/24 promoted wallets dormant); the 24h list
+        //    finds wallets generating edge RIGHT NOW. Merge with 24h-active
+        //    wallets prioritized (they're proven active this day).
+        let mut profitable = Vec::new();
+        for (query_id, label) in [
+            (self.promote_query_id, "7d"),
+            (self.promote_query_id_24h, "24h"),
+        ] {
+            let Ok(execution_id) = self.execute_query(query_id).await else {
+                warn!(query_id, label, "Dune promote query execution failed");
+                continue;
+            };
+            let Ok(csv) = self.poll_and_fetch_csv(&execution_id).await else {
+                warn!(query_id, label, "Dune promote query CSV fetch failed");
+                continue;
+            };
+            let mut parsed = Self::parse_profitable_csv(&csv, self.promote_min_roi);
+            if parsed.is_empty() {
+                // CSV endpoint flaky — fall back to JSON results.
+                if let Ok(rows) = self.fetch_completed_json_rows(&execution_id).await {
+                    parsed = Self::parse_profitable_csv(
+                        &Self::rows_to_csv(&rows),
+                        self.promote_min_roi,
+                    );
+                }
+            }
+            info!(
+                query_id,
+                label,
+                found = parsed.len(),
+                "Dune promote query returned wallets"
+            );
+            // 24h-active wallets go FIRST so they're assessed/promoted before
+            // the 7d-only wallets when the per-cycle cap binds.
+            if label == "24h" {
+                profitable.splice(0..0, parsed);
+            } else {
+                profitable.extend(parsed);
             }
         }
         if profitable.is_empty() {

@@ -2606,6 +2606,13 @@ pub struct DuneConfig {
     /// Dune query ID for the top profitable traders query.
     #[serde(default = "default_dune_promote_query_id")]
     pub promote_query_id: u64,
+    /// Dune query ID for a 24h-active profitable traders query. Run alongside
+    /// the 7d query: 7d ROI promotes wallets that may have STOPPED trading
+    /// (observed: 21/24 promoted wallets dormant). The 24h window finds
+    /// wallets generating edge RIGHT NOW, so the roster skews to active
+    /// traders. Wallets on both lists are prioritized for promotion.
+    #[serde(default = "default_dune_promote_query_id_24h")]
+    pub promote_query_id_24h: u64,
     /// Minimum ROI (net PnL / buy volume) for a wallet to be promoted.
     #[serde(default = "default_dune_promote_min_roi")]
     pub promote_min_roi: f64,
@@ -2660,6 +2667,9 @@ fn default_dune_promote_enabled() -> bool {
 fn default_dune_promote_query_id() -> u64 {
     8221520
 }
+fn default_dune_promote_query_id_24h() -> u64 {
+    8235367
+}
 fn default_dune_promote_min_roi() -> f64 {
     1.2
 }
@@ -2695,6 +2705,7 @@ impl Default for DuneConfig {
             demote_losers_enabled: false,
             promote_enabled: default_dune_promote_enabled(),
             promote_query_id: default_dune_promote_query_id(),
+            promote_query_id_24h: default_dune_promote_query_id_24h(),
             promote_min_roi: default_dune_promote_min_roi(),
             promote_max_per_cycle: default_dune_promote_max_per_cycle(),
             promote_max_active_total: default_dune_promote_max_active_total(),
