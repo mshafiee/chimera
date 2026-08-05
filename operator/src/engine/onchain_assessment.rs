@@ -18,6 +18,7 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
 
 use crate::monitoring::helius::HeliusClient;
+use crate::token::is_pumpfun_token;
 
 /// Quote mints whose tokenAmount can be valued directly (decimal-adjusted).
 const QUOTE_MINTS: [&str; 3] = [
@@ -228,6 +229,15 @@ impl OnchainAssessor {
 
         // For each quote leg (wallet paid quote -> bought token; received
         // quote -> sold token), find the traded token (the other leg).
+        // PUMP.FUN EXCLUSION (2026-08-06): pump.fun bonding-curve mints end
+        // with "pump" — copy-trading them is guaranteed to lose money (no
+        // exit liquidity on DEX, per selection gate). The promotion pipeline
+        // was promoting wallets whose edge is ENTIRELY pump.fun (verified
+        // profitable on-chain) and then the selection gate blocked every
+        // signal (PUMPFUN_BONDING_CURVE) — promoted wallets that can never
+        // produce a trade. Excluding them from the assessment means a
+        // pump.fun-only wallet gets round_trips=0 → fails the gate → never
+        // promoted. Edge on real DEX tokens is what matters for us.
         for (i, (mint, amount, paid)) in wallet_legs.iter().enumerate() {
             if !QUOTE_MINTS.contains(&mint.as_str()) || amount.is_zero() {
                 continue;
@@ -235,7 +245,12 @@ impl OnchainAssessor {
             let traded = wallet_legs
                 .iter()
                 .enumerate()
-                .filter(|(j, (m, a, _))| *j != i && !QUOTE_MINTS.contains(&m.as_str()) && !a.is_zero())
+                .filter(|(j, (m, a, _))| {
+                    *j != i
+                        && !QUOTE_MINTS.contains(&m.as_str())
+                        && !a.is_zero()
+                        && !is_pumpfun_token(m)
+                })
                 .map(|(_, (m, _, _))| m.clone())
                 .next();
             let Some(traded_token) = traded else { continue };
@@ -360,8 +375,46 @@ mod tests {
     }
 
     #[test]
-    fn test_sol_quoted_buy() {
+    fn test_pumpfun_round_trip_excluded() {
+        // A wallet whose ONLY trading is pump.fun bonding-curve tokens
+        // (mints end with "pump") must NOT accumulate round trips — its
+        // edge is uncopyable (no DEX exit liquidity). Regression for the
+        // promotion of pump.fun-only wallets whose signals were then all
+        // blocked by the selection gate.
         let wallet = "Wallet111111111111111111111111111111111111";
+        let pump_token = "PumpToken1111111111111111111111111111111111pump";
+        let usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+        let buy_tx = serde_json::json!({
+            "transactionError": null,
+            "tokenTransfers": [
+                leg(usdc, "100", wallet, "DexAcct1111111111111111111111111111111111111"),
+                leg(pump_token, "1000", "DexAcct1111111111111111111111111111111111111", wallet),
+            ],
+            "nativeTransfers": [],
+        });
+        let sell_tx = serde_json::json!({
+            "transactionError": null,
+            "tokenTransfers": [
+                leg(pump_token, "1000", wallet, "DexAcct1111111111111111111111111111111111111"),
+                leg(usdc, "150", "DexAcct1111111111111111111111111111111111111", wallet),
+            ],
+            "nativeTransfers": [],
+        });
+
+        let mut ledgers = HashMap::new();
+        OnchainAssessor::apply_transaction(wallet, &buy_tx, &mut ledgers);
+        OnchainAssessor::apply_transaction(wallet, &sell_tx, &mut ledgers);
+
+        assert!(
+            ledgers.is_empty(),
+            "pump.fun round trips must not create ledgers: {:?}",
+            ledgers.keys()
+        );
+    }
+
+    #[test]
+    fn test_sol_quoted_buy() {        let wallet = "Wallet111111111111111111111111111111111111";
         let token = "TokA111111111111111111111111111111111111111";
         let wsol = "So11111111111111111111111111111111111111112";
 
