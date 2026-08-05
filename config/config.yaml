@@ -50,8 +50,8 @@ strategy:
   shield_signal_quality_threshold: 0.30  # Drop net-negative 0.20-0.30 quality band (-0.057 SOL, 20% WR)
   spear_signal_quality_threshold: 0.30  # Drop net-negative 0.20-0.30 quality band (-0.057 SOL, 20% WR)
   dex_fee_rate: 0.003             # Default Raydium/Orca fee rate (0.3%)
-  shield_max_total_cost_percent: 0.05  # Rejects Shield trades if costs exceed 5% of trade size
-  spear_max_total_cost_percent: 0.08   # Rejects Spear trades if costs exceed 8% of trade size
+  shield_max_total_cost_percent: 0.025  # Rejects Shield trades if costs exceed 2.5% of trade size (was 5%: too loose for a ~0% edge — 5% cost = guaranteed loss)
+  spear_max_total_cost_percent: 0.03   # Rejects Spear trades if costs exceed 3% of trade size (was 8%: even with the 1.5x regime expansion that's 12% effective)
   slippage_fallback_small_percent: 0.005   # 0.5% slippage estimate for trades < threshold when Jupiter impact unavailable
   slippage_fallback_large_percent: 0.01    # 1.0% slippage estimate for trades >= threshold
   slippage_fallback_threshold_sol: 0.5     # SOL boundary between small/large for slippage fallback
@@ -94,9 +94,9 @@ token_safety:
     - "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"  # USDT
     - "So11111111111111111111111111111111111111112"   # Wrapped SOL
   # Minimum liquidity thresholds (USD) - with 20% buffer for safety
-  min_liquidity_shield_usd: 5000  # Shield floor: $5K (cost gate 5% backstops slippage; admits more pump.fun tokens)
-  min_liquidity_spear_usd: 10000   # Aggressive throughput: $10K floor
-  min_liquidity_pumpfun_usd: 5000  # Pump.fun floor: $5K (was default $25K, blocking all pump.fun signals)
+  min_liquidity_shield_usd: 20000  # Shield floor: $20K (was $5K: 0.5 SOL buy on $5K pool = ~1.6% slippage; $20K keeps it under 0.5%)
+  min_liquidity_spear_usd: 30000   # Spear floor: $30K (was $10K)
+  min_liquidity_pumpfun_usd: 15000  # Pump.fun floor: $15K (was $5K; pump.fun blocked anyway but kept sane)
   # Enable honeypot detection via transaction simulation
   honeypot_detection_enabled: true
   # Token cache settings
@@ -154,9 +154,9 @@ monitoring:
   auto_demote_wallets: true  # Enable automatic wallet demotion based on copy performance
   inactivity_rotation_enabled: true  # Demote wallets that haven't traded recently
   auto_promote_enabled: true  # Refill ACTIVE roster from high-WQS CANDIDATEs (counterbalances auto-demote)
-  auto_promote_min_wqs: 30.0  # Admit WQS>=30 wallets (was 40; more wallets = more trading opportunities; quality gate 0.30 filters signals)
+  auto_promote_min_wqs: 45.0  # Admit WQS>=45 wallets only (was 30: admitted low-quality wallets whose signals are negative-EV; the on-chain expectancy gate further filters)
   auto_promote_ttl_hours: 168  # 7-day TTL on auto-promoted wallets; auto-demote re-evaluates them
-  auto_promote_max_age_days: 14  # Promote/demote by recency: candidates must have traded within 14d (was 7d — admits more; quality gate 0.30 still filters signals); ACTIVE wallets dormant >14d are demoted
+  auto_promote_max_age_days: 7  # Promote/demote by recency: candidates must have traded within 7d (was 14d: admitted stale wallets; fresh activity = current edge)
   wallet_boost_enabled: false  # Tiered per-wallet copy-performance sizing (opt-in; see docs/superpowers/specs/2026-08-03-wallet-performance-sizing-design.md)
   wallet_boost_min_sample: 15
   wallet_boost_window_trades: 20
@@ -251,7 +251,7 @@ position_sizing:
   min_size_sol: 0.25
   min_live_position_sol: 0.02  # Minimum position size for live trading (distinct from paper)
   consensus_multiplier: 2.0  # Increased from 1.5x to 2.0x for stronger consensus signals
-  max_concurrent_positions: 20  # Increased from 12: allow more simultaneous trades
+  max_concurrent_positions: 12  # Was 20: fewer simultaneous positions reduces exposure to negative-EV signals and churn costs
   use_kelly_sizing: false  # Fixed sizing at base_size_sol for consistent cost ratios
   total_capital_sol: 10.0  # Total trading capital in SOL (adjust to actual wallet balance)
   off_hours_size_multiplier: 0.75  # Was 0.5; less penalization during off-hours for more trade volume

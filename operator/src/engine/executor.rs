@@ -46,7 +46,13 @@ const MAX_TX_SIZE_ENCODED: usize = 1644;
 ///
 /// Defined as a fn because `rust_decimal::Decimal` is not `const`-constructible.
 fn max_price_impact_pct() -> Decimal {
-    Decimal::from_str("5").unwrap_or(Decimal::ZERO)
+    // Was 5%: on a near-zero gross-edge strategy, accepting a 5% entry slippage
+    // guarantees a net-negative round trip (entry slippage + exit slippage +
+    // fees ≈ 6-7%). Live win rate was 17.5% vs shadow 68% — the ~50pt gap is
+    // execution cost, dominated by slippage on thin-liquidity entries. A 2%
+    // cap rejects high-impact entries; combined with raised liquidity floors
+    // this targets <1% average entry slippage.
+    Decimal::from_str("2").unwrap_or(Decimal::ZERO)
 }
 
 /// A2: absolute price-impact gate evaluated BEFORE any submission. Rejecting
