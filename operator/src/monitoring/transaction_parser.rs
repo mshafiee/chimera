@@ -666,6 +666,13 @@ pub fn parse_helius_webhook(
     // Before this fix, ~98% of tracked-wallet SWAP events parsed as
     // Ok(None) because the speculative token's user_account didn't match.
     if let Some(swap_event) = &payload.events.swap {
+        tracing::debug!(
+            signature = %payload.signature,
+            has_events_swap = true,
+            token_inputs = swap_event.token_inputs.len(),
+            token_outputs = swap_event.token_outputs.len(),
+            "events.swap present — using primary parse path"
+        );
         if let Some(parsed) = parse_from_swap_event(
             swap_event,
             &payload.signature,
@@ -675,11 +682,15 @@ pub fn parse_helius_webhook(
         )? {
             return Ok(Some(parsed));
         }
+    } else if tracked_wallet.is_some() {
+        tracing::debug!(
+            signature = %payload.signature,
+            has_events_swap = false,
+            "events.swap absent — falling back to tokenBalanceChanges"
+        );
     }
 
     // Fallback: infer from token balance changes (original path).
-
-    // Aggregate NET token balance changes across all account_data entries.
     // When tracked_wallet is Some, only aggregate changes where user_account matches.
     // Helius Enhanced webhooks report net deltas, so multi-hop intermediate
     // tokens (e.g. USDC in SOL→USDC→TOKEN) correctly net to ~zero.
