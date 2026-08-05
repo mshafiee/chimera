@@ -2956,11 +2956,16 @@ impl Executor {
         let base_tip_sol = self.calculate_jito_tip(signal).await;
 
         if attempt > 1 {
-            // Increase tip by 20% per retry attempt (compensating)
+            // Increase tip by 20% per retry attempt (compensating), but NEVER
+            // exceed the configured ceiling. On a near-zero-edge strategy,
+            // escalating tips to land a marginal trade burns capital: a trade
+            // that can't land at the ceiling should fail rather than pay
+            // 2-3x the ceiling on retries. The ceiling is the hard cap.
             let multiplier = 1.0 + (0.2 * (attempt - 1) as f64);
-            let increased_tip = base_tip_sol * rust_decimal::Decimal::from_str(
+            let raw_increased = base_tip_sol * rust_decimal::Decimal::from_str(
                 &format!("{}", multiplier)
             ).unwrap_or(rust_decimal::Decimal::from(2));
+            let increased_tip = raw_increased.min(self.config.jito.tip_ceiling_sol);
 
             // Convert to lamports (1 SOL = 1,000,000,000 lamports)
             (increased_tip * rust_decimal::Decimal::from(1_000_000_000u64))
