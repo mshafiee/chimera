@@ -1005,10 +1005,58 @@ impl TokenMetadataFetcher {
             self.jupiter_api_url, token_address, sol_mint, test_amount
         );
 
-        let response = crate::jupiter::with_api_key(self.http_client.get(&quote_url))
-            .send()
-            .await
-            .map_err(|e| AppError::Http(format!("Jupiter sell-quote request failed: {}", e)))?;
+        // Retry transient failures (429 rate limit, 5xx, network) before
+        // declaring "inconclusive". Observed 2026-08-06: WingsAYbfs (a whale's
+        // token that passed every other gate) was fail-closed here because a
+        // single Jupiter quote call returned a transient non-200/400 status —
+        // while the trade's own price-impact check at execution still protects
+        // the entry. A transient API error is NOT evidence of a honeypot.
+        let mut last_status: Option<reqwest::StatusCode> = None;
+        let mut response_opt: Option<reqwest::Response> = None;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(300 * attempt as u64)).await;
+            }
+            let resp = crate::jupiter::with_api_key(self.http_client.get(&quote_url))
+                .send()
+                .await;
+            match resp {
+                Ok(r) => {
+                    let status = r.status();
+                    if status == reqwest::StatusCode::BAD_REQUEST || status.is_success() {
+                        response_opt = Some(r);
+                        break;
+                    }
+                    // Transient/error status — retry, remember the status.
+                    last_status = Some(status);
+                    tracing::debug!(
+                        token = token_address,
+                        status = %status,
+                        attempt,
+                        "Honeypot sell-quote returned error status — retrying"
+                    );
+                }
+                Err(e) => {
+                    last_status = None;
+                    tracing::debug!(
+                        token = token_address,
+                        error = %e,
+                        attempt,
+                        "Honeypot sell-quote transport error — retrying"
+                    );
+                }
+            }
+        }
+
+        let Some(response) = response_opt else {
+            let detail = match last_status {
+                Some(s) => format!("Jupiter quote returned {s} after 3 attempts"),
+                None => "Jupiter quote transport error after 3 attempts".to_string(),
+            };
+            return Err(AppError::Validation(format!(
+                "honeypot_simulation_inconclusive: {detail}"
+            )));
+        };
 
         let status = response.status();
 
