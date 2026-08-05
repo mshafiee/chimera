@@ -215,8 +215,8 @@ monitoring:
 profit_management:
   targets: []               # No fixed take-profit ceiling — let winners run on trailing stop only
   tiered_exit_percent: 1    # Minimal (validation requires >0); never triggered with empty targets
-  trailing_stop_activation: 5   # Activate trailing at +5%
-  trailing_stop_distance: 3     # Trail 3% below peak (captures ~70% of peak vs ~30%)
+  trailing_stop_activation: 2.5   # Activate trailing at +2.5% (was 5): 60% of shadow wins ended via 4h time_exit at +0.94% avg because the +5% activation never engaged on winners peaking in the 0-5% band
+  trailing_stop_distance: 2     # Trail 2% below peak (was 3): capture more of the peak on small runners
   hard_stop_loss: -8              # Tightened from -25: cap tail risk, avg loser already exits ~-8%
   time_exit_hours: 4           # Force-close after 4h
   losing_time_exit_hours_shield: 4  # SHIELD losers time out at 4h
@@ -238,7 +238,7 @@ profit_management:
     reference_hold_hours: 12  # wallet with median hold == 12h maps to multiplier 1.0
     hold_mult_min: 0.25     # clamp: fastest exits (4x shorter than global)
     hold_mult_max: 4.0      # clamp: longest holds (4x longer than global)
-    trailing_min_distance_pct: 3.0
+    trailing_min_distance_pct: 2.0
     trailing_max_distance_pct: 40.0
     trailing_min_activation_pct: 2.0
     trailing_max_activation_pct: 25.0

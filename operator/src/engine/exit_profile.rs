@@ -156,7 +156,8 @@ pub fn effective_params(
     };
 
     // Trailing distance: wallet winners/losers magnitude * 0.3, blended and
-    // clamped to [min, max]. Trailing activation: median win * 0.5.
+    // clamped to [min, max]. This is the per-wallet volatility adaptation —
+    // wide swings get wide trails so normal retraces don't shake out.
     let w = weight(stats.samples, cfg.shrinkage_k);
     let raw_dist = stats
         .median_win_pct
@@ -170,14 +171,21 @@ pub fn effective_params(
     )
     .clamp(cfg.trailing_min_distance_pct, cfg.trailing_max_distance_pct);
 
-    let wallet_act = (stats.median_win_pct * 0.5)
+    // Trailing activation: NEVER above the global value. Data (2026-08-05):
+    // 60% of shadow wins ended via 4h time_exit at +0.94% avg because the
+    // +5% activation never engaged on winners peaking in the 0-5% band, and
+    // the old median_win*0.5 formula pushed ACTIVE whales' activation to
+    // 16-19% (outlier-dominated medians). Early activation is harmless when
+    // the distance is wide — the distance does the per-wallet adaptation.
+    let act_global = global
+        .trailing_stop_activation
+        .to_f64()
+        .unwrap_or(5.0)
+        .max(cfg.trailing_min_activation_pct);
+    let wallet_act = (stats.median_win_pct * 0.35)
+        .clamp(cfg.trailing_min_activation_pct, act_global);
+    let activation = blend(act_global, wallet_act, w)
         .clamp(cfg.trailing_min_activation_pct, cfg.trailing_max_activation_pct);
-    let activation = blend(
-        global.trailing_stop_activation.to_f64().unwrap_or(3.0),
-        wallet_act,
-        w,
-    )
-    .clamp(cfg.trailing_min_activation_pct, cfg.trailing_max_activation_pct);
 
     EffectiveExitParams {
         high_profit_hours: mult(base_high),
@@ -427,6 +435,28 @@ mod tests {
         let s_big = stats(200, Some(3600), 500.0, -40.0);
         let e_big = effective_params(&cfg, &global, Some(&s_big), "SHIELD");
         assert!(e_big.trailing_distance_pct <= Decimal::from_f64_retain(cfg.trailing_max_distance_pct).unwrap());
+    }
+
+    #[test]
+    fn test_activation_never_exceeds_global() {
+        // A whale with an outlier-dominated median win must NOT get a late
+        // trailing activation — 60% of shadow wins were time_exits at +0.94%
+        // because the old median_win*0.5 formula pushed activation to 16-19%.
+        let cfg = test_config();
+        let global = test_global();
+        let s = stats(100, Some(3600), 500.0, -40.0);
+        let e = effective_params(&cfg, &global, Some(&s), "SHIELD");
+        assert!(
+            e.trailing_activation_pct <= global.trailing_stop_activation,
+            "activation {} must not exceed global {}",
+            e.trailing_activation_pct,
+            global.trailing_stop_activation
+        );
+        // Distance still adapts per wallet (volatility), independent of activation.
+        assert!(
+            e.trailing_distance_pct > global.trailing_stop_distance,
+            "wide-swing wallet should keep a wider trailing distance"
+        );
     }
 
     #[test]

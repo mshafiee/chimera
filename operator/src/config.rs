@@ -2025,7 +2025,7 @@ fn default_exit_profiles_hold_mult_max() -> f64 {
     4.0
 }
 fn default_exit_profiles_trailing_min_pct() -> f64 {
-    3.0
+    2.0
 }
 fn default_exit_profiles_trailing_max_pct() -> f64 {
     40.0
