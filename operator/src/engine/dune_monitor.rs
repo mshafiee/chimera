@@ -73,6 +73,7 @@ pub struct DunePnlMonitor {
     shadow_quality_enabled: bool,
     shadow_quality_min_samples: i64,
     shadow_quality_demote_threshold_pct: f64,
+    shadow_quality_cost_adjustment_pct: f64,
     shadow_quality_window_hours: i64,
     onchain_config: crate::config::OnchainAssessmentConfig,
     promotion_ctx: Option<DunePromotionContext>,
@@ -120,6 +121,7 @@ impl DunePnlMonitor {
             shadow_quality_enabled: config.shadow_quality_enabled,
             shadow_quality_min_samples: config.shadow_quality_min_samples,
             shadow_quality_demote_threshold_pct: config.shadow_quality_demote_threshold_pct,
+            shadow_quality_cost_adjustment_pct: config.shadow_quality_cost_adjustment_pct,
             shadow_quality_window_hours: config.shadow_quality_window_hours,
             onchain_config: config.onchain_assessment.clone(),
             promotion_ctx: None,
@@ -824,12 +826,13 @@ impl DunePnlMonitor {
               AND sp.token_address NOT LIKE '%pump'
               AND sp.main_admitted = true
             GROUP BY sp.wallet_address
-            HAVING COUNT(*) >= $2 AND AVG(se.pnl_pct) < $3
+            HAVING COUNT(*) >= $2 AND AVG(se.pnl_pct) < $3 + $4
             "#,
         )
         .bind(self.shadow_quality_window_hours)
         .bind(self.shadow_quality_min_samples)
         .bind(self.shadow_quality_demote_threshold_pct)
+        .bind(self.shadow_quality_cost_adjustment_pct)
         .fetch_all(&pool)
         .await?;
 

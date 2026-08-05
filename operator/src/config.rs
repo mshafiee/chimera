@@ -2476,6 +2476,13 @@ pub struct ShadowBlacklistConfig {
     /// Average shadow PnL% below this threshold triggers the blacklist.
     #[serde(default = "default_shadow_blacklist_threshold_pct")]
     pub threshold_pct: f64,
+    /// Cost adjustment: shadow mirror PnL ignores trading costs (jito tip +
+    /// dex fee ≈ 0.72% per round trip at 0.5 SOL). Live PnL ≈ mirror − this
+    /// amount, so gates calibrated to mirror PnL must add it back to the
+    /// threshold: tokens with mirror avg < threshold + cost_adjustment are
+    /// blacklisted (live avg ≈ threshold).
+    #[serde(default)]
+    pub cost_adjustment_pct: f64,
     /// Rolling window (hours) over which shadow exits are evaluated.
     #[serde(default = "default_shadow_blacklist_window_hours")]
     pub window_hours: i64,
@@ -2502,6 +2509,7 @@ impl Default for ShadowBlacklistConfig {
             enabled: default_shadow_blacklist_enabled(),
             min_samples: default_shadow_blacklist_min_samples(),
             threshold_pct: default_shadow_blacklist_threshold_pct(),
+            cost_adjustment_pct: 0.0,
             window_hours: default_shadow_blacklist_window_hours(),
         }
     }
@@ -2617,6 +2625,11 @@ pub struct DuneConfig {
     /// Demote when average shadow PnL% is below this threshold.
     #[serde(default = "default_shadow_quality_demote_threshold_pct")]
     pub shadow_quality_demote_threshold_pct: f64,
+    /// Cost adjustment for shadow mirror PnL (same rationale as
+    /// ShadowBlacklistConfig::cost_adjustment_pct): live PnL ≈ mirror − this,
+    /// so the demote threshold is effectively threshold + adjustment.
+    #[serde(default)]
+    pub shadow_quality_cost_adjustment_pct: f64,
     /// Rolling window (hours) for shadow quality evaluation.
     #[serde(default = "default_shadow_quality_window_hours")]
     pub shadow_quality_window_hours: i64,
@@ -2679,6 +2692,7 @@ impl Default for DuneConfig {
             shadow_quality_enabled: default_shadow_quality_enabled(),
             shadow_quality_min_samples: default_shadow_quality_min_samples(),
             shadow_quality_demote_threshold_pct: default_shadow_quality_demote_threshold_pct(),
+            shadow_quality_cost_adjustment_pct: 0.0,
             shadow_quality_window_hours: default_shadow_quality_window_hours(),
             onchain_assessment: OnchainAssessmentConfig::default(),
         }

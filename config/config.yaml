@@ -286,6 +286,11 @@ shadow_blacklist:
   enabled: true
   min_samples: 10           # shadow exits (mirror_main, any wallet) required
   threshold_pct: -1.5       # avg shadow PnL% below this triggers the ban
+  # cost_adjustment: shadow mirror PnL ignores trading costs (jito 0.48% +
+  # dex fee 0.24% = ~0.72%/round trip at 0.5 SOL). Live PnL ≈ mirror − 0.72,
+  # so gates add it back: token banned when mirror avg < -1.5 + 0.72 = -0.78
+  # (live avg ≈ -1.5%). Measured on matched shadow/live signals 2026-08-05.
+  cost_adjustment_pct: 0.72
   window_hours: 48
 
 # Dune Analytics integration for wallet PnL monitoring
@@ -307,6 +312,7 @@ dune:
   shadow_quality_enabled: true  # demote wallets with negative shadow PnL on admitted DEX signals
   shadow_quality_min_samples: 5 # min mirror_main exits before demoting
   shadow_quality_demote_threshold_pct: -1.5  # avg PnL% below this triggers demotion
+  shadow_quality_cost_adjustment_pct: 0.72   # live PnL ≈ mirror − 0.72 (fees); see shadow_blacklist
   shadow_quality_window_hours: 48
   # On-chain wallet assessment: verify a candidate's ACTUAL round-trip
   # expectancy on Solana (Helius history) before admitting to live trading.

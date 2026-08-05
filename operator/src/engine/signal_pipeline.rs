@@ -755,7 +755,7 @@ impl SignalProcessor {
                                   AND se.exit_strategy = 'mirror_main'
                                   AND sp.opened_at > NOW() - ($2 || ' hours')::interval
                                 GROUP BY sp.token_address
-                                HAVING COUNT(*) >= $3 AND AVG(se.pnl_pct) < $4
+                                HAVING COUNT(*) >= $3 AND AVG(se.pnl_pct) < $4 + $5
                             )
                             "#,
                         )
@@ -763,6 +763,7 @@ impl SignalProcessor {
                         .bind(blacklist.window_hours)
                         .bind(blacklist.min_samples)
                         .bind(blacklist.threshold_pct)
+                        .bind(blacklist.cost_adjustment_pct)
                         .fetch_one(&pool)
                         .await
                         .unwrap_or(false)
