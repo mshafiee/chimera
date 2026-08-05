@@ -285,3 +285,11 @@ dune:
   shadow_quality_min_samples: 5 # min mirror_main exits before demoting
   shadow_quality_demote_threshold_pct: -1.5  # avg PnL% below this triggers demotion
   shadow_quality_window_hours: 48
+  # On-chain wallet assessment: verify a candidate's ACTUAL round-trip
+  # expectancy on Solana (Helius history) before admitting to live trading.
+  # Dune aggregate PnL can hide negative per-trade expectancy.
+  onchain_assessment:
+    enabled: true
+    min_round_trips: 10        # completed round trips required
+    min_expectancy_pct: 0.0    # avg round-trip PnL% must be > 0
+    tx_limit: 200              # SWAP transactions fetched per wallet

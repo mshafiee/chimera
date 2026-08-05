@@ -250,6 +250,67 @@ impl HeliusClient {
         (cache_hits, cache_misses, cache_size)
     }
 
+        /// Fetch a wallet's recent SWAP transactions (enhanced format).
+    ///
+    /// Returns the raw enhanced transaction JSON objects. The enhanced
+    /// `tokenTransfers[].tokenAmount` is decimal-adjusted (human units);
+    /// `nativeTransfers[].amount` is raw lamports (SOL = amount / 1e9).
+    ///
+    /// Paginates `limit` transactions (page size 100, max 5 pages).
+    pub async fn fetch_wallet_swaps(
+        &self,
+        wallet_address: &str,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        let mut result = Vec::new();
+        let mut before: Option<String> = None;
+        let target = limit.min(500);
+        let mut pages = 0;
+
+        while result.len() < target && pages < 5 {
+            let mut url = format!(
+                "{}/addresses/{}/transactions?api-key={}&limit=100&type=SWAP",
+                self.base_url, wallet_address, self.api_key
+            );
+            if let Some(b) = &before {
+                url.push_str(&format!("&before={}", b));
+            }
+
+            let resp = self
+                .client
+                .get(&url)
+                .send()
+                .await
+                .context("Failed to fetch wallet transactions")?;
+            if !resp.status().is_success() {
+                return Err(anyhow!(
+                    "Helius wallet transactions returned {}",
+                    resp.status()
+                ));
+            }
+            let batch: Vec<serde_json::Value> = resp
+                .json()
+                .await
+                .context("Failed to parse wallet transactions")?;
+            if batch.is_empty() {
+                break;
+            }
+
+            let before_sig = batch
+                .last()
+                .and_then(|t| t.get("signature"))
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string());
+
+            result.extend(batch);
+            pages += 1;
+            before = before_sig;
+        }
+
+        result.truncate(target);
+        Ok(result)
+    }
+
     /// Get token creation time in hours since creation
     ///
     /// Returns None if:
@@ -258,8 +319,7 @@ impl HeliusClient {
     ///
     /// Uses shared metadata cache for unified storage of token metadata and age information.
     /// Age is calculated once and stored in the cache for 24 hours.
-    pub async fn get_token_age_hours(&self, mint_address: &str) -> Result<Option<f64>> {
-        // Check shared metadata cache first
+    pub async fn get_token_age_hours(&self, mint_address: &str) -> Result<Option<f64>> {        // Check shared metadata cache first
         {
             let cache = self.metadata_cache.read();
             if let Some(metadata) = cache.get(mint_address) {

@@ -72,6 +72,7 @@ pub struct DunePnlMonitor {
     shadow_quality_min_samples: i64,
     shadow_quality_demote_threshold_pct: f64,
     shadow_quality_window_hours: i64,
+    onchain_config: crate::config::OnchainAssessmentConfig,
     promotion_ctx: Option<DunePromotionContext>,
 }
 
@@ -116,6 +117,7 @@ impl DunePnlMonitor {
             shadow_quality_min_samples: config.shadow_quality_min_samples,
             shadow_quality_demote_threshold_pct: config.shadow_quality_demote_threshold_pct,
             shadow_quality_window_hours: config.shadow_quality_window_hours,
+            onchain_config: config.onchain_assessment.clone(),
             promotion_ctx: None,
         }
     }
@@ -535,9 +537,62 @@ impl DunePnlMonitor {
         let pnl_map: HashMap<&str, &ProfitableWallet> =
             profitable.iter().map(|w| (w.address.as_str(), w)).collect();
 
+        // 3b. On-chain assessment gate: verify each candidate's ACTUAL
+        //     round-trip trading on Solana before admitting it. Dune's
+        //     aggregate PnL can hide negative per-trade expectancy (rare big
+        //     winners masking many small losers) — the on-chain assessment
+        //     measures the true copy-trading edge (win rate + expectancy over
+        //     completed round trips). Wallets that fail the assessment are
+        //     left as CANDIDATE (shadow-monitored only).
+        let onchain_config = &self.onchain_config;
+        let mut verified: Vec<String> = Vec::new();
+        if onchain_config.enabled {
+            if let Some(ctx) = &self.promotion_ctx {
+                if let Some(helius) = &ctx.helius_client {
+                    let assessor =
+                        crate::engine::onchain_assessment::OnchainAssessor::new(helius.clone());
+                    for addr in &candidates {
+                        match assessor
+                            .assess_wallet(addr, onchain_config.tx_limit)
+                            .await
+                        {
+                            Ok(a) => {
+                                let pass = a.round_trips
+                                    >= onchain_config.min_round_trips
+                                    && a.expectancy_pct > onchain_config.min_expectancy_pct;
+                                info!(
+                                    wallet = %addr,
+                                    round_trips = a.round_trips,
+                                    win_rate = a.win_rate_pct,
+                                    expectancy = a.expectancy_pct,
+                                    pass,
+                                    "On-chain assessment for Dune promotion"
+                                );
+                                if pass {
+                                    verified.push(addr.clone());
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    wallet = %addr,
+                                    error = %e,
+                                    "On-chain assessment failed — skipping promotion"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            verified = candidates.clone();
+        }
+        if verified.is_empty() {
+            return Ok(0);
+        }
+
         // 4. Promote (capped per cycle).
         let mut promoted = 0;
-        for address in candidates
+        for address in verified
             .iter()
             .take(self.promote_max_per_cycle as usize)
         {

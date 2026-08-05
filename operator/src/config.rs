@@ -2408,6 +2408,52 @@ impl Default for ShadowBlacklistConfig {
     }
 }
 
+/// On-chain wallet assessment: verifies a wallet's ACTUAL round-trip trading
+/// on Solana (win rate + expectancy from Helius history) before it is
+/// admitted to live trading. Complements shadow trading — the shadow needs
+/// signals to accumulate slowly; on-chain history gives 100s of round trips
+/// immediately and measures the true copy-trading edge (per-trade
+/// expectancy), not the wallet's aggregate PnL.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OnchainAssessmentConfig {
+    /// Master switch.
+    #[serde(default = "default_onchain_assessment_enabled")]
+    pub enabled: bool,
+    /// Minimum completed round trips required before a wallet qualifies.
+    #[serde(default = "default_onchain_assessment_min_round_trips")]
+    pub min_round_trips: usize,
+    /// Minimum average round-trip PnL% (expectancy) to admit to live trading.
+    #[serde(default = "default_onchain_assessment_min_expectancy_pct")]
+    pub min_expectancy_pct: f64,
+    /// Max SWAP transactions fetched per wallet.
+    #[serde(default = "default_onchain_assessment_tx_limit")]
+    pub tx_limit: usize,
+}
+
+fn default_onchain_assessment_enabled() -> bool {
+    true
+}
+fn default_onchain_assessment_min_round_trips() -> usize {
+    10
+}
+fn default_onchain_assessment_min_expectancy_pct() -> f64 {
+    0.0
+}
+fn default_onchain_assessment_tx_limit() -> usize {
+    200
+}
+
+impl Default for OnchainAssessmentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_onchain_assessment_enabled(),
+            min_round_trips: default_onchain_assessment_min_round_trips(),
+            min_expectancy_pct: default_onchain_assessment_min_expectancy_pct(),
+            tx_limit: default_onchain_assessment_tx_limit(),
+        }
+    }
+}
+
 /// Dune Analytics integration for wallet PnL monitoring and fast demotion.
 /// API key is read from the `DUNE_API_KEY` environment variable.
 #[derive(Debug, Clone, Deserialize)]
@@ -2449,6 +2495,10 @@ pub struct DuneConfig {
     /// Rolling window (hours) for shadow quality evaluation.
     #[serde(default = "default_shadow_quality_window_hours")]
     pub shadow_quality_window_hours: i64,
+    /// On-chain wallet assessment (copy-trading admission gate) — verifies a
+    /// candidate's ACTUAL round-trip expectancy on Solana before promotion.
+    #[serde(default)]
+    pub onchain_assessment: OnchainAssessmentConfig,
 }
 
 fn default_dune_pnl_query_id() -> u64 {
@@ -2500,6 +2550,7 @@ impl Default for DuneConfig {
             shadow_quality_min_samples: default_shadow_quality_min_samples(),
             shadow_quality_demote_threshold_pct: default_shadow_quality_demote_threshold_pct(),
             shadow_quality_window_hours: default_shadow_quality_window_hours(),
+            onchain_assessment: OnchainAssessmentConfig::default(),
         }
     }
 }
