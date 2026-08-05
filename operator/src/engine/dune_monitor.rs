@@ -889,6 +889,7 @@ impl DunePnlMonitor {
                         && a.expectancy_pct > self.onchain_config.min_expectancy_pct;
                     info!(
                         wallet = %wallet,
+                        txs_fetched = a.txs_fetched,
                         round_trips = a.round_trips,
                         win_rate = a.win_rate_pct,
                         expectancy = a.expectancy_pct,

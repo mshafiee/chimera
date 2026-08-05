@@ -292,6 +292,12 @@ impl HeliusClient {
                 .json()
                 .await
                 .context("Failed to parse wallet transactions")?;
+            tracing::debug!(
+                wallet = %wallet_address,
+                url = %url,
+                batch_len = batch.len(),
+                "fetch_wallet_swaps: page received"
+            );
             if batch.is_empty() {
                 break;
             }
