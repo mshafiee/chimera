@@ -994,8 +994,22 @@ impl DunePnlMonitor {
                     }
 
                     // Toxic baseline so the detector can track post-promotion ROI.
+                    // Use the wallet's actual 30d ROI ratio (consistent units with
+                    // the detector's selection_roi); fall back to 0.0 when unknown.
                     if let Some(td) = &ctx.toxic_detector {
-                        if let Err(e) = td.register_wallet_promotion(addr.clone(), 0.0).await {
+                        let baseline_roi: f64 = sqlx::query_scalar(
+                            "SELECT roi_30d FROM wallets WHERE address = $1",
+                        )
+                        .bind(addr)
+                        .fetch_optional(&pool)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0.0);
+                        if let Err(e) = td
+                            .register_wallet_promotion(addr.clone(), baseline_roi)
+                            .await
+                        {
                             warn!(wallet = %addr, error = %e, "Candidate promotion: toxic baseline registration failed");
                         }
                     }

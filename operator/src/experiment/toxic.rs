@@ -84,12 +84,29 @@ impl ToxicFlowDetector {
             // Check toxic conditions
             if self.should_flag_as_toxic(w) {
                 let reason = self.determine_toxic_reason(w);
-                w.is_toxic = true;
-                w.toxic_reason = Some(reason);
-                w.detected_at = Some(chrono::Utc::now());
-                
-                warn!("Wallet {} flagged as toxic: {:?}", wallet, reason);
-                return Ok(Some(reason));
+                // Flag only on transition so we can also recover.
+                if !w.is_toxic {
+                    w.is_toxic = true;
+                    w.toxic_reason = Some(reason);
+                    w.detected_at = Some(chrono::Utc::now());
+                    warn!("Wallet {} flagged as toxic: {:?}", wallet, reason);
+                    return Ok(Some(reason));
+                }
+            } else if w.is_toxic {
+                // RECOVERY (2026-08-05): a previously-flagged wallet whose
+                // ROI has recovered is un-flagged. Without this, the flag was
+                // permanent: a toxic wallet's signals are rejected → it never
+                // trades → never re-evaluated → deadlock forever (observed:
+                // 6 wallets stuck toxic, zero trades for 4h+). Re-evaluating
+                // on every entry makes the flag self-healing.
+                w.is_toxic = false;
+                w.toxic_reason = None;
+                w.detected_at = None;
+                info!(
+                    wallet = %wallet,
+                    current_roi,
+                    "ToxicFlowDetector: wallet recovered — toxic flag cleared"
+                );
             }
         }
         

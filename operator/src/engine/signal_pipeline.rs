@@ -1509,36 +1509,72 @@ impl SignalProcessor {
                                     // is_local_top is unknown without price-history
                                     // analysis; conservatively set false. The ROI-drop
                                     // detection (the primary toxic signal) still works.
-                                    let roi_f64 = pnl_sol.to_f64().unwrap_or(0.0);
-                                    match td
-                                        .record_entry(wallet.clone(), false, roi_f64)
-                                        .await
-                                    {
-                                        Ok(Some(reason)) => {
-                                            tracing::warn!(
-                                                wallet = %wallet,
-                                                ?reason,
-                                                "ToxicFlowDetector: wallet flagged as toxic"
-                                            );
-                                            // Persist immediately on detection
-                                            use crate::db_abstraction::DbPool;
-                                            let DbPool::PostgreSQL(pool) = self.db.pool();
-                                            let run_id = format!(
-                                                "v{}",
-                                                env!("CARGO_PKG_VERSION")
-                                            );
-                                            let _ = td
-                                                .persist_to_database(&pool, &run_id)
-                                                .await;
+                                    //
+                                    // CRITICAL FIX (2026-08-05): current_roi must be a
+                                    // ROI RATIO, consistent with selection_roi (the
+                                    // Dune/on-chain promotion ROI). Previously pnl_sol
+                                    // (absolute SOL PnL of ONE trade) was passed — e.g.
+                                    // selection_roi 3.56 (356%) vs post_promotion_roi
+                                    // -0.055 (SOL) → deterioration 3.6 > 0.3 threshold
+                                    // → every promoted wallet flagged toxic after its
+                                    // first losing trade. 6 wallets stuck toxic, the
+                                    // only active trader blocked → zero trades.
+                                    // Use the wallet's 30d ROI ratio; skip recording
+                                    // when unavailable (never flag without data).
+                                    let roi_ratio: Option<f64> = {
+                                        use crate::db_abstraction::DbPool;
+                                        match self.db.pool() {
+                                            DbPool::PostgreSQL(pool) => {
+                                                sqlx::query_scalar::<_, f64>(
+                                                    "SELECT roi_30d FROM wallets WHERE address = $1",
+                                                )
+                                                .bind(wallet)
+                                                .fetch_optional(&pool)
+                                                .await
+                                                .unwrap_or(None)
+                                            }
                                         }
-                                        Err(e) => {
-                                            tracing::warn!(
+                                    };
+                                    match roi_ratio {
+                                        Some(roi) => {
+                                            match td
+                                                .record_entry(wallet.clone(), false, roi)
+                                                .await
+                                            {
+                                                Ok(Some(reason)) => {
+                                                    tracing::warn!(
+                                                        wallet = %wallet,
+                                                        roi_30d = roi,
+                                                        ?reason,
+                                                        "ToxicFlowDetector: wallet flagged as toxic"
+                                                    );
+                                                    // Persist immediately on detection
+                                                    use crate::db_abstraction::DbPool;
+                                                    let DbPool::PostgreSQL(pool) = self.db.pool();
+                                                    let run_id = format!(
+                                                        "v{}",
+                                                        env!("CARGO_PKG_VERSION")
+                                                    );
+                                                    let _ = td
+                                                        .persist_to_database(&pool, &run_id)
+                                                        .await;
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        wallet = %wallet,
+                                                        error = %e,
+                                                        "ToxicFlowDetector: record_entry failed"
+                                                    );
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        None => {
+                                            tracing::debug!(
                                                 wallet = %wallet,
-                                                error = %e,
-                                                "ToxicFlowDetector: record_entry failed"
+                                                "ToxicFlowDetector: no roi_30d available — skipping entry record"
                                             );
                                         }
-                                        _ => {}
                                     }
                                 }
                             }
