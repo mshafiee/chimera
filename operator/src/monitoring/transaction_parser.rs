@@ -543,6 +543,13 @@ fn parse_from_swap_event(
     for leg in &swap.token_inputs {
         if let Some(rta) = &leg.raw_token_amount {
             let amount = Decimal::from_str(&rta.token_amount).unwrap_or(Decimal::ZERO);
+            tracing::debug!(
+                mint = %leg.mint,
+                raw_token_amount = %rta.token_amount,
+                parsed_amount = %amount,
+                direction = "input",
+                "swap_event leg parsed"
+            );
             if amount.abs() > Decimal::new(1, 6) {
                 legs.push((leg.mint.clone(), amount, false)); // given
             }
@@ -551,6 +558,13 @@ fn parse_from_swap_event(
     for leg in &swap.token_outputs {
         if let Some(rta) = &leg.raw_token_amount {
             let amount = Decimal::from_str(&rta.token_amount).unwrap_or(Decimal::ZERO);
+            tracing::debug!(
+                mint = %leg.mint,
+                raw_token_amount = %rta.token_amount,
+                parsed_amount = %amount,
+                direction = "output",
+                "swap_event leg parsed"
+            );
             if amount.abs() > Decimal::new(1, 6) {
                 legs.push((leg.mint.clone(), amount, true)); // received
             }
