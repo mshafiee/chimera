@@ -162,6 +162,7 @@ impl WebhookLifecycleManager {
                                     transaction_types: None,
                                     account_addresses: None,
                                     auth_header: Some(serde_json::Value::String(auth)),
+                                    webhook_type: None,
                                 };
                                 match self.helius_client.update_webhook(webhook_id, update).await {
                                     Ok(()) => {
@@ -245,11 +246,14 @@ impl WebhookLifecycleManager {
                 Ok(webhook) if !webhook.wallet_addresses.contains(&wallet.to_string()) => {
                     let mut accounts = webhook.wallet_addresses.clone();
                     accounts.push(wallet.to_string());
+                    // Helius requires webhookURL/transactionTypes/webhookType on
+                    // update — send the full current data plus the new account.
                     let update = crate::monitoring::helius::WebhookUpdate {
-                        webhook_url: None,
-                        transaction_types: None,
+                        webhook_url: Some(webhook.webhook_url.clone()),
+                        transaction_types: Some(webhook.transaction_types.clone()),
                         account_addresses: Some(accounts),
                         auth_header: None,
+                        webhook_type: Some("enhanced".to_string()),
                     };
                     match self.helius_client.update_webhook(&batch_webhook_id, update).await {
                         Ok(()) => {
@@ -533,6 +537,7 @@ impl WebhookLifecycleManager {
                         .auth_header
                         .as_ref()
                         .map(|h| serde_json::Value::String(h.clone())),
+                    webhook_type: None,
                 },
             )
             .await

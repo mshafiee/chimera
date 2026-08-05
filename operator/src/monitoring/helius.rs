@@ -117,14 +117,16 @@ pub struct HeliusMetrics {
 /// Webhook update request structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookUpdate {
-    #[serde(rename = "webhookURL")]
+    #[serde(rename = "webhookURL", skip_serializing_if = "Option::is_none")]
     pub webhook_url: Option<String>,
-    #[serde(rename = "transactionTypes")]
+    #[serde(rename = "transactionTypes", skip_serializing_if = "Option::is_none")]
     pub transaction_types: Option<Vec<String>>,
-    #[serde(rename = "accountAddresses")]
+    #[serde(rename = "accountAddresses", skip_serializing_if = "Option::is_none")]
     pub account_addresses: Option<Vec<String>>,
-    #[serde(rename = "authHeader")]
+    #[serde(rename = "authHeader", skip_serializing_if = "Option::is_none")]
     pub auth_header: Option<serde_json::Value>,
+    #[serde(rename = "webhookType", skip_serializing_if = "Option::is_none")]
+    pub webhook_type: Option<String>,
 }
 
 /// Webhook toggle request structure
@@ -826,6 +828,7 @@ impl HeliusClient {
                         transaction_types: None,
                         account_addresses: None,
                         auth_header: None,
+                        webhook_type: None,
                     },
                 )
                 .await;
