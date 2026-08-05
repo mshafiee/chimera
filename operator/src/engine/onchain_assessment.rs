@@ -143,10 +143,20 @@ impl OnchainAssessor {
         if let Some(transfers) = tx.get("tokenTransfers").and_then(|t| t.as_array()) {
             for leg in transfers {
                 let mint = leg.get("mint").and_then(|m| m.as_str()).unwrap_or("");
+                // tokenAmount is a JSON NUMBER in the raw enhanced API
+                // ("tokenAmount": 12), but can be a string in some modes —
+                // handle both.
                 let amount = leg
                     .get("tokenAmount")
-                    .and_then(|a| a.as_str())
-                    .and_then(|s| Decimal::from_str(s).ok())
+                    .map(|a| {
+                        if let Some(n) = a.as_f64() {
+                            Decimal::from_f64_retain(n).unwrap_or(Decimal::ZERO)
+                        } else {
+                            a.as_str()
+                                .and_then(|s| Decimal::from_str(s).ok())
+                                .unwrap_or(Decimal::ZERO)
+                        }
+                    })
                     .unwrap_or(Decimal::ZERO);
                 let from = leg.get("fromUserAccount").and_then(|v| v.as_str()).unwrap_or("");
                 let to = leg.get("toUserAccount").and_then(|v| v.as_str()).unwrap_or("");
@@ -271,6 +281,29 @@ mod tests {
         let mut ledgers = HashMap::new();
         OnchainAssessor::apply_transaction(wallet, &buy_tx, &mut ledgers);
         assert_eq!(ledgers.get(token).unwrap().buy_quote, Decimal::from(5));
+    }
+
+    #[test]
+    fn test_numeric_token_amount_parses() {
+        // The raw Helius enhanced API emits tokenAmount as a JSON NUMBER
+        // (e.g. "tokenAmount": 12), not a string. The parser must handle it.
+        let wallet = "Wallet111111111111111111111111111111111111";
+        let token = "TokA111111111111111111111111111111111111111";
+        let usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+        let buy_tx = serde_json::json!({
+            "transactionError": null,
+            "tokenTransfers": [
+                {"mint": usdc, "tokenAmount": 12, "fromUserAccount": wallet, "toUserAccount": "DexAcct1111111111111111111111111111111111111"},
+                {"mint": token, "tokenAmount": 579.266206, "fromUserAccount": "DexAcct1111111111111111111111111111111111111", "toUserAccount": wallet},
+            ],
+            "nativeTransfers": [],
+        });
+
+        let mut ledgers = HashMap::new();
+        OnchainAssessor::apply_transaction(wallet, &buy_tx, &mut ledgers);
+        let ledger = ledgers.get(token).expect("token ledger");
+        assert_eq!(ledger.buy_quote, Decimal::from(12));
     }
 
     #[test]
