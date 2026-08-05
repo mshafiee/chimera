@@ -1647,6 +1647,8 @@ async fn main() -> anyhow::Result<()> {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             let mut last_checked: std::collections::HashMap<String, std::time::Instant> =
                 std::collections::HashMap::new();
+            let mut last_eager_fetch: std::collections::HashMap<String, std::time::Instant> =
+                std::collections::HashMap::new();
             let mut db_fail_count: u32 = 0;
             loop {
                 tokio::select! {
@@ -1692,9 +1694,30 @@ async fn main() -> anyhow::Result<()> {
                         }
 
                         last_checked.retain(|uuid, _| positions.iter().any(|p| &p.trade_uuid == uuid));
+                        last_eager_fetch.retain(|token, _| positions.iter().any(|p| &p.token_address == token));
 
                         for pos in positions {
-                            let current_price = monitor_pc.get_price_usd(&pos.token_address);
+                            // Eager-fetch fallback: when there is no cached price
+                            // (micro-cap tokens missing from Jupiter's price API),
+                            // fetch once instead of skipping the position. Without
+                            // this the monitor never evaluated exits — trades bled
+                            // for 8+ hours instead of stopping out in ~30 min (the
+                            // shadow trader already uses this pattern). Throttled
+                            // to one fetch per token per 30s to avoid hammering the
+                            // price API on every 5s tick.
+                            let mut current_price = monitor_pc.get_price_usd(&pos.token_address);
+                            if current_price.is_none() {
+                                let should_fetch = match last_eager_fetch.get(&pos.token_address) {
+                                    Some(&last) => now.duration_since(last)
+                                        > std::time::Duration::from_secs(30),
+                                    None => true,
+                                };
+                                if should_fetch {
+                                    last_eager_fetch.insert(pos.token_address.clone(), now);
+                                    monitor_pc.eager_fetch_token(&pos.token_address).await;
+                                    current_price = monitor_pc.get_price_usd(&pos.token_address);
+                                }
+                            }
                             if current_price.is_none() {
                                 tracing::warn!(
                                     trade_uuid = %pos.trade_uuid,
