@@ -262,10 +262,12 @@ rejection_mute:
 
 # Token shadow blacklist: reject BUY signals for tokens whose shadow
 # performance under our own exits is consistently negative.
+# NOTE: mirror_main exits cut losers at -2% (recovery gate), so dump tokens
+# average ~-2% to -3% — a -5% threshold never fires. -1.5% catches them.
 shadow_blacklist:
   enabled: true
   min_samples: 10           # shadow exits (mirror_main, any wallet) required
-  threshold_pct: -5.0       # avg shadow PnL% below this triggers the ban
+  threshold_pct: -1.5       # avg shadow PnL% below this triggers the ban
   window_hours: 48
 
 # Dune Analytics integration for wallet PnL monitoring

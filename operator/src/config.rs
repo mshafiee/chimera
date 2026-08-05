@@ -2389,7 +2389,9 @@ fn default_shadow_blacklist_min_samples() -> i64 {
     10
 }
 fn default_shadow_blacklist_threshold_pct() -> f64 {
-    -5.0
+    // mirror_main exits cut losers at -2% (recovery gate), so dump tokens
+    // average ~-2% to -3% — -5% would never fire. -1.5% catches them.
+    -1.5
 }
 fn default_shadow_blacklist_window_hours() -> i64 {
     48
