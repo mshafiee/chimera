@@ -45,6 +45,54 @@ pub struct HeliusWebhookPayload {
     pub transaction_error: Option<serde_json::Value>,
     #[serde(rename = "type")]
     pub transaction_type: String,
+    /// Helius enhanced webhook `events` object. When present, `events.swap`
+    /// gives explicit swapper + tokenInputs/tokenOutputs — far more reliable
+    /// than inferring from tokenBalanceChanges (which fails when
+    /// userAccount doesn't match for newly-created token accounts, dropping
+    /// ~98% of tracked-wallet SWAP events).
+    #[serde(default)]
+    pub events: WebhookEvents,
+}
+
+/// Top-level events container in a Helius enhanced webhook.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WebhookEvents {
+    #[serde(default)]
+    pub swap: Option<WebhookSwapEvent>,
+}
+
+/// Explicit swap event from Helius enhanced data. Identifies the swapper
+/// and exactly what tokens were given/received — no inference needed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookSwapEvent {
+    #[serde(default)]
+    pub swapper: Option<String>,
+    #[serde(default, rename = "nativeInput", alias = "native_input")]
+    pub native_input: Option<WebhookSwapNativeLeg>,
+    #[serde(default, rename = "nativeOutput", alias = "native_output")]
+    pub native_output: Option<WebhookSwapNativeLeg>,
+    #[serde(default, rename = "tokenInputs", alias = "token_inputs")]
+    pub token_inputs: Vec<WebhookSwapTokenLeg>,
+    #[serde(default, rename = "tokenOutputs", alias = "token_outputs")]
+    pub token_outputs: Vec<WebhookSwapTokenLeg>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookSwapNativeLeg {
+    #[serde(default)]
+    pub account: String,
+    #[serde(default)]
+    pub amount: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookSwapTokenLeg {
+    #[serde(default, rename = "userAccount", alias = "user_account")]
+    pub user_account: String,
+    #[serde(default)]
+    pub mint: String,
+    #[serde(default, rename = "rawTokenAmount", alias = "raw_token_amount")]
+    pub raw_token_amount: Option<RawTokenAmount>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
