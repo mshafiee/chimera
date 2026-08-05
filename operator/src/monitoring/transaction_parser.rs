@@ -594,7 +594,25 @@ pub fn parse_helius_webhook(
 
     let (token_mint, token_delta) = match traded_token {
         Some(v) => v,
-        None => return Ok(None), // no speculative token (pure stablecoin/dust swap)
+        None => {
+            // Diagnostic: 98% of tracked-wallet SWAP events return Ok(None)
+            // here. Log the token_deltas map so we can see WHY no speculative
+            // token was found (all SOL/stablecoin? amounts parsing as zero?
+            // user_account filter removing all changes?).
+            if tracked_wallet.is_some() && !token_deltas.is_empty() {
+                let delta_summary: Vec<String> = token_deltas
+                    .iter()
+                    .map(|(m, d)| format!("{}={}", &m[..m.len().min(8)], d))
+                    .collect();
+                tracing::warn!(
+                    signature = %payload.signature,
+                    tracked_wallet = ?tracked_wallet,
+                    token_deltas = delta_summary.join(", "),
+                    "PARSE_FAIL: tracked wallet SWAP but no speculative token found — see deltas"
+                );
+            }
+            return Ok(None); // no speculative token (pure stablecoin/dust swap)
+        }
     };
 
     // Direction: positive token delta = received tokens = BUY; negative = SELL.
