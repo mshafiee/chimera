@@ -246,18 +246,35 @@ impl ToxicFlowDetector {
                 _ => ToxicReason::RoiDrop,
             });
 
+            // RE-VALIDATE on load (2026-08-05): the flag must still hold NOW.
+            // Stale persisted flags — e.g. from the ROI unit bug (SOL PnL vs
+            // ratio) or a wallet that has since recovered — must not resurrect
+            // across restarts. A stale flag is a permanent deadlock: the
+            // wallet's signals get rejected so it never trades, so record_entry
+            // (the recovery path) never fires.
+            let candidate = ToxicWallet {
+                address: row.wallet_address.clone(),
+                selection_roi: row.selection_roi,
+                post_promotion_roi: row.post_promotion_roi,
+                local_top_entries: row.local_top_entries as u32,
+                total_entries: row.total_entries as u32,
+                is_toxic: true,
+                toxic_reason,
+                detected_at: row.detected_at,
+            };
+            if !self.should_flag_as_toxic(&candidate) {
+                info!(
+                    wallet = %candidate.address,
+                    selection_roi = candidate.selection_roi,
+                    post_promotion_roi = candidate.post_promotion_roi,
+                    "Toxic wallet loaded from DB but no longer qualifies — skipping (flag cleared)"
+                );
+                continue;
+            }
+
             wallets.insert(
                 row.wallet_address.clone(),
-                ToxicWallet {
-                    address: row.wallet_address,
-                    selection_roi: row.selection_roi,
-                    post_promotion_roi: row.post_promotion_roi,
-                    local_top_entries: row.local_top_entries as u32,
-                    total_entries: row.total_entries as u32,
-                    is_toxic: true,
-                    toxic_reason,
-                    detected_at: row.detected_at,
-                },
+                candidate,
             );
         }
 
