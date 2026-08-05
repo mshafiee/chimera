@@ -519,6 +519,10 @@ pub trait Database: Send + Sync {
         max_wallets: i64,
     ) -> AppResult<Option<String>>;
 
+    /// Clear the helius_webhook_id for ALL wallets referencing a given
+    /// webhook ID (used when the webhook no longer exists in Helius).
+    async fn clear_webhook_id_for_webhook(&self, webhook_id: &str) -> AppResult<()>;
+
     /// Insert or update wallet monitoring record
     async fn upsert_wallet_monitoring(
         &self,

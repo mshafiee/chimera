@@ -2637,6 +2637,16 @@ impl Database for PostgresBackend {
         Ok(webhook_id)
     }
 
+    async fn clear_webhook_id_for_webhook(&self, webhook_id: &str) -> AppResult<()> {
+        sqlx::query(
+            "UPDATE wallet_monitoring SET helius_webhook_id = NULL WHERE helius_webhook_id = $1",
+        )
+        .bind(webhook_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn upsert_wallet_monitoring(
         &self,
         wallet_address: &str,
