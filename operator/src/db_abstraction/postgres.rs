@@ -2616,6 +2616,27 @@ impl Database for PostgresBackend {
         }
     }
 
+    async fn find_webhook_with_capacity(
+        &self,
+        max_wallets: i64,
+    ) -> AppResult<Option<String>> {
+        let webhook_id: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT helius_webhook_id
+            FROM wallet_monitoring
+            WHERE helius_webhook_id IS NOT NULL
+            GROUP BY helius_webhook_id
+            HAVING COUNT(*) < $1
+            ORDER BY COUNT(*) DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(max_wallets)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(webhook_id)
+    }
+
     async fn upsert_wallet_monitoring(
         &self,
         wallet_address: &str,

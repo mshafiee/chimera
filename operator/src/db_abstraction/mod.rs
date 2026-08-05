@@ -510,6 +510,15 @@ pub trait Database: Send + Sync {
         wallet_address: &str,
     ) -> AppResult<Option<WalletMonitoring>>;
 
+    /// Find an existing Helius webhook that has room for more wallets
+    /// (fewer than `max_wallets` accounts). Returns the fullest such webhook
+    /// so batching minimizes the number of webhooks used — the Helius plan
+    /// caps total webhooks (50), but each supports many accountAddresses.
+    async fn find_webhook_with_capacity(
+        &self,
+        max_wallets: i64,
+    ) -> AppResult<Option<String>>;
+
     /// Insert or update wallet monitoring record
     async fn upsert_wallet_monitoring(
         &self,

@@ -17,6 +17,11 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 
+/// Maximum wallets per Helius webhook when batching. The Helius plan caps
+/// total webhooks (50); batching ~10 wallets per webhook lifts the effective
+/// capacity to ~500 wallets.
+const MAX_WALLETS_PER_WEBHOOK: i64 = 10;
+
 /// Webhook lifecycle configuration
 #[derive(Debug, Clone)]
 pub struct WebhookLifecycleConfig {
@@ -220,6 +225,106 @@ impl WebhookLifecycleManager {
         self.rate_limiter
             .acquire_standard(RequestPriority::Polling)
             .await;
+
+        // ── Batch-aware registration ─────────────────────────────────────
+        // The Helius plan caps total webhooks (50), but each webhook supports
+        // many accountAddresses. Before creating a NEW per-wallet webhook,
+        // try to ADD this wallet to an existing webhook that has capacity.
+        // This removes the 50-webhook cap as a scaling constraint (~10
+        // wallets per webhook = ~500 wallets before hitting the cap again).
+        if let Ok(Some(batch_webhook_id)) = self
+            .db
+            .find_webhook_with_capacity(MAX_WALLETS_PER_WEBHOOK)
+            .await
+        {
+            match self
+                .helius_client
+                .get_webhook_typed(&batch_webhook_id)
+                .await
+            {
+                Ok(webhook) if !webhook.wallet_addresses.contains(&wallet.to_string()) => {
+                    let mut accounts = webhook.wallet_addresses.clone();
+                    accounts.push(wallet.to_string());
+                    let update = crate::monitoring::helius::WebhookUpdate {
+                        webhook_url: None,
+                        transaction_types: None,
+                        account_addresses: Some(accounts),
+                        auth_header: None,
+                    };
+                    match self.helius_client.update_webhook(&batch_webhook_id, update).await {
+                        Ok(()) => {
+                            if let Err(e) = self
+                                .db
+                                .upsert_wallet_monitoring(wallet, Some(&batch_webhook_id), true)
+                                .await
+                            {
+                                warn!(wallet = %wallet, error = %e, "DB update failed after batching wallet into webhook");
+                            }
+                            let _ = self
+                                .db
+                                .log_webhook_lifecycle_event(
+                                    wallet,
+                                    "register",
+                                    "success",
+                                    Some(&batch_webhook_id),
+                                    Some(&format!(
+                                        "Wallet added to existing batched webhook {}",
+                                        batch_webhook_id
+                                    )),
+                                    None,
+                                    Some(start.elapsed().as_millis() as i32),
+                                )
+                                .await;
+                            info!(
+                                wallet = %wallet,
+                                webhook_id = %batch_webhook_id,
+                                "Wallet added to existing batched webhook (no new webhook created)"
+                            );
+                            return Ok(WebhookRegistrationResult {
+                                wallet_address: wallet.to_string(),
+                                webhook_id: batch_webhook_id,
+                                success: true,
+                                error_message: None,
+                                duration_ms: start.elapsed().as_millis() as i32,
+                            });
+                        }
+                        Err(e) => {
+                            warn!(
+                                wallet = %wallet,
+                                webhook_id = %batch_webhook_id,
+                                error = %e,
+                                "Failed to add wallet to batched webhook — falling back to new webhook"
+                            );
+                        }
+                    }
+                }
+                Ok(_) => {
+                    // Wallet already in this webhook — treat as registered.
+                    if let Err(e) = self
+                        .db
+                        .upsert_wallet_monitoring(wallet, Some(&batch_webhook_id), true)
+                        .await
+                    {
+                        warn!(wallet = %wallet, error = %e, "DB update failed (wallet already in webhook)");
+                    }
+                    return Ok(WebhookRegistrationResult {
+                        wallet_address: wallet.to_string(),
+                        webhook_id: batch_webhook_id,
+                        success: true,
+                        error_message: None,
+                        duration_ms: start.elapsed().as_millis() as i32,
+                    });
+                }
+                Err(e) => {
+                    warn!(
+                        wallet = %wallet,
+                        webhook_id = %batch_webhook_id,
+                        error = %e,
+                        "Failed to inspect batched webhook — falling back to new webhook"
+                    );
+                }
+            }
+        }
 
         // Register webhook with Helius
         match self
