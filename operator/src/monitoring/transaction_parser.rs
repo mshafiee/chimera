@@ -651,6 +651,14 @@ fn parse_from_swap_event(
 
     let dex = "Unknown";
 
+    tracing::info!(
+        token_mint = %token_mint,
+        direction = ?direction,
+        quote_mint = %quote_mint,
+        quote_amount = %quote_amount,
+        "parse_from_swap_event SUCCESS — returning ParsedSwap"
+    );
+
     Ok(Some(ParsedSwap {
         token_in: if direction == SwapDirection::Buy {
             quote_mint.clone()
