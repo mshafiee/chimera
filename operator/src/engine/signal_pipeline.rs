@@ -994,6 +994,37 @@ impl SignalProcessor {
         }
 
         // Execute the trade
+        // ── Price-feed gate (BUY only) ─────────────────────────────────────
+        // Tokens with no continuous price feed cannot be exit-managed: the
+        // position monitor skips stop-loss/trailing/time exits when the price
+        // is unavailable (observed: 8-hour bleeds on tokens missing from
+        // Jupiter's price API). Reject here instead of entering blind.
+        if signal.payload.action == Action::Buy {
+            if let Some(ref pc) = self.price_cache {
+                let token_addr = signal.token_address().unwrap_or_default();
+                pc.track_token(token_addr);
+                pc.eager_fetch_token(token_addr).await;
+                if pc.get_price_usd(token_addr).is_none() {
+                    let reason = "Token has no price feed — cannot monitor exits".to_string();
+                    tracing::warn!(
+                        trade_uuid = signal.trade_uuid,
+                        token = signal.payload.token,
+                        token_address = token_addr,
+                        "Signal rejected: no price feed for token"
+                    );
+                    let _ = self
+                        .db
+                        .mark_trade_dead_letter(
+                            &signal.trade_uuid,
+                            &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                            &reason,
+                        )
+                        .await;
+                    return;
+                }
+            }
+        }
+
         let result = {
             let executor = self.executor.read().await;
             executor.execute(signal).await
