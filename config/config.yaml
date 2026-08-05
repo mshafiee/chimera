@@ -225,6 +225,24 @@ profit_management:
   wick_protection_max_loss_percent: -3.0  # Tightened from -5%: exit if loss reaches -3% in first 30s (catches instant dumps)
   recovery_gate_secs: 60            # Tightened from 90: identify losers faster
   recovery_gate_threshold: -2.0     # Exit if PnL below -2% at gate time (was -1.5%)
+  # Per-wallet exit profiles: derive per-wallet time-exit hours + trailing
+  # params from the wallet's on-chain round-trip behavior (median hold,
+  # win/loss size), blended with the global values above via Bayesian
+  # shrinkage (weight = samples/(samples+K)). Loss-side rails (stop loss,
+  # recovery gate, wick) always stay global. Profiles persist from the
+  # on-chain audit/promotion cycles — zero extra Helius cost.
+  exit_profiles:
+    enabled: true
+    min_samples: 5          # below this many round trips -> global params unchanged
+    shrinkage_k: 25         # K=25: 25 samples = 50% trust, 200 samples = 89%
+    reference_hold_hours: 12  # wallet with median hold == 12h maps to multiplier 1.0
+    hold_mult_min: 0.25     # clamp: fastest exits (4x shorter than global)
+    hold_mult_max: 4.0      # clamp: longest holds (4x longer than global)
+    trailing_min_distance_pct: 3.0
+    trailing_max_distance_pct: 40.0
+    trailing_min_activation_pct: 2.0
+    trailing_max_activation_pct: 25.0
+    refresh_secs: 600       # profile cache refresh interval
 
 # Position sizing configuration
 position_sizing:

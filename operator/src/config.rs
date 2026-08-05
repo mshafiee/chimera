@@ -1958,6 +1958,104 @@ pub struct ProfitManagementConfig {
     /// after recovery_gate_secs. Default -2.5 (exit if still below -2.5%).
     #[serde(default = "default_recovery_gate_threshold")]
     pub recovery_gate_threshold: Decimal,
+    /// Per-wallet exit profiles: derive per-wallet time-exit and trailing-stop
+    /// parameters from the wallet's on-chain round-trip behavior (hold
+    /// duration, win/loss size), blended with these global defaults via
+    /// Bayesian shrinkage. Loss-side params (stop loss, recovery gate, wick
+    /// protection) always stay global — they are safety rails.
+    #[serde(default)]
+    pub exit_profiles: ExitProfileConfig,
+}
+
+/// Per-wallet exit profile configuration (Bayesian shrinkage against the
+/// global `ProfitManagementConfig`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExitProfileConfig {
+    /// Master switch.
+    #[serde(default = "default_exit_profiles_enabled")]
+    pub enabled: bool,
+    /// Wallets with fewer round-trip samples than this keep the global
+    /// params unchanged (no shrinkage applied).
+    #[serde(default = "default_exit_profiles_min_samples")]
+    pub min_samples: usize,
+    /// Shrinkage constant K: weight = samples / (samples + K). At K=25 a
+    /// wallet with 25 samples is 50% trusted; 200 samples -> 89%.
+    #[serde(default = "default_exit_profiles_shrinkage_k")]
+    pub shrinkage_k: f64,
+    /// Reference hold time (hours) for the hold multiplier: a wallet whose
+    /// median round-trip hold equals this maps to multiplier 1.0.
+    #[serde(default = "default_exit_profiles_reference_hold_hours")]
+    pub reference_hold_hours: f64,
+    /// Clamp for the hold multiplier (0.25 = 4x faster exits, 4.0 = 4x longer).
+    #[serde(default = "default_exit_profiles_hold_mult_min")]
+    pub hold_mult_min: f64,
+    #[serde(default = "default_exit_profiles_hold_mult_max")]
+    pub hold_mult_max: f64,
+    /// Clamp for per-wallet trailing distance (percent).
+    #[serde(default = "default_exit_profiles_trailing_min_pct")]
+    pub trailing_min_distance_pct: f64,
+    #[serde(default = "default_exit_profiles_trailing_max_pct")]
+    pub trailing_max_distance_pct: f64,
+    /// Clamp for per-wallet trailing activation (percent).
+    #[serde(default = "default_exit_profiles_activation_min_pct")]
+    pub trailing_min_activation_pct: f64,
+    #[serde(default = "default_exit_profiles_activation_max_pct")]
+    pub trailing_max_activation_pct: f64,
+    /// Floor below which the exit-profile cache never refreshes (seconds).
+    #[serde(default = "default_exit_profiles_refresh_secs")]
+    pub refresh_secs: u64,
+}
+
+fn default_exit_profiles_enabled() -> bool {
+    true
+}
+fn default_exit_profiles_min_samples() -> usize {
+    5
+}
+fn default_exit_profiles_shrinkage_k() -> f64 {
+    25.0
+}
+fn default_exit_profiles_reference_hold_hours() -> f64 {
+    12.0
+}
+fn default_exit_profiles_hold_mult_min() -> f64 {
+    0.25
+}
+fn default_exit_profiles_hold_mult_max() -> f64 {
+    4.0
+}
+fn default_exit_profiles_trailing_min_pct() -> f64 {
+    3.0
+}
+fn default_exit_profiles_trailing_max_pct() -> f64 {
+    40.0
+}
+fn default_exit_profiles_activation_min_pct() -> f64 {
+    2.0
+}
+fn default_exit_profiles_activation_max_pct() -> f64 {
+    25.0
+}
+fn default_exit_profiles_refresh_secs() -> u64 {
+    600
+}
+
+impl Default for ExitProfileConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_exit_profiles_enabled(),
+            min_samples: default_exit_profiles_min_samples(),
+            shrinkage_k: default_exit_profiles_shrinkage_k(),
+            reference_hold_hours: default_exit_profiles_reference_hold_hours(),
+            hold_mult_min: default_exit_profiles_hold_mult_min(),
+            hold_mult_max: default_exit_profiles_hold_mult_max(),
+            trailing_min_distance_pct: default_exit_profiles_trailing_min_pct(),
+            trailing_max_distance_pct: default_exit_profiles_trailing_max_pct(),
+            trailing_min_activation_pct: default_exit_profiles_activation_min_pct(),
+            trailing_max_activation_pct: default_exit_profiles_activation_max_pct(),
+            refresh_secs: default_exit_profiles_refresh_secs(),
+        }
+    }
 }
 
 fn default_recovery_gate_secs() -> u64 {
@@ -2048,6 +2146,7 @@ impl Default for ProfitManagementConfig {
             atr_stop_loss_enabled: default_atr_stop_loss_enabled(),
             recovery_gate_secs: default_recovery_gate_secs(),
             recovery_gate_threshold: default_recovery_gate_threshold(),
+            exit_profiles: ExitProfileConfig::default(),
         }
     }
 }

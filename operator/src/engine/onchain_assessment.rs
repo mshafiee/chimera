@@ -39,6 +39,13 @@ pub struct OnchainWalletAssessment {
     pub expectancy_pct: f64,
     pub total_buy_quote: f64,
     pub total_sell_quote: f64,
+    /// Per-wallet exit-profile inputs (see engine/exit_profile.rs):
+    /// median/avg buy->sell hold duration, median win/loss, profit factor.
+    pub median_hold_secs: Option<i64>,
+    pub avg_hold_secs: Option<i64>,
+    pub median_win_pct: f64,
+    pub median_loss_pct: f64,
+    pub profit_factor: f64,
 }
 
 /// Per-token ledger for one wallet.
@@ -46,6 +53,9 @@ pub struct OnchainWalletAssessment {
 struct TokenLedger {
     buy_quote: Decimal,
     sell_quote: Decimal,
+    /// Timestamp (unix secs) of the wallet's first buy / first sell of the token.
+    first_buy_ts: Option<i64>,
+    first_sell_ts: Option<i64>,
 }
 
 /// Assesses wallets from their on-chain history.
@@ -89,6 +99,7 @@ impl OnchainAssessor {
 
         // Compute round-trip metrics per token.
         let mut pnls: Vec<Decimal> = Vec::new();
+        let mut holds: Vec<i64> = Vec::new();
         let mut total_buy = Decimal::ZERO;
         let mut total_sell = Decimal::ZERO;
         for ledger in ledgers.values() {
@@ -97,6 +108,12 @@ impl OnchainAssessor {
                 pnls.push(pnl);
                 total_buy += ledger.buy_quote;
                 total_sell += ledger.sell_quote;
+                if let (Some(b), Some(s)) = (ledger.first_buy_ts, ledger.first_sell_ts) {
+                    let h = s - b;
+                    if h > 0 {
+                        holds.push(h);
+                    }
+                }
             }
         }
 
@@ -123,6 +140,15 @@ impl OnchainAssessor {
         } else {
             0.0
         };
+        let gross_win: f64 = pnls.iter().filter(|p| **p > Decimal::ZERO).map(|p| p.to_f64().unwrap_or(0.0)).sum();
+        let gross_loss: f64 = pnls.iter().filter(|p| **p <= Decimal::ZERO).map(|p| p.to_f64().unwrap_or(0.0).abs()).sum();
+        let profit_factor = if gross_loss > 0.0 {
+            gross_win / gross_loss
+        } else if gross_win > 0.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        };
 
         Ok(OnchainWalletAssessment {
             wallet: wallet.to_string(),
@@ -135,6 +161,15 @@ impl OnchainAssessor {
             expectancy_pct: round2(expectancy),
             total_buy_quote: total_buy.to_f64().unwrap_or(0.0),
             total_sell_quote: total_sell.to_f64().unwrap_or(0.0),
+            median_hold_secs: median_i64(&holds),
+            avg_hold_secs: if holds.is_empty() {
+                None
+            } else {
+                Some((holds.iter().sum::<i64>() / holds.len() as i64).max(0))
+            },
+            median_win_pct: round2(median_f64(&pnls.iter().filter(|p| **p > Decimal::ZERO).map(|p| p.to_f64().unwrap_or(0.0)).collect::<Vec<_>>())),
+            median_loss_pct: round2(median_f64(&pnls.iter().filter(|p| **p <= Decimal::ZERO).map(|p| p.to_f64().unwrap_or(0.0)).collect::<Vec<_>>())),
+            profit_factor: if profit_factor.is_finite() { round2(profit_factor) } else { profit_factor },
         })
     }
 
@@ -144,6 +179,7 @@ impl OnchainAssessor {
         tx: &serde_json::Value,
         ledgers: &mut HashMap<String, TokenLedger>,
     ) {
+        let ts = tx_timestamp(tx);
         // Collect the wallet's token-transfer legs.
         let mut wallet_legs: Vec<(String, Decimal, bool)> = Vec::new(); // (mint, amount, wallet_paid)
         if let Some(transfers) = tx.get("tokenTransfers").and_then(|t| t.as_array()) {
@@ -207,10 +243,64 @@ impl OnchainAssessor {
             let ledger = ledgers.entry(traded_token).or_default();
             if *paid {
                 ledger.buy_quote += *amount;
+                if ledger.first_buy_ts.is_none() {
+                    ledger.first_buy_ts = ts;
+                }
             } else {
                 ledger.sell_quote += *amount;
+                if ledger.first_sell_ts.is_none() {
+                    ledger.first_sell_ts = ts;
+                }
             }
         }
+    }
+}
+
+/// Extract the transaction timestamp (unix seconds) from an enhanced API
+/// response. The API emits ISO-8601 strings in some modes and unix numbers
+/// in others — handle both.
+fn tx_timestamp(tx: &serde_json::Value) -> Option<i64> {
+    let raw = tx.get("timestamp")?;
+    if let Some(n) = raw.as_i64() {
+        return Some(n);
+    }
+    if let Some(n) = raw.as_u64() {
+        return Some(n as i64);
+    }
+    let s = raw.as_str()?;
+    if let Ok(n) = s.parse::<i64>() {
+        return Some(n);
+    }
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp())
+}
+
+fn median_f64(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = sorted.len() / 2;
+    if sorted.len().is_multiple_of(2) {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    } else {
+        sorted[mid]
+    }
+}
+
+fn median_i64(values: &[i64]) -> Option<i64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let mid = sorted.len() / 2;
+    if sorted.len().is_multiple_of(2) {
+        Some((sorted[mid - 1] + sorted[mid]) / 2)
+    } else {
+        Some(sorted[mid])
     }
 }
 
@@ -339,7 +429,6 @@ mod tests {
             .unwrap_or(false);
         assert!(!is_error, "null transactionError must not count as failure");
     }
-
     #[test]
     fn test_ignores_failed_transactions() {
         let wallet = "Wallet111111111111111111111111111111111111";
@@ -352,6 +441,7 @@ mod tests {
                 leg(usdc, "100", wallet, "DexAcct1111111111111111111111111111111111111"),
                 leg(token, "1000", "DexAcct1111111111111111111111111111111111111", wallet),
             ],
+
             "nativeTransfers": [],
         });
 
@@ -361,5 +451,61 @@ mod tests {
         // This test verifies the ledger still builds; the error filter is in
         // assess_wallet's loop. Keep behavior documented.
         assert!(ledgers.contains_key(token));
+    }
+
+    #[test]
+    fn test_hold_duration_captured() {
+        let wallet = "Wallet111111111111111111111111111111111111";
+        let token = "TokA111111111111111111111111111111111111111";
+        let usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+        // BUY at t=100 (unix), SELL at t=100+3600.
+        let buy_tx = serde_json::json!({
+            "transactionError": null,
+            "timestamp": 100,
+            "tokenTransfers": [
+                leg(usdc, "100", wallet, "DexAcct1111111111111111111111111111111111111"),
+                leg(token, "1000", "DexAcct1111111111111111111111111111111111111", wallet),
+            ],
+            "nativeTransfers": [],
+        });
+        let sell_tx = serde_json::json!({
+            "transactionError": null,
+            "timestamp": 3700,
+            "tokenTransfers": [
+                leg(token, "1000", wallet, "DexAcct1111111111111111111111111111111111111"),
+                leg(usdc, "150", "DexAcct1111111111111111111111111111111111111", wallet),
+            ],
+            "nativeTransfers": [],
+        });
+
+        let mut ledgers = HashMap::new();
+        OnchainAssessor::apply_transaction(wallet, &buy_tx, &mut ledgers);
+        OnchainAssessor::apply_transaction(wallet, &sell_tx, &mut ledgers);
+        let ledger = ledgers.get(token).expect("token ledger");
+        assert_eq!(ledger.first_buy_ts, Some(100));
+        assert_eq!(ledger.first_sell_ts, Some(3700));
+        assert_eq!(ledger.buy_quote, Decimal::from(100));
+        assert_eq!(ledger.sell_quote, Decimal::from(150));
+    }
+
+    #[test]
+    fn test_iso_timestamp_parses() {
+        let tx = serde_json::json!({ "timestamp": "2026-08-05T12:00:00.000Z" });
+        let ts = tx_timestamp(&tx);
+        assert!(ts.is_some(), "ISO timestamp must parse");
+        // Round-trip: parsing the same string through chrono gives the same unix.
+        let dt = chrono::DateTime::parse_from_rfc3339("2026-08-05T12:00:00.000Z").unwrap();
+        assert_eq!(ts, Some(dt.timestamp()));
+    }
+
+    #[test]
+    fn test_median_helpers() {
+        assert_eq!(median_f64(&[]), 0.0);
+        assert_eq!(median_f64(&[3.0, 1.0, 2.0]), 2.0);
+        assert_eq!(median_f64(&[4.0, 1.0, 2.0, 3.0]), 2.5);
+        assert_eq!(median_i64(&[]), None);
+        assert_eq!(median_i64(&[3, 1, 2]), Some(2));
+        assert_eq!(median_i64(&[4, 1, 2, 3]), Some(2));
     }
 }

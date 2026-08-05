@@ -615,6 +615,19 @@ impl DunePnlMonitor {
                             .await
                         {
                             Ok(a) => {
+                                // Persist the per-wallet exit profile (reuses
+                                // the fetched txs — zero extra Helius cost).
+                                {
+                                    let DbPool::PostgreSQL(pool) = self.db.pool();
+                                    let stats = crate::engine::exit_profile::WalletExitStats::from_assessment(&a);
+                                    if let Err(e) = crate::engine::exit_profile::upsert_exit_profile(
+                                        &pool, addr, &stats,
+                                    )
+                                    .await
+                                    {
+                                        warn!(wallet = %addr, error = %e, "Dune promotion: exit profile upsert failed");
+                                    }
+                                }
                                 let pass = a.round_trips
                                     >= onchain_config.min_round_trips
                                     && a.expectancy_pct > onchain_config.min_expectancy_pct;
@@ -938,6 +951,17 @@ impl DunePnlMonitor {
                 .await
             {
                 Ok(a) => {
+                    // Persist the per-wallet exit profile (reuses the same
+                    // fetched txs — zero extra Helius cost).
+                    {
+                        let DbPool::PostgreSQL(pool) = self.db.pool();
+                        let stats = crate::engine::exit_profile::WalletExitStats::from_assessment(&a);
+                        if let Err(e) =
+                            crate::engine::exit_profile::upsert_exit_profile(&pool, wallet, &stats).await
+                        {
+                            warn!(wallet = %wallet, error = %e, "On-chain audit: exit profile upsert failed");
+                        }
+                    }
                     let pass = a.round_trips >= self.onchain_config.min_round_trips
                         && a.expectancy_pct > self.onchain_config.min_expectancy_pct;
                     info!(

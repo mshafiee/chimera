@@ -605,6 +605,38 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
 
+    // Per-wallet exit profiles: derived from on-chain round trips, blended
+    // with the global profit config via Bayesian shrinkage. Refreshed from
+    // the DB periodically; consumed by the position monitor (time exits +
+    // trailing) and the shadow mirror.
+    let exit_profile_cache = Arc::new(
+        chimera_operator::engine::exit_profile::ExitProfileCache::new(
+            db_pool.clone(),
+            Arc::new(config.profit_management.clone()),
+            config.profit_management.exit_profiles.clone(),
+        ),
+    );
+    if config.profit_management.exit_profiles.enabled {
+        let ep_token = cancel_token.clone();
+        let ep_cache = exit_profile_cache.clone();
+        let ep_interval = config.profit_management.exit_profiles.refresh_secs;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(ep_interval));
+            loop {
+                tokio::select! {
+                    _ = ep_token.cancelled() => break,
+                    _ = interval.tick() => {
+                        match ep_cache.refresh().await {
+                            Ok(n) => tracing::info!(profiles = n, "Exit profile cache refreshed"),
+                            Err(e) => tracing::warn!(error = %e, "Exit profile cache refresh failed"),
+                        }
+                    }
+                }
+            }
+        });
+        tracing::info!("Per-wallet exit profiles enabled (refresh {}s)", ep_interval);
+    }
+
     // Shadow paper trader: trades every signal for later evaluation
     let shadow_trader = Arc::new(chimera_operator::engine::ShadowTrader::new(
         db_pool.clone(),
@@ -613,6 +645,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(config.profit_management.clone()),
             run_context.run_id.clone(),
         ),
+        Some(exit_profile_cache.clone()),
     ));
     if shadow_trader.is_enabled() {
         tracing::info!(run_id = %run_context.run_id, "Shadow paper trader enabled");
@@ -1612,7 +1645,7 @@ async fn main() -> anyhow::Result<()> {
             price_cache.clone(),
             Some(momentum_exit),
             Some(market_regime_detector.clone()),
-        ));
+        ).with_exit_profiles(Some(exit_profile_cache.clone())));
 
         // Dedicated HWM sweep task — runs every 5 minutes independent of the position
         // monitoring loop so memory is reclaimed even if that loop stalls or panics.
@@ -1813,7 +1846,12 @@ async fn main() -> anyhow::Result<()> {
 
                             // Check profit targets
                             let pt_action = monitor_pt
-                                .check_targets(&pos.trade_uuid, &pos.token_address, &pos.strategy)
+                                .check_targets(
+                                    &pos.trade_uuid,
+                                    &pos.wallet_address,
+                                    &pos.token_address,
+                                    &pos.strategy,
+                                )
                                 .await;
                             let pt_triggered = !matches!(pt_action, ProfitTargetAction::None);
                             let pt_exit = match pt_action {

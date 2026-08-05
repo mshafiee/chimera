@@ -28,6 +28,9 @@ pub struct ProfitTargetManager {
     momentum_exit: Option<Arc<MomentumExit>>,
     /// Market regime detector (optional)
     market_regime: Option<Arc<MarketRegimeDetector>>,
+    /// Per-wallet exit profiles (optional): time-exit hours and trailing-stop
+    /// params are blended per wallet; loss-side rails stay global.
+    exit_profiles: Option<Arc<crate::engine::exit_profile::ExitProfileCache>>,
 }
 
 /// Profit target state for a position
@@ -187,6 +190,7 @@ impl ProfitTargetManager {
             active_targets: Arc::new(RwLock::new(std::collections::HashMap::new())),
             momentum_exit: None,
             market_regime: None,
+            exit_profiles: None,
         }
     }
 
@@ -204,6 +208,7 @@ impl ProfitTargetManager {
             active_targets: Arc::new(RwLock::new(std::collections::HashMap::new())),
             momentum_exit: Some(momentum_exit),
             market_regime: None,
+            exit_profiles: None,
         }
     }
 
@@ -221,6 +226,7 @@ impl ProfitTargetManager {
             active_targets: Arc::new(RwLock::new(std::collections::HashMap::new())),
             momentum_exit: None,
             market_regime: Some(market_regime),
+            exit_profiles: None,
         }
     }
 
@@ -239,6 +245,31 @@ impl ProfitTargetManager {
             active_targets: Arc::new(RwLock::new(std::collections::HashMap::new())),
             momentum_exit,
             market_regime,
+            exit_profiles: None,
+        }
+    }
+
+    /// Attach the per-wallet exit profile cache.
+    pub fn with_exit_profiles(
+        mut self,
+        cache: Option<Arc<crate::engine::exit_profile::ExitProfileCache>>,
+    ) -> Self {
+        self.exit_profiles = cache;
+        self
+    }
+
+    /// Effective per-wallet exit params for a position, or the global
+    /// defaults when no usable profile exists for the wallet.
+    async fn effective_exit_params(
+        &self,
+        wallet: &str,
+        strategy: &str,
+    ) -> crate::engine::exit_profile::EffectiveExitParams {
+        match &self.exit_profiles {
+            Some(c) => c.effective(wallet, strategy).await,
+            None => {
+                crate::engine::exit_profile::EffectiveExitParams::from_config(&self.config, strategy)
+            }
         }
     }
 
@@ -388,12 +419,18 @@ impl ProfitTargetManager {
     ///
     /// `strategy` is the position's strategy string ("SHIELD" or "SPEAR") — used to
     /// differentiate time-exit thresholds and trailing-stop distance.
+    /// `wallet_address` selects the per-wallet exit profile (time-exit hours,
+    /// trailing params) when one exists; otherwise global config is used.
     pub async fn check_targets(
         &self,
         trade_uuid: &str,
+        wallet_address: &str,
         token_address: &str,
         strategy: &str,
     ) -> ProfitTargetAction {
+        // Per-wallet exit params (fall back to global defaults when no usable
+        // profile exists). Loss-side rails stay global.
+        let eff = self.effective_exit_params(wallet_address, strategy).await;
         let current_price = match self.price_cache.get_price_usd(token_address) {
             Some(price) => price,
             None => {
@@ -564,13 +601,15 @@ impl ProfitTargetManager {
         // Additionally, the trailing distance widens for highly volatile tokens (mirrors
         // stop_loss.rs adaptive logic) so microcaps aren't stopped out by normal intraday
         // retracements. Cap at 40% so the stop remains actionable.
-        // Scale trailing stop activation by vol_scale (Issue 3 fix)
-        let scaled_activation = (self.config.trailing_stop_activation * vol_scale).max(min_target);
+        // Scale trailing stop activation by vol_scale (Issue 3 fix).
+        // Per-wallet activation replaces the global default when a profile
+        // exists (effective_exit_params above).
+        let scaled_activation = (eff.trailing_activation_pct * vol_scale).max(min_target);
 
         let base_trailing_distance = if strategy == "SPEAR" {
-            self.config.trailing_stop_distance * dec!(1.5)
+            eff.trailing_distance_pct * dec!(1.5)
         } else {
-            self.config.trailing_stop_distance
+            eff.trailing_distance_pct
         };
         // Scale trailing distance by vol_scale so low-vol tokens get tighter
         // stops, but keep a floor so the stop can never collapse to the peak
@@ -644,25 +683,20 @@ impl ProfitTargetManager {
         // Determine final action before releasing the lock.
         // Spear positions use shorter hold times (higher volatility, faster decay).
         // Shield positions hold longer to allow conservative signals to play out.
+        // Per-wallet time exits (effective params) replace the hardcoded
+        // tiers when a wallet profile exists; losing-tier exits stay global.
         let is_spear = strategy == "SPEAR";
         let (elapsed_hours, time_exit_limit_hours, time_exit) =
             match state.entry_time.elapsed() {
                 Ok(elapsed) => {
                     let elapsed_hours = elapsed.as_secs() / 3600;
                     let exit_limit_hours = if profit_percent > dec!(25) {
-                        // High-profit: Shield holds to 48h, Spear exits sooner at 24h
-                        if is_spear {
-                            24
-                        } else {
-                            48
-                        }
+                        // High-profit: per-wallet hours (default Shield 48h, Spear 24h)
+                        eff.high_profit_hours
                     } else if profit_percent > dec!(10) {
-                        // Medium-profit: Shield 24h, Spear 12h
-                        if is_spear {
-                            12
-                        } else {
-                            self.config.time_exit_hours
-                        }
+                        // Medium-profit: per-wallet hours (default Shield
+                        // config.time_exit_hours, Spear 12h)
+                        eff.medium_profit_hours
                     } else {
                         // Low-profit and losing: use the configured losing_time_exit_hours
                         // for the strategy so operators can control all near-breakeven/

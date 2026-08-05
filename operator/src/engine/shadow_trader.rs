@@ -66,6 +66,9 @@ pub struct ShadowTrader {
     price_cache: Arc<PriceCache>,
     config: ShadowConfig,
     peaks: Arc<tokio::sync::Mutex<HashMap<String, Decimal>>>,
+    /// Per-wallet exit profiles — keeps the mirror_main simulation faithful
+    /// to the real monitor (per-wallet time exits + trailing).
+    exit_profiles: Option<Arc<crate::engine::exit_profile::ExitProfileCache>>,
 }
 
 impl ShadowTrader {
@@ -73,12 +76,14 @@ impl ShadowTrader {
         db: Arc<dyn Database>,
         price_cache: Arc<PriceCache>,
         config: ShadowConfig,
+        exit_profiles: Option<Arc<crate::engine::exit_profile::ExitProfileCache>>,
     ) -> Self {
         Self {
             db,
             price_cache,
             config,
             peaks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            exit_profiles,
         }
     }
 
@@ -358,7 +363,7 @@ impl ShadowTrader {
         let DbPool::PostgreSQL(pool) = self.db.pool();
 
         let active_positions = sqlx::query_as::<_, ShadowPositionRow>(
-            r#"SELECT shadow_id, token_address, strategy, entry_price_usd, entry_amount_sol, opened_at
+            r#"SELECT shadow_id, wallet_address, token_address, strategy, entry_price_usd, entry_amount_sol, opened_at
                FROM shadow_positions
                WHERE fully_closed = FALSE
                  AND entry_price_usd IS NOT NULL
@@ -440,8 +445,18 @@ impl ShadowTrader {
             return;
         }
 
+        let strategy_str = pos.strategy.as_deref().unwrap_or("SHIELD");
+        let eff = match &self.exit_profiles {
+            Some(c) => c.effective(&pos.wallet_address, strategy_str).await,
+            None => crate::engine::exit_profile::EffectiveExitParams::from_config(
+                &self.config.profit_config,
+                strategy_str,
+            ),
+        };
+
         let mirror_exit = Self::check_mirror_main(
             &self.config.profit_config,
+            &eff,
             pos.entry_price_usd,
             current_price,
             peak_price,
@@ -510,6 +525,7 @@ impl ShadowTrader {
 
     fn check_mirror_main(
         config: &ProfitManagementConfig,
+        eff: &crate::engine::exit_profile::EffectiveExitParams,
         entry_price: Decimal,
         current_price: Decimal,
         peak_price: Decimal,
@@ -557,10 +573,11 @@ impl ShadowTrader {
             return Some("stop_loss".to_string());
         }
 
-        // 5. Trailing stop (unchanged).
-        if profit_pct >= config.trailing_stop_activation {
+        // 5. Trailing stop — per-wallet activation/distance when a profile
+        //    exists (mirrors profit_targets.rs using eff params).
+        if profit_pct >= eff.trailing_activation_pct {
             let trailing_stop_price = peak_price
-                * (Decimal::ONE - config.trailing_stop_distance / Decimal::from(100));
+                * (Decimal::ONE - eff.trailing_distance_pct / Decimal::from(100));
             if current_price <= trailing_stop_price {
                 return Some("trailing_stop".to_string());
             }
@@ -573,26 +590,17 @@ impl ShadowTrader {
             }
         }
 
-        // 7. Tiered time exit — matches profit_targets.rs exactly:
-        //    profit > 25%: SPEAR 24h / SHIELD 48h
-        //    profit > 10%: SPEAR 12h / SHIELD time_exit_hours
-        //    else:         SPEAR losing_spear / SHIELD losing_shield
-        //    The mirror previously used a flat time_exit_hours for winners and
-        //    a loss-threshold-gated losing exit — both diverge from the real
-        //    monitor, which exits at the tier limit regardless of PnL level.
+        // 7. Tiered time exit — matches profit_targets.rs exactly, using
+        //    per-wallet hours when a profile exists:
+        //    profit > 25%: eff.high_profit_hours (SPEAR 24h / SHIELD 48h base)
+        //    profit > 10%: eff.medium_profit_hours (SPEAR 12h / SHIELD
+        //                  config.time_exit_hours base)
+        //    else:         SPEAR losing_spear / SHIELD losing_shield (global)
         let is_spear = strategy.as_deref() == Some("SPEAR");
         let exit_limit_hours = if profit_pct > dec!(25) {
-            if is_spear {
-                24
-            } else {
-                48
-            }
+            eff.high_profit_hours
         } else if profit_pct > dec!(10) {
-            if is_spear {
-                12
-            } else {
-                config.time_exit_hours
-            }
+            eff.medium_profit_hours
         } else if is_spear {
             config.losing_time_exit_hours_spear
         } else {
@@ -678,6 +686,7 @@ impl ShadowTrader {
 #[derive(Debug, sqlx::FromRow)]
 struct ShadowPositionRow {
     shadow_id: String,
+    wallet_address: String,
     token_address: String,
     strategy: Option<String>,
     entry_price_usd: Decimal,
