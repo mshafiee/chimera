@@ -177,6 +177,57 @@ pub async fn list_wallets(
     Ok(Json(WalletsResponse { wallets, total }))
 }
 
+/// Shadow trading leaderboard row: per-wallet per-exit-strategy PnL on
+/// admitted DEX signals over 7 days.
+#[derive(Debug, serde::Serialize, sqlx::FromRow)]
+pub struct ShadowLeaderboardRow {
+    pub wallet_address: String,
+    pub exit_strategy: String,
+    pub exits_7d: i64,
+    pub wins_7d: i64,
+    pub win_rate_pct: f64,
+    pub avg_pnl_pct: f64,
+    pub total_pnl_sol: f64,
+}
+
+/// Shadow trading leaderboard.
+///
+/// GET /api/v1/shadow/leaderboard
+/// Requires: readonly+ role
+///
+/// Aggregates the shadow paper-trader exits per wallet and exit strategy
+/// (mirror_main / fixed_1h / fixed_4h / fixed_24h / wallet_sell) over the
+/// last 7 days, restricted to admitted non-pump signals — the data that
+/// drives wallet quality decisions and (once samples accumulate) per-wallet
+/// exit tuning.
+pub async fn get_shadow_leaderboard(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<Vec<ShadowLeaderboardRow>>, AppError> {
+    let DbPool::PostgreSQL(pool) = state.db.pool();
+    let rows: Vec<ShadowLeaderboardRow> = sqlx::query_as(
+        r#"
+        SELECT sp.wallet_address,
+               se.exit_strategy,
+               COUNT(*) AS exits_7d,
+               SUM(CASE WHEN se.pnl_sol > 0 THEN 1 ELSE 0 END) AS wins_7d,
+               ROUND(100.0 * SUM(CASE WHEN se.pnl_sol > 0 THEN 1 ELSE 0 END) / COUNT(*), 1)::float8 AS win_rate_pct,
+               ROUND(AVG(se.pnl_pct)::numeric, 2)::float8 AS avg_pnl_pct,
+               ROUND(SUM(se.pnl_sol)::numeric, 3)::float8 AS total_pnl_sol
+        FROM shadow_exits se
+        JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
+        WHERE sp.opened_at > NOW() - INTERVAL '7 days'
+          AND sp.token_address NOT LIKE '%pump'
+          AND sp.main_admitted = true
+        GROUP BY sp.wallet_address, se.exit_strategy
+        ORDER BY total_pnl_sol DESC
+        LIMIT 100
+        "#,
+    )
+    .fetch_all(&pool)
+    .await?;
+    Ok(Json(rows))
+}
+
 /// Get a single wallet by address
 ///
 /// GET /api/v1/wallets/:address

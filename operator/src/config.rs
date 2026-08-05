@@ -135,6 +135,9 @@ pub struct AppConfig {
     /// Rejection-rate wallet mute configuration
     #[serde(default)]
     pub rejection_mute: RejectionMuteConfig,
+    /// Token shadow blacklist configuration
+    #[serde(default)]
+    pub shadow_blacklist: ShadowBlacklistConfig,
     /// Dune Analytics integration configuration
     #[serde(default)]
     pub dune: DuneConfig,
@@ -2354,6 +2357,51 @@ impl Default for RejectionMuteConfig {
             min_window_samples: default_rejection_mute_min_samples(),
             hard_rejection_threshold: default_rejection_mute_threshold(),
             mute_duration_hours: default_rejection_mute_duration_hours(),
+        }
+    }
+}
+
+/// Token shadow blacklist: rejects BUY signals for tokens whose shadow
+/// performance under our own exits (mirror_main) is consistently negative
+/// across enough samples. Prevents re-entering dump tokens like 6GmAFSYs4g
+/// (-13% avg over 40 shadow signals) that bleed capital every entry.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ShadowBlacklistConfig {
+    /// Master switch.
+    #[serde(default = "default_shadow_blacklist_enabled")]
+    pub enabled: bool,
+    /// Minimum shadow exits (mirror_main, any wallet) before a token can be
+    /// blacklisted — protects against small-sample noise.
+    #[serde(default = "default_shadow_blacklist_min_samples")]
+    pub min_samples: i64,
+    /// Average shadow PnL% below this threshold triggers the blacklist.
+    #[serde(default = "default_shadow_blacklist_threshold_pct")]
+    pub threshold_pct: f64,
+    /// Rolling window (hours) over which shadow exits are evaluated.
+    #[serde(default = "default_shadow_blacklist_window_hours")]
+    pub window_hours: i64,
+}
+
+fn default_shadow_blacklist_enabled() -> bool {
+    true
+}
+fn default_shadow_blacklist_min_samples() -> i64 {
+    10
+}
+fn default_shadow_blacklist_threshold_pct() -> f64 {
+    -5.0
+}
+fn default_shadow_blacklist_window_hours() -> i64 {
+    48
+}
+
+impl Default for ShadowBlacklistConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_shadow_blacklist_enabled(),
+            min_samples: default_shadow_blacklist_min_samples(),
+            threshold_pct: default_shadow_blacklist_threshold_pct(),
+            window_hours: default_shadow_blacklist_window_hours(),
         }
     }
 }

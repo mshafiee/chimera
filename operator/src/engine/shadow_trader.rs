@@ -526,16 +526,38 @@ impl ShadowTrader {
 
         let elapsed_secs_u64 = elapsed_secs as u64;
 
+        // Order mirrors the real position monitor (stop_loss.rs + profit_targets.rs):
+        // 1. Hard stop: absolute floor at -25%.
+        if loss_pct <= dec!(-25) {
+            return Some("stop_loss".to_string());
+        }
+
+        // 2. Recovery gate: the DOMINANT loser exit in the real monitor — after
+        //    the wick window, any position still below the threshold is cut
+        //    immediately (data: winners recover above -1% within 48s, losers
+        //    stay below -2.5%). The mirror previously held to -8%, massively
+        //    overstating losses for positions the real system exits at -2%.
+        if elapsed_secs_u64 > config.recovery_gate_secs
+            && loss_pct < config.recovery_gate_threshold
+        {
+            return Some("recovery_gate".to_string());
+        }
+
+        // 3. Adaptive stop approximation: the real monitor clamps the dynamic
+        //    stop to max_stop_loss_distance. Mirror uses the flat value.
         if loss_pct <= config.max_stop_loss_distance {
             return Some("stop_loss".to_string());
         }
 
-        if elapsed_secs_u64 > config.wick_protection_secs
+        // 4. Wick window: during the first wick_protection_secs, cap losses at
+        //    wick_protection_max_loss_percent (fast-dump protection).
+        if elapsed_secs_u64 <= config.wick_protection_secs
             && loss_pct <= config.wick_protection_max_loss_percent
         {
             return Some("stop_loss".to_string());
         }
 
+        // 5. Trailing stop (unchanged).
         if profit_pct >= config.trailing_stop_activation {
             let trailing_stop_price = peak_price
                 * (Decimal::ONE - config.trailing_stop_distance / Decimal::from(100));
@@ -544,25 +566,41 @@ impl ShadowTrader {
             }
         }
 
+        // 6. Profit targets (currently empty — trailing-only regime).
         for target in &config.targets {
             if profit_pct >= *target {
                 return Some(format!("profit_target_{}", target));
             }
         }
 
-        let time_exit_secs = config.time_exit_hours as i64 * 3600;
-        if elapsed_secs >= time_exit_secs {
-            return Some("time_exit".to_string());
-        }
-
-        let losing_hours = match strategy.as_deref() {
-            Some("SHIELD") => config.losing_time_exit_hours_shield as i64 * 3600,
-            Some("SPEAR") => config.losing_time_exit_hours_spear as i64 * 3600,
-            _ => config.losing_time_exit_hours_shield as i64 * 3600,
+        // 7. Tiered time exit — matches profit_targets.rs exactly:
+        //    profit > 25%: SPEAR 24h / SHIELD 48h
+        //    profit > 10%: SPEAR 12h / SHIELD time_exit_hours
+        //    else:         SPEAR losing_spear / SHIELD losing_shield
+        //    The mirror previously used a flat time_exit_hours for winners and
+        //    a loss-threshold-gated losing exit — both diverge from the real
+        //    monitor, which exits at the tier limit regardless of PnL level.
+        let is_spear = strategy.as_deref() == Some("SPEAR");
+        let exit_limit_hours = if profit_pct > dec!(25) {
+            if is_spear {
+                24
+            } else {
+                48
+            }
+        } else if profit_pct > dec!(10) {
+            if is_spear {
+                12
+            } else {
+                config.time_exit_hours
+            }
+        } else if is_spear {
+            config.losing_time_exit_hours_spear
+        } else {
+            config.losing_time_exit_hours_shield
         };
 
-        if elapsed_secs >= losing_hours && loss_pct <= config.losing_time_exit_threshold_percent {
-            return Some("losing_time_exit".to_string());
+        if elapsed_secs >= exit_limit_hours as i64 * 3600 {
+            return Some("time_exit".to_string());
         }
 
         None

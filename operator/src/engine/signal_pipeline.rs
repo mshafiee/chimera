@@ -5,7 +5,7 @@
 //! parallel (WorkerPool) processing paths.
 
 use crate::config::AppConfig;
-use crate::db_abstraction::Database;
+use crate::db_abstraction::{Database, DbPool};
 use crate::engine::executor::{Executor, ExecutorError};
 use crate::engine::portfolio_heat::PortfolioHeat;
 use crate::handlers::{TradeUpdateData, WsEvent, WsState};
@@ -728,6 +728,67 @@ impl SignalProcessor {
                     Ok(false) => {}
                     Err(e) => {
                         tracing::warn!(error = %e, "Cooldown check failed — proceeding");
+                    }
+                }
+            }
+        }
+
+        // Token shadow blacklist: reject BUY signals for tokens whose shadow
+        // performance under our own exits (mirror_main, any wallet, rolling
+        // window) is consistently negative. Complements the cooldown with a
+        // durable, data-backed ban — e.g. 6GmAFSYs4g averaged -13%/h over 40
+        // shadow signals and kept getting re-entered.
+        if signal.payload.action == Action::Buy {
+            if let Some(ref token_addr) = signal.payload.token_address {
+                let blacklist = &self.config.shadow_blacklist;
+                if blacklist.enabled {
+                    let banned: bool = {
+                        let DbPool::PostgreSQL(pool) = self.db.pool();
+                        sqlx::query_scalar(
+                            r#"
+                            SELECT EXISTS(
+                                SELECT 1
+                                FROM shadow_exits se
+                                JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
+                                WHERE sp.token_address = $1
+                                  AND sp.token_address NOT LIKE '%pump'
+                                  AND se.exit_strategy = 'mirror_main'
+                                  AND sp.opened_at > NOW() - ($2 || ' hours')::interval
+                                GROUP BY sp.token_address
+                                HAVING COUNT(*) >= $3 AND AVG(se.pnl_pct) < $4
+                            )
+                            "#,
+                        )
+                        .bind(token_addr)
+                        .bind(blacklist.window_hours)
+                        .bind(blacklist.min_samples)
+                        .bind(blacklist.threshold_pct)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap_or(false)
+                    };
+                    if banned {
+                        let reason = format!(
+                            "Token shadow blacklist: {} shadow exits avg < {:.1}% over {}h",
+                            blacklist.min_samples,
+                            blacklist.threshold_pct,
+                            blacklist.window_hours
+                        );
+                        tracing::info!(
+                            trade_uuid = %trade_uuid,
+                            token = %signal.payload.token,
+                            token_address = %token_addr,
+                            "Signal rejected: token shadow blacklist"
+                        );
+                        let _ = self
+                            .db
+                            .mark_trade_dead_letter(
+                                &trade_uuid,
+                                &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                                &reason,
+                            )
+                            .await;
+                        return;
                     }
                 }
             }

@@ -260,6 +260,14 @@ rejection_mute:
   hard_rejection_threshold: 0.90  # mute at >=90% hard-rejection rate
   mute_duration_hours: 6    # mute for 6h, then re-evaluate
 
+# Token shadow blacklist: reject BUY signals for tokens whose shadow
+# performance under our own exits is consistently negative.
+shadow_blacklist:
+  enabled: true
+  min_samples: 10           # shadow exits (mirror_main, any wallet) required
+  threshold_pct: -5.0       # avg shadow PnL% below this triggers the ban
+  window_hours: 48
+
 # Dune Analytics integration for wallet PnL monitoring
 # API key read from DUNE_API_KEY env var
 dune:

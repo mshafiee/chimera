@@ -2721,6 +2721,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/incidents/dead-letter/:trade_uuid/retry", post(retry_dead_letter_item))
         .route("/scout/run", post(trigger_scout_run))
         .route("/debug/backtest-smoke", post(debug_backtest_smoke))
+        .route(
+            "/shadow/leaderboard",
+            get(chimera_operator::handlers::get_shadow_leaderboard),
+        )
         .with_state(api_state.clone())
         .layer(axum_middleware::from_fn_with_state(
             auth_state.clone(),
