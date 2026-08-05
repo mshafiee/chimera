@@ -681,11 +681,15 @@ pub fn parse_helius_webhook(
     // Before this fix, ~98% of tracked-wallet SWAP events parsed as
     // Ok(None) because the speculative token's user_account didn't match.
     if let Some(swap_event) = &payload.events.swap {
+        let in_mints: Vec<String> = swap_event.token_inputs.iter().map(|l| format!("{}({})", &l.mint[..l.mint.len().min(8)], l.raw_token_amount.is_some())).collect();
+        let out_mints: Vec<String> = swap_event.token_outputs.iter().map(|l| format!("{}({})", &l.mint[..l.mint.len().min(8)], l.raw_token_amount.is_some())).collect();
         tracing::debug!(
             signature = %payload.signature,
             has_events_swap = true,
             token_inputs = swap_event.token_inputs.len(),
             token_outputs = swap_event.token_outputs.len(),
+            in_mints = in_mints.join(","),
+            out_mints = out_mints.join(","),
             "events.swap present — using primary parse path"
         );
         if let Some(parsed) = parse_from_swap_event(
