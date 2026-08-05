@@ -284,7 +284,7 @@ impl ShadowTrader {
             let elapsed_secs = (Utc::now() - opened_at).num_seconds();
             let (pnl_pct, pnl_sol) = Self::compute_pnl(entry_price, exit_price, config.position_size_sol);
 
-            let _ = sqlx::query(
+            let insert = sqlx::query(
                 r#"INSERT INTO shadow_exits (shadow_id, exit_strategy, exit_price_usd, exit_sol_price_usd, pnl_pct, pnl_sol, exit_reason, hold_duration_secs)
                    VALUES ($1, 'wallet_sell', $2, $3, $4, $5, 'wallet_sell', $6)
                    ON CONFLICT (shadow_id, exit_strategy) DO NOTHING"#,
@@ -298,11 +298,15 @@ impl ShadowTrader {
             .execute(&pool)
             .await;
 
-            tracing::debug!(
-                shadow_id = %shadow_id,
-                pnl_pct = %pnl_pct,
-                "Shadow: wallet_sell exit triggered"
-            );
+            if let Ok(r) = insert {
+                if r.rows_affected() > 0 {
+                    tracing::trace!(
+                        shadow_id = %shadow_id,
+                        pnl_pct = %pnl_pct,
+                        "Shadow: wallet_sell exit triggered"
+                    );
+                }
+            }
 
             Self::check_fully_closed(&pool, &shadow_id).await;
         }
@@ -465,7 +469,7 @@ impl ShadowTrader {
         );
 
         if let Some(reason) = mirror_exit {
-            let _ = sqlx::query(
+            let insert = sqlx::query(
                 r#"INSERT INTO shadow_exits (shadow_id, exit_strategy, exit_price_usd, exit_sol_price_usd, pnl_pct, pnl_sol, exit_reason, hold_duration_secs)
                    VALUES ($1, 'mirror_main', $2, $3, $4, $5, $6, $7)
                    ON CONFLICT (shadow_id, exit_strategy) DO NOTHING"#,
@@ -480,12 +484,21 @@ impl ShadowTrader {
             .execute(pool)
             .await;
 
-            tracing::debug!(
-                shadow_id = %pos.shadow_id,
-                reason = %reason,
-                pnl_pct = %Self::pnl_pct(pos.entry_price_usd, current_price),
-                "Shadow: mirror_main exit"
-            );
+            // Only log when a NEW row was inserted. ON CONFLICT DO NOTHING
+            // silently no-ops on repeat ticks, but the log after it fired
+            // unconditionally — flooding the log at ~5s per open position
+            // (observed: 154K shadow-exit lines in the last 200K log lines,
+            // 9GB operator log in one day, disk at 81%).
+            if let Ok(r) = insert {
+                if r.rows_affected() > 0 {
+                    tracing::trace!(
+                        shadow_id = %pos.shadow_id,
+                        reason = %reason,
+                        pnl_pct = %Self::pnl_pct(pos.entry_price_usd, current_price),
+                        "Shadow: mirror_main exit"
+                    );
+                }
+            }
         }
 
         for (i, strategy) in EXIT_STRATEGIES.iter().enumerate() {
@@ -495,7 +508,7 @@ impl ShadowTrader {
             let hold_secs = FIXED_HOLDS_SECS.get(i - 1).copied().unwrap_or(86400);
 
             if elapsed_secs >= hold_secs {
-                let _ = sqlx::query(
+                let insert = sqlx::query(
                     r#"INSERT INTO shadow_exits (shadow_id, exit_strategy, exit_price_usd, exit_sol_price_usd, pnl_pct, pnl_sol, exit_reason, hold_duration_secs)
                        VALUES ($1, $2, $3, $4, $5, $6, 'fixed_hold_expired', $7)
                        ON CONFLICT (shadow_id, exit_strategy) DO NOTHING"#,
@@ -510,13 +523,18 @@ impl ShadowTrader {
                 .execute(pool)
                 .await;
 
-                tracing::debug!(
-                    shadow_id = %pos.shadow_id,
-                    strategy = %strategy,
-                    hold_secs,
-                    pnl_pct = %Self::pnl_pct(pos.entry_price_usd, current_price),
-                    "Shadow: fixed_hold exit"
-                );
+                // Same fix as mirror_main: only log on actual new insert.
+                if let Ok(r) = insert {
+                    if r.rows_affected() > 0 {
+                        tracing::trace!(
+                            shadow_id = %pos.shadow_id,
+                            strategy = %strategy,
+                            hold_secs,
+                            pnl_pct = %Self::pnl_pct(pos.entry_price_usd, current_price),
+                            "Shadow: fixed_hold exit"
+                        );
+                    }
+                }
             }
         }
 
