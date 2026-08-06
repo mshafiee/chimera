@@ -8,8 +8,7 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod circuit_breaker;
-pub use chimera_core::{constants, error, retry, utils};
-pub mod config;
+pub use chimera_core::{config, constants, error, retry, utils};
 pub mod db_abstraction;
 pub mod engine;
 pub mod experiment;

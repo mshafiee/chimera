@@ -4,49 +4,12 @@
 //! Uses DashMap for sub-microsecond lock acquisition with automatic expiration
 //! and cleanup for crash safety.
 
+use crate::config::ExecutionLockConfig;
 use dashmap::DashMap;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
-
-/// Configuration for execution lock behavior
-#[derive(Debug, Clone, Deserialize)]
-pub struct ExecutionLockConfig {
-    /// Enable/disable execution locking
-    #[serde(default = "default_execution_lock_enabled")]
-    pub enabled: bool,
-
-    /// Lock timeout in seconds (auto-expiration for crash safety)
-    #[serde(default = "default_lock_timeout")]
-    pub lock_timeout_seconds: u64,
-
-    /// Background cleanup interval in seconds
-    #[serde(default = "default_cleanup_interval")]
-    pub cleanup_interval_seconds: u64,
-}
-
-impl Default for ExecutionLockConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_execution_lock_enabled(),
-            lock_timeout_seconds: default_lock_timeout(),
-            cleanup_interval_seconds: default_cleanup_interval(),
-        }
-    }
-}
-
-fn default_execution_lock_enabled() -> bool {
-    true
-}
-
-fn default_lock_timeout() -> u64 {
-    120 // 2 minutes default
-}
-
-fn default_cleanup_interval() -> u64 {
-    30 // 30 seconds default
-}
 
 /// Lock entry stored in DashMap
 #[derive(Debug, Clone)]

@@ -3,21 +3,23 @@ name = "chimera_core"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
-description = "Chimera domain-pure foundation: constants, retry utilities. No database drivers, no web frameworks."
+description = "Chimera domain-pure foundation: config, constants, error, retry, utils. No web frameworks in the default build."
 
 [dependencies]
 anyhow = { workspace = true }
 config = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-rust_decimal = { workspace = true }
-urlencoding = "2.1"
 sqlx = { workspace = true }
+solana-sdk = "3"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+urlencoding = "2.1"
 axum = { workspace = true, optional = true }
 
 [features]
@@ -26,9 +28,9 @@ axum = { workspace = true, optional = true }
 api = ["dep:axum"]
 
 [dev-dependencies]
-solana-sdk = "3"
 
 # NOTE (pragmatic exception, see docs/architecture/rust-workspace.md):
 # `sqlx`/`config` appear as regular deps solely because AppError (the
-# crate-wide error type) wraps sqlx::Error and config::ConfigError variants.
-# A future phase splits CoreError from InfraError to remove them.
+# crate-wide error type) wraps sqlx::Error and config::ConfigError variants,
+# and config.rs embeds solana_sdk pubkey validation. A future phase splits
+# CoreError from InfraError to remove them.

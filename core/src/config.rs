@@ -71,6 +71,10 @@ impl std::fmt::Display for TradeMode {
 /// Root configuration structure
 #[derive(Debug, Clone, Deserialize)]
 #[derive(Default)]
+
+
+
+
 pub struct AppConfig {
     /// Server configuration
     #[serde(default)]
@@ -125,7 +129,7 @@ pub struct AppConfig {
     pub degradation: DegradationConfig,
     /// Execution lock configuration for idempotency
     #[serde(default)]
-    pub execution_lock: crate::engine::ExecutionLockConfig,
+    pub execution_lock: ExecutionLockConfig,
     /// Forward test experiment configuration
     #[serde(default)]
     pub experiment: ExperimentConfig,
@@ -2813,6 +2817,43 @@ impl Default for DegradationConfig {
     }
 }
 
+// ── Execution-lock configuration (moved from engine/execution_lock.rs 2026-08-07) ──
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutionLockConfig {
+    /// Enable/disable execution locking
+    #[serde(default = "default_execution_lock_enabled")]
+    pub enabled: bool,
+
+    /// Lock timeout in seconds (auto-expiration for crash safety)
+    #[serde(default = "default_lock_timeout")]
+    pub lock_timeout_seconds: u64,
+
+    /// Background cleanup interval in seconds
+    #[serde(default = "default_cleanup_interval")]
+    pub cleanup_interval_seconds: u64,
+}
+
+impl Default for ExecutionLockConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_execution_lock_enabled(),
+            lock_timeout_seconds: default_lock_timeout(),
+            cleanup_interval_seconds: default_cleanup_interval(),
+        }
+    }
+}
+
+fn default_execution_lock_enabled() -> bool {
+    true
+}
+
+fn default_lock_timeout() -> u64 {
+    120 // 2 minutes default
+}
+
+fn default_cleanup_interval() -> u64 {
+    30 // 30 seconds default
+}
 impl AppConfig {
     /// Load configuration from files and environment with optional custom path
     ///

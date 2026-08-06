@@ -6,6 +6,7 @@
 //! utilities. The `operator` crate re-exports these modules so the legacy
 //! `chimera_operator::*` paths keep working during incremental extraction.
 
+pub mod config;
 pub mod constants;
 pub mod error;
 pub mod retry;

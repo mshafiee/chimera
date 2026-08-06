@@ -1022,6 +1022,7 @@ dependencies = [
  "rand 0.9.4",
  "reqwest",
  "rust_decimal",
+ "rust_decimal_macros",
  "serde",
  "serde_json",
  "solana-sdk",
