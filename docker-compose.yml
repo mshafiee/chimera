@@ -150,6 +150,14 @@ services:
        # requests returned 200. Keyless works (rate-limited); keep unset
        # until a valid key is available.)
        - CHIMERA_JUPITER__API_KEY=${JUPITER_API_KEY:-}
+       # Jupiter-via-Tor stopgap (2026-08-06): server IP 216.151.164.105 is
+       # permanently 429'd by lite-api.jup.ag and throttled on api.jup.ag —
+       # every honeypot/price call fails and signals die in DEAD_LETTER.
+       # Tor exit IPs get a fresh anonymous quota (verified 200/200). Only
+       # Jupiter hosts go through the proxy; Helius/Jito/Dune/Telegram/RPC
+       # stay direct. REMOVE both vars once a valid JUPITER_API_KEY exists.
+       - HTTPS_PROXY=http://tor:8118
+       - NO_PROXY=localhost,127.0.0.1,postgres,redis,api.helius.xyz,mainnet.helius-rpc.com,api.dune.com,api.telegram.org,api.dexscreener.com,api.mainnet-beta.solana.com,mainnet.block-engine.jito.wtf,tokyo.mainnet.block-engine.jito.wtf
        # Helius API key (config crate reads CHIMERA_ prefix, not raw HELIUS_API_KEY)
        - CHIMERA_MONITORING__HELIUS_API_KEY=${HELIUS_API_KEY}
        # RPC endpoints: use Helius RPC (reliable from this network) instead of
@@ -179,6 +187,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      tor:
+        condition: service_started
     networks:
       - chimera-network
     healthcheck:
@@ -187,6 +197,21 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    profiles:
+      - devnet
+      - mainnet-paper
+      - mainnet-prod
+      - evaluation
+
+  # Tor+privoxy sidecar — Jupiter stopgap (see HTTPS_PROXY on operator).
+  # No host ports: only reachable on chimera-network. Remove when a valid
+  # Jupiter API key is configured.
+  tor:
+    image: dockage/tor-privoxy:latest
+    container_name: chimera-tor
+    restart: unless-stopped
+    networks:
+      - chimera-network
     profiles:
       - devnet
       - mainnet-paper
