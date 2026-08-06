@@ -1,55 +1,14 @@
-# Git
+# Keep the docker build context (repo root) lean.
+# NOTE: scout/, scripts/, docker/, ops/ build from the root context too —
+# they must NOT be excluded here.
 .git
-.gitignore
-.gitattributes
-
-# Documentation
+target
+data
+logs
+node_modules
+web
+docs
+.kilo
 *.md
-docs/
-README.md
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Build artifacts
-target/
-dist/
-node_modules/
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-
-# Environment files
 .env
-.env.*
-!.env.example
-
-# Test files
-tests/
-*.test.*
-*.spec.*
-
-# Logs
-*.log
-logs/
-
-# Data (will be mounted as volumes)
-data/
-*.db
-*.db-shm
-*.db-wal
-
-# Temporary files
-tmp/
-temp/
-*.tmp
+backups

@@ -6,13 +6,16 @@ description = "Chimera Solana trading operator: execution engine, signal pipelin
 publish = false
 
 [dependencies]
+# Internal crates (workspace)
+chimera_core = { path = "../core" }
+
 # Core Async Runtime
-tokio = { version = "1.37", features = ["full", "sync"] }
+tokio = { workspace = true }
 tokio-util = "0.7"
 
 
 # Web Framework (Ingress)
-axum = { version = "0.7", features = ["macros", "ws"] }
+axum = { workspace = true }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["trace", "cors", "request-id", "limit"] }
 
@@ -47,34 +50,34 @@ solana-message = "3"
 solana-address-lookup-table-interface = "3" 
 
 # Database (PostgreSQL only)
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "macros", "migrate", "rust_decimal"] }
+sqlx = { workspace = true }
 
 # Configuration
-config = "0.15"
+config = { workspace = true }
 
 # Utilities
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
 # bincode 2.x serde API with config::legacy() reproduces the Solana wire format
 # (formerly bincode 1.x) — no separate bincode1 dependency needed.
 # Pinned exactly to 2.0.1: the legacy() wire format was validated against this version.
 bincode = { version = "=2.0.1", features = ["serde"] }
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { workspace = true }
 dotenvy = "0.15"
-tracing = "0.1"
+tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 tracing-log = "0.1"
-anyhow = "1.0"
-thiserror = "2.0"
-uuid = { version = "1.11", features = ["v4"] }
-async-trait = "0.1"
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
 dashmap = "6"
 parking_lot = "0.12"
 futures-util = "0.3"
 
 # HTTP Client for Telegram notifications and RPC
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+reqwest = { workspace = true }
 urlencoding = "2.1"
 
 # WebSocket client for Helius LaserStream
@@ -87,14 +90,14 @@ prometheus = "0.14.0"
 printpdf = "0.8.2"
 
 # Random number generation
-rand = { version = "0.9", features = ["small_rng"] }
+rand = { workspace = true }
 
 # Memory Security
 zeroize = { version = "1.7", features = ["derive"] }
 
 # Math
-rust_decimal = { version = "1.33", features = ["serde"] }
-rust_decimal_macros = "1"
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
 sysinfo = "0.38.4"
 
 # CLI + keypair format helpers (used by `import_keypair` tool)
@@ -136,7 +139,7 @@ tower = { version = "0.4", features = ["util"] }
 tokio = { version = "1.37", features = ["test-util"] }
 mockall = "0.13"
 rstest = "0.21"
-async-trait = "0.1"
+async-trait = { workspace = true }
 futures = "0.3"
 url = "2"
 

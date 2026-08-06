@@ -1013,6 +1013,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "chimera_core"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "rand 0.9.4",
+ "reqwest",
+ "solana-sdk",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "chimera_operator"
 version = "1.0.0"
 dependencies = [
@@ -1024,6 +1036,7 @@ dependencies = [
  "base64 0.22.1",
  "bincode 2.0.1",
  "bs58",
+ "chimera_core",
  "chrono",
  "clap",
  "config",

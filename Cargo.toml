@@ -1,0 +1,39 @@
+# Chimera Rust Workspace
+#
+# Enterprise layout (see docs/architecture/rust-workspace.md):
+#   core/   — domain-pure foundation: no database drivers, no web frameworks
+#   infra/  — adapters: Postgres backends, external API clients (planned)
+#   api/    — app entry + HTTP transport (planned)
+#   operator/ — legacy single-crate facade; re-exports core/infra modules so
+#               existing `chimera_operator::*` paths keep working while
+#               extraction proceeds incrementally.
+#
+# All shared dependency versions are locked here via [workspace.dependencies].
+
+[workspace]
+resolver = "2"
+members = ["core", "operator"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+publish = false
+
+# ── Shared dependency lock (single source of truth for versions) ────────────
+[workspace.dependencies]
+tokio = { version = "1.37", features = ["full", "sync"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+anyhow = "1.0"
+rust_decimal = { version = "1.33", features = ["serde"] }
+rust_decimal_macros = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+rand = { version = "0.9", features = ["small_rng"] }
+async-trait = "0.1"
+uuid = { version = "1.11", features = ["v4"] }
+config = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "macros", "migrate", "rust_decimal"] }
+axum = { version = "0.7", features = ["macros", "ws"] }

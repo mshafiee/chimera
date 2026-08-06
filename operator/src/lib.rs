@@ -8,8 +8,8 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod circuit_breaker;
+pub use chimera_core::{constants, retry};
 pub mod config;
-pub mod constants;
 pub mod db_abstraction;
 pub mod engine;
 pub mod error;
@@ -27,7 +27,7 @@ pub mod models;
 pub mod monitoring;
 pub mod notifications;
 pub mod price_cache;
-pub mod retry;
+
 pub mod roster;
 pub mod state;
 pub mod token;

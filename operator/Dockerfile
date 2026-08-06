@@ -24,14 +24,26 @@ WORKDIR /build
 ARG GIT_HASH=unknown
 ENV GIT_HASH=${GIT_HASH}
 
-# Copy Cargo files first for better caching
+# ── Cargo workspace layout (2026-08-07) ────────────────────────────────────
+# The operator is now a member of the workspace rooted at the repo root:
+#   Cargo.toml           workspace manifest ([workspace.dependencies])
+#   core/                domain-pure crate (chimera_core)
+#   operator/            this crate (chimera_operator)
+# Build context must be the repo root (see docker-compose.yml).
+
+# Copy workspace manifests first for better caching
 COPY Cargo.toml Cargo.lock ./
-COPY build.rs ./
-COPY src ./src
-COPY migrations_postgres ./migrations_postgres
+COPY core/Cargo.toml ./core/Cargo.toml
+COPY operator/Cargo.toml ./operator/Cargo.toml
+COPY operator/build.rs ./operator/build.rs
+
+# Copy sources
+COPY core/src ./core/src
+COPY operator/src ./operator/src
+COPY operator/migrations_postgres ./operator/migrations_postgres
 
 # Build release binary (online mode for sqlx, as we don't have prepared data)
-RUN cargo build --release
+RUN cargo build --release -p chimera_operator
 
 # Runtime stage - same base image for GLIBC compatibility
 FROM ubuntu:22.04

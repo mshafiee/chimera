@@ -116,8 +116,8 @@ services:
   # Chimera Operator - Core trading engine
   operator:
     build:
-      context: ./operator
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: operator/Dockerfile
       args:
         # Stamp the real git commit hash into the binary so decision_records /
         # promotion_episodes carry an accurate code_revision. Resolve from the

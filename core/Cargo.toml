@@ -1,0 +1,16 @@
+[package]
+name = "chimera_core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Chimera domain-pure foundation: constants, retry utilities. No database drivers, no web frameworks."
+
+[dependencies]
+anyhow = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+solana-sdk = "3"
