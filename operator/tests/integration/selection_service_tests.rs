@@ -63,6 +63,29 @@ async fn insert_wallet(db: &Arc<dyn Database>, address: &str, wqs: Option<f64>) 
     .unwrap();
 }
 
+/// Insert closed copy-trades for a wallet so the consensus-OR-proven gate can
+/// recognize it as "proven" (the gate reads the live `trades` ledger).
+async fn insert_closed_trades(
+    db: &Arc<dyn Database>,
+    address: &str,
+    count: i32,
+    net_pnl_per_trade: &str,
+) {
+    let pool = pg_pool(db);
+    for i in 0..count {
+        sqlx::query(
+            "INSERT INTO trades (trade_uuid, wallet_address, token_address, token_symbol, strategy, side, amount_sol, status, net_pnl_sol)
+             VALUES ($1, $2, 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'TEST', 'SHIELD', 'BUY', 0.25, 'CLOSED', $3)",
+        )
+        .bind(format!("proven_test_{}_{}", address, i))
+        .bind(address)
+        .bind(dec(net_pnl_per_trade))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+}
+
 fn build_selection_service(
     db: Arc<dyn Database>,
 ) -> (
@@ -106,6 +129,9 @@ fn build_selection_service(
         min_wqs_score: 70.0,
         spear_lite_max_size_sol: dec("0.10"),
         spear_lite_wqs_threshold: 40.0,
+        require_consensus_or_proven: true,
+        min_proven_trades: 10,
+        require_proven_positive_pnl: true,
     };
     let service = SelectionService::new(
         db,
@@ -246,4 +272,92 @@ async fn test_both_ingresses_produce_identical_rejection() {
     // The only difference is the ingress field.
     assert_eq!(d1.ingress, Ingress::Webhook);
     assert_eq!(d2.ingress, Ingress::Helius);
+}
+
+// ── Consensus-OR-proven gate (profitability fix 2026-08-06) ────────────────
+// The gate sits after the non-speculative/pump.fun checks and before the
+// token fast-check, so the single-wallet rejection path is network-free
+// (the fast-check network dependency is never reached).
+
+#[tokio::test]
+async fn test_single_wallet_unproven_buy_rejected_by_gate() {
+    let (db, _tmp) = create_test_db().await;
+    let wallet = format!("G1{}", &WALLET_PREFIX[..27]);
+    insert_wallet(&db, &wallet, Some(90.0)).await;
+    let (service, _, _) = build_selection_service(db);
+
+    let req = SelectionRequest {
+        wallet_address: wallet,
+        // Non-stablecoin, non-pump.fun address: passes the non-speculative and
+        // pump.fun gates, then hits the consensus-OR-proven gate before any
+        // network-dependent fast-check.
+        token_address: "ZEUS1aR7aX8DFFJf5QjWj2ftDDdNTroMNGo8YoQm3Gq".to_string(),
+        action: Action::Buy,
+        source_amount_sol: dec("1.0"),
+        ingress: Ingress::Webhook,
+        source_slot: None,
+        exit_fraction: None,
+    };
+    let decision = service.decide(&req).await;
+    assert!(!decision.admitted);
+    assert_eq!(
+        decision.rejection_code,
+        Some("SINGLE_WALLET_UNPROVEN"),
+        "single-wallet signal from an unproven wallet must be rejected by the gate"
+    );
+}
+
+#[tokio::test]
+async fn test_proven_wallet_single_signal_passes_gate() {
+    let (db, _tmp) = create_test_db().await;
+    let wallet = format!("G2{}", &WALLET_PREFIX[..27]);
+    insert_wallet(&db, &wallet, Some(90.0)).await;
+    // 10 closed copy-trades with positive 30d PnL → proven branch admits.
+    insert_closed_trades(&db, &wallet, 10, "0.05").await;
+    let (service, _, _) = build_selection_service(db);
+
+    let req = SelectionRequest {
+        wallet_address: wallet,
+        token_address: "ZEUS1aR7aX8DFFJf5QjWj2ftDDdNTroMNGo8YoQm3Gq".to_string(),
+        action: Action::Buy,
+        source_amount_sol: dec("1.0"),
+        ingress: Ingress::Webhook,
+        source_slot: None,
+        exit_fraction: None,
+    };
+    let decision = service.decide(&req).await;
+    // Must NOT be rejected by the consensus-OR-proven gate. The subsequent
+    // token fast-check is network-dependent (may reject for other reasons),
+    // so only the gate's absence is asserted here.
+    assert_ne!(
+        decision.rejection_code,
+        Some("SINGLE_WALLET_UNPROVEN"),
+        "proven wallet must pass the consensus-OR-proven gate"
+    );
+}
+
+#[tokio::test]
+async fn test_unproven_wallet_with_negative_pnl_rejected_by_gate() {
+    let (db, _tmp) = create_test_db().await;
+    let wallet = format!("G3{}", &WALLET_PREFIX[..27]);
+    insert_wallet(&db, &wallet, Some(90.0)).await;
+    // Enough trades, but 30d copy PnL is negative → not proven.
+    insert_closed_trades(&db, &wallet, 10, "-0.05").await;
+    let (service, _, _) = build_selection_service(db);
+
+    let req = SelectionRequest {
+        wallet_address: wallet,
+        token_address: "ZEUS1aR7aX8DFFJf5QjWj2ftDDdNTroMNGo8YoQm3Gq".to_string(),
+        action: Action::Buy,
+        source_amount_sol: dec("1.0"),
+        ingress: Ingress::Webhook,
+        source_slot: None,
+        exit_fraction: None,
+    };
+    let decision = service.decide(&req).await;
+    assert_eq!(
+        decision.rejection_code,
+        Some("SINGLE_WALLET_UNPROVEN"),
+        "unproven wallet (negative 30d PnL) must be rejected by the gate"
+    );
 }

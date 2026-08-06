@@ -31,6 +31,8 @@ pub struct ProfitTargetManager {
     /// Per-wallet exit profiles (optional): time-exit hours and trailing-stop
     /// params are blended per wallet; loss-side rails stay global.
     exit_profiles: Option<Arc<crate::engine::exit_profile::ExitProfileCache>>,
+    /// Optional TokenParser for live sell-quote re-validation of tiered exits.
+    quote_client: Option<Arc<crate::TokenParser>>,
 }
 
 /// Profit target state for a position
@@ -191,6 +193,7 @@ impl ProfitTargetManager {
             momentum_exit: None,
             market_regime: None,
             exit_profiles: None,
+            quote_client: None,
         }
     }
 
@@ -209,6 +212,7 @@ impl ProfitTargetManager {
             momentum_exit: Some(momentum_exit),
             market_regime: None,
             exit_profiles: None,
+            quote_client: None,
         }
     }
 
@@ -227,6 +231,7 @@ impl ProfitTargetManager {
             momentum_exit: None,
             market_regime: Some(market_regime),
             exit_profiles: None,
+            quote_client: None,
         }
     }
 
@@ -246,7 +251,74 @@ impl ProfitTargetManager {
             momentum_exit,
             market_regime,
             exit_profiles: None,
+            quote_client: None,
         }
+    }
+
+    /// Attach a TokenParser for live sell-quote re-validation of tiered
+    /// profit exits (cache vs executable divergence — see `quote_confirms_profit`).
+    pub fn with_quote_client(mut self, quote_client: Arc<crate::TokenParser>) -> Self {
+        self.quote_client = Some(quote_client);
+        self
+    }
+
+    /// Confirm a tiered profit exit against the executable Jupiter sell quote:
+    /// the quoted USD value of 1 token must clear entry + cost breakeven, or
+    /// the tier is suppressed (fail-closed — loss rails remain active). On
+    /// any error/missing data the tier is NOT fired this tick.
+    async fn quote_confirms_profit(
+        &self,
+        token_address: &str,
+        entry_price_usd: Decimal,
+    ) -> bool {
+        let Some(parser) = &self.quote_client else {
+            return true;
+        };
+        let decimals = match self.price_cache.get_price(token_address) {
+            Some(entry) => entry.decimals,
+            None => None,
+        };
+        let Some(decimals) = decimals else {
+            tracing::debug!(
+                token = token_address,
+                "Tier exit quote confirmation: decimals unknown — suppressing tier this tick"
+            );
+            return false;
+        };
+        let Some(test_amount) = 10u64.checked_pow(decimals as u32) else {
+            return false;
+        };
+
+        let out_sol = match parser.sell_quote_out_sol(token_address, test_amount).await {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                tracing::debug!(
+                    token = token_address,
+                    "Tier exit quote confirmation: no sell route — suppressing tier"
+                );
+                return false;
+            }
+            Err(e) => {
+                tracing::debug!(
+                    token = token_address,
+                    error = %e,
+                    "Tier exit quote confirmation: quote failed — suppressing tier this tick"
+                );
+                return false;
+            }
+        };
+
+        let Some(sol_price_usd) = self.price_cache.get_sol_price_usd() else {
+            return false;
+        };
+        if sol_price_usd <= Decimal::ZERO {
+            return false;
+        }
+
+        let quoted_usd = out_sol * sol_price_usd;
+        let cost_buffer = dec!(0.015);
+        let breakeven = entry_price_usd * (Decimal::ONE + cost_buffer);
+        quoted_usd >= breakeven
     }
 
     /// Attach the per-wallet exit profile cache.
@@ -542,6 +614,29 @@ impl ProfitTargetManager {
                     state_changed = true;
                     new_targets_hit += 1;
                 }
+            }
+
+            if new_targets_hit > 0
+                && !self
+                    .quote_confirms_profit(token_address, state.entry_price)
+                    .await
+            {
+                // Cache price said we're at the tier, but the executable sell
+                // quote does not clear cost breakeven (cache vs execution
+                // divergence, observed 2026-08-06). Do not bank a loss dressed
+                // as a profit: revert the tier hits and re-evaluate next tick.
+                // Loss-side rails (stop-loss/recovery/wick) stay fully active.
+                tracing::warn!(
+                    trade_uuid = %trade_uuid,
+                    token = %token_address,
+                    profit_percent = %profit_percent,
+                    "Tiered profit exit suppressed: live sell quote does not clear cost breakeven — holding"
+                );
+                for _ in 0..new_targets_hit {
+                    state.targets_hit.pop();
+                }
+                state_changed = true;
+                new_targets_hit = 0;
             }
 
             if new_targets_hit > 0 {

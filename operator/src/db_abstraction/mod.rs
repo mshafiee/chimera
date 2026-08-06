@@ -811,6 +811,16 @@ pub trait Database: Send + Sync {
     /// Count closed trades for a specific wallet
     async fn get_closed_trade_count_for_wallet(&self, wallet_address: &str) -> AppResult<i64>;
 
+    /// Closed copy-trade count and realized net PnL for a wallet — the
+    /// "proven wallet" basis for the consensus-OR-proven admission gate.
+    /// Reads the live `trades` ledger (the `wallet_copy_performance` table is
+    /// currently unmaintained and would keep the proven branch permanently
+    /// empty). Returns (closed_trade_count, sum(net_pnl_sol)).
+    async fn get_wallet_copy_stats(
+        &self,
+        wallet_address: &str,
+    ) -> AppResult<(i64, rust_decimal::Decimal)>;
+
     /// Get wallet copy performance metrics
     async fn get_wallet_copy_performance(
         &self,

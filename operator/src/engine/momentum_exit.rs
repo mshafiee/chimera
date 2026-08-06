@@ -17,7 +17,9 @@
 use crate::db_abstraction::Database;
 use crate::engine::volume_cache::VolumeCache;
 use crate::price_cache::PriceCache;
+use crate::TokenParser;
 use rust_decimal::prelude::*;
+use rust_decimal_macros::dec;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -39,6 +41,9 @@ pub struct MomentumExit {
     /// Grace period matching stop_loss.rs wick_protection_secs — price-drop check is suppressed
     /// during this window to avoid exiting on the entry-candle wick.
     wick_protection_secs: u64,
+    /// Optional TokenParser for live sell-quote re-validation of profit-side
+    /// exits (see `quote_confirms_profit`).
+    quote_client: Option<Arc<TokenParser>>,
 }
 
 impl MomentumExit {
@@ -53,6 +58,7 @@ impl MomentumExit {
             price_cache,
             volume_cache: None,
             wick_protection_secs,
+            quote_client: None,
         }
     }
 
@@ -68,7 +74,99 @@ impl MomentumExit {
             price_cache,
             volume_cache: Some(volume_cache),
             wick_protection_secs,
+            quote_client: None,
         }
+    }
+
+    /// Attach a TokenParser for live sell-quote re-validation of profit-side
+    /// exits. Without one, momentum exits keep their previous behavior.
+    pub fn with_quote_client(mut self, quote_client: Arc<TokenParser>) -> Self {
+        self.quote_client = Some(quote_client);
+        self
+    }
+
+    /// Re-validate a nominally-profitable exit against the executable Jupiter
+    /// sell quote. The price cache can diverge from the executable fill
+    /// (observed 2026-08-06: +0.286% cache "profit" filled at -0.35%), so a
+    /// profit-side exit must clear the cost breakeven on a live quote before
+    /// firing. Defensive (loss-side) exits must NOT be blocked: on any error
+    /// or missing data this returns `true` (proceed with the exit).
+    async fn quote_confirms_profit(
+        &self,
+        token_address: &str,
+        entry_price_usd: Decimal,
+    ) -> bool {
+        let Some(parser) = &self.quote_client else {
+            return true;
+        };
+        // 1 full token requires its decimals (pump.fun = 6, most SPL = 6-9).
+        let decimals = match self.price_cache.get_price(token_address) {
+            Some(entry) => entry.decimals,
+            None => None,
+        };
+        let Some(decimals) = decimals else {
+            tracing::debug!(
+                token = token_address,
+                "Exit quote confirmation: decimals unknown — proceeding with exit"
+            );
+            return true;
+        };
+        let test_amount = match 10u64.checked_pow(decimals as u32) {
+            Some(a) => a,
+            None => {
+                tracing::warn!(token = token_address, decimals, "Exit quote confirmation: decimal exponent overflow — proceeding with exit");
+                return true;
+            }
+        };
+
+        let out_sol = match parser.sell_quote_out_sol(token_address, test_amount).await {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                // No sell route — cannot confirm profit; proceed (loss rails handle it).
+                tracing::debug!(
+                    token = token_address,
+                    "Exit quote confirmation: no sell route — proceeding with exit"
+                );
+                return true;
+            }
+            Err(e) => {
+                tracing::debug!(
+                    token = token_address,
+                    error = %e,
+                    "Exit quote confirmation: quote failed — proceeding with exit (defensive)"
+                );
+                return true;
+            }
+        };
+
+        let Some(sol_price_usd) = self.price_cache.get_sol_price_usd() else {
+            tracing::debug!(
+                token = token_address,
+                "Exit quote confirmation: SOL price unavailable — proceeding with exit"
+            );
+            return true;
+        };
+        if sol_price_usd <= Decimal::ZERO {
+            return true;
+        }
+
+        // Quoted USD value of 1 token must clear entry + round-trip cost buffer
+        // (~1.4% observed: Jito tip + dex fee + slippage) with margin.
+        let quoted_usd = out_sol * sol_price_usd;
+        let cost_buffer = dec!(0.015);
+        let breakeven = entry_price_usd * (Decimal::ONE + cost_buffer);
+
+        if quoted_usd < breakeven {
+            tracing::warn!(
+                token = token_address,
+                quoted_usd = %quoted_usd,
+                entry_price_usd = %entry_price_usd,
+                breakeven = %breakeven,
+                "Momentum profit exit suppressed: live sell quote does not clear cost breakeven (cache vs executable divergence)"
+            );
+            return false;
+        }
+        true
     }
 
     /// Check for negative momentum and return action
@@ -295,6 +393,17 @@ impl MomentumExit {
         if !in_wick_window {
             if let Some((current_rsi, previous_rsi)) = self.calculate_rsi(token_address).await {
                 if current_rsi < 35.0 && current_rsi < previous_rsi {
+                    // If the position is nominally profitable per the cache, confirm the
+                    // executable sell quote actually clears cost breakeven before exiting
+                    // "into profit" — cache and fill diverged (2026-08-06: +0.286% cache
+                    // "profit" filled at -0.35%). Loss-side exits are never blocked here.
+                    if price_drop_percent < Decimal::ZERO
+                        && !self
+                            .quote_confirms_profit(token_address, entry_price)
+                            .await
+                    {
+                        return MomentumExitAction::None;
+                    }
                     tracing::warn!(
                         trade_uuid = %trade_uuid,
                         token_address = token_address,

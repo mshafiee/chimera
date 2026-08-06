@@ -548,6 +548,22 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(40.0),
+        // Profitability gate: BUY requires consensus (≥2 wallets) or a wallet
+        // with a proven copy-trade record. Enabled by default — single-wallet
+        // signals from unproven wallets were the negative-EV class (verified
+        // 2026-08: 17/17 wallets net-negative).
+        require_consensus_or_proven: std::env::var("CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(true),
+        min_proven_trades: std::env::var("CHIMERA_SELECTION__MIN_PROVEN_TRADES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10),
+        require_proven_positive_pnl: std::env::var("CHIMERA_SELECTION__REQUIRE_PROVEN_POSITIVE_PNL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(true),
     };
     let roster_addresses: Vec<String> = db_pool
         .get_active_wallets()
@@ -1638,14 +1654,17 @@ async fn main() -> anyhow::Result<()> {
             price_cache.clone(),
             volume_cache,
             config.profit_management.wick_protection_secs,
-        ));
+        )
+        .with_quote_client(token_parser.clone()));
         let profit_target_mgr = Arc::new(ProfitTargetManager::with_extras(
             db_pool.clone(),
             Arc::new(config.profit_management.clone()),
             price_cache.clone(),
             Some(momentum_exit),
             Some(market_regime_detector.clone()),
-        ).with_exit_profiles(Some(exit_profile_cache.clone())));
+        )
+        .with_quote_client(token_parser.clone())
+        .with_exit_profiles(Some(exit_profile_cache.clone())));
 
         // Dedicated HWM sweep task — runs every 5 minutes independent of the position
         // monitoring loop so memory is reclaimed even if that loop stalls or panics.

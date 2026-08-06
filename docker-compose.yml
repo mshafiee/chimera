@@ -170,6 +170,12 @@ services:
        # Position cap for low-WQS wallets (WQS < 40 → max 0.25 SOL = min_size_sol)
        - CHIMERA_SELECTION__SPEAR_LITE_MAX_SIZE_SOL=0.25
        - CHIMERA_SELECTION__SPEAR_LITE_WQS_THRESHOLD=40.0
+       # Profitability gate (2026-08-06): BUY requires consensus (≥2 wallets)
+       # OR a wallet with ≥10 closed copy-trades and positive 30d copy PnL.
+       # Single-wallet signals from unproven wallets were the negative-EV class.
+       - CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN=true
+       - CHIMERA_SELECTION__MIN_PROVEN_TRADES=10
+       - CHIMERA_SELECTION__REQUIRE_PROVEN_POSITIVE_PNL=true
        # Paper trading mode (simulated execution, no real SOL)
        - CHIMERA_TRADE_MODE=paper
        # Dune Analytics API key for wallet PnL monitoring

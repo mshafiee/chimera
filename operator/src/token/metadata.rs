@@ -1113,6 +1113,110 @@ impl TokenMetadataFetcher {
         Ok(true)
     }
 
+    /// Quote a token→SOL sell and return the output amount in SOL (Decimal).
+    ///
+    /// Same request/retry pattern as [`simulate_sell`] but returns the actual
+    /// executable output instead of a bool. Used to re-validate profit-side
+    /// exits against the executable price rather than the price cache —
+    /// cache vs execution divergence was locking in losses on "profit" exits
+    /// (observed 2026-08-06: cache +0.286% "profit" filled at -0.35%).
+    ///
+    /// Returns `Ok(None)` when Jupiter reports no sell route (400 / error /
+    /// zero output); `Ok(Some(out_sol))` otherwise; `Err` only when the
+    /// Jupiter API is unreachable after retries.
+    pub async fn sell_quote_out_sol(
+        &self,
+        token_address: &str,
+        amount: u64,
+    ) -> AppResult<Option<Decimal>> {
+        let sol_mint = crate::constants::mints::SOL;
+        let quote_url = format!(
+            "{}/quote?inputMint={}&outputMint={}&amount={}&slippageBps=10000",
+            self.jupiter_api_url, token_address, sol_mint, amount
+        );
+
+        let mut last_status: Option<reqwest::StatusCode> = None;
+        let mut response_opt: Option<reqwest::Response> = None;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(300 * attempt as u64)).await;
+            }
+            let resp = crate::jupiter::with_api_key(self.http_client.get(&quote_url))
+                .send()
+                .await;
+            match resp {
+                Ok(r) => {
+                    let status = r.status();
+                    if status == reqwest::StatusCode::BAD_REQUEST || status.is_success() {
+                        response_opt = Some(r);
+                        break;
+                    }
+                    last_status = Some(status);
+                    tracing::debug!(
+                        token = token_address,
+                        status = %status,
+                        attempt,
+                        "Sell-quote returned error status — retrying"
+                    );
+                }
+                Err(e) => {
+                    last_status = None;
+                    tracing::debug!(
+                        token = token_address,
+                        error = %e,
+                        attempt,
+                        "Sell-quote transport error — retrying"
+                    );
+                }
+            }
+        }
+
+        let Some(response) = response_opt else {
+            let detail = match last_status {
+                Some(s) => format!("Jupiter quote returned {s} after 3 attempts"),
+                None => "Jupiter quote transport error after 3 attempts".to_string(),
+            };
+            return Err(AppError::Validation(format!(
+                "honeypot_simulation_inconclusive: {detail}"
+            )));
+        };
+
+        let status = response.status();
+        if status == reqwest::StatusCode::BAD_REQUEST {
+            // 400 = no route exists (can't sell this token)
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(AppError::Validation(format!(
+                "honeypot_simulation_inconclusive: Jupiter quote returned {}",
+                status
+            )));
+        }
+
+        let quote: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AppError::Parse(format!("Failed to parse Jupiter sell quote: {}", e)))?;
+
+        if quote.get("error").is_some() {
+            return Ok(None);
+        }
+
+        let out_amount = quote
+            .get("outAmount")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        if out_amount == 0 {
+            return Ok(None);
+        }
+
+        // outAmount is in SOL lamports (1e9)
+        let sol_decimals = Decimal::from(1_000_000_000u64);
+        Ok(Some(Decimal::from(out_amount) / sol_decimals))
+    }
+
     /// Clear the metadata cache and TTL timestamps
     pub fn clear_cache(&self) {
         let mut cache = self.metadata_cache.write();

@@ -321,6 +321,11 @@ async fn build_real_webhook_app() -> (Router, Arc<dyn Database>, crate::common::
         min_wqs_score: 70.0,
         spear_lite_max_size_sol: dec!(0.10),
         spear_lite_wqs_threshold: 40.0,
+        // Gate off in this flow test (single-wallet admission is exercised by
+        // the dedicated consensus-OR-proven tests in selection_service_tests).
+        require_consensus_or_proven: false,
+        min_proven_trades: 10,
+        require_proven_positive_pnl: true,
     };
     let selection = Arc::new(SelectionService::new(
         db.clone(),

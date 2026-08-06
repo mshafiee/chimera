@@ -95,6 +95,20 @@ pub struct SelectionConfig {
     /// WQS threshold below which spear_lite_max_size_sol applies.
     /// Wallets with WQS < this value get micro-positions. Default: 40.0.
     pub spear_lite_wqs_threshold: f64,
+    /// When true, BUY signals require either multi-wallet consensus (≥2
+    /// tracked wallets on the same token) or a wallet with a proven copy-trade
+    /// track record (`min_proven_trades` closed trades, optionally with
+    /// positive 30d copy PnL). Single-wallet signals from unproven wallets are
+    /// rejected — the negative-EV class (verified 2026-08-04..06: 17/17
+    /// wallets net-negative, 2 wins / 49 closed trades). Env:
+    /// CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN (default true).
+    pub require_consensus_or_proven: bool,
+    /// Minimum closed copy-trades for the "proven wallet" branch of the
+    /// consensus-OR-proven gate. Env: CHIMERA_SELECTION__MIN_PROVEN_TRADES.
+    pub min_proven_trades: i32,
+    /// Proven branch also requires positive 30d copy PnL.
+    /// Env: CHIMERA_SELECTION__REQUIRE_PROVEN_POSITIVE_PNL (default true).
+    pub require_proven_positive_pnl: bool,
 }
 
 impl SelectionConfig {
@@ -119,6 +133,9 @@ impl SelectionConfig {
         hasher.update(self.min_wqs_score.to_le_bytes());
         hasher.update(self.spear_lite_max_size_sol.to_string().as_bytes());
         hasher.update(self.spear_lite_wqs_threshold.to_le_bytes());
+        hasher.update(u8::from(self.require_consensus_or_proven).to_le_bytes());
+        hasher.update(self.min_proven_trades.to_le_bytes());
+        hasher.update(u8::from(self.require_proven_positive_pnl).to_le_bytes());
         hex::encode(&hasher.finalize()[..8])
     }
 }
@@ -1000,6 +1017,49 @@ impl SelectionService {
             false
         };
 
+        // ── 7b. Consensus-OR-proven gate ───────────────────────────────────
+        // Single-wallet signals from wallets without a proven copy-trade
+        // record are the negative-EV class (all wallets net-negative since
+        // 2026-08-04; config note: only the 0.50+ signal-quality band is
+        // gross-profitable). Require either multi-wallet consensus or a wallet
+        // with >= min_proven_trades closed copy-trades (and, when configured,
+        // positive 30d copy PnL) before admitting a BUY. Exit/SELL decisions
+        // are never gated here.
+        if self.config.require_consensus_or_proven
+            && !is_consensus
+            && strategy != Strategy::Exit
+        {
+            let proven = self.wallet_is_proven(&req.wallet_address).await;
+            if !proven {
+                let reason = format!(
+                    "Single-wallet signal from unproven wallet — requires consensus (≥2 wallets) or ≥{} closed copy-trades{}",
+                    self.config.min_proven_trades,
+                    if self.config.require_proven_positive_pnl {
+                        " with positive 30d copy PnL"
+                    } else {
+                        ""
+                    }
+                );
+                tracing::info!(
+                    ingress = ?req.ingress,
+                    decision = "BUY",
+                    token = %req.token_address,
+                    wallet = %req.wallet_address,
+                    rejection_code = "SINGLE_WALLET_UNPROVEN",
+                    reason = %reason,
+                    strategy = ?strategy,
+                    is_consensus,
+                    "selection: BUY rejected by gate"
+                );
+                return BuyDecision::rejected(
+                    req,
+                    &self.config_hash,
+                    "SINGLE_WALLET_UNPROVEN",
+                    reason,
+                );
+            }
+        }
+
         // ── 8. Signal-quality score ─────────────────────────────────────────
         let quality = SignalQuality::calculate(
             wallet_wqs,
@@ -1302,6 +1362,50 @@ impl SelectionService {
         }
     }
 
+    /// A wallet is "proven" when its copy-trade ledger shows >=
+    /// `min_proven_trades` closed trades and (when `require_proven_positive_pnl`)
+    /// positive realized net PnL, per the live `trades` table. Fails closed on
+    /// any error — an unverifiable wallet must not bypass the gate.
+    async fn wallet_is_proven(&self, wallet_address: &str) -> bool {
+        let (closed_trades, net_pnl_sol) = match self.db.get_wallet_copy_stats(wallet_address).await
+        {
+            Ok(stats) => stats,
+            Err(e) => {
+                tracing::warn!(
+                    wallet = wallet_address,
+                    error = %e,
+                    "Proven-wallet check failed — treating as unproven (fail-closed)"
+                );
+                return false;
+            }
+        };
+        if closed_trades < self.config.min_proven_trades as i64 {
+            tracing::debug!(
+                wallet = wallet_address,
+                closed_trades,
+                min_proven_trades = self.config.min_proven_trades,
+                "Proven-wallet check: too few closed copy-trades"
+            );
+            return false;
+        }
+        if self.config.require_proven_positive_pnl && net_pnl_sol <= Decimal::ZERO {
+            tracing::debug!(
+                wallet = wallet_address,
+                closed_trades,
+                net_pnl_sol = %net_pnl_sol,
+                "Proven-wallet check: realized copy PnL not positive"
+            );
+            return false;
+        }
+        tracing::debug!(
+            wallet = wallet_address,
+            closed_trades,
+            net_pnl_sol = %net_pnl_sol,
+            "Proven-wallet check passed"
+        );
+        true
+    }
+
     /// Persist a BUY signal to the signal_aggregation table so the stop-loss
     /// manager's consensus detection works uniformly for both ingress paths.
     async fn persist_signal_aggregation(
@@ -1353,6 +1457,9 @@ mod tests {
             min_wqs_score: 70.0,
             spear_lite_max_size_sol: Decimal::new(10, 2), // 0.10 SOL
             spear_lite_wqs_threshold: 40.0,
+            require_consensus_or_proven: true,
+            min_proven_trades: 10,
+            require_proven_positive_pnl: true,
         };
 
         let mut config2 = config1.clone();
@@ -1369,6 +1476,13 @@ mod tests {
         assert_ne!(
             config1.hash(), config2.hash(),
             "changing min_liquidity_pumpfun_usd should change hash"
+        );
+
+        config2 = config1.clone();
+        config2.require_consensus_or_proven = false;
+        assert_ne!(
+            config1.hash(), config2.hash(),
+            "changing require_consensus_or_proven should change hash"
         );
     }
 }

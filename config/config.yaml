@@ -216,8 +216,8 @@ monitoring:
 
 # Profit management configuration
 profit_management:
-  targets: []               # No fixed take-profit ceiling — let winners run on trailing stop only
-  tiered_exit_percent: 1    # Minimal (validation requires >0); never triggered with empty targets
+  targets: [5.0]               # Bank a third at +5% (floored by min_target_pct 5.0) — clears the ~1.4% cost breakeven; remainder trails
+  tiered_exit_percent: 33      # Sell 33% of the remaining balance at each target (was 1 with empty targets)
   trailing_stop_activation: 2.5   # Activate trailing at +2.5% (was 5): 60% of shadow wins ended via 4h time_exit at +0.94% avg because the +5% activation never engaged on winners peaking in the 0-5% band
   trailing_stop_distance: 2     # Trail 2% below peak (was 3): capture more of the peak on small runners
   hard_stop_loss: -8              # Tightened from -25: cap tail risk, avg loser already exits ~-8%

@@ -168,6 +168,18 @@ impl TokenParser {
         self.fetcher.get_liquidity(token_address).await
     }
 
+    /// Quote a token→SOL sell and return the executable output in SOL (Decimal).
+    /// `Ok(None)` = no sell route (honeypot/illiquid); `Err` = API unreachable.
+    /// Used by exit managers to re-validate profit-side exits against the
+    /// executable price instead of the price cache.
+    pub async fn sell_quote_out_sol(
+        &self,
+        token_address: &str,
+        amount: u64,
+    ) -> AppResult<Option<Decimal>> {
+        self.fetcher.sell_quote_out_sol(token_address, amount).await
+    }
+
     /// Fast path check - validates token metadata only (sub-millisecond)
     ///
     /// Checks:

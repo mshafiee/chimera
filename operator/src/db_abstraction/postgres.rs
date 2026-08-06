@@ -261,7 +261,8 @@ impl Database for PostgresBackend {
                 r#"
                 UPDATE trades
                 SET status = $1, tx_signature = $2, error_message = $3,
-                    network_fee_sol = COALESCE($5, network_fee_sol)
+                    network_fee_sol = COALESCE($5, network_fee_sol),
+                    closed_at = CASE WHEN $1 = 'CLOSED' THEN CURRENT_TIMESTAMP ELSE closed_at END
                 WHERE trade_uuid = $4
                 "#,
             )
@@ -277,7 +278,8 @@ impl Database for PostgresBackend {
                 r#"
                 UPDATE trades
                 SET status = $1, error_message = COALESCE($2, error_message),
-                    network_fee_sol = COALESCE($4, network_fee_sol)
+                    network_fee_sol = COALESCE($4, network_fee_sol),
+                    closed_at = CASE WHEN $1 = 'CLOSED' THEN CURRENT_TIMESTAMP ELSE closed_at END
                 WHERE trade_uuid = $3
                 "#,
             )
@@ -2009,7 +2011,7 @@ impl Database for PostgresBackend {
         // which corrupts circuit-breaker loss counts and dashboard stats.
         for entry_uuid in &fully_closed_entry_uuids {
             let rows = sqlx::query(
-                "UPDATE trades SET status = 'CLOSED' WHERE trade_uuid = $1 AND status = 'ACTIVE'",
+                "UPDATE trades SET status = 'CLOSED', closed_at = CURRENT_TIMESTAMP WHERE trade_uuid = $1 AND status = 'ACTIVE'",
             )
             .bind(entry_uuid)
             .execute(&mut *tx)
@@ -3869,6 +3871,23 @@ impl Database for PostgresBackend {
         Ok(count.0)
     }
 
+    async fn get_wallet_copy_stats(
+        &self,
+        wallet_address: &str,
+    ) -> AppResult<(i64, rust_decimal::Decimal)> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) FILTER (WHERE status = 'CLOSED')::bigint AS closed_trades, \
+                    COALESCE(SUM(net_pnl_sol) FILTER (WHERE status = 'CLOSED'), 0) AS net_pnl_sol \
+             FROM trades WHERE wallet_address = $1",
+        )
+        .bind(wallet_address)
+        .fetch_one(&self.pool)
+        .await?;
+        let closed_trades: i64 = row.try_get("closed_trades")?;
+        let net_pnl_sol: rust_decimal::Decimal = row.try_get("net_pnl_sol")?;
+        Ok((closed_trades, net_pnl_sol))
+    }
+
     async fn get_wallet_copy_performance(
         &self,
         wallet_address: &str,
@@ -4623,7 +4642,9 @@ impl Database for PostgresBackend {
 
         // Update trade status
         sqlx::query(
-            "UPDATE trades SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE trade_uuid = $2"
+            "UPDATE trades SET status = $1, updated_at = CURRENT_TIMESTAMP, \
+             closed_at = CASE WHEN $1 = 'CLOSED' THEN CURRENT_TIMESTAMP ELSE closed_at END \
+             WHERE trade_uuid = $2"
         )
         .bind(trade_status)
         .bind(trade_uuid)
