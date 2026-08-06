@@ -57,10 +57,19 @@ working — every phase is green and deployable.
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Workspace + `[workspace.dependencies]` + `core` (constants, retry) + Dockerfile/compose adaptation | ✅ deployed 2026-08-07 |
-| 2 | `core` += `error` (axum impl behind feature flag), `utils` | pending |
-| 3 | `core` += `db_abstraction` repository traits (sqlx leak removed), `infra` = Postgres backend + API clients (Jupiter/Helius/Dune) | pending |
-| 4 | `api` = main.rs + handlers + middleware; operator becomes thin facade | pending |
-| 5 | `core` += `config` (split engine sub-configs), `price_cache` (client extraction), pure engine services | pending |
+| 2 | `core` += `error` (axum impl behind `api` feature flag), `utils` | ✅ 2026-08-07 |
+| 3 | `infra` = db_abstraction backend (traits + Postgres + migrations moved as a unit; trait/impl split is follow-up), `core` += `config` (ExecutionLockConfig untied from engine) | ✅ 2026-08-07 |
+| 4 | `api` = main.rs + HTTP transport (binary keeps legacy name `chimera_operator`); tools exposed as lib modules + wrapper bins | ✅ 2026-08-07 |
+| 5 | `core` += `price_cache` (extract Jupiter client into infra behind a trait), engine service split (onion-ectomy of executor/jupiter/token), handlers + middleware → `api` | pending — multi-session |
+
+### Known pragmatic exceptions (documented in code)
+- `core` keeps `sqlx`/`config`/`solana-sdk` deps: `AppError` wraps `sqlx::Error`/
+  `config::ConfigError`, and config.rs embeds pubkey validation. A future
+  phase splits `CoreError` from `InfraError` and moves those variants out.
+- `db_abstraction` moved to infra as a unit (traits + impl together); the
+  repository-trait/impl split into core is follow-up work.
+- `handlers`/`middleware` remain in the operator crate until the engine split
+  (phase 5) completes — they reference engine/monitoring/token directly.
 
 ## Versioning
 
