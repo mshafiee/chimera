@@ -11,7 +11,10 @@ use crate::error::AppError;
 /// skipping `config.validate()` and the honeypot fail-closed in production.
 pub fn is_dev_mode() -> bool {
     match std::env::var("CHIMERA_DEV_MODE") {
-        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
         Err(_) => false,
     }
 }
@@ -63,9 +66,8 @@ pub fn sol_to_lamports(sol: Decimal) -> Result<u64, AppError> {
 /// This is a convenience function for legacy code that still uses f64
 pub fn sol_to_lamports_f64(sol: f64) -> Result<u64, AppError> {
     // Convert float to Decimal first to handle precision safely
-    let sol_decimal = Decimal::from_f64_retain(sol).ok_or_else(|| {
-        AppError::InvalidInput(format!("Cannot represent {} as a Decimal", sol))
-    })?;
+    let sol_decimal = Decimal::from_f64_retain(sol)
+        .ok_or_else(|| AppError::InvalidInput(format!("Cannot represent {} as a Decimal", sol)))?;
     sol_to_lamports(sol_decimal)
 }
 

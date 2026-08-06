@@ -7,4 +7,6 @@
 //! `chimera_operator::*` paths keep working during incremental extraction.
 
 pub mod constants;
+pub mod error;
 pub mod retry;
+pub mod utils;

@@ -7,10 +7,28 @@ description = "Chimera domain-pure foundation: constants, retry utilities. No da
 
 [dependencies]
 anyhow = { workspace = true }
+config = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rust_decimal = { workspace = true }
+urlencoding = "2.1"
+sqlx = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+axum = { workspace = true, optional = true }
+
+[features]
+# The axum HTTP-error response impl is isolated behind this feature so core
+# stays web-framework-free when built without it (blueprint law 4).
+api = ["dep:axum"]
 
 [dev-dependencies]
 solana-sdk = "3"
+
+# NOTE (pragmatic exception, see docs/architecture/rust-workspace.md):
+# `sqlx`/`config` appear as regular deps solely because AppError (the
+# crate-wide error type) wraps sqlx::Error and config::ConfigError variants.
+# A future phase splits CoreError from InfraError to remove them.

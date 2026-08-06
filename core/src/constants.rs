@@ -53,7 +53,6 @@ pub mod verified_majors {
     pub const ALL: &[&str] = &[BONK, WIF, JUP, POP, GRASS, JTO];
 }
 
-
 // Legacy constants for backward compatibility
 #[deprecated = "Use mints::SOL instead"]
 pub const SOL_MINT: &str = mints::SOL;
@@ -109,6 +108,10 @@ mod tests {
         let all = verified_majors::ALL;
         assert!(!all.is_empty());
         let unique: std::collections::HashSet<&&str> = all.iter().collect();
-        assert_eq!(unique.len(), all.len(), "verified_majors must not contain duplicates");
+        assert_eq!(
+            unique.len(),
+            all.len(),
+            "verified_majors must not contain duplicates"
+        );
     }
 }

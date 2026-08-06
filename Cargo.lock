@@ -1017,11 +1017,19 @@ name = "chimera_core"
 version = "1.0.0"
 dependencies = [
  "anyhow",
+ "axum 0.7.9",
+ "config",
  "rand 0.9.4",
  "reqwest",
+ "rust_decimal",
+ "serde",
+ "serde_json",
  "solana-sdk",
+ "sqlx",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "urlencoding",
 ]
 
 [[package]]

@@ -1,10 +1,12 @@
 //! Error types for Chimera Operator
 
+#[cfg(feature = "api")]
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
+#[cfg(feature = "api")]
 use serde_json::json;
 use thiserror::Error;
 
@@ -86,6 +88,7 @@ pub enum AppError {
 
 /// Error response structure for API
 #[derive(Debug, serde::Serialize)]
+#[cfg(feature = "api")]
 pub struct ErrorResponse {
     pub status: &'static str,
     pub reason: String,
@@ -93,6 +96,7 @@ pub struct ErrorResponse {
     pub details: Option<String>,
 }
 
+#[cfg(feature = "api")]
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status_code, error_response) = match &self {

@@ -8,11 +8,10 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod circuit_breaker;
-pub use chimera_core::{constants, retry};
+pub use chimera_core::{constants, error, retry, utils};
 pub mod config;
 pub mod db_abstraction;
 pub mod engine;
-pub mod error;
 pub mod experiment;
 pub mod handlers;
 pub mod jupiter;
@@ -31,7 +30,6 @@ pub mod price_cache;
 pub mod roster;
 pub mod state;
 pub mod token;
-pub mod utils;
 pub mod vault;
 
 // Re-export commonly used types for tests

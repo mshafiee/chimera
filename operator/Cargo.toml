@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 # Internal crates (workspace)
-chimera_core = { path = "../core" }
+chimera_core = { path = "../core", features = ["api"] }
 
 # Core Async Runtime
 tokio = { workspace = true }
