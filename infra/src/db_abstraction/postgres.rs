@@ -12,7 +12,7 @@ use super::{
     WalletPerformance, WebhookAuditLog,
     datetime_to_string,
 };
-use crate::error::{AppError, AppResult};
+use chimera_core::error::{AppError, AppResult};
 use rust_decimal::prelude::*;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::Row;
@@ -724,8 +724,8 @@ impl Database for PostgresBackend {
         rows.into_iter().map(|r| self.row_to_wallet(r)).collect()
     }
 
-    async fn get_wallets_by_conviction_tier(&self, tier: crate::config::ConvictionTier) -> AppResult<Vec<Wallet>> {
-        use crate::config::ConvictionTier;
+    async fn get_wallets_by_conviction_tier(&self, tier: chimera_core::config::ConvictionTier) -> AppResult<Vec<Wallet>> {
+        use chimera_core::config::ConvictionTier;
 
         let (status, min_wqs, max_wqs) = match tier {
             ConvictionTier::High => (Some("ACTIVE"), Some(80), None),

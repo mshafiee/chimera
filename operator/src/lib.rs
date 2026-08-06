@@ -9,7 +9,7 @@
 
 pub mod circuit_breaker;
 pub use chimera_core::{config, constants, error, retry, utils};
-pub mod db_abstraction;
+pub use chimera_infra::db_abstraction;
 pub mod engine;
 pub mod experiment;
 pub mod handlers;

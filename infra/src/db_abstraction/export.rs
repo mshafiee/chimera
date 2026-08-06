@@ -2,7 +2,7 @@
 //! Moved from db.rs as part of the database layer refactoring.
 
 use super::types::TradeDetail;
-use crate::error::{AppError, AppResult};
+use chimera_core::error::{AppError, AppResult};
 
 fn csv_escape(s: &str) -> String {
     if s.contains(',') || s.contains('"') || s.contains('\n') {

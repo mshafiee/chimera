@@ -34,13 +34,15 @@ ENV GIT_HASH=${GIT_HASH}
 # Copy workspace manifests first for better caching
 COPY Cargo.toml Cargo.lock ./
 COPY core/Cargo.toml ./core/Cargo.toml
+COPY infra/Cargo.toml ./infra/Cargo.toml
 COPY operator/Cargo.toml ./operator/Cargo.toml
 COPY operator/build.rs ./operator/build.rs
 
 # Copy sources
 COPY core/src ./core/src
+COPY infra/src ./infra/src
+COPY infra/migrations_postgres ./infra/migrations_postgres
 COPY operator/src ./operator/src
-COPY operator/migrations_postgres ./operator/migrations_postgres
 
 # Build release binary (online mode for sqlx, as we don't have prepared data)
 RUN cargo build --release -p chimera_operator

@@ -18,7 +18,7 @@ pub use types::{
     WalletMonitoring, WalletMonitoringExtended, WebhookAuditLog, WebhookEligibility, WebhookStats,
 };
 
-use crate::error::{AppError, AppResult};
+use chimera_core::error::{AppError, AppResult};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -188,7 +188,7 @@ pub trait Database: Send + Sync {
     async fn get_wallets_by_status(&self, status: &str) -> AppResult<Vec<Wallet>>;
 
     /// Get ACTIVE or CANDIDATE wallets grouped by conviction tier for tiered polling
-    async fn get_wallets_by_conviction_tier(&self, tier: crate::config::ConvictionTier) -> AppResult<Vec<Wallet>>;
+    async fn get_wallets_by_conviction_tier(&self, tier: chimera_core::config::ConvictionTier) -> AppResult<Vec<Wallet>>;
 
     /// Get wallets with WQS scores for batch processing
     async fn get_wallets_with_wqs(
