@@ -74,13 +74,14 @@ mod tests {
     /// incorrect transactions/routes at runtime.
     #[test]
     fn all_address_constants_are_valid_pubkeys() {
-        let mut addresses: Vec<(&str, &str)> = Vec::new();
-        addresses.push(("mints::SOL", mints::SOL));
-        addresses.push(("mints::USDC", mints::USDC));
-        addresses.push(("mints::USDT", mints::USDT));
-        addresses.push(("programs::JUPITER", programs::JUPITER));
-        addresses.push(("programs::TOKEN", programs::TOKEN));
-        addresses.push(("programs::TOKEN_2022", programs::TOKEN_2022));
+        let mut addresses: Vec<(&str, &str)> = vec![
+            ("mints::SOL", mints::SOL),
+            ("mints::USDC", mints::USDC),
+            ("mints::USDT", mints::USDT),
+            ("programs::JUPITER", programs::JUPITER),
+            ("programs::TOKEN", programs::TOKEN),
+            ("programs::TOKEN_2022", programs::TOKEN_2022),
+        ];
         for addr in verified_majors::ALL {
             addresses.push(("verified_majors", addr));
         }

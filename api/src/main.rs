@@ -20,7 +20,6 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use tokio_util::sync::CancellationToken;
 
-mod tools;
 
 use chimera_operator::circuit_breaker::CircuitBreaker;
 use chimera_operator::config::{AppConfig, TradeMode};
@@ -523,7 +522,7 @@ async fn main() -> anyhow::Result<()> {
     // derive the RunContext (unique per process run) and the DecisionRecorder
     // (fire-and-forget decision persistence). Constructed early so both the
     // /health endpoint and the selection engine share the same run identity.
-    let selection_config = crate::engine::SelectionConfig {
+    let selection_config = chimera_operator::engine::SelectionConfig {
         total_capital_sol: config.position_sizing.total_capital_sol,
         max_position_sol: config.position_sizing.max_size_sol,
         shield_signal_quality_threshold: config.strategy.shield_signal_quality_threshold,
@@ -948,9 +947,9 @@ async fn main() -> anyhow::Result<()> {
         chimera_operator::experiment::ToxicFlowDetector::new(config.experiment.clone()),
     );
     let rejection_mute_detector = Arc::new(
-        crate::engine::rejection_mute::RejectionMuteDetector::new(config.rejection_mute.clone()),
+        chimera_operator::engine::rejection_mute::RejectionMuteDetector::new(config.rejection_mute.clone()),
     );
-    let mut dune_pnl_monitor = crate::engine::dune_monitor::DunePnlMonitor::new(
+    let mut dune_pnl_monitor = chimera_operator::engine::dune_monitor::DunePnlMonitor::new(
         &config.dune,
         db_pool.clone(),
     );
@@ -1273,7 +1272,7 @@ async fn main() -> anyhow::Result<()> {
                             for status_update in &status_updates {
                                 // Conditionally move DEAD_LETTER → QUEUED
                                 let result = match dlq_pool.pool() {
-                                    crate::db_abstraction::DbPool::PostgreSQL(ref pool) => {
+                                    chimera_operator::db_abstraction::DbPool::PostgreSQL(ref pool) => {
                                         sqlx::query(
                                             r#"
                                             UPDATE trades
@@ -1571,7 +1570,7 @@ async fn main() -> anyhow::Result<()> {
                 _ = monitor_token.cancelled() => break,
                 _ = interval.tick() => {
                     if config_clone.degradation.memory_monitoring_enabled {
-                        match crate::engine::check_memory_pressure().await {
+                        match chimera_operator::engine::check_memory_pressure().await {
                             Ok(usage) => {
                                 if usage >= config_clone.degradation.memory_pressure_threshold {
                                     tracing::warn!(
@@ -1595,7 +1594,7 @@ async fn main() -> anyhow::Result<()> {
                     if config_clone.degradation.disk_monitoring_enabled {
                         // Check disk space in current directory
                         let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                        match crate::engine::check_disk_space(&current_dir).await {
+                        match chimera_operator::engine::check_disk_space(&current_dir).await {
                             Ok(free_space) => {
                                 if free_space <= config_clone.degradation.disk_space_warning_threshold {
                                     tracing::warn!(
@@ -1637,7 +1636,7 @@ async fn main() -> anyhow::Result<()> {
                             .unwrap_or_else(|| "/app/data/logs".into());
                         let log_dir = std::path::PathBuf::from(log_dir);
                         let max_age_days = 7; // Default: prune logs older than 7 days
-                        match crate::engine::prune_logs_if_needed(&log_dir, max_age_days).await {
+                        match chimera_operator::engine::prune_logs_if_needed(&log_dir, max_age_days).await {
                             Ok(_) => {
                                 tracing::debug!("Log pruning check completed");
                             }
@@ -3029,7 +3028,7 @@ async fn main() -> anyhow::Result<()> {
     // C1: the shared selection_config + decision_recorder were built right
     // after db init so /health and selection share one run identity.
     let selection_service = Arc::new(
-        crate::engine::SelectionService::new(
+        chimera_operator::engine::SelectionService::new(
             db_pool.clone(),
             token_parser.clone(),
             Some(portfolio_heat.clone()),
@@ -3795,7 +3794,7 @@ mod tests {
 
     #[test]
     fn test_generate_jwt_secret() {
-        use crate::tools::generate_jwt_secret::generate_jwt_secret;
+        use chimera_operator::tools::generate_jwt_secret::generate_jwt_secret;
         let secret = generate_jwt_secret().unwrap();
         assert_eq!(secret.len(), 64);
         assert!(secret.chars().all(|c| c.is_ascii_hexdigit()));

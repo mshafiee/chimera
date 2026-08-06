@@ -29,6 +29,8 @@ pub mod price_cache;
 pub mod roster;
 pub mod state;
 pub mod token;
+#[allow(dead_code)]
+pub mod tools;
 pub mod vault;
 
 // Re-export commonly used types for tests

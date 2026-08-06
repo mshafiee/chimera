@@ -3246,7 +3246,8 @@ mod tests {
         assert_eq!(defaults.min_token_age_pumpfun_hours, 4.0);
     }
 
-    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+#[test]
     fn test_pumpfun_age_override_parses() {
         let mut config = TokenSafetyConfig::default();
         config.min_token_age_pumpfun_hours = 2.0;

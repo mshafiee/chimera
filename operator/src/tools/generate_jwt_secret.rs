@@ -18,7 +18,7 @@ pub fn generate_jwt_secret() -> Result<String> {
     Ok(secret)
 }
 
-fn main() -> Result<()> {
+pub fn main() -> Result<()> {
     let secret = generate_jwt_secret()?;
     // writeln! so a closed stdout (e.g. `| head`) fails cleanly instead of
     // panicking with a trace.

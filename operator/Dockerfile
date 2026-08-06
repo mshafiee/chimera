@@ -33,19 +33,23 @@ ENV GIT_HASH=${GIT_HASH}
 
 # Copy workspace manifests first for better caching
 COPY Cargo.toml Cargo.lock ./
+COPY api/Cargo.toml ./api/Cargo.toml
 COPY core/Cargo.toml ./core/Cargo.toml
 COPY infra/Cargo.toml ./infra/Cargo.toml
 COPY operator/Cargo.toml ./operator/Cargo.toml
 COPY operator/build.rs ./operator/build.rs
 
 # Copy sources
+COPY api/src ./api/src
 COPY core/src ./core/src
 COPY infra/src ./infra/src
 COPY infra/migrations_postgres ./infra/migrations_postgres
 COPY operator/src ./operator/src
 
 # Build release binary (online mode for sqlx, as we don't have prepared data)
-RUN cargo build --release -p chimera_operator
+# The chimera_operator binary now lives in the api crate (kept name for
+# deploy compatibility); operator's CLI bins (import_keypair) still build from operator.
+RUN cargo build --release -p chimera_api -p chimera_operator --bins
 
 # Runtime stage - same base image for GLIBC compatibility
 FROM ubuntu:22.04

@@ -1,0 +1,33 @@
+[package]
+name = "chimera_api"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Chimera app entry + HTTP transport: main.rs orchestrates infra structs into core services and exposes them via axum. The binary keeps the legacy name chimera_operator so the deploy pipeline is unchanged."
+
+[[bin]]
+name = "chimera_operator"
+path = "src/main.rs"
+
+[dependencies]
+chimera_operator = { path = "../operator" }
+anyhow = { workspace = true }
+axum = { workspace = true }
+solana-client = "3"
+reqwest = { workspace = true }
+solana-sdk = "3"
+tower = "0.4"
+tower_governor = "0.4"
+chrono = { workspace = true }
+dotenvy = "0.15"
+rust_decimal = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+parking_lot = "0.12"
+tokio-util = "0.7"
+tracing-appender = "0.2"
+tracing-log = "0.1"
+tracing = { workspace = true }
+tower-http = { version = "0.5", features = ["trace", "cors", "request-id", "limit"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

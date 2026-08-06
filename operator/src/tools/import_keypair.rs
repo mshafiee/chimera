@@ -41,9 +41,9 @@ use clap::Parser;
 use solana_sdk::signature::{Keypair, Signer};
 use zeroize::Zeroize;
 
-use chimera_operator::engine::transaction_builder::load_wallet_keypair;
-use chimera_operator::keypair_utils::normalize_to_64_bytes;
-use chimera_operator::vault::{Vault, VaultError, VaultSecrets};
+use crate::engine::transaction_builder::load_wallet_keypair;
+use crate::keypair_utils::normalize_to_64_bytes;
+use crate::vault::{Vault, VaultError, VaultSecrets};
 
 /// Default vault path when neither `--vault-path` nor `$CHIMERA_VAULT_PATH`
 /// is provided. Matches the canonical path used by
@@ -76,7 +76,7 @@ struct Cli {
     dry_run: bool,
 }
 
-fn main() -> Result<()> {
+pub fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // 1. Resolve vault key from env. Hard-fail with actionable guidance
@@ -542,7 +542,7 @@ fn roundtrip_validate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chimera_operator::vault::Vault;
+    use crate::vault::Vault;
     use solana_sdk::signature::{Keypair, Signer};
     use tempfile::NamedTempFile;
 

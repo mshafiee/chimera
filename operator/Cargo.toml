@@ -114,11 +114,11 @@ redis-cache = ["redis"]
 
 [[bin]]
 name = "generate_jwt_secret"
-path = "src/tools/generate_jwt_secret.rs"
+path = "src/bin/generate_jwt_secret.rs"
 
 [[bin]]
 name = "import_keypair"
-path = "src/tools/import_keypair.rs"
+path = "src/bin/import_keypair.rs"
 
 # [[bench]]
 # name = "metadata"
