@@ -69,6 +69,14 @@ pub struct ShadowTrader {
     /// Per-wallet exit profiles — keeps the mirror_main simulation faithful
     /// to the real monitor (per-wallet time exits + trailing).
     exit_profiles: Option<Arc<crate::engine::exit_profile::ExitProfileCache>>,
+    /// Per-token eager-fetch cooldown (2026-08-06): shadow tokens must NOT
+    /// hammer Jupiter. Previously every monitor tick (15s) eager-fetched
+    /// every shadow position's token with no cache — hundreds of Jupiter
+    /// calls per tick, mostly for tokens the price API doesn't list
+    /// ('not found'). That burned the keyless quota and starved the
+    /// honeypot check at execution time (429 -> fail-closed -> dead letters).
+    /// Now each token is eager-fetched at most once per cooldown window.
+    last_fetch_attempt: Arc<tokio::sync::Mutex<HashMap<String, std::time::Instant>>>,
 }
 
 impl ShadowTrader {
@@ -84,6 +92,7 @@ impl ShadowTrader {
             config,
             peaks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             exit_profiles,
+            last_fetch_attempt: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -126,12 +135,11 @@ impl ShadowTrader {
         let shadow_id = uuid::Uuid::new_v4().to_string();
         let sol_price = price_cache.get_sol_price_usd();
 
-        // Track the token in the price cache so the background updater keeps a
-        // live price for the shadow monitor loop. Without this, get_price_usd
-        // always returns None for tokens the main system has never opened a
-        // position on (e.g. rejected signals), so every shadow position was
-        // recorded with no entry price and no evaluable PnL.
-        price_cache.track_token(&req.token_address);
+        // NOTE (2026-08-06): shadow tokens are NOT tracked in the live price
+        // cache — that pushed hundreds of tokens into the 5s background
+        // updater, burning the keyless Jupiter quota (see check_position_exits).
+        // The shadow monitor eager-fetches on demand with a per-token cooldown;
+        // the entry price is fetched below.
 
         // Eagerly fetch a fresh price — mirrors the main system's behavior
         // after opening a position (signal_pipeline.rs). Waits briefly for the
@@ -396,16 +404,29 @@ impl ShadowTrader {
         pool: &sqlx::PgPool,
         pos: &ShadowPositionRow,
     ) {
-        // Ensure the token stays tracked so the background updater refreshes
-        // its price (e.g. after a restart, tracked set is empty).
-        self.price_cache.track_token(&pos.token_address);
+        // NOTE: shadow tokens are deliberately NOT added to the live price
+        // cache's tracked set (2026-08-06). Hundreds of shadow positions were
+        // pushed into the 5s background updater, re-queried forever, burning
+        // the keyless Jupiter quota. The shadow monitor fetches on demand
+        // below, rate-limited per token.
         let current_price = match self.price_cache.get_price_usd(&pos.token_address) {
             Some(p) => p,
             None => {
-                // No cached price this tick — try an eager fetch once, then
-                // defer to the next 15s tick if it still fails (matches the
-                // main system's position monitor behavior).
-                self.price_cache.eager_fetch_token(&pos.token_address).await;
+                // No cached price this tick — eager fetch at most once per
+                // cooldown window per token (was: every 15s tick forever).
+                let cooldown = std::time::Duration::from_secs(60);
+                let mut attempts = self.last_fetch_attempt.lock().await;
+                let due = !matches!(
+                    attempts.get(&pos.token_address),
+                    Some(last) if last.elapsed() < cooldown
+                );
+                if due {
+                    attempts.insert(pos.token_address.clone(), std::time::Instant::now());
+                    drop(attempts);
+                    self.price_cache.eager_fetch_token(&pos.token_address).await;
+                } else {
+                    return;
+                }
                 match self.price_cache.get_price_usd(&pos.token_address) {
                     Some(p) => p,
                     None => return,

@@ -819,6 +819,17 @@ impl PriceCache {
                 results.push((token.clone(), price, Some(price_data.decimals.unwrap_or(9))));
             } else {
                 tracing::warn!(token = token, "Token not found in Jupiter price response");
+                // UNTRACK absent tokens (2026-08-06): Jupiter's price API
+                // doesn't list new/small tokens. Re-querying them every 5s
+                // cycle burned the keyless rate quota (53K 'not found' lines
+                // + 40K eager-fetch failures per day) — starving the
+                // honeypot check at execution time (429 -> fail-closed ->
+                // every admitted signal dead-lettered). The token can be
+                // re-tracked if it later appears (e.g. a new signal).
+                {
+                    let mut tokens = self.active_tokens.write();
+                    tokens.retain(|t| t != token);
+                }
                 // Skip tokens not found in response
             }
         }
