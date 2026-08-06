@@ -176,6 +176,13 @@ services:
        - CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN=true
        - CHIMERA_SELECTION__MIN_PROVEN_TRADES=10
        - CHIMERA_SELECTION__REQUIRE_PROVEN_POSITIVE_PNL=true
+       # Entry confirmation (2026-08-06): single-wallet unproven BUYs are
+       # deferred and admitted only if the whale's entry price holds within
+       # the drawdown tolerance for the wait window — stops buying the top of
+       # fresh pumps (the pattern behind all 134 historical losing trades).
+       - CHIMERA_ENTRY_CONFIRMATION__ENABLED=true
+       - CHIMERA_ENTRY_CONFIRMATION__WAIT_SECS=300
+       - CHIMERA_ENTRY_CONFIRMATION__MAX_DRAWDOWN_PCT=3.0
        # Paper trading mode (simulated execution, no real SOL)
        - CHIMERA_TRADE_MODE=paper
        # Dune Analytics API key for wallet PnL monitoring

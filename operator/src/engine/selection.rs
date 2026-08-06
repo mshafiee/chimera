@@ -377,9 +377,23 @@ impl SelectionService {
     /// rejected) is persisted fire-and-forget as the last step before
     /// returning, so the full admission funnel is captured for the run.
     pub async fn decide(&self, req: &SelectionRequest) -> BuyDecision {
+        self.decide_with_options(req, false).await
+    }
+
+    /// Like [`decide`], but `bypass_consensus_proven` skips the
+    /// consensus-OR-proven gate (step 7b). Used by the entry-confirmation
+    /// manager: a single-wallet unproven signal whose token held its price
+    /// through the confirmation window is re-evaluated with the price-hold
+    /// acting as the admission criterion instead of the hard gate. All other
+    /// gates (quality, sizing, heat, safety) still run.
+    pub async fn decide_with_options(
+        &self,
+        req: &SelectionRequest,
+        bypass_consensus_proven: bool,
+    ) -> BuyDecision {
         let received_at = chrono::Utc::now();
         let decision = match req.action {
-            Action::Buy => self.decide_buy(req).await,
+            Action::Buy => self.decide_buy(req, bypass_consensus_proven).await,
             Action::Sell => self.decide_sell(req).await,
         };
         tracing::debug!(
@@ -600,7 +614,11 @@ impl SelectionService {
         }
     }
 
-    async fn decide_buy(&self, req: &SelectionRequest) -> BuyDecision {
+    async fn decide_buy(
+        &self,
+        req: &SelectionRequest,
+        bypass_consensus_proven: bool,
+    ) -> BuyDecision {
         // ── 0. Token address format validation (cheap, fail fast) ──────────
         if req
             .token_address
@@ -1025,7 +1043,8 @@ impl SelectionService {
         // with >= min_proven_trades closed copy-trades (and, when configured,
         // positive 30d copy PnL) before admitting a BUY. Exit/SELL decisions
         // are never gated here.
-        if self.config.require_consensus_or_proven
+        if !bypass_consensus_proven
+            && self.config.require_consensus_or_proven
             && !is_consensus
             && strategy != Strategy::Exit
         {

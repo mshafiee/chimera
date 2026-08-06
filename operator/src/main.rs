@@ -3138,6 +3138,36 @@ async fn main() -> anyhow::Result<()> {
     // Use _engine_handle which is created earlier
     let config_arc = Arc::new(config.clone());
     tracing::info!("Attempting to create MonitoringState...");
+
+    // Entry confirmation: single-wallet unproven BUY signals are deferred and
+    // admitted only if the whale's entry price holds for the confirmation
+    // window (see engine::entry_confirmation). Env-tunable.
+    let entry_confirmation_config = chimera_operator::engine::entry_confirmation::EntryConfirmationConfig {
+        enabled: std::env::var("CHIMERA_ENTRY_CONFIRMATION__ENABLED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(true),
+        wait_secs: std::env::var("CHIMERA_ENTRY_CONFIRMATION__WAIT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300),
+        max_drawdown_pct: std::env::var("CHIMERA_ENTRY_CONFIRMATION__MAX_DRAWDOWN_PCT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(rust_decimal::Decimal::new(3, 0)),
+    };
+    let entry_confirmation = Arc::new(
+        chimera_operator::engine::entry_confirmation::EntryConfirmationManager::new(
+            entry_confirmation_config,
+            db_pool.clone(),
+            _engine_handle.clone(),
+            Some(token_parser.clone()),
+            selection_service.clone(),
+        ),
+    );
+    entry_confirmation.clone().spawn();
+    tracing::info!("Entry confirmation manager spawned");
+
     let monitoring_routes = match MonitoringState::new(
         db_pool.clone(),
         _engine_handle.clone(),
@@ -3150,6 +3180,7 @@ async fn main() -> anyhow::Result<()> {
             .with_portfolio_heat(portfolio_heat.clone())
             .with_exit_detector(exit_detector.clone())
             .with_selection(selection_service.clone())
+            .with_entry_confirmation(entry_confirmation)
     }) {
         Ok(monitoring_state) => {
             let monitoring_state_arc = Arc::new(monitoring_state);

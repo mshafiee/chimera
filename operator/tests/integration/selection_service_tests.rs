@@ -361,3 +361,41 @@ async fn test_unproven_wallet_with_negative_pnl_rejected_by_gate() {
         "unproven wallet (negative 30d PnL) must be rejected by the gate"
     );
 }
+
+#[tokio::test]
+async fn test_consensus_gate_bypass_allows_price_hold_confirmation() {
+    // Entry confirmation re-evaluates a deferred signal with the gate
+    // bypassed (the price-hold acts as the admission criterion). The decision
+    // must NOT be rejected by the consensus-OR-proven gate in that mode; the
+    // subsequent network-dependent fast-check may reject for other reasons.
+    let (db, _tmp) = create_test_db().await;
+    let wallet = format!("G4{}", &WALLET_PREFIX[..27]);
+    insert_wallet(&db, &wallet, Some(90.0)).await;
+    let (service, _, _) = build_selection_service(db);
+
+    let req = SelectionRequest {
+        wallet_address: wallet,
+        token_address: "ZEUS1aR7aX8DFFJf5QjWj2ftDDdNTroMNGo8YoQm3Gq".to_string(),
+        action: Action::Buy,
+        source_amount_sol: dec("1.0"),
+        ingress: Ingress::Webhook,
+        source_slot: None,
+        exit_fraction: None,
+    };
+
+    // Same inputs: the gate rejects when active...
+    let gated = service.decide(&req).await;
+    assert_eq!(
+        gated.rejection_code,
+        Some("SINGLE_WALLET_UNPROVEN"),
+        "gate must reject without the bypass"
+    );
+
+    // ...and is skipped with the bypass (price-hold confirmation path).
+    let bypassed = service.decide_with_options(&req, true).await;
+    assert_ne!(
+        bypassed.rejection_code,
+        Some("SINGLE_WALLET_UNPROVEN"),
+        "gate bypass must skip the consensus-OR-proven rejection"
+    );
+}

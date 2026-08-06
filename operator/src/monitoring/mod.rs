@@ -98,6 +98,11 @@ pub struct MonitoringState {
     /// Unified selection engine (B1): shared BUY/SELL decision pipeline used
     /// by both this monitoring path and the direct webhook handler.
     pub selection: Option<Arc<crate::engine::SelectionService>>,
+    /// Entry confirmation: single-wallet unproven BUY signals are deferred and
+    /// admitted only if the whale's entry holds its price (see
+    /// `crate::engine::entry_confirmation`).
+    pub entry_confirmation:
+        Option<Arc<crate::engine::entry_confirmation::EntryConfirmationManager>>,
     /// Shared secret expected in the `Authorization` header of Helius webhook
     /// deliveries. `None` = auth header not configured (accept all).
     pub helius_auth_header: Option<String>,
@@ -206,6 +211,7 @@ impl MonitoringState {
             )),
             active_wallet_cache: Arc::new(parking_lot::RwLock::new(None)),
             selection: None,
+            entry_confirmation: None,
             helius_auth_header,
             helius_auth_enforce,
             rpc_verify_enforce,
@@ -239,6 +245,15 @@ impl MonitoringState {
     /// Attach the unified selection engine (B1)
     pub fn with_selection(mut self, s: Arc<crate::engine::SelectionService>) -> Self {
         self.selection = Some(s);
+        self
+    }
+
+    /// Attach the entry-confirmation manager (deferred single-wallet BUYs)
+    pub fn with_entry_confirmation(
+        mut self,
+        ec: Arc<crate::engine::entry_confirmation::EntryConfirmationManager>,
+    ) -> Self {
+        self.entry_confirmation = Some(ec);
         self
     }
 }

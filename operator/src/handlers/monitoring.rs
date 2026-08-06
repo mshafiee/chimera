@@ -2,9 +2,8 @@
 //!
 //! Handles Helius webhook endpoint and monitoring status
 
-use crate::db_abstraction::{InsertTrade, UpdateTradeStatus};
 use crate::middleware::{AuthExtension, Role};
-use crate::models::{Action, Signal, SignalPayload, Strategy};
+use crate::models::Action;
 use crate::monitoring::transaction_parser::parse_helius_webhook;
 use crate::monitoring::HeliusWebhookPayload;
 use crate::monitoring::MonitoringState;
@@ -339,165 +338,54 @@ pub async fn helius_webhook_handler(
                             reason = decision.rejection_reason.as_deref().unwrap_or("rejected"),
                             "Monitoring signal rejected by selection service"
                         );
+                        // Single-wallet unproven BUY → defer to entry
+                        // confirmation: admit only if the whale's entry price
+                        // holds for the confirmation window. Replaces "buy the
+                        // top of a fresh pump" with "buy only if the whale's
+                        // entry is holding" (the losing pattern across all 134
+                        // historical closed trades).
+                        if decision.rejection_code == Some("SINGLE_WALLET_UNPROVEN")
+                            && direction == Action::Buy
+                        {
+                            if let Some(ref ec) = state.entry_confirmation {
+                                let sol_mint = crate::constants::mints::SOL;
+                                // Only SOL-quoted buys give a free exact entry
+                                // price (amount_in is SOL, amount_out raw units).
+                                if swap.token_in == sol_mint
+                                    && swap.amount_out > rust_decimal::Decimal::ZERO
+                                {
+                                    let ref_price = swap.amount_in / swap.amount_out;
+                                    if ec.register(req.clone(), ref_price).await {
+                                        tracing::info!(
+                                            wallet = %wallet_address,
+                                            token = %target_token,
+                                            ref_price_sol_per_raw = %ref_price,
+                                            "Signal queued for entry confirmation (single-wallet unproven)"
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                         continue;
                     }
 
-                    let trade_amount_sol =
-                        decision.size_sol.unwrap_or(swap.amount_in);
-                    let strategy = decision.strategy.unwrap_or(Strategy::Spear);
-
-                    // Generate a time-bucketed trade UUID for monitoring signals.
-                    // Unlike webhook signals (which use a pure hash for permanent dedup),
-                    // monitoring signals use a 5-minute time bucket so that:
-                    // 1. Duplicate Helius webhooks within the same 5-min window → same UUID → dedup
-                    // 2. After a position closes, new signals in a later window → new UUID → new trade
-                    // This prevents the system from being permanently locked out of a
-                    // wallet+token pair after the first trade closes.
-                    let time_bucket = chrono::Utc::now().timestamp() / 300; // 5-minute buckets
-                    let monitoring_uuid = {
-                        use sha2::{Sha256, Digest};
-                        let mut hasher = Sha256::new();
-                        hasher.update(wallet_address.as_bytes());
-                        hasher.update(b"|");
-                        hasher.update(target_token.as_bytes());
-                        hasher.update(b"|");
-                        hasher.update(direction.to_string().as_bytes());
-                        hasher.update(b"|");
-                        hasher.update(trade_amount_sol.to_string().as_bytes());
-                        hasher.update(b"|");
-                        hasher.update(time_bucket.to_le_bytes());
-                        hex::encode(&hasher.finalize()[..16])
-                    };
-
-                    let signal_payload = SignalPayload {
-                        wallet_address: wallet_address.clone(),
-                        strategy,
-                        token: target_token.clone(),
-                        token_address: Some(target_token),
-                        action: direction,
-                        amount_sol: trade_amount_sol,
-                        trade_uuid: Some(monitoring_uuid),
-                        exit_fraction: None,
-                    };
-
-                    let mut signal = Signal::new(
-                        signal_payload,
-                        chrono::Utc::now().timestamp(),
-                        None, // source_ip
-                    );
-
-                    // Populate token decimals — required by the executor's convert_fill_price()
-                    // to compute entry_price. Without this, entry_price=0 and position insert
-                    // fails with "Entry price must be positive".
-                    if let Some(ref tp) = state.token_parser {
-                        if let Some(decimals) = tp
-                            .get_token_decimals(signal.token_address().unwrap_or(""))
-                            .await
-                        {
-                            signal.token_decimals = Some(decimals);
-                        }
-                    }
-
-                    // Insert trade into DB as PENDING before queueing (mirrors webhook handler).
-                    // Without this, the worker's process_signal() fails with TradeNotFound
-                    // because update_trade_status() targets a non-existent row.
-                    match state
-                        .db
-                        .insert_trade(&InsertTrade {
-                            trade_uuid: signal.trade_uuid.clone(),
-                            wallet_address: signal.payload.wallet_address.clone(),
-                            token_address: signal.token_address().unwrap_or("").to_string(),
-                            token_symbol: Some(signal.payload.token.clone()),
-                            strategy: signal.payload.strategy.to_string(),
-                            side: signal.payload.action.to_string(),
-                            amount_sol: signal.payload.amount_sol,
-                            status: "PENDING".to_string(),
-                        })
-                        .await
+                    // Queue the admitted signal through the shared path (also
+                    // used by the entry-confirmation loop) — identical UUID,
+                    // payload, decimals, insert, link, queue, and status
+                    // updates as before.
+                    if !crate::engine::entry_confirmation::queue_monitoring_signal(
+                        &state.db,
+                        &state.engine,
+                        state.token_parser.as_ref(),
+                        selection,
+                        &decision,
+                        &req,
+                    )
+                    .await
                     {
-                        Ok(_) => {
-                            // C1: link the persisted decision record to its
-                            // trade (fire-and-forget). The Helius trade_uuid is
-                            // derived from the decision size, so it is linked
-                            // here after insert rather than at decide time.
-                            if let Some(recorder) = selection.decision_recorder() {
-                                recorder.link_trade(
-                                    decision.decision_id.clone(),
-                                    signal.trade_uuid.clone(),
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            let err_str = e.to_string();
-                            if err_str.contains("duplicate key") {
-                                // Helius sends duplicate webhooks for the same transaction.
-                                // The deterministic trade_uuid (wallet+token+action+amount)
-                                // ensures the same signal maps to the same DB row. This is
-                                // the dedup path — skip silently.
-                                tracing::debug!(
-                                    trade_uuid = %signal.trade_uuid,
-                                    wallet = %wallet_address,
-                                    "Monitoring signal already in DB (duplicate Helius webhook), skipping"
-                                );
-                            } else {
-                                tracing::error!(
-                                    error = %e,
-                                    trade_uuid = %signal.trade_uuid,
-                                    wallet = %wallet_address,
-                                    "Failed to insert trade from monitoring signal"
-                                );
-                            }
-                            continue;
-                        }
+                        continue;
                     }
-
-                    // Queue signal with the real WQS from the decision (B1).
-                    let wallet_wqs = decision.wqs;
-                    let signal_uuid = signal.trade_uuid.clone();
-                    if let Err(e) = state.engine.queue_signal(signal, wallet_wqs).await {
-                        tracing::error!(
-                            error = %e,
-                            trade_uuid = %signal_uuid,
-                            "Failed to queue signal from webhook"
-                        );
-                        let _ = state
-                            .db
-                            .update_trade_status(&UpdateTradeStatus {
-                                trade_uuid: signal_uuid,
-                                status: "FAILED".to_string(),
-                                tx_signature: None,
-                                error_message: Some(format!("Queue failed: {}", e)),
-                                network_fee_sol: None,
-                            })
-                            .await;
-                        continue; // Skip this event, but continue processing others
-                    }
-
-                    // Update trade status to QUEUED after successful queue
-                    if let Err(e) = state
-                        .db
-                        .update_trade_status(&UpdateTradeStatus {
-                            trade_uuid: signal_uuid.clone(),
-                            status: "QUEUED".to_string(),
-                            tx_signature: None,
-                            error_message: None,
-                            network_fee_sol: None,
-                        })
-                        .await
-                    {
-                        tracing::warn!(
-                            error = %e,
-                            trade_uuid = %signal_uuid,
-                            "Failed to update monitoring trade status to QUEUED"
-                        );
-                    }
-
-                    tracing::info!(
-                        wallet = %wallet_address,
-                        token = %swap.token_out,
-                        trade_uuid = %signal_uuid,
-                        "Queued signal from webhook"
-                    );
                 } else {
                     tracing::debug!(
                         wallet = %wallet_address,
