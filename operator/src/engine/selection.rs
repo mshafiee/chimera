@@ -109,6 +109,19 @@ pub struct SelectionConfig {
     /// Proven branch also requires positive 30d copy PnL.
     /// Env: CHIMERA_SELECTION__REQUIRE_PROVEN_POSITIVE_PNL (default true).
     pub require_proven_positive_pnl: bool,
+    /// Shadow-mirror token gate (2026-08-06): admit a token only when its
+    /// rolling `mirror_main` shadow average (the whale's own round trip under
+    /// our exit rails, pre-cost) is >= `mirror_gate_min_avg_pct` with at least
+    /// `mirror_gate_min_samples` exits in `mirror_gate_window_hours`.
+    /// Post-cost breakeven is ~1.4%, so +1.5% clears it. Verified on 48h
+    /// shadow data: negative-mirror tokens avg -1.82% (est -3.2% net) vs
+    /// positive-mirror tokens +2.73% (est +1.3% net). Tokens with insufficient
+    /// samples are rejected (SHADOW_MIRROR_INSUFFICIENT) and routed to entry
+    /// confirmation, where a price-hold provides the admission evidence.
+    pub mirror_gate_enabled: bool,
+    pub mirror_gate_min_avg_pct: Decimal,
+    pub mirror_gate_min_samples: i32,
+    pub mirror_gate_window_hours: i32,
 }
 
 impl SelectionConfig {
@@ -136,6 +149,10 @@ impl SelectionConfig {
         hasher.update(u8::from(self.require_consensus_or_proven).to_le_bytes());
         hasher.update(self.min_proven_trades.to_le_bytes());
         hasher.update(u8::from(self.require_proven_positive_pnl).to_le_bytes());
+        hasher.update(u8::from(self.mirror_gate_enabled).to_le_bytes());
+        hasher.update(self.mirror_gate_min_avg_pct.to_string().as_bytes());
+        hasher.update(self.mirror_gate_min_samples.to_le_bytes());
+        hasher.update(self.mirror_gate_window_hours.to_le_bytes());
         hex::encode(&hasher.finalize()[..8])
     }
 }
@@ -1079,6 +1096,86 @@ impl SelectionService {
             }
         }
 
+        // ── 7c. Shadow-mirror token gate ───────────────────────────────────
+        // Token-level EV: only admit tokens whose whale round-trips (shadow
+        // `mirror_main`, rolling window) clear the post-cost breakeven.
+        // Verified 2026-08-06 on 48h shadow data: negative-mirror tokens
+        // average -1.82% (est -3.2% net of ~1.4% costs) vs positive-mirror
+        // tokens +2.73% (est +1.3% net). Insufficient data fails closed but
+        // the handler routes those signals to entry confirmation, where a
+        // price-hold provides the admission evidence (the gate is bypassed in
+        // the confirmation re-decision).
+        if !bypass_consensus_proven && self.config.mirror_gate_enabled {
+            let avg = match self
+                .db
+                .get_token_mirror_avg_pnl(
+                    &req.token_address,
+                    self.config.mirror_gate_window_hours,
+                    self.config.mirror_gate_min_samples,
+                )
+                .await
+            {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!(
+                        token = %req.token_address,
+                        error = %e,
+                        "Mirror-gate check failed — treating as insufficient evidence (fail-closed)"
+                    );
+                    None
+                }
+            };
+            match avg {
+                Some(avg) if avg < self.config.mirror_gate_min_avg_pct => {
+                    let reason = format!(
+                        "Token shadow-mirror avg {:.2}% below minimum {:.2}% ({} samples, {}h window)",
+                        avg,
+                        self.config.mirror_gate_min_avg_pct,
+                        self.config.mirror_gate_min_samples,
+                        self.config.mirror_gate_window_hours
+                    );
+                    tracing::info!(
+                        ingress = ?req.ingress,
+                        decision = "BUY",
+                        token = %req.token_address,
+                        wallet = %req.wallet_address,
+                        rejection_code = "SHADOW_MIRROR_NEGATIVE",
+                        reason = %reason,
+                        avg_pnl_pct = %avg,
+                        "selection: BUY rejected by gate"
+                    );
+                    return BuyDecision::rejected(
+                        req,
+                        &self.config_hash,
+                        "SHADOW_MIRROR_NEGATIVE",
+                        reason,
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    let reason = format!(
+                        "Token has <{} shadow-mirror samples in {}h — insufficient evidence",
+                        self.config.mirror_gate_min_samples, self.config.mirror_gate_window_hours
+                    );
+                    tracing::info!(
+                        ingress = ?req.ingress,
+                        decision = "BUY",
+                        token = %req.token_address,
+                        wallet = %req.wallet_address,
+                        rejection_code = "SHADOW_MIRROR_INSUFFICIENT",
+                        reason = %reason,
+                        "selection: BUY rejected by gate"
+                    );
+                    return BuyDecision::rejected(
+                        req,
+                        &self.config_hash,
+                        "SHADOW_MIRROR_INSUFFICIENT",
+                        reason,
+                    );
+                }
+            }
+        }
+
         // ── 8. Signal-quality score ─────────────────────────────────────────
         let quality = SignalQuality::calculate(
             wallet_wqs,
@@ -1479,6 +1576,10 @@ mod tests {
             require_consensus_or_proven: true,
             min_proven_trades: 10,
             require_proven_positive_pnl: true,
+            mirror_gate_enabled: true,
+            mirror_gate_min_avg_pct: Decimal::new(15, 1),
+            mirror_gate_min_samples: 10,
+            mirror_gate_window_hours: 48,
         };
 
         let mut config2 = config1.clone();

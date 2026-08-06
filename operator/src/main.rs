@@ -564,6 +564,24 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(true),
+        // Shadow-mirror token gate: only admit tokens whose whale round-trips
+        // clear the post-cost breakeven (+1.5% mirror avg, >=10 samples, 48h).
+        mirror_gate_enabled: std::env::var("CHIMERA_SELECTION__MIRROR_GATE_ENABLED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(true),
+        mirror_gate_min_avg_pct: std::env::var("CHIMERA_SELECTION__MIRROR_GATE_MIN_AVG_PCT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(rust_decimal::Decimal::new(15, 1)), // 1.5%
+        mirror_gate_min_samples: std::env::var("CHIMERA_SELECTION__MIRROR_GATE_MIN_SAMPLES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10),
+        mirror_gate_window_hours: std::env::var("CHIMERA_SELECTION__MIRROR_GATE_WINDOW_HOURS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(48),
     };
     let roster_addresses: Vec<String> = db_pool
         .get_active_wallets()

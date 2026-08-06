@@ -821,6 +821,18 @@ pub trait Database: Send + Sync {
         wallet_address: &str,
     ) -> AppResult<(i64, rust_decimal::Decimal)>;
 
+    /// Rolling shadow-mirror average PnL% for a token (`exit_strategy =
+    /// 'mirror_main'` — the whale's own round trip under our exit rails,
+    /// pre-cost). Returns `Some(avg)` only when at least `min_samples` exits
+    /// exist within the `window_hours` window, else `None`. Drives the
+    /// shadow-mirror admission gate (token-level EV).
+    async fn get_token_mirror_avg_pnl(
+        &self,
+        token_address: &str,
+        window_hours: i32,
+        min_samples: i32,
+    ) -> AppResult<Option<rust_decimal::Decimal>>;
+
     /// Get wallet copy performance metrics
     async fn get_wallet_copy_performance(
         &self,

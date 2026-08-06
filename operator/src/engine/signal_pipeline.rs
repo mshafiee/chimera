@@ -738,6 +738,9 @@ impl SignalProcessor {
         // window) is consistently negative. Complements the cooldown with a
         // durable, data-backed ban — e.g. 6GmAFSYs4g averaged -13%/h over 40
         // shadow signals and kept getting re-entered.
+        // 2026-08-06: the former `NOT LIKE '%pump'` exclusion was removed —
+        // pump.fun tokens are the losing class (all 134 historical closed
+        // trades) and were exempt from this filter.
         if signal.payload.action == Action::Buy {
             if let Some(ref token_addr) = signal.payload.token_address {
                 let blacklist = &self.config.shadow_blacklist;
@@ -751,7 +754,6 @@ impl SignalProcessor {
                                 FROM shadow_exits se
                                 JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
                                 WHERE sp.token_address = $1
-                                  AND sp.token_address NOT LIKE '%pump'
                                   AND se.exit_strategy = 'mirror_main'
                                   AND sp.opened_at > NOW() - ($2 || ' hours')::interval
                                 GROUP BY sp.token_address

@@ -338,15 +338,16 @@ pub async fn helius_webhook_handler(
                             reason = decision.rejection_reason.as_deref().unwrap_or("rejected"),
                             "Monitoring signal rejected by selection service"
                         );
-                        // Single-wallet unproven BUY → defer to entry
-                        // confirmation: admit only if the whale's entry price
-                        // holds for the confirmation window. Replaces "buy the
-                        // top of a fresh pump" with "buy only if the whale's
-                        // entry is holding" (the losing pattern across all 134
+                        // Single-wallet unproven BUY or a token without
+                        // shadow-mirror history → defer to entry confirmation:
+                        // admit only if the whale's entry price holds for the
+                        // confirmation window. Replaces "buy the top of a
+                        // fresh pump" with "buy only if the whale's entry is
+                        // holding" (the losing pattern across all 134
                         // historical closed trades).
-                        if decision.rejection_code == Some("SINGLE_WALLET_UNPROVEN")
-                            && direction == Action::Buy
-                        {
+                        let confirmable = decision.rejection_code == Some("SINGLE_WALLET_UNPROVEN")
+                            || decision.rejection_code == Some("SHADOW_MIRROR_INSUFFICIENT");
+                        if confirmable && direction == Action::Buy {
                             if let Some(ref ec) = state.entry_confirmation {
                                 let sol_mint = crate::constants::mints::SOL;
                                 // Only SOL-quoted buys give a free exact entry

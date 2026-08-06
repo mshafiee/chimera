@@ -3888,6 +3888,30 @@ impl Database for PostgresBackend {
         Ok((closed_trades, net_pnl_sol))
     }
 
+    async fn get_token_mirror_avg_pnl(
+        &self,
+        token_address: &str,
+        window_hours: i32,
+        min_samples: i32,
+    ) -> AppResult<Option<rust_decimal::Decimal>> {
+        let avg: Option<(rust_decimal::Decimal,)> = sqlx::query_as(
+            "SELECT AVG(se.pnl_pct)
+             FROM shadow_exits se
+             JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
+             WHERE sp.token_address = $1
+               AND se.exit_strategy = 'mirror_main'
+               AND sp.opened_at > NOW() - ($2 || ' hours')::interval
+             GROUP BY sp.token_address
+             HAVING COUNT(*) >= $3",
+        )
+        .bind(token_address)
+        .bind(window_hours)
+        .bind(min_samples)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(avg.map(|a| a.0))
+    }
+
     async fn get_wallet_copy_performance(
         &self,
         wallet_address: &str,

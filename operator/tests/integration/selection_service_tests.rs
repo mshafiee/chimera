@@ -132,6 +132,10 @@ fn build_selection_service(
         require_consensus_or_proven: true,
         min_proven_trades: 10,
         require_proven_positive_pnl: true,
+        mirror_gate_enabled: true,
+        mirror_gate_min_avg_pct: dec("1.5"),
+        mirror_gate_min_samples: 10,
+        mirror_gate_window_hours: 48,
     };
     let service = SelectionService::new(
         db,
@@ -397,5 +401,120 @@ async fn test_consensus_gate_bypass_allows_price_hold_confirmation() {
         bypassed.rejection_code,
         Some("SINGLE_WALLET_UNPROVEN"),
         "gate bypass must skip the consensus-OR-proven rejection"
+    );
+}
+
+/// Insert `mirror_main` shadow rows for a token (one shadow position + one
+/// exit per pnl_pct value) so the shadow-mirror gate has data to evaluate.
+async fn insert_shadow_mirror(db: &Arc<dyn Database>, token: &str, pnl_pcts: &[&str]) {
+    let pool = pg_pool(db);
+    for (i, pct) in pnl_pcts.iter().enumerate() {
+        let shadow_id = format!("mirror_test_{}_{}", &token[..8], i);
+        sqlx::query(
+            "INSERT INTO shadow_positions (shadow_id, wallet_address, token_address, main_admitted, entry_amount_sol, ingress, opened_at, fully_closed)
+             VALUES ($1, '11111111111111111111111111111111', $2, false, 0.1, 'Webhook', NOW() - INTERVAL '1 hour', true)",
+        )
+        .bind(&shadow_id)
+        .bind(token)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO shadow_exits (shadow_id, exit_strategy, exit_price_usd, exit_sol_price_usd, pnl_pct, pnl_sol, exit_reason, hold_duration_secs)
+             VALUES ($1, 'mirror_main', 1.0, 150.0, $2, 0.001, 'recovery_gate', 600)",
+        )
+        .bind(&shadow_id)
+        .bind(dec(pct))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+}
+
+// ── Shadow-mirror token gate (2026-08-06) ─────────────────────────────────
+// The gate sits after the consensus-OR-proven gate, so these tests use a
+// proven wallet (passes step 7b) to reach the mirror evaluation.
+
+#[tokio::test]
+async fn test_mirror_gate_rejects_negative_token() {
+    let (db, _tmp) = create_test_db().await;
+    let wallet = format!("M1{}", &WALLET_PREFIX[..27]);
+    insert_wallet(&db, &wallet, Some(90.0)).await;
+    insert_closed_trades(&db, &wallet, 10, "0.05").await; // proven wallet
+    let token = "ZEUS1aR7aX8DFFJf5QjWj2ftDDdNTroMNGo8YoQm3Gq";
+    insert_shadow_mirror(&db, token, &["-1.0", "-2.0", "-3.0", "-1.5", "-2.5", "-1.0", "-2.0", "-3.0", "-1.5", "-2.5"]).await;
+    let (service, _, _) = build_selection_service(db);
+
+    let req = SelectionRequest {
+        wallet_address: wallet,
+        token_address: token.to_string(),
+        action: Action::Buy,
+        source_amount_sol: dec("1.0"),
+        ingress: Ingress::Webhook,
+        source_slot: None,
+        exit_fraction: None,
+    };
+    let decision = service.decide(&req).await;
+    assert_eq!(
+        decision.rejection_code,
+        Some("SHADOW_MIRROR_NEGATIVE"),
+        "token with negative mirror average must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn test_mirror_gate_passes_positive_token() {
+    let (db, _tmp) = create_test_db().await;
+    let wallet = format!("M2{}", &WALLET_PREFIX[..27]);
+    insert_wallet(&db, &wallet, Some(90.0)).await;
+    insert_closed_trades(&db, &wallet, 10, "0.05").await;
+    let token = "CortexFv3fRcLKTgACr7aLqckGh5eP7TP3z9JHoKqMc6";
+    insert_shadow_mirror(&db, token, &["4.0", "5.0", "6.0", "5.5", "4.5", "5.0", "6.5", "4.0", "5.5", "6.0"]).await;
+    let (service, _, _) = build_selection_service(db);
+
+    let req = SelectionRequest {
+        wallet_address: wallet,
+        token_address: token.to_string(),
+        action: Action::Buy,
+        source_amount_sol: dec("1.0"),
+        ingress: Ingress::Webhook,
+        source_slot: None,
+        exit_fraction: None,
+    };
+    let decision = service.decide(&req).await;
+    assert_ne!(
+        decision.rejection_code,
+        Some("SHADOW_MIRROR_NEGATIVE"),
+        "positive-mirror token must pass the shadow-mirror gate"
+    );
+    assert_ne!(
+        decision.rejection_code,
+        Some("SHADOW_MIRROR_INSUFFICIENT"),
+        "token with 10 samples has sufficient evidence"
+    );
+}
+
+#[tokio::test]
+async fn test_mirror_gate_insufficient_evidence_rejected() {
+    let (db, _tmp) = create_test_db().await;
+    let wallet = format!("M3{}", &WALLET_PREFIX[..27]);
+    insert_wallet(&db, &wallet, Some(90.0)).await;
+    insert_closed_trades(&db, &wallet, 10, "0.05").await;
+    let (service, _, _) = build_selection_service(db);
+
+    let req = SelectionRequest {
+        wallet_address: wallet,
+        token_address: "ZEUS1aR7aX8DFFJf5QjWj2ftDDdNTroMNGo8YoQm3Gq".to_string(),
+        action: Action::Buy,
+        source_amount_sol: dec("1.0"),
+        ingress: Ingress::Webhook,
+        source_slot: None,
+        exit_fraction: None,
+    };
+    let decision = service.decide(&req).await;
+    assert_eq!(
+        decision.rejection_code,
+        Some("SHADOW_MIRROR_INSUFFICIENT"),
+        "token without enough shadow-mirror samples must fail closed"
     );
 }
