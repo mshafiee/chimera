@@ -105,9 +105,12 @@ token_safety:
   # Minimum token age in hours to allow a BUY signal (0 disables the check)
   min_token_age_hours: 0.5         # Minimum 30min token age — filters instant rug pulls while still catching early moves (was 0.0 disabled, originally 2h)
   min_token_age_pumpfun_hours: 0.5 # Same: 30min minimum for pump.fun tokens
-  # Allow pump.fun tokens >2h old. With signal-based exit management (copy_wallet_sells: false),
-  # positions are managed by profit targets/stop-loss instead of copying wallet sells.
-  allow_graduated_pumpfun: false  # Block ALL pump.fun tokens — 70% of trades, 17% win rate, negative EV
+  # Allow pump.fun tokens with real DEX liquidity (graduated). Bonding-curve
+  # tokens stay blocked: they have $0 DEX liquidity and fail the $15K pumpfun
+  # floor below. Positions are managed by profit targets/stop-loss (copy_wallet_sells: false).
+  # Re-enabled 2026-08-06 (was false since 70% of trades / 17% win rate / negative EV
+  # — that data predates the $15K graduated liquidity floor).
+  allow_graduated_pumpfun: true
   # ⚠️  SECURITY CRITICAL: NEVER enable this in production ⚠️
   # When false (default, SAFE), tokens not indexed by DexScreener are treated as $0 liquidity
   # and BUY signals are rejected (fail-closed security posture).
