@@ -88,7 +88,7 @@ impl KellySizer {
     pub async fn calculate_kelly(
         &self,
         wallet_address: &str,
-        strategy: crate::models::Strategy,
+        strategy: chimera_core::models::Strategy,
         lookback_days: i64,
     ) -> Result<KellyResult, String> {
         // Get historical trades for this wallet
@@ -293,7 +293,7 @@ impl KellySizer {
     pub async fn calculate_position_size(
         &self,
         wallet_address: &str,
-        strategy: crate::models::Strategy,
+        strategy: chimera_core::models::Strategy,
         total_capital_sol: Decimal,
         lookback_days: i64,
     ) -> Result<Decimal, String> {

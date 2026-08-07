@@ -12,6 +12,7 @@ pub mod config;
 pub mod constants;
 pub mod experiment;
 pub mod roster;
+pub mod engine;
 pub mod error;
 pub mod jupiter;
 pub mod models;

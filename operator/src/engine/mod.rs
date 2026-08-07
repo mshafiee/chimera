@@ -2,10 +2,7 @@
 //!
 //! Manages signal processing, priority queuing, and trade execution.
 
-mod channel;
-mod degradation;
 pub mod decision_recorder;
-pub mod dex_comparator;
 pub mod entry_confirmation;
 pub mod dune_monitor;
 pub mod exit_profile;
@@ -13,58 +10,51 @@ pub mod onchain_assessment;
 pub mod executor;
 mod execution_lock;
 pub mod jito_searcher;
-pub mod kelly_sizer;
-pub mod market_regime;
-pub mod mev_protection;
-pub mod momentum_exit;
-pub mod portfolio_heat;
 pub mod position_sizer;
 pub mod profit_targets;
 pub mod recovery;
-pub mod rejection_mute;
 pub mod reconciliation;
 mod rent_scavenger;
-pub mod rpc_cache;
-pub mod run_context;
 pub mod selection;
 pub mod shadow_fill;
 pub mod shadow_trader;
 pub mod signal_pipeline;
-pub mod signal_quality;
-pub mod slippage;
 pub mod stop_loss;
-pub mod tip_inlining;
-pub mod tips;
 pub mod transaction_builder;
-pub mod v0_reconstruction;
-pub mod volume_cache;
 pub mod worker_pool;
 
-pub use channel::*;
-pub use degradation::*;
+// Engine modules extracted to workspace crates (2026-08-07): pure domain
+// services live in chimera_core::engine; db-backed services in
+// chimera_infra::engine. Re-exported so existing paths keep working.
+pub use chimera_core::engine::{
+    dex_comparator, market_regime, mev_protection, rejection_mute, rpc_cache,
+    run_context, signal_quality, slippage, tip_inlining, v0_reconstruction,
+    volume_cache,
+};
+pub use chimera_core::engine::channel::*;
+pub use chimera_core::engine::degradation::*;
+pub use chimera_core::engine::{
+    CacheStats, DexComparator, MarketRegime, MarketRegimeDetector, MevProtection,
+    QualityCategory, RpcCache, RouteSelection, RunContext, SignalFactors,
+    SignalQuality, VolumeCache,
+};
+pub use chimera_infra::engine::{kelly_sizer, momentum_exit, portfolio_heat, tips};
+pub use chimera_infra::engine::{HeatResult, KellyResult, KellySizer, MomentumExit, MomentumExitAction, PortfolioHeat, TipManager};
+pub use chimera_core::engine::channel::PriorityQueue;
+pub use chimera_core::engine::degradation::handle_rpc_rate_limit;
+
 pub use decision_recorder::DecisionRecorder;
-pub use dex_comparator::{DexComparator, RouteSelection};
 pub use executor::*;
 pub use execution_lock::{ExecutionLock, LockGuard, LockInfo};
 pub use crate::config::ExecutionLockConfig;
-pub use kelly_sizer::{KellyResult, KellySizer};
-pub use market_regime::{MarketRegime, MarketRegimeDetector};
-pub use mev_protection::MevProtection;
-pub use momentum_exit::{MomentumExit, MomentumExitAction};
-pub use portfolio_heat::{HeatResult, PortfolioHeat};
 pub use position_sizer::PositionSizer;
 pub use profit_targets::{ProfitTargetAction, ProfitTargetManager};
 pub use recovery::RecoveryManager;
 pub use rent_scavenger::{RentScavenger, RentScavengerConfig};
-pub use rpc_cache::{CacheStats, RpcCache};
-pub use run_context::RunContext;
 pub use selection::{BuyDecision, Ingress, SelectionConfig, SelectionRequest, SelectionService};
 pub use shadow_fill::LatencyTracker;
 pub use shadow_trader::{ShadowConfig, ShadowTrader};
-pub use signal_quality::{QualityCategory, SignalFactors, SignalQuality};
 pub use stop_loss::{StopLossAction, StopLossManager};
-pub use tips::TipManager;
-pub use volume_cache::VolumeCache;
 
 use crate::config::AppConfig;
 use crate::db_abstraction::Database;

@@ -9,6 +9,7 @@
 //! incremental extraction.
 
 pub mod db_abstraction;
+pub mod engine;
 pub mod keypair_utils;
 pub mod notifications;
 pub mod state;

@@ -349,7 +349,7 @@ impl PortfolioHeat {
 
     pub async fn can_open_strategy_position(
         &self,
-        strategy: crate::models::Strategy,
+        strategy: chimera_core::models::Strategy,
         position_size_sol: Decimal,
         shield_percent: u32,
         spear_percent: u32,
@@ -360,8 +360,8 @@ impl PortfolioHeat {
 
         let (shield_heat, spear_heat) = self.get_strategy_heat().await?;
         let allocation_pct = match strategy {
-            crate::models::Strategy::Shield => Decimal::from(shield_percent),
-            crate::models::Strategy::Spear => Decimal::from(spear_percent),
+            chimera_core::models::Strategy::Shield => Decimal::from(shield_percent),
+            chimera_core::models::Strategy::Spear => Decimal::from(spear_percent),
             _ => return Ok(true),
         };
         if allocation_pct.is_zero() {
@@ -372,8 +372,8 @@ impl PortfolioHeat {
         let max_heat_sol = capital * (self.max_heat_percent / Decimal::from(100));
         let allocated_sol = max_heat_sol * (allocation_pct / Decimal::from(100));
         let current_heat = match strategy {
-            crate::models::Strategy::Shield => shield_heat,
-            crate::models::Strategy::Spear => spear_heat,
+            chimera_core::models::Strategy::Shield => shield_heat,
+            chimera_core::models::Strategy::Spear => spear_heat,
             _ => Decimal::ZERO,
         };
         

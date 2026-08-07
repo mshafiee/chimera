@@ -12,10 +12,10 @@
 //! - If < 10 successful tips in history, use tip_floor * 2
 //! - After 10 tips, switch to percentile-based calculation
 
-use crate::config::JitoConfig;
+use chimera_core::config::JitoConfig;
 use crate::db_abstraction::Database;
-use crate::error::AppResult;
-use crate::models::Strategy;
+use chimera_core::error::AppResult;
+use chimera_core::models::Strategy;
 use parking_lot::RwLock;
 use rust_decimal::prelude::*;
 use std::sync::Arc;
@@ -174,7 +174,7 @@ impl TipManager {
         ];
         for tip_str in seed_tips {
             let tip = Decimal::from_str(tip_str).map_err(|_| {
-                crate::error::AppError::Validation(format!("invalid seed tip: {tip_str}"))
+                chimera_core::error::AppError::Validation(format!("invalid seed tip: {tip_str}"))
             })?;
             self.db
                 .insert_jito_tip(&tip, Some("paper-seed"), Some("SHIELD"), true)
