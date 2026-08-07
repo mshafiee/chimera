@@ -274,11 +274,7 @@ impl PriceCache {
     pub fn is_tracked_price_stale(&self, token_address: &str) -> bool {
         // If we're not actively tracking this token, we have no expectation
         // of fresh data — don't report staleness.
-        let is_tracked = self
-            .active_tokens
-            .read()
-            .iter()
-            .any(|t| t == token_address);
+        let is_tracked = self.active_tokens.read().iter().any(|t| t == token_address);
         if !is_tracked {
             return false;
         }
@@ -287,7 +283,13 @@ impl PriceCache {
 
     /// Set price for a token.
     /// FIX [B-H7]: Updates both prices and price_history atomically under one lock.
-    pub fn set_price(&self, token_address: &str, price_usd: Decimal, source: PriceSource, decimals: Option<u8>) {
+    pub fn set_price(
+        &self,
+        token_address: &str,
+        price_usd: Decimal,
+        source: PriceSource,
+        decimals: Option<u8>,
+    ) {
         let now = Utc::now();
         // Acquire a single write lock and update both maps atomically.
         let mut inner = self.inner.write();
@@ -320,7 +322,7 @@ impl PriceCache {
     }
 
     /// Set price for a token with a custom timestamp (test only).
-    #[cfg(test)]
+    #[cfg(feature = "test-utils")]
     pub fn set_price_with_time(
         &self,
         token_address: &str,
@@ -507,11 +509,17 @@ impl PriceCache {
                 let lite_url = "https://lite-api.jup.ag/price";
                 match self.fetch_prices_jupiter(&tokens, Some(lite_url)).await {
                     Ok((prices, decimals_map)) if !prices.is_empty() => {
-                        tracing::debug!(token = token_address, "Eager fetch served by lite-api fallback");
+                        tracing::debug!(
+                            token = token_address,
+                            "Eager fetch served by lite-api fallback"
+                        );
                         let _ = self.apply_price_updates(prices, decimals_map);
                     }
                     Ok(_) => {
-                        tracing::warn!(token = token_address, "Eager price fetch fallback returned 0 prices");
+                        tracing::warn!(
+                            token = token_address,
+                            "Eager price fetch fallback returned 0 prices"
+                        );
                     }
                     Err(fallback_err) => {
                         tracing::warn!(token = token_address, error = %fallback_err, "Eager price fetch fallback failed");
@@ -604,11 +612,16 @@ impl PriceCache {
                     let lite_url = "https://lite-api.jup.ag/price";
                     match self.fetch_prices_jupiter(&tokens, Some(lite_url)).await {
                         Ok((prices, decimals_map)) if !prices.is_empty() => {
-                            tracing::info!("Lite-api fallback returned {} prices after rate-limit", prices.len());
+                            tracing::info!(
+                                "Lite-api fallback returned {} prices after rate-limit",
+                                prices.len()
+                            );
                             let _ = self.apply_price_updates(prices, decimals_map);
                         }
                         Ok((_, _)) => {
-                            tracing::warn!("Lite-api fallback returned 0 prices during rate-limit cooldown");
+                            tracing::warn!(
+                                "Lite-api fallback returned 0 prices during rate-limit cooldown"
+                            );
                             rate_limit_cooldown = true;
                         }
                         Err(fallback_err) => {
@@ -654,8 +667,12 @@ impl PriceCache {
                         );
                         match self.fetch_prices_jupiter(tokens, Some(lite_url)).await {
                             Ok((fallback_prices, fallback_decimals_map)) => {
-                                tracing::info!("Lite-api fallback returned {} prices", fallback_prices.len());
-                                return self.apply_price_updates(fallback_prices, fallback_decimals_map);
+                                tracing::info!(
+                                    "Lite-api fallback returned {} prices",
+                                    fallback_prices.len()
+                                );
+                                return self
+                                    .apply_price_updates(fallback_prices, fallback_decimals_map);
                             }
                             Err(fallback_err) => {
                                 tracing::warn!(error = %fallback_err, "Lite-api fallback failed, continuing retries");
@@ -683,8 +700,14 @@ impl PriceCache {
                             let lite_url = "https://lite-api.jup.ag/price";
                             match self.fetch_prices_jupiter(tokens, Some(lite_url)).await {
                                 Ok((fallback_prices, fallback_decimals_map)) => {
-                                    tracing::info!("Lite-api fallback returned {} prices after HTTP error", fallback_prices.len());
-                                    return self.apply_price_updates(fallback_prices, fallback_decimals_map);
+                                    tracing::info!(
+                                        "Lite-api fallback returned {} prices after HTTP error",
+                                        fallback_prices.len()
+                                    );
+                                    return self.apply_price_updates(
+                                        fallback_prices,
+                                        fallback_decimals_map,
+                                    );
                                 }
                                 Err(fallback_err) => {
                                     tracing::warn!(error = %fallback_err, "Lite-api fallback also failed");
@@ -714,7 +737,9 @@ impl PriceCache {
         if !decimals_map.is_empty() {
             let mut inner = self.inner.write();
             for (token, (decimals, _)) in decimals_map {
-                inner.decimals.insert(token, (decimals, std::time::Instant::now()));
+                inner
+                    .decimals
+                    .insert(token, (decimals, std::time::Instant::now()));
             }
         }
 
@@ -730,7 +755,13 @@ impl PriceCache {
         &self,
         tokens: &[String],
         url_override: Option<&str>,
-    ) -> Result<(Vec<(String, Decimal, Option<u8>)>, HashMap<String, (u8, u64)>), PriceCacheError> {
+    ) -> Result<
+        (
+            Vec<(String, Decimal, Option<u8>)>,
+            HashMap<String, (u8, u64)>,
+        ),
+        PriceCacheError,
+    > {
         if tokens.is_empty() {
             return Ok((Vec::new(), HashMap::new()));
         }
@@ -910,8 +941,8 @@ impl PriceCache {
             }
         }
 
-        let total_requests = inner.cache_hits.load(Ordering::Relaxed)
-            + inner.cache_misses.load(Ordering::Relaxed);
+        let total_requests =
+            inner.cache_hits.load(Ordering::Relaxed) + inner.cache_misses.load(Ordering::Relaxed);
         let hit_rate = if total_requests > 0 {
             (inner.cache_hits.load(Ordering::Relaxed) as f64 / total_requests as f64) * 100.0
         } else {
@@ -1158,7 +1189,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sol.usdPrice, 180.5);
-        assert!(res.data.get("timeTaken").is_some(), "metadata field is kept in the map");
+        assert!(
+            res.data.get("timeTaken").is_some(),
+            "metadata field is kept in the map"
+        );
     }
 
     #[test]

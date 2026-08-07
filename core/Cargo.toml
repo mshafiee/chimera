@@ -7,7 +7,10 @@ description = "Chimera domain-pure foundation: config, constants, error, retry, 
 
 [dependencies]
 anyhow = { workspace = true }
+parking_lot = "0.12"
+prometheus = "0.14.0"
 config = { workspace = true }
+chrono = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
 rust_decimal = { workspace = true }
@@ -26,6 +29,7 @@ axum = { workspace = true, optional = true }
 # The axum HTTP-error response impl is isolated behind this feature so core
 # stays web-framework-free when built without it (blueprint law 4).
 api = ["dep:axum"]
+test-utils = []
 
 [dev-dependencies]
 

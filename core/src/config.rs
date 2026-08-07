@@ -4,8 +4,8 @@
 //! Environment variables override YAML values.
 
 use config::{Config, ConfigError, Environment, File};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -69,11 +69,7 @@ impl std::fmt::Display for TradeMode {
 }
 
 /// Root configuration structure
-#[derive(Debug, Clone, Deserialize)]
-#[derive(Default)]
-
-
-
+#[derive(Debug, Clone, Deserialize, Default)]
 
 pub struct AppConfig {
     /// Server configuration
@@ -509,7 +505,7 @@ fn default_cooldown() -> u32 {
 }
 
 fn default_max_jupiter_failures() -> u32 {
-    10  // Allow up to 10 consecutive Jupiter API failures before halting
+    10 // Allow up to 10 consecutive Jupiter API failures before halting
 }
 
 /// Strategy allocation configuration
@@ -767,7 +763,7 @@ fn default_jito_max_retries() -> u32 {
 }
 
 fn default_helius_staked_exits() -> bool {
-    true  // Enable by default for production
+    true // Enable by default for production
 }
 
 /// Manual Default delegating to the serde default fns so `JitoConfig::default()`
@@ -885,11 +881,11 @@ fn default_multi_dex_comparison() -> bool {
 }
 
 fn default_enable_rtse() -> bool {
-    true  // Enable RTSE by default for better slippage protection
+    true // Enable RTSE by default for better slippage protection
 }
 
 fn default_jupiter_api_url() -> String {
-    "https://api.jup.ag/swap/v2".to_string()  // Updated to v2
+    "https://api.jup.ag/swap/v2".to_string() // Updated to v2
 }
 
 /// Manual Default (NOT derive): delegates to the same serde default fns so
@@ -1791,10 +1787,7 @@ impl std::fmt::Debug for MonitoringConfig {
             .field("tiered_polling", &self.tiered_polling)
             .field("rpc_poll_batch_size", &self.rpc_poll_batch_size)
             .field("rpc_poll_rate_limit", &self.rpc_poll_rate_limit)
-            .field(
-                "exit_detection_delay_secs",
-                &self.exit_detection_delay_secs,
-            )
+            .field("exit_detection_delay_secs", &self.exit_detection_delay_secs)
             .field("max_active_wallets", &self.max_active_wallets)
             .field("auto_demote_wallets", &self.auto_demote_wallets)
             .field(
@@ -1831,27 +1824,32 @@ impl std::fmt::Debug for MonitoringConfig {
 
 impl MonitoringConfig {
     /// Get effective polling interval for a wallet based on WQS score and status
-    pub fn get_polling_interval_for_wallet(&self, wqs_score: Option<rust_decimal::Decimal>, status: &str) -> u64 {
+    pub fn get_polling_interval_for_wallet(
+        &self,
+        wqs_score: Option<rust_decimal::Decimal>,
+        status: &str,
+    ) -> u64 {
         if !self.tiered_polling_enabled {
             return self.rpc_poll_interval_secs;
         }
 
-        let (high_interval, regular_interval, emerging_interval, high_threshold, regular_threshold) = match &self.tiered_polling {
-            Some(config) => (
-                config.high_conviction_interval_secs,
-                config.regular_conviction_interval_secs,
-                config.emerging_conviction_interval_secs,
-                config.high_conviction_wqs_threshold,
-                config.regular_conviction_wqs_threshold,
-            ),
-            None => (
-                default_high_conviction_interval(),
-                default_regular_conviction_interval(),
-                default_emerging_conviction_interval(),
-                default_high_conviction_threshold(),
-                default_regular_conviction_threshold(),
-            ),
-        };
+        let (high_interval, regular_interval, emerging_interval, high_threshold, regular_threshold) =
+            match &self.tiered_polling {
+                Some(config) => (
+                    config.high_conviction_interval_secs,
+                    config.regular_conviction_interval_secs,
+                    config.emerging_conviction_interval_secs,
+                    config.high_conviction_wqs_threshold,
+                    config.regular_conviction_wqs_threshold,
+                ),
+                None => (
+                    default_high_conviction_interval(),
+                    default_regular_conviction_interval(),
+                    default_emerging_conviction_interval(),
+                    default_high_conviction_threshold(),
+                    default_regular_conviction_threshold(),
+                ),
+            };
 
         // CANDIDATE wallets always use emerging interval
         if status == "CANDIDATE" {
@@ -2935,7 +2933,8 @@ impl AppConfig {
             "CHIMERA_SECURITY__WEBHOOK_SECRET",
         );
         if let Some(prev) = config.security.webhook_secret_previous.as_mut() {
-            *prev = Self::resolve_env_placeholder(prev, "CHIMERA_SECURITY__WEBHOOK_SECRET_PREVIOUS");
+            *prev =
+                Self::resolve_env_placeholder(prev, "CHIMERA_SECURITY__WEBHOOK_SECRET_PREVIOUS");
         }
 
         // Resolve ${HELIUS_API_KEY} placeholders in RPC URLs (config crate does
@@ -2991,7 +2990,8 @@ impl AppConfig {
         if self.security.webhook_secret.contains("${") {
             return Err(ConfigError::Message(
                 "webhook_secret is an unresolved ${...} placeholder — set \
-                 CHIMERA_SECURITY__WEBHOOK_SECRET in the environment".to_string(),
+                 CHIMERA_SECURITY__WEBHOOK_SECRET in the environment"
+                    .to_string(),
             ));
         }
         if self.security.webhook_secret.len() < 32 {
@@ -3225,7 +3225,6 @@ impl AppConfig {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3247,7 +3246,7 @@ mod tests {
     }
 
     #[allow(clippy::field_reassign_with_default)]
-#[test]
+    #[test]
     fn test_pumpfun_age_override_parses() {
         let mut config = TokenSafetyConfig::default();
         config.min_token_age_pumpfun_hours = 2.0;

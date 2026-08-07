@@ -7,12 +7,10 @@
 //! - Quota usage tracking
 //! - Performance indicators
 
-use prometheus::{
-    Gauge, Histogram, HistogramVec, IntCounter, IntGauge, Registry,
-};
-use std::sync::Arc;
 use parking_lot::RwLock;
+use prometheus::{Gauge, Histogram, HistogramVec, IntCounter, IntGauge, Registry};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Jupiter API metrics collector
 #[derive(Clone)]
@@ -110,166 +108,225 @@ impl JupiterMetrics {
         let registry = Registry::new();
 
         // Request metrics
-        let jupiter_requests_total = IntCounter::new(
-            "jupiter_requests_total",
-            "Total Jupiter API requests"
-        ).unwrap();
+        let jupiter_requests_total =
+            IntCounter::new("jupiter_requests_total", "Total Jupiter API requests").unwrap();
         let jupiter_requests_success_total = IntCounter::new(
             "jupiter_requests_success_total",
-            "Successful Jupiter API requests"
-        ).unwrap();
+            "Successful Jupiter API requests",
+        )
+        .unwrap();
         let jupiter_requests_failed_total = IntCounter::new(
             "jupiter_requests_failed_total",
-            "Failed Jupiter API requests"
-        ).unwrap();
+            "Failed Jupiter API requests",
+        )
+        .unwrap();
 
         // Response time metrics
         let jupiter_request_duration_seconds = Histogram::with_opts(
             prometheus::HistogramOpts::new(
                 "jupiter_request_duration_seconds",
-                "Jupiter API request duration in seconds"
-            ).buckets(vec![0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0]),
-        ).unwrap();
+                "Jupiter API request duration in seconds",
+            )
+            .buckets(vec![0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0]),
+        )
+        .unwrap();
 
         let jupiter_request_duration_by_endpoint_seconds = HistogramVec::new(
             prometheus::HistogramOpts::new(
                 "jupiter_request_duration_by_endpoint_seconds",
-                "Jupiter API request duration by endpoint"
-            ).buckets(vec![0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0]),
+                "Jupiter API request duration by endpoint",
+            )
+            .buckets(vec![0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0]),
             &["endpoint"],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Error metrics
-        let jupiter_errors_total = IntCounter::new(
-            "jupiter_errors_total",
-            "Jupiter API errors by type"
-        ).unwrap();
+        let jupiter_errors_total =
+            IntCounter::new("jupiter_errors_total", "Jupiter API errors by type").unwrap();
         let jupiter_rate_limit_errors_total = IntCounter::new(
             "jupiter_rate_limit_errors_total",
-            "Jupiter API rate limit errors"
-        ).unwrap();
-        let jupiter_timeout_errors_total = IntCounter::new(
-            "jupiter_timeout_errors_total",
-            "Jupiter API timeout errors"
-        ).unwrap();
+            "Jupiter API rate limit errors",
+        )
+        .unwrap();
+        let jupiter_timeout_errors_total =
+            IntCounter::new("jupiter_timeout_errors_total", "Jupiter API timeout errors").unwrap();
 
         // Circuit breaker metrics
         let jupiter_circuit_breaker_trips_total = IntCounter::new(
             "jupiter_circuit_breaker_trips_total",
-            "Jupiter API circuit breaker trips"
-        ).unwrap();
+            "Jupiter API circuit breaker trips",
+        )
+        .unwrap();
         let jupiter_consecutive_failures = IntGauge::new(
             "jupiter_consecutive_failures",
-            "Jupiter API consecutive failures"
-        ).unwrap();
+            "Jupiter API consecutive failures",
+        )
+        .unwrap();
 
         // Connection pool metrics
         let jupiter_active_connections = IntGauge::new(
             "jupiter_active_connections",
-            "Active Jupiter API connections"
-        ).unwrap();
-        let jupiter_idle_connections = IntGauge::new(
-            "jupiter_idle_connections",
-            "Idle Jupiter API connections"
-        ).unwrap();
+            "Active Jupiter API connections",
+        )
+        .unwrap();
+        let jupiter_idle_connections =
+            IntGauge::new("jupiter_idle_connections", "Idle Jupiter API connections").unwrap();
         let jupiter_connection_reuses_total = IntCounter::new(
             "jupiter_connection_reuses_total",
-            "Jupiter API connection reuses"
-        ).unwrap();
+            "Jupiter API connection reuses",
+        )
+        .unwrap();
 
         // Performance metrics
         let jupiter_avg_response_time_ms = Gauge::new(
             "jupiter_avg_response_time_ms",
-            "Average Jupiter API response time in milliseconds"
-        ).unwrap();
+            "Average Jupiter API response time in milliseconds",
+        )
+        .unwrap();
         let jupiter_p95_response_time_ms = Gauge::new(
             "jupiter_p95_response_time_ms",
-            "Jupiter API p95 response time in milliseconds"
-        ).unwrap();
+            "Jupiter API p95 response time in milliseconds",
+        )
+        .unwrap();
         let jupiter_p99_response_time_ms = Gauge::new(
             "jupiter_p99_response_time_ms",
-            "Jupiter API p99 response time in milliseconds"
-        ).unwrap();
+            "Jupiter API p99 response time in milliseconds",
+        )
+        .unwrap();
 
         // Feature usage metrics
-        let jupiter_rtse_usage_total = IntCounter::new(
-            "jupiter_rtse_usage_total",
-            "RTSE usage count"
-        ).unwrap();
+        let jupiter_rtse_usage_total =
+            IntCounter::new("jupiter_rtse_usage_total", "RTSE usage count").unwrap();
         let jupiter_jupiter_beam_usage_total = IntCounter::new(
             "jupiter_jupiter_beam_usage_total",
-            "Jupiter Beam usage count"
-        ).unwrap();
+            "Jupiter Beam usage count",
+        )
+        .unwrap();
         let jupiter_gasless_swap_usage_total = IntCounter::new(
             "jupiter_gasless_swap_usage_total",
-            "Gasless swap usage count"
-        ).unwrap();
+            "Gasless swap usage count",
+        )
+        .unwrap();
 
         // Version metrics
-        let jupiter_v2_usage_total = IntCounter::new(
-            "jupiter_v2_usage_total",
-            "Jupiter API v2 usage"
-        ).unwrap();
+        let jupiter_v2_usage_total =
+            IntCounter::new("jupiter_v2_usage_total", "Jupiter API v2 usage").unwrap();
         let jupiter_v1_usage_total = IntCounter::new(
             "jupiter_v1_usage_total",
-            "Jupiter API v1 usage (deprecated)"
-        ).unwrap();
+            "Jupiter API v1 usage (deprecated)",
+        )
+        .unwrap();
 
         // Cache metrics
-        let jupiter_route_cache_hits_total = IntCounter::new(
-            "jupiter_route_cache_hits_total",
-            "Jupiter route cache hits"
-        ).unwrap();
+        let jupiter_route_cache_hits_total =
+            IntCounter::new("jupiter_route_cache_hits_total", "Jupiter route cache hits").unwrap();
         let jupiter_route_cache_misses_total = IntCounter::new(
             "jupiter_route_cache_misses_total",
-            "Jupiter route cache misses"
-        ).unwrap();
+            "Jupiter route cache misses",
+        )
+        .unwrap();
 
         // Response size metrics
         let jupiter_response_size_bytes = Histogram::with_opts(
             prometheus::HistogramOpts::new(
                 "jupiter_response_size_bytes",
-                "Jupiter API response size in bytes"
-            ).buckets(vec![100.0, 1000.0, 10000.0, 100000.0, 1000000.0]),
-        ).unwrap();
+                "Jupiter API response size in bytes",
+            )
+            .buckets(vec![100.0, 1000.0, 10000.0, 100000.0, 1000000.0]),
+        )
+        .unwrap();
 
         // Quota metrics
         let jupiter_quota_usage_percent = Gauge::new(
             "jupiter_quota_usage_percent",
-            "Jupiter API quota usage percentage"
-        ).unwrap();
-        let jupiter_quota_remaining = IntGauge::new(
-            "jupiter_quota_remaining",
-            "Jupiter API remaining quota"
-        ).unwrap();
+            "Jupiter API quota usage percentage",
+        )
+        .unwrap();
+        let jupiter_quota_remaining =
+            IntGauge::new("jupiter_quota_remaining", "Jupiter API remaining quota").unwrap();
 
         // Register metrics
-        registry.register(Box::new(jupiter_requests_total.clone())).unwrap();
-        registry.register(Box::new(jupiter_requests_success_total.clone())).unwrap();
-        registry.register(Box::new(jupiter_requests_failed_total.clone())).unwrap();
-        registry.register(Box::new(jupiter_request_duration_seconds.clone())).unwrap();
-        registry.register(Box::new(jupiter_request_duration_by_endpoint_seconds.clone())).unwrap();
-        registry.register(Box::new(jupiter_errors_total.clone())).unwrap();
-        registry.register(Box::new(jupiter_rate_limit_errors_total.clone())).unwrap();
-        registry.register(Box::new(jupiter_timeout_errors_total.clone())).unwrap();
-        registry.register(Box::new(jupiter_circuit_breaker_trips_total.clone())).unwrap();
-        registry.register(Box::new(jupiter_consecutive_failures.clone())).unwrap();
-        registry.register(Box::new(jupiter_active_connections.clone())).unwrap();
-        registry.register(Box::new(jupiter_idle_connections.clone())).unwrap();
-        registry.register(Box::new(jupiter_connection_reuses_total.clone())).unwrap();
-        registry.register(Box::new(jupiter_avg_response_time_ms.clone())).unwrap();
-        registry.register(Box::new(jupiter_p95_response_time_ms.clone())).unwrap();
-        registry.register(Box::new(jupiter_p99_response_time_ms.clone())).unwrap();
-        registry.register(Box::new(jupiter_rtse_usage_total.clone())).unwrap();
-        registry.register(Box::new(jupiter_jupiter_beam_usage_total.clone())).unwrap();
-        registry.register(Box::new(jupiter_gasless_swap_usage_total.clone())).unwrap();
-        registry.register(Box::new(jupiter_v2_usage_total.clone())).unwrap();
-        registry.register(Box::new(jupiter_v1_usage_total.clone())).unwrap();
-        registry.register(Box::new(jupiter_route_cache_hits_total.clone())).unwrap();
-        registry.register(Box::new(jupiter_route_cache_misses_total.clone())).unwrap();
-        registry.register(Box::new(jupiter_response_size_bytes.clone())).unwrap();
-        registry.register(Box::new(jupiter_quota_usage_percent.clone())).unwrap();
-        registry.register(Box::new(jupiter_quota_remaining.clone())).unwrap();
+        registry
+            .register(Box::new(jupiter_requests_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_requests_success_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_requests_failed_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_request_duration_seconds.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(
+                jupiter_request_duration_by_endpoint_seconds.clone(),
+            ))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_errors_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_rate_limit_errors_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_timeout_errors_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_circuit_breaker_trips_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_consecutive_failures.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_active_connections.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_idle_connections.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_connection_reuses_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_avg_response_time_ms.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_p95_response_time_ms.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_p99_response_time_ms.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_rtse_usage_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_jupiter_beam_usage_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_gasless_swap_usage_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_v2_usage_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_v1_usage_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_route_cache_hits_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_route_cache_misses_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_response_size_bytes.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_quota_usage_percent.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(jupiter_quota_remaining.clone()))
+            .unwrap();
 
         Self {
             registry: Arc::new(registry),
@@ -304,7 +361,8 @@ impl JupiterMetrics {
     }
 
     /// Record a Jupiter API request
-    pub fn record_request(&self, endpoint: &str, duration_secs: f64, success: bool) {        self.jupiter_requests_total.inc();
+    pub fn record_request(&self, endpoint: &str, duration_secs: f64, success: bool) {
+        self.jupiter_requests_total.inc();
 
         if success {
             self.jupiter_requests_success_total.inc();
@@ -313,7 +371,11 @@ impl JupiterMetrics {
         }
 
         self.jupiter_request_duration_seconds.observe(duration_secs);
-        let endpoint_label = if endpoint.is_empty() { "unknown" } else { endpoint };
+        let endpoint_label = if endpoint.is_empty() {
+            "unknown"
+        } else {
+            endpoint
+        };
         self.jupiter_request_duration_by_endpoint_seconds
             .with_label_values(&[endpoint_label])
             .observe(duration_secs);
@@ -423,7 +485,9 @@ impl JupiterMetrics {
 
         let result = encoder.encode(&self.registry.gather(), &mut buffer);
         match result {
-            Ok(_) => String::from_utf8(buffer).unwrap_or_else(|_| "Error encoding metrics".to_string()),
+            Ok(_) => {
+                String::from_utf8(buffer).unwrap_or_else(|_| "Error encoding metrics".to_string())
+            }
             Err(e) => format!("Error exporting metrics: {}", e),
         }
     }

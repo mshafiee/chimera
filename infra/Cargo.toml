@@ -10,6 +10,9 @@ chimera_core = { path = "../core" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+parking_lot = "0.12"
+prometheus = "0.14.0"
+reqwest = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

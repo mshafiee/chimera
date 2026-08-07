@@ -26,10 +26,7 @@ use std::time::Instant;
 /// Database query timing and monitoring utility
 ///
 /// Records query execution time and logs slow queries (>100ms)
-pub async fn timed_query<F, T>(
-    metric_name: &str,
-    operation: F,
-) -> AppResult<T>
+pub async fn timed_query<F, T>(metric_name: &str, operation: F) -> AppResult<T>
 where
     F: std::future::Future<Output = AppResult<T>>,
 {
@@ -162,11 +159,7 @@ pub trait Database: Send + Sync {
     /// to free `max_concurrent_positions` slots that would otherwise be
     /// permanently blocked by unsellable positions (paper SELL requires
     /// token_amount).
-    async fn force_close_orphan_position(
-        &self,
-        trade_uuid: &str,
-        reason: &str,
-    ) -> AppResult<()>;
+    async fn force_close_orphan_position(&self, trade_uuid: &str, reason: &str) -> AppResult<()>;
 
     // ========================================================================
     // WALLET OPERATIONS
@@ -188,7 +181,10 @@ pub trait Database: Send + Sync {
     async fn get_wallets_by_status(&self, status: &str) -> AppResult<Vec<Wallet>>;
 
     /// Get ACTIVE or CANDIDATE wallets grouped by conviction tier for tiered polling
-    async fn get_wallets_by_conviction_tier(&self, tier: chimera_core::config::ConvictionTier) -> AppResult<Vec<Wallet>>;
+    async fn get_wallets_by_conviction_tier(
+        &self,
+        tier: chimera_core::config::ConvictionTier,
+    ) -> AppResult<Vec<Wallet>>;
 
     /// Get wallets with WQS scores for batch processing
     async fn get_wallets_with_wqs(
@@ -514,10 +510,7 @@ pub trait Database: Send + Sync {
     /// (fewer than `max_wallets` accounts). Returns the fullest such webhook
     /// so batching minimizes the number of webhooks used — the Helius plan
     /// caps total webhooks (50), but each supports many accountAddresses.
-    async fn find_webhook_with_capacity(
-        &self,
-        max_wallets: i64,
-    ) -> AppResult<Option<String>>;
+    async fn find_webhook_with_capacity(&self, max_wallets: i64) -> AppResult<Option<String>>;
 
     /// Clear the helius_webhook_id for ALL wallets referencing a given
     /// webhook ID (used when the webhook no longer exists in Helius).
@@ -569,7 +562,11 @@ pub trait Database: Send + Sync {
     ) -> AppResult<()>;
 
     /// Update last speculative signal timestamp for a wallet
-    async fn update_last_speculative_signal(&self, wallet_address: &str, timestamp: chrono::DateTime<chrono::Utc>) -> AppResult<()>;
+    async fn update_last_speculative_signal(
+        &self,
+        wallet_address: &str,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> AppResult<()>;
 
     /// Get inactivity demotion count for a wallet
     async fn get_inactivity_demotion_count(&self, wallet_address: &str) -> AppResult<i32>;
@@ -748,10 +745,7 @@ pub trait Database: Send + Sync {
     ) -> AppResult<Vec<DeadLetterItem>>;
 
     /// Get a single dead letter queue item by trade UUID
-    async fn get_dead_letter_entry(
-        &self,
-        trade_uuid: &str,
-    ) -> AppResult<Option<DeadLetterItem>>;
+    async fn get_dead_letter_entry(&self, trade_uuid: &str) -> AppResult<Option<DeadLetterItem>>;
 
     /// Count dead letter queue items
     async fn count_dead_letter_entries(&self) -> AppResult<i64>;
@@ -914,7 +908,8 @@ pub trait Database: Send + Sync {
         _position: &InsertPosition,
     ) -> AppResult<i64> {
         Err(AppError::Internal(
-            "insert_trade_and_create_position requires a transactional backend override".to_string(),
+            "insert_trade_and_create_position requires a transactional backend override"
+                .to_string(),
         ))
     }
 
@@ -937,7 +932,11 @@ pub trait Database: Send + Sync {
             network_fee_sol: None,
         };
 
-        timed_query("update_trade_status_and_position_update_trade", self.update_trade_status(&update)).await?;
+        timed_query(
+            "update_trade_status_and_position_update_trade",
+            self.update_trade_status(&update),
+        )
+        .await?;
 
         if let Some(state) = position_state {
             self.update_position_state(trade_uuid, state).await?;

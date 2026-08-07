@@ -133,6 +133,7 @@ path = "src/bin/import_keypair.rs"
 # harness = false
 
 [dev-dependencies]
+chimera_core = { path = "../core", features = ["api", "test-utils"] }
 # Testing utilities
 axum-test = "18.4.1"
 tempfile = "3.23"

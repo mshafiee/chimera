@@ -6,10 +6,10 @@
 //! - jupiter-lend: Future lending protocol integration
 //! - jupiter-vrfd: Token verification integration
 
-use crate::config::JupiterConfig;
-use crate::error::AppResult;
-use std::collections::HashMap;
+use chimera_core::config::JupiterConfig;
+use chimera_core::error::AppResult;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Jupiter API version information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,10 +114,7 @@ impl JupiterSkillsIntegration {
                 "/quote".to_string(),
             ]
         } else {
-            vec![
-                "/quote".to_string(),
-                "/swap".to_string(),
-            ]
+            vec!["/quote".to_string(), "/swap".to_string()]
         };
 
         let features = if version == "v2" {
@@ -181,20 +178,23 @@ impl JupiterSkillsIntegration {
             "jupiter-vrfd".to_string(),
         ];
 
-        let mut recommendations = vec
-![
-            "Use integrating-jupiter skill for best practices validation".to_string(),
-        ];
+        let mut recommendations =
+            vec!["Use integrating-jupiter skill for best practices validation".to_string()];
 
         if api_info.migration_required {
-            recommendations.push("Use jupiter-swap-migration skill for structured v2 migration".to_string());
+            recommendations
+                .push("Use jupiter-swap-migration skill for structured v2 migration".to_string());
         }
 
-        recommendations.push("Consider jupiter-lend for future lending protocol features".to_string());
+        recommendations
+            .push("Consider jupiter-lend for future lending protocol features".to_string());
         recommendations.push("Use jupiter-vrfd for enhanced token verification".to_string());
 
         let mut best_practice_compliance = HashMap::new();
-        best_practice_compliance.insert("api_key_authentication".to_string(), self.config.api_key.is_some());
+        best_practice_compliance.insert(
+            "api_key_authentication".to_string(),
+            self.config.api_key.is_some(),
+        );
         best_practice_compliance.insert("v2_api_usage".to_string(), !api_info.migration_required);
         best_practice_compliance.insert("rtse_enabled".to_string(), self.config.enable_rtse);
 
@@ -255,7 +255,8 @@ impl JupiterSkillsIntegration {
         // Check API version — only an explicit v1 URL is "deprecated"; an
         // unknown URL gets its own message instead of a misleading v1 claim.
         if self.config.api_url.contains("/v1") {
-            issues.push("Using deprecated Swap API v1 - migrate to v2 for new features".to_string());
+            issues
+                .push("Using deprecated Swap API v1 - migrate to v2 for new features".to_string());
         } else if !self.config.api_url.contains("/v2") {
             warnings.push(format!(
                 "Cannot determine Swap API version from api_url '{}' — expected a /v1 or /v2 URL",
@@ -289,18 +290,18 @@ impl JupiterSkillsIntegration {
                 "Migrate Swap API from {} to v2 using jupiter-swap-migration skill",
                 api_info.version
             ));
-            recommendations.push("Benefits: RTSE, Jupiter Beam, gasless swaps, better pricing".to_string());
+            recommendations
+                .push("Benefits: RTSE, Jupiter Beam, gasless swaps, better pricing".to_string());
         }
 
         if let Some(deadline) = api_info.deprecation_deadline {
-            recommendations.push(format!(
-                "Complete migration before deadline: {}",
-                deadline
-            ));
+            recommendations.push(format!("Complete migration before deadline: {}", deadline));
         }
 
-        recommendations.push("Use integrating-jupiter skill for implementation guidance".to_string());
-        recommendations.push("Leverage jupiter-vrfd for enhanced token safety verification".to_string());
+        recommendations
+            .push("Use integrating-jupiter skill for implementation guidance".to_string());
+        recommendations
+            .push("Leverage jupiter-vrfd for enhanced token safety verification".to_string());
 
         recommendations
     }
@@ -315,33 +316,20 @@ impl JupiterSkillsIntegration {
 
         // Static assumption: skills are considered available based on the
         // documented setup, not verified against the environment.
-        skills_status.insert(
-            "jupiter-swap-migration".to_string(),
-            true,
-        );
+        skills_status.insert("jupiter-swap-migration".to_string(), true);
 
-        skills_status.insert(
-            "integrating-jupiter".to_string(),
-            true,
-        );
+        skills_status.insert("integrating-jupiter".to_string(), true);
 
-        skills_status.insert(
-            "jupiter-lend".to_string(),
-            true,
-        );
+        skills_status.insert("jupiter-lend".to_string(), true);
 
-        skills_status.insert(
-            "jupiter-vrfd".to_string(),
-            true,
-        );
+        skills_status.insert("jupiter-vrfd".to_string(), true);
 
         Ok(skills_status)
     }
 
     /// Get integration opportunities using Jupiter skills
     pub fn get_integration_opportunities(&self) -> Vec<String> {
-        vec
-![
+        vec![
             "Use integrating-jupiter for advanced routing strategies".to_string(),
             "Implement jupiter-lend for lending protocol arbitrage".to_string(),
             "Integrate jupiter-vrfd for real-time token verification".to_string(),
@@ -420,7 +408,9 @@ mod tests {
         let integration = JupiterSkillsIntegration::new(config);
         let validation = integration.validate_best_practices();
 
-        assert!(validation.iter().any(|v| v.contains("deprecated") || v.contains("API key")));
+        assert!(validation
+            .iter()
+            .any(|v| v.contains("deprecated") || v.contains("API key")));
     }
 
     #[test]
@@ -464,6 +454,9 @@ mod tests {
         assert!(!status.available_skills.is_empty());
         assert!(!status.recommendations.is_empty());
         assert_eq!(status.migration_status.swap_api, SwapApiStatus::V2);
-        assert!(status.best_practice_compliance.get("v2_api_usage").unwrap_or(&false));
+        assert!(status
+            .best_practice_compliance
+            .get("v2_api_usage")
+            .unwrap_or(&false));
     }
 }

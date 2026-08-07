@@ -3,11 +3,11 @@
 //! Optimized HTTP client with connection pooling, keep-alive, and health monitoring
 //! specifically tuned for high-frequency Jupiter API calls.
 
-use crate::error::{AppError, AppResult};
+use chimera_core::error::{AppError, AppResult};
+use parking_lot::{Mutex, RwLock};
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::Duration;
-use parking_lot::{Mutex, RwLock};
 
 /// Jupiter HTTP client configuration optimized for high-frequency API calls
 #[derive(Debug, Clone)]
@@ -340,7 +340,10 @@ mod tests {
         client.record_request_duration(300);
 
         let metrics = client.get_metrics();
-        assert_eq!(metrics.avg_request_duration_ms, 200.0, "Average should be 200ms");
+        assert_eq!(
+            metrics.avg_request_duration_ms, 200.0,
+            "Average should be 200ms"
+        );
     }
 
     #[tokio::test]
@@ -359,7 +362,10 @@ mod tests {
 
         // After 10 requests with 10 connection reuses, efficiency should be 100%
         let efficiency = client.get_connection_efficiency();
-        assert_eq!(efficiency, 100.0, "Should be 100% reuse rate when all requests reuse connections");
+        assert_eq!(
+            efficiency, 100.0,
+            "Should be 100% reuse rate when all requests reuse connections"
+        );
     }
 
     #[tokio::test]

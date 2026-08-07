@@ -9,3 +9,6 @@
 //! incremental extraction.
 
 pub mod db_abstraction;
+pub mod jupiter_http_client;
+pub mod jupiter_monitoring;
+pub mod jupiter_skills_integration;

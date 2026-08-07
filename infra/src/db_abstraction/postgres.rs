@@ -3,14 +3,13 @@
 use super::types::DatabaseConfig;
 use super::types::PostgresPool;
 use super::{
-    ActivePositionEntry, ActivePositionSummary, CircuitBreakerState, ConfigAuditItem, Database,
-    DbPool, DeadLetterItem, DiscrepancyRow, DiscrepancyTypeStats, ExitTargetData, InsertPosition,
-    InsertTrade, KillSwitchState, LatencyBucket, Position, PositionDetail, PositionRecord,
-    ReconciliationRun, ReconciliationStats, ReconciliationStatus, RetryableDlqItem, Trade,
-    TradeDetail, TradeLatencyStats, TradeStatistics, UpdateDlqItemParams, UpdatePosition,
-    UpdateTradeStatus, Wallet, WalletCopyPerformance, WalletDetail, WalletMonitoring,
-    WalletPerformance, WebhookAuditLog,
-    datetime_to_string,
+    datetime_to_string, ActivePositionEntry, ActivePositionSummary, CircuitBreakerState,
+    ConfigAuditItem, Database, DbPool, DeadLetterItem, DiscrepancyRow, DiscrepancyTypeStats,
+    ExitTargetData, InsertPosition, InsertTrade, KillSwitchState, LatencyBucket, Position,
+    PositionDetail, PositionRecord, ReconciliationRun, ReconciliationStats, ReconciliationStatus,
+    RetryableDlqItem, Trade, TradeDetail, TradeLatencyStats, TradeStatistics, UpdateDlqItemParams,
+    UpdatePosition, UpdateTradeStatus, Wallet, WalletCopyPerformance, WalletDetail,
+    WalletMonitoring, WalletPerformance, WebhookAuditLog,
 };
 use chimera_core::error::{AppError, AppResult};
 use rust_decimal::prelude::*;
@@ -724,7 +723,10 @@ impl Database for PostgresBackend {
         rows.into_iter().map(|r| self.row_to_wallet(r)).collect()
     }
 
-    async fn get_wallets_by_conviction_tier(&self, tier: chimera_core::config::ConvictionTier) -> AppResult<Vec<Wallet>> {
+    async fn get_wallets_by_conviction_tier(
+        &self,
+        tier: chimera_core::config::ConvictionTier,
+    ) -> AppResult<Vec<Wallet>> {
         use chimera_core::config::ConvictionTier;
 
         let (status, min_wqs, max_wqs) = match tier {
@@ -758,7 +760,7 @@ impl Database for PostgresBackend {
                 notes, archetype, avg_entry_delay_seconds, created_at, updated_at
             FROM wallets
             WHERE 1=1
-            "#
+            "#,
         );
 
         let mut conditions = Vec::new();
@@ -1016,7 +1018,9 @@ impl Database for PostgresBackend {
             total_trades: row.try_get("total_trades").unwrap_or(0),
             successful_trades: row.try_get("successful_trades").unwrap_or(0),
             failed_trades: row.try_get("failed_trades").unwrap_or(0),
-            total_pnl_sol: row.try_get::<Decimal, _>("total_pnl_sol").unwrap_or(Decimal::ZERO),
+            total_pnl_sol: row
+                .try_get::<Decimal, _>("total_pnl_sol")
+                .unwrap_or(Decimal::ZERO),
             total_volume_sol: row
                 .try_get::<Decimal, _>("total_volume_sol")
                 .unwrap_or(Decimal::ZERO),
@@ -1069,8 +1073,12 @@ impl Database for PostgresBackend {
                 wallet_address: r
                     .try_get("wallet_address")
                     .unwrap_or(wallet_address.to_string()),
-                copy_pnl_7d: r.try_get::<Decimal, _>("copy_pnl_7d").unwrap_or(Decimal::ZERO),
-                copy_pnl_30d: r.try_get::<Decimal, _>("copy_pnl_30d").unwrap_or(Decimal::ZERO),
+                copy_pnl_7d: r
+                    .try_get::<Decimal, _>("copy_pnl_7d")
+                    .unwrap_or(Decimal::ZERO),
+                copy_pnl_30d: r
+                    .try_get::<Decimal, _>("copy_pnl_30d")
+                    .unwrap_or(Decimal::ZERO),
                 signal_success_rate: r
                     .try_get::<Decimal, _>("signal_success_rate")
                     .unwrap_or(Decimal::ZERO),
@@ -1258,20 +1266,18 @@ impl Database for PostgresBackend {
         &self,
         days: u32,
     ) -> AppResult<Vec<crate::db_abstraction::types::PortfolioSnapshot>> {
-        let rows: Vec<crate::db_abstraction::types::PortfolioSnapshot> = sqlx::query_as::<
-            _,
-            crate::db_abstraction::types::PortfolioSnapshot,
-        >(
-            r#"SELECT recorded_at, nav_sol, capital_sol, realized_pnl_sol,
+        let rows: Vec<crate::db_abstraction::types::PortfolioSnapshot> =
+            sqlx::query_as::<_, crate::db_abstraction::types::PortfolioSnapshot>(
+                r#"SELECT recorded_at, nav_sol, capital_sol, realized_pnl_sol,
                       unrealized_pnl_sol, open_positions, sol_price_usd, trade_mode
                FROM portfolio_snapshots
                WHERE recorded_at >= NOW() - INTERVAL '1 day' * $1
                ORDER BY recorded_at ASC"#,
-        )
-        .bind(days as i32)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(AppError::Database)?;
+            )
+            .bind(days as i32)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(AppError::Database)?;
         Ok(rows)
     }
 
@@ -1448,10 +1454,7 @@ impl Database for PostgresBackend {
         Ok(consecutive)
     }
 
-    async fn get_max_drawdown_percent(
-        &self,
-        cap: Decimal,
-    ) -> AppResult<(Decimal, Decimal)> {
+    async fn get_max_drawdown_percent(&self, cap: Decimal) -> AppResult<(Decimal, Decimal)> {
         // Query all closed positions to find the all-time peak
         let closed_rows: Vec<Decimal> = sqlx::query_scalar::<_, Decimal>(
             r#"
@@ -1662,8 +1665,7 @@ impl Database for PostgresBackend {
                         || db_err.code().as_deref() == Some("40P01"))
                         && attempt < MAX_RETRIES =>
                 {
-                    let backoff =
-                        std::time::Duration::from_millis(50 * (1 << (attempt - 1)));
+                    let backoff = std::time::Duration::from_millis(50 * (1 << (attempt - 1)));
                     tracing::debug!(
                         attempt = attempt,
                         backoff_ms = backoff.as_millis(),
@@ -1760,7 +1762,13 @@ impl Database for PostgresBackend {
         #[allow(clippy::type_complexity)]
         let mut entry_costs_map: std::collections::HashMap<
             String,
-            (Option<Decimal>, Option<Decimal>, Option<Decimal>, Decimal, Option<Decimal>),
+            (
+                Option<Decimal>,
+                Option<Decimal>,
+                Option<Decimal>,
+                Decimal,
+                Option<Decimal>,
+            ),
         > = std::collections::HashMap::new();
         if !entry_uuids.is_empty() {
             let placeholders = entry_uuids
@@ -1946,21 +1954,23 @@ impl Database for PostgresBackend {
             } else {
                 let remaining_amount = entry_amount_dec - exited_amount;
 
-                let current_realized_sol: Decimal =
-                    sqlx::query_scalar("SELECT COALESCE(realized_pnl_sol, 0) FROM positions WHERE id = $1")
-                        .bind(id)
-                        .fetch_optional(&mut *tx)
-                        .await?
-                        .unwrap_or(Decimal::ZERO);
+                let current_realized_sol: Decimal = sqlx::query_scalar(
+                    "SELECT COALESCE(realized_pnl_sol, 0) FROM positions WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .unwrap_or(Decimal::ZERO);
                 let new_realized_sol = current_realized_sol + pnl_sol;
 
                 let new_realized_usd = if let Some(pnl_usd) = pnl_usd_opt {
-                    let current_realized_usd: Decimal =
-                        sqlx::query_scalar("SELECT COALESCE(realized_pnl_usd, 0) FROM positions WHERE id = $1")
-                            .bind(id)
-                            .fetch_optional(&mut *tx)
-                            .await?
-                            .unwrap_or(Decimal::ZERO);
+                    let current_realized_usd: Decimal = sqlx::query_scalar(
+                        "SELECT COALESCE(realized_pnl_usd, 0) FROM positions WHERE id = $1",
+                    )
+                    .bind(id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .unwrap_or(Decimal::ZERO);
                     Some(current_realized_usd + pnl_usd)
                 } else {
                     None
@@ -2052,10 +2062,10 @@ impl Database for PostgresBackend {
         .await?;
 
         sqlx::query("UPDATE trades SET net_pnl_sol = $1 WHERE trade_uuid = $2")
-             .bind(new_net)
-             .bind(trade_uuid)
-             .execute(&mut *tx)
-             .await?;
+            .bind(new_net)
+            .bind(trade_uuid)
+            .execute(&mut *tx)
+            .await?;
 
         tx.commit().await?;
         Ok(true)
@@ -2074,11 +2084,7 @@ impl Database for PostgresBackend {
         Ok(())
     }
 
-    async fn force_close_orphan_position(
-        &self,
-        trade_uuid: &str,
-        reason: &str,
-    ) -> AppResult<()> {
+    async fn force_close_orphan_position(&self, trade_uuid: &str, reason: &str) -> AppResult<()> {
         // Guard on state='ACTIVE' AND token_amount IS NULL for idempotency:
         // once closed (or once token_amount is populated) the row no longer
         // matches, so this is safe to call repeatedly and from multiple paths.
@@ -2162,8 +2168,8 @@ impl Database for PostgresBackend {
                     .await?;
                     let confirmed_exit_amount: Decimal = confirmed_exit_values.into_iter().sum();
 
-                    let reverted_amount = (buy_signal_amount_sol - confirmed_exit_amount)
-                        .max(Decimal::ZERO);
+                    let reverted_amount =
+                        (buy_signal_amount_sol - confirmed_exit_amount).max(Decimal::ZERO);
 
                     let mut new_realized_pnl_sol: Option<Decimal> = None;
                     let mut new_realized_pnl_usd: Option<Decimal> = None;
@@ -2182,8 +2188,7 @@ impl Database for PostgresBackend {
                         .fetch_one(&mut *tx)
                         .await?;
 
-                        let failed_gross = match (failed_net, failed_tip, failed_dex, failed_slip)
-                        {
+                        let failed_gross = match (failed_net, failed_tip, failed_dex, failed_slip) {
                             (Some(net), Some(tip), Some(dex), Some(slip)) => net + tip + dex + slip,
                             _ => Decimal::ZERO,
                         };
@@ -2414,7 +2419,13 @@ impl Database for PostgresBackend {
         Ok(rows
             .into_iter()
             .map(
-                |(trade_uuid, token_address, entry_price, entry_amount_sol, entry_sol_price_usd)| {
+                |(
+                    trade_uuid,
+                    token_address,
+                    entry_price,
+                    entry_amount_sol,
+                    entry_sol_price_usd,
+                )| {
                     ActivePositionSummary {
                         trade_uuid,
                         token_address,
@@ -2620,10 +2631,7 @@ impl Database for PostgresBackend {
         }
     }
 
-    async fn find_webhook_with_capacity(
-        &self,
-        max_wallets: i64,
-    ) -> AppResult<Option<String>> {
+    async fn find_webhook_with_capacity(&self, max_wallets: i64) -> AppResult<Option<String>> {
         let webhook_id: Option<String> = sqlx::query_scalar(
             r#"
             SELECT helius_webhook_id
@@ -2874,7 +2882,11 @@ impl Database for PostgresBackend {
         Ok(())
     }
 
-    async fn update_webhook_status(&self, wallet_address: &str, webhook_status: &str) -> AppResult<()> {
+    async fn update_webhook_status(
+        &self,
+        wallet_address: &str,
+        webhook_status: &str,
+    ) -> AppResult<()> {
         sqlx::query(
             r#"
             UPDATE wallet_monitoring
@@ -3215,11 +3227,15 @@ impl Database for PostgresBackend {
         .await?;
 
         Ok(row.map(|row| ExitTargetData {
-            entry_price: row.try_get::<Decimal, _>("entry_price").unwrap_or(Decimal::ZERO),
+            entry_price: row
+                .try_get::<Decimal, _>("entry_price")
+                .unwrap_or(Decimal::ZERO),
             entry_amount_sol: row
                 .try_get::<Decimal, _>("entry_amount_sol")
                 .unwrap_or(Decimal::ZERO),
-            peak_price: row.try_get::<Decimal, _>("peak_price").unwrap_or(Decimal::ZERO),
+            peak_price: row
+                .try_get::<Decimal, _>("peak_price")
+                .unwrap_or(Decimal::ZERO),
             peak_profit_percent: row
                 .try_get::<Decimal, _>("peak_profit_percent")
                 .unwrap_or(Decimal::ZERO),
@@ -3632,13 +3648,21 @@ impl Database for PostgresBackend {
             "#,
         );
 
-        let next =
-            append_trade_filter_clauses(&mut query, from_date, to_date, status_filter, strategy_filter, wallet_address_filter);
+        let next = append_trade_filter_clauses(
+            &mut query,
+            from_date,
+            to_date,
+            status_filter,
+            strategy_filter,
+            wallet_address_filter,
+        );
 
         let limit_n = next;
         let offset_n = if limit < 0 { next } else { next + 1 };
         if limit < 0 {
-            query.push_str(&format!(" ORDER BY created_at DESC LIMIT ALL OFFSET ${offset_n}"));
+            query.push_str(&format!(
+                " ORDER BY created_at DESC LIMIT ALL OFFSET ${offset_n}"
+            ));
         } else {
             query.push_str(&format!(
                 " ORDER BY created_at DESC LIMIT ${limit_n} OFFSET ${offset_n}"
@@ -3677,7 +3701,9 @@ impl Database for PostgresBackend {
                 token_symbol: row.try_get("token_symbol").ok(),
                 strategy: row.try_get("strategy").unwrap_or_default(),
                 side: row.try_get("side").unwrap_or_default(),
-                amount_sol: row.try_get::<Decimal, _>("amount_sol").unwrap_or(Decimal::ZERO),
+                amount_sol: row
+                    .try_get::<Decimal, _>("amount_sol")
+                    .unwrap_or(Decimal::ZERO),
                 price_at_signal: row
                     .try_get::<Option<Decimal>, _>("price_at_signal")
                     .ok()
@@ -3708,9 +3734,7 @@ impl Database for PostgresBackend {
                     .try_get::<Option<Decimal>, _>("net_pnl_sol")
                     .ok()
                     .flatten(),
-                pnl_data_valid: row
-                    .try_get::<bool, _>("pnl_data_valid")
-                    .unwrap_or(true),
+                pnl_data_valid: row.try_get::<bool, _>("pnl_data_valid").unwrap_or(true),
                 created_at: row
                     .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
                     .map(|dt| dt.to_rfc3339())
@@ -3734,8 +3758,14 @@ impl Database for PostgresBackend {
     ) -> AppResult<i64> {
         let mut query = String::from("SELECT COUNT(*) FROM trades WHERE 1=1");
 
-        let _next =
-            append_trade_filter_clauses(&mut query, from_date, to_date, status_filter, strategy_filter, wallet_address_filter);
+        let _next = append_trade_filter_clauses(
+            &mut query,
+            from_date,
+            to_date,
+            status_filter,
+            strategy_filter,
+            wallet_address_filter,
+        );
 
         let mut q = sqlx::query_as::<_, (i64,)>(&query);
         if let Some(from) = from_date {
@@ -4034,10 +4064,7 @@ impl Database for PostgresBackend {
         Ok(count.0)
     }
 
-    async fn get_dead_letter_entry(
-        &self,
-        trade_uuid: &str,
-    ) -> AppResult<Option<DeadLetterItem>> {
+    async fn get_dead_letter_entry(&self, trade_uuid: &str) -> AppResult<Option<DeadLetterItem>> {
         let row = sqlx::query(
             "SELECT id, trade_uuid, payload, reason, error_details, source_ip, retry_count, can_retry, received_at, processed_at FROM dead_letter_queue WHERE trade_uuid = $1",
         )
@@ -4334,7 +4361,10 @@ impl Database for PostgresBackend {
             query = query.bind(bound);
         }
 
-        let row = query.fetch_one(&self.pool).await.map_err(AppError::Database)?;
+        let row = query
+            .fetch_one(&self.pool)
+            .await
+            .map_err(AppError::Database)?;
         let total: i64 = row.try_get("total").unwrap_or(0);
         if total == 0 {
             return Ok(vec![]);
@@ -4500,19 +4530,10 @@ impl Database for PostgresBackend {
                         .try_get::<Option<Decimal>, _>("wqs_score")
                         .ok()
                         .flatten(),
-                    roi_7d: row
-                        .try_get::<Option<Decimal>, _>("roi_7d")
-                        .ok()
-                        .flatten(),
-                    roi_30d: row
-                        .try_get::<Option<Decimal>, _>("roi_30d")
-                        .ok()
-                        .flatten(),
+                    roi_7d: row.try_get::<Option<Decimal>, _>("roi_7d").ok().flatten(),
+                    roi_30d: row.try_get::<Option<Decimal>, _>("roi_30d").ok().flatten(),
                     trade_count_30d: row.try_get("trade_count_30d").ok(),
-                    win_rate: row
-                        .try_get::<Option<Decimal>, _>("win_rate")
-                        .ok()
-                        .flatten(),
+                    win_rate: row.try_get::<Option<Decimal>, _>("win_rate").ok().flatten(),
                     max_drawdown_30d: row
                         .try_get::<Option<Decimal>, _>("max_drawdown_30d")
                         .ok()
@@ -4647,7 +4668,8 @@ impl Database for PostgresBackend {
         // Commit transaction
         tx.commit().await.map_err(|e| {
             AppError::Database(sqlx::Error::Io(std::io::Error::other(format!(
-                "Failed to commit transaction: {}", e
+                "Failed to commit transaction: {}",
+                e
             ))))
         })?;
 
@@ -4668,7 +4690,7 @@ impl Database for PostgresBackend {
         sqlx::query(
             "UPDATE trades SET status = $1, updated_at = CURRENT_TIMESTAMP, \
              closed_at = CASE WHEN $1 = 'CLOSED' THEN CURRENT_TIMESTAMP ELSE closed_at END \
-             WHERE trade_uuid = $2"
+             WHERE trade_uuid = $2",
         )
         .bind(trade_status)
         .bind(trade_uuid)
@@ -4691,7 +4713,8 @@ impl Database for PostgresBackend {
         // Commit transaction
         tx.commit().await.map_err(|e| {
             AppError::Database(sqlx::Error::Io(std::io::Error::other(format!(
-                "Failed to commit transaction: {}", e
+                "Failed to commit transaction: {}",
+                e
             ))))
         })?;
 
@@ -4863,14 +4886,18 @@ impl PostgresBackend {
         Ok(WalletMonitoring {
             wallet_address: row.try_get("wallet_address").unwrap_or_default(),
             helius_webhook_id: row.try_get("helius_webhook_id").ok(),
-            rpc_polling_active: row.try_get::<bool, _>("rpc_polling_active").unwrap_or(false),
+            rpc_polling_active: row
+                .try_get::<bool, _>("rpc_polling_active")
+                .unwrap_or(false),
             last_transaction_signature: row.try_get("last_transaction_signature").ok(),
             last_monitored_at: row
                 .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_monitored_at")
                 .ok()
                 .flatten()
                 .map(|dt| dt.to_rfc3339()),
-            monitoring_enabled: row.try_get::<bool, _>("monitoring_enabled").unwrap_or(false),
+            monitoring_enabled: row
+                .try_get::<bool, _>("monitoring_enabled")
+                .unwrap_or(false),
             created_at: row
                 .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
                 .map(|dt| dt.to_rfc3339())
@@ -4886,9 +4913,7 @@ impl PostgresBackend {
                 .flatten()
                 .map(|dt| dt.to_rfc3339()),
             webhook_last_health_check: row
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(
-                    "webhook_last_health_check",
-                )
+                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("webhook_last_health_check")
                 .ok()
                 .flatten()
                 .map(|dt| dt.to_rfc3339()),
@@ -4904,5 +4929,4 @@ impl PostgresBackend {
             inactivity_demotion_count: row.try_get("inactivity_demotion_count").unwrap_or(0),
         })
     }
-
 }
