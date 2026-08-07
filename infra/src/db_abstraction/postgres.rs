@@ -3954,7 +3954,7 @@ impl Database for PostgresBackend {
              FROM shadow_exits se
              JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
              WHERE sp.wallet_address = $1
-               AND se.exit_strategy = 'mirror_main'
+               AND se.exit_strategy IN ('mirror_main', 'dune_wallet')
                AND sp.opened_at > NOW() - ($2 || ' days')::interval
              HAVING COUNT(*) > 0",
         )

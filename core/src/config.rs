@@ -2632,6 +2632,22 @@ pub struct DuneConfig {
     /// Dune query ID for the 24h wallet PnL monitor (losing wallets).
     #[serde(default = "default_dune_pnl_query_id")]
     pub pnl_query_id: u64,
+    /// Dune query ID for the one-shot bootstrap (per-wallet round-trip PnL
+    /// history, 30d window). 0 = disabled (the `bootstrap_dune` binary
+    /// refuses to run). The bootstrap seeds `shadow_positions`/`shadow_exits`
+    /// with `exit_strategy='dune_wallet'` so the wallet t-stat / proven /
+    /// smart-money-cluster gates have evidence from day one instead of
+    /// cold-starting on live shadow data.
+    #[serde(default = "default_dune_bootstrap_query_id")]
+    pub bootstrap_query_id: u64,
+    /// Max distinct wallets the bootstrap processes per run (Dune credit cost
+    /// is bounded by the query LIMIT × this cap).
+    #[serde(default = "default_dune_bootstrap_wallets_max")]
+    pub bootstrap_wallets_max: usize,
+    /// Seed the `wallets` roster from the bootstrap result as CANDIDATE
+    /// (never ACTIVE/REJECTED) unless `--no-roster` is passed.
+    #[serde(default = "default_dune_bootstrap_roster_enabled")]
+    pub bootstrap_roster_enabled: bool,
     /// How often (in seconds) to poll Dune for wallet PnL. Default: 2 hours.
     #[serde(default = "default_dune_check_interval_secs")]
     pub check_interval_secs: u64,
@@ -2700,6 +2716,15 @@ pub struct DuneConfig {
 fn default_dune_pnl_query_id() -> u64 {
     8221776
 }
+fn default_dune_bootstrap_query_id() -> u64 {
+    0
+}
+fn default_dune_bootstrap_wallets_max() -> usize {
+    60
+}
+fn default_dune_bootstrap_roster_enabled() -> bool {
+    true
+}
 fn default_dune_check_interval_secs() -> u64 {
     7200
 }
@@ -2745,6 +2770,9 @@ impl Default for DuneConfig {
         Self {
             enabled: false,
             pnl_query_id: default_dune_pnl_query_id(),
+            bootstrap_query_id: default_dune_bootstrap_query_id(),
+            bootstrap_wallets_max: default_dune_bootstrap_wallets_max(),
+            bootstrap_roster_enabled: default_dune_bootstrap_roster_enabled(),
             check_interval_secs: default_dune_check_interval_secs(),
             promote_check_interval_secs: default_promote_check_interval_secs(),
             demote_losers_enabled: false,

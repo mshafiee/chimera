@@ -21,6 +21,7 @@ tower_governor = "0.4"
 chrono = { workspace = true }
 dotenvy = "0.15"
 rust_decimal = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true }

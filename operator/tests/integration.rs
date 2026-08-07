@@ -71,6 +71,9 @@ mod selection_service_tests;
 #[path = "integration/smart_money_cluster_tests.rs"]
 mod smart_money_cluster_tests;
 
+#[path = "integration/dune_bootstrap_tests.rs"]
+mod dune_bootstrap_tests;
+
 #[path = "integration/parallel_execution_test.rs"]
 mod parallel_execution_test;
 

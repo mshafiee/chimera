@@ -72,6 +72,9 @@ COPY --from=builder /build/target/release/chimera_operator /app/chimera_operator
 # Ship the import_keypair CLI alongside the operator so the runbook's
 # `docker compose run ... /app/import_keypair` procedure works.
 COPY --from=builder /build/target/release/import_keypair /app/import_keypair
+# One-shot Dune bootstrap (wallet PnL history + roster seed). Runs manually
+# via `docker compose run --rm bootstrap_dune bootstrap_dune --apply --roster`.
+COPY --from=builder /build/target/release/bootstrap_dune /app/bootstrap_dune
 
 # Create directories (config files are mounted as volumes in docker-compose)
 RUN mkdir -p /app/config /app/data && chown -R chimera:chimera /app

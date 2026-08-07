@@ -1024,6 +1024,7 @@ dependencies = [
  "parking_lot",
  "reqwest",
  "rust_decimal",
+ "serde",
  "serde_json",
  "solana-client",
  "solana-sdk",

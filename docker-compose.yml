@@ -239,6 +239,39 @@ services:
       - mainnet-prod
       - evaluation
 
+  # Dune bootstrap - one-shot wallet PnL history + roster seed. Not started
+  # by `up`; run manually:
+  #   dry-run:  docker compose run --rm bootstrap_dune bootstrap_dune --dry-run
+  #   real run: docker compose run --rm bootstrap_dune bootstrap_dune --apply --roster
+  bootstrap_dune:
+    build:
+      context: .
+      dockerfile: operator/Dockerfile
+      args:
+        GIT_HASH: ${GIT_HASH:-unknown}
+    container_name: chimera-bootstrap-dune
+    restart: "no"
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config:ro
+    environment:
+      - RUST_LOG=info
+      - CHIMERA_LOG_DIR=/app/data/logs
+      - CHIMERA_DB_MODE=${CHIMERA_DB_MODE:-postgres}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://chimera:changeme_asap@postgres:5432/chimera}
+      - DUNE_API_KEY=${DUNE_API_KEY:-}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - chimera-network
+    command: ["bootstrap_dune", "--dry-run"]
+    profiles:
+      - mainnet-paper
+      - mainnet-prod
+
   # Tor+privoxy sidecar — Jupiter stopgap (see HTTPS_PROXY on operator).
   # No host ports: only reachable on chimera-network. Remove when a valid
   # Jupiter API key is configured.

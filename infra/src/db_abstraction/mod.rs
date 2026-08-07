@@ -827,12 +827,18 @@ pub trait Database: Send + Sync {
         min_samples: i32,
     ) -> AppResult<Option<rust_decimal::Decimal>>;
 
-    /// Per-wallet shadow-mirror PnL statistics for t-statistic scoring.
+    /// Per-wallet shadow PnL statistics for t-statistic scoring.
     /// Returns `(count, mean_pnl_pct, stddev_pnl_pct)` from shadow_exits
-    /// (mirror_main strategy, pre-cost). Drives the wallet profitability
-    /// gate: t = mean / (stddev / sqrt(n)) > threshold = statistically
-    /// significant positive returns. Research: wallet selection is the
-    /// dominant factor in copier profitability (arxiv 2601.08641).
+    /// (mirror_main + dune_wallet strategies, pre-cost). Drives the wallet
+    /// profitability gate: t = mean / (stddev / sqrt(n)) > threshold =
+    /// statistically significant positive returns. Research: wallet selection
+    /// is the dominant factor in copier profitability (arxiv 2601.08641).
+    ///
+    /// `dune_wallet` rows are bootstrap evidence (`shadow_id LIKE 'dune\_%'`,
+    /// seeded by the `bootstrap_dune` binary): the wallet's own round trips on
+    /// its own rails, combined with our `mirror_main` shadow exits. The token
+    /// mirror gate (`get_token_mirror_avg_pnl`) reads ONLY `mirror_main`, so
+    /// bootstrap rows can never count as mirror-gate evidence.
     async fn get_wallet_pnl_statistics(
         &self,
         wallet_address: &str,
