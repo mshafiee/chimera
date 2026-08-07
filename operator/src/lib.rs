@@ -27,7 +27,7 @@ pub mod notifications;
 
 pub mod roster;
 pub mod state;
-pub mod token;
+pub use chimera_infra::token;
 #[allow(dead_code)]
 pub mod tools;
 pub mod vault;

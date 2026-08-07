@@ -7,17 +7,17 @@
 //! - Honeypot detection (sell simulation fails)
 
 use super::{TokenCache, TokenMetadataFetcher};
-use crate::error::{AppError, AppResult};
-use crate::models::Strategy;
+use chimera_core::error::{AppError, AppResult};
+use chimera_core::models::Strategy;
 use rust_decimal::prelude::*;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Known safe token mints that are allowed to have freeze/mint authority
 ///
-/// These should match the constants in crate::constants::mints
+/// These should match the constants in chimera_core::constants::mints
 pub mod known_tokens {
-    use crate::constants;
+    use chimera_core::constants;
 
     /// USDC mint address
     pub const USDC: &str = constants::mints::USDC;
@@ -563,7 +563,7 @@ impl TokenParser {
                     // fix is to supply a funded keypair for simulation; until then we treat an
                     // unverifiable honeypot check as a rejection in production.
                     // Set CHIMERA_DEV_MODE=1 to bypass this gate during local testing.
-                    if !crate::utils::is_dev_mode() {
+                    if !chimera_core::utils::is_dev_mode() {
                         tracing::warn!(
                             token = token_address,
                             "Honeypot simulation inconclusive (unfunded wallet) — rejecting (fail-closed)"
@@ -625,7 +625,7 @@ impl TokenParser {
     /// impossible for large caps (FDV dwarfs single-pool liquidity). Exit/slippage
     /// risk for these is instead gated by the executor's Jupiter price-impact check.
     fn is_verified_major(&self, token_address: &str) -> bool {
-        crate::constants::verified_majors::ALL.contains(&token_address)
+        chimera_core::constants::verified_majors::ALL.contains(&token_address)
     }
 }
 

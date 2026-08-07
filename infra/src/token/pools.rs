@@ -2,7 +2,7 @@
 //!
 //! Queries Raydium and Orca pools directly via RPC to get accurate liquidity data.
 
-use crate::error::AppError;
+use chimera_core::error::AppError;
 use rust_decimal::Decimal;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;

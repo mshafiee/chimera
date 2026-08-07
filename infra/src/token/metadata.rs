@@ -5,7 +5,7 @@
 //! - Liquidity estimation
 //! - Honeypot detection via sell simulation
 
-use crate::error::{AppError, AppResult};
+use chimera_core::error::{AppError, AppResult};
 use crate::monitoring::rate_limiter::RateLimiter;
 use crate::token::pools::PoolEnumerator;
 use parking_lot::RwLock;
@@ -101,7 +101,7 @@ pub struct TokenMetadataFetcher {
     /// When true, use supply heuristic for tokens not indexed by DexScreener
     allow_unlisted_heuristic: bool,
     /// Optional price cache reference for decimals lookup (offloads RPC calls to Jupiter)
-    price_cache: Option<Arc<crate::price_cache::PriceCache>>,
+    price_cache: Option<Arc<chimera_core::price_cache::PriceCache>>,
 
     /// FIX 1: Liquidity cache with TTL (default: 60 seconds)
     liquidity_cache: RwLock<HashMap<String, LiquidityEntry>>,
@@ -143,7 +143,7 @@ impl TokenMetadataFetcher {
     }
 
     /// Set the price cache for decimals lookup
-    pub fn with_price_cache(mut self, price_cache: Arc<crate::price_cache::PriceCache>) -> Self {
+    pub fn with_price_cache(mut self, price_cache: Arc<chimera_core::price_cache::PriceCache>) -> Self {
         self.price_cache = Some(price_cache);
         self
     }
@@ -193,7 +193,7 @@ impl TokenMetadataFetcher {
     }
 
     /// Set the price cache for decimals lookup (builder pattern for with_client)
-    pub fn with_price_cache_builder(mut self, price_cache: Arc<crate::price_cache::PriceCache>) -> Self {
+    pub fn with_price_cache_builder(mut self, price_cache: Arc<chimera_core::price_cache::PriceCache>) -> Self {
         self.price_cache = Some(price_cache);
         self
     }
@@ -795,7 +795,7 @@ impl TokenMetadataFetcher {
         // NOTE: v2 endpoint was deprecated/removed by Jupiter (returns HTTP 404). v3 returns
         // {<token>: {usdPrice, liquidity, decimals, priceChange24h, ...}} at the top level.
         let price_url = format!("https://lite-api.jup.ag/price/v3?ids={}", token_address);
-        let response = crate::jupiter::with_api_key(self.http_client.get(&price_url))
+        let response = chimera_core::jupiter::with_api_key(self.http_client.get(&price_url))
             .send()
             .await
             .map_err(|e| AppError::Http(format!("Jupiter price request failed: {}", e)))?;
@@ -998,7 +998,7 @@ impl TokenMetadataFetcher {
         // 1_000 base units (0.001 tokens) falls below DEX minimum order sizes and causes
         // false-positive "no route" rejections even for perfectly safe tokens.
         let test_amount: u64 = 1_000_000;
-        let sol_mint = crate::constants::mints::SOL;
+        let sol_mint = chimera_core::constants::mints::SOL;
 
         let quote_url = format!(
             "{}/quote?inputMint={}&outputMint={}&amount={}&slippageBps=10000",
@@ -1017,7 +1017,7 @@ impl TokenMetadataFetcher {
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(300 * attempt as u64)).await;
             }
-            let resp = crate::jupiter::with_api_key(self.http_client.get(&quote_url))
+            let resp = chimera_core::jupiter::with_api_key(self.http_client.get(&quote_url))
                 .send()
                 .await;
             match resp {
@@ -1129,7 +1129,7 @@ impl TokenMetadataFetcher {
         token_address: &str,
         amount: u64,
     ) -> AppResult<Option<Decimal>> {
-        let sol_mint = crate::constants::mints::SOL;
+        let sol_mint = chimera_core::constants::mints::SOL;
         let quote_url = format!(
             "{}/quote?inputMint={}&outputMint={}&amount={}&slippageBps=10000",
             self.jupiter_api_url, token_address, sol_mint, amount
@@ -1141,7 +1141,7 @@ impl TokenMetadataFetcher {
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(300 * attempt as u64)).await;
             }
-            let resp = crate::jupiter::with_api_key(self.http_client.get(&quote_url))
+            let resp = chimera_core::jupiter::with_api_key(self.http_client.get(&quote_url))
                 .send()
                 .await;
             match resp {

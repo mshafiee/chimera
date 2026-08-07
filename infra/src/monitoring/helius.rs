@@ -4,7 +4,7 @@
 
 use crate::monitoring::rate_limiter::RateLimiter;
 use crate::monitoring::rate_limiter::RequestPriority;
-use crate::retry::{extract_status, retry_with_backoff};
+use chimera_core::retry::{extract_status, retry_with_backoff};
 use anyhow::{anyhow, Context, Result};
 use parking_lot::RwLock;
 use reqwest::Client;
@@ -227,7 +227,7 @@ impl HeliusClient {
         Ok(Self {
             api_key,
             client: Client::new(),
-            base_url: crate::utils::helius_api_base_url(),
+            base_url: chimera_core::utils::helius_api_base_url(),
             metadata_cache,
             cache_ttl: 86400, // 24 hours (immutable token metadata)
             cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -256,7 +256,7 @@ impl HeliusClient {
     /// found, or `Err` on RPC failure. Used by the webhook receipt handler's
     /// staged RPC signature verification (B2).
     pub async fn verify_signature_exists(&self, signature: &str) -> Result<bool> {
-        let url = crate::utils::helius_rpc_url(&self.api_key);
+        let url = chimera_core::utils::helius_rpc_url(&self.api_key);
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,

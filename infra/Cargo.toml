@@ -12,7 +12,11 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 parking_lot = "0.12"
 prometheus = "0.14.0"
+lru = "0.13"
 reqwest = { workspace = true }
+solana-client = "3"
+solana-sdk = "3"
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 rust_decimal = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -20,3 +24,7 @@ sqlx = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+redis = { version = "0.25", features = ["tokio-comp", "connection-manager", "aio"], optional = true }
+
+[features]
+redis-cache = ["dep:redis"]

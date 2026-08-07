@@ -5,14 +5,14 @@
 
 pub mod exit_detector;
 pub mod dexscreener;
-pub mod helius;
+pub use chimera_infra::monitoring::helius;
 pub mod helius_wss;
 pub mod helius_wss_health;
 pub mod nav_snapshot;
 pub mod helius_wss_subscription;
 pub mod polling_task;
 pub mod pre_validator;
-pub mod rate_limiter;
+pub use chimera_infra::monitoring::rate_limiter;
 pub mod rpc_polling;
 pub mod signal_aggregator;
 pub mod transaction_parser;
