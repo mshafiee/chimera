@@ -84,6 +84,12 @@ pub struct SelectionConfig {
     pub min_token_age_hours: f64,
     /// Minimum token age in hours for pump.fun tokens.
     pub min_token_age_pumpfun_hours: f64,
+    /// Age waiver floor for statistically-proven wallets (2026-08-07):
+    /// wallets passing the t-stat gate trade early entries by design; their
+    /// signals are age-waived to this floor instead of the global
+    /// `min_token_age_*` (30 min). 0.1h = 6 min — still filters instant rugs.
+    /// 0.0 disables the waiver.
+    pub min_token_age_proven_hours: f64,
     /// Minimum WQS score for a wallet to be eligible for copying.
     /// Wallets below this are rejected entirely. Configurable via env var
     /// CHIMERA_SELECTION__MIN_WQS_SCORE (default: 70.0).
@@ -170,6 +176,7 @@ impl SelectionConfig {
         hasher.update(u8::from(self.allow_graduated_pumpfun).to_le_bytes());
         hasher.update(self.min_token_age_hours.to_le_bytes());
         hasher.update(self.min_token_age_pumpfun_hours.to_le_bytes());
+        hasher.update(self.min_token_age_proven_hours.to_le_bytes());
         hasher.update(self.min_wqs_score.to_le_bytes());
         hasher.update(self.spear_lite_max_size_sol.to_string().as_bytes());
         hasher.update(self.spear_lite_wqs_threshold.to_le_bytes());
@@ -900,21 +907,56 @@ impl SelectionService {
         if min_age > 0.0 {
             match token_age_hours {
                 Some(age) if age < min_age => {
-                    let reason = format!("Token age {:.1}h below minimum {:.1}h", age, min_age);
-                    tracing::info!(
-                        ingress = ?req.ingress,
-                        decision = "BUY",
-                        token = %req.token_address,
-                        wallet = %req.wallet_address,
-                        rejection_code = "TOKEN_TOO_NEW",
-                        reason = %reason,
-                        token_age_hours = age,
-                        min_age = min_age,
-                        strategy = ?strategy,
-                        is_pumpfun = is_pumpfun,
-                        "selection: BUY rejected by gate"
-                    );
-                    return BuyDecision::rejected(req, &self.config_hash, "TOKEN_TOO_NEW", reason);
+                    // Proven-wallet age waiver (2026-08-07): wallets with
+                    // statistically significant shadow PnL (t-stat gate) trade
+                    // early entries by design — their fresh-token signals are
+                    // the edge. Age-waive them to
+                    // `min_token_age_proven_hours` (default 0.1h = 6 min,
+                    // still filters instant rug pulls). Unproven wallets keep
+                    // the full maturity filter.
+                    let proven = self.wallet_has_significant_pnl(&req.wallet_address).await;
+                    let effective_min = if proven && self.config.min_token_age_proven_hours > 0.0
+                    {
+                        self.config.min_token_age_proven_hours
+                    } else {
+                        min_age
+                    };
+                    if age >= effective_min {
+                        tracing::info!(
+                            ingress = ?req.ingress,
+                            decision = "BUY",
+                            token = %req.token_address,
+                            wallet = %req.wallet_address,
+                            token_age_hours = age,
+                            global_min = min_age,
+                            proven_floor = effective_min,
+                            strategy = ?strategy,
+                            is_pumpfun = is_pumpfun,
+                            "Proven-wallet age waiver: token below global min but above proven floor"
+                        );
+                    } else {
+                        let reason =
+                            format!("Token age {:.1}h below minimum {:.1}h", age, effective_min);
+                        tracing::info!(
+                            ingress = ?req.ingress,
+                            decision = "BUY",
+                            token = %req.token_address,
+                            wallet = %req.wallet_address,
+                            rejection_code = "TOKEN_TOO_NEW",
+                            reason = %reason,
+                            token_age_hours = age,
+                            min_age = effective_min,
+                            strategy = ?strategy,
+                            is_pumpfun = is_pumpfun,
+                            "selection: BUY rejected by gate"
+                        );
+                        return BuyDecision::rejected(
+                            req,
+                            &self.config_hash,
+                            "TOKEN_TOO_NEW",
+                            reason,
+                        );
+                    }
                 }
                 None => {
                     // Unknown age — policy: reject SPEAR, allow SHIELD.
@@ -1731,6 +1773,7 @@ mod tests {
             allow_graduated_pumpfun: true,
             min_token_age_hours: 1.0,
             min_token_age_pumpfun_hours: 1.0,
+            min_token_age_proven_hours: 0.1,
             min_wqs_score: 70.0,
             spear_lite_max_size_sol: Decimal::new(10, 2), // 0.10 SOL
             spear_lite_wqs_threshold: 40.0,

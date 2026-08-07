@@ -1015,6 +1015,13 @@ pub struct TokenSafetyConfig {
     /// The $25K liquidity gate (gate 6) is the primary risk filter for these.
     #[serde(default = "default_min_token_age_pumpfun_hours")]
     pub min_token_age_pumpfun_hours: f64,
+    /// Age waiver floor for statistically-proven wallets (2026-08-07):
+    /// wallets passing the t-stat gate (significant shadow PnL) trade early
+    /// entries by design, so their signals are age-waived down to this floor
+    /// instead of the global `min_token_age_*` (30 min). 0.1h = 6 minutes —
+    /// still filters instant rug pulls. 0.0 disables the waiver.
+    #[serde(default = "default_min_token_age_proven_hours")]
+    pub min_token_age_proven_hours: f64,
     /// FIX 1: Liquidity cache TTL in seconds (default: 60)
     #[serde(default = "default_liquidity_cache_ttl")]
     pub liquidity_cache_ttl_secs: u64,
@@ -1049,6 +1056,10 @@ fn default_min_token_age_hours() -> f64 {
 
 fn default_min_token_age_pumpfun_hours() -> f64 {
     4.0
+}
+
+fn default_min_token_age_proven_hours() -> f64 {
+    0.1
 }
 
 fn default_liquidity_cache_ttl() -> u64 {
@@ -1125,6 +1136,7 @@ impl Default for TokenSafetyConfig {
             allow_unlisted_heuristic: default_allow_unlisted_heuristic(),
             min_token_age_hours: default_min_token_age_hours(),
             min_token_age_pumpfun_hours: default_min_token_age_pumpfun_hours(),
+            min_token_age_proven_hours: default_min_token_age_proven_hours(),
             liquidity_cache_ttl_secs: default_liquidity_cache_ttl(),
             fdv_cache_ttl_secs: default_fdv_cache_ttl(),
             liquidity_update_interval_secs: default_liquidity_update_interval(),

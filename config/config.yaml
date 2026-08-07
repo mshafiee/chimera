@@ -112,6 +112,11 @@ token_safety:
   # Minimum token age in hours to allow a BUY signal (0 disables the check)
   min_token_age_hours: 0.5         # Minimum 30min token age — filters instant rug pulls while still catching early moves (was 0.0 disabled, originally 2h)
   min_token_age_pumpfun_hours: 0.5 # Same: 30min minimum for pump.fun tokens
+  # Proven-wallet age waiver floor (2026-08-07): wallets with statistically
+  # significant shadow PnL (t-stat > 1.645) trade early entries by design —
+  # their signals are age-waived to 0.1h (6 min) instead of the 30 min global
+  # minimum. Still filters instant rugs. 0 = disable the waiver.
+  min_token_age_proven_hours: 0.1
   # Allow pump.fun tokens with real DEX liquidity (graduated). Bonding-curve
   # tokens stay blocked: they have $0 DEX liquidity and fail the $15K pumpfun
   # floor below. Positions are managed by profit targets/stop-loss (copy_wallet_sells: false).

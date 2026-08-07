@@ -509,6 +509,7 @@ async fn main() -> anyhow::Result<()> {
         allow_graduated_pumpfun: config.token_safety.allow_graduated_pumpfun,
         min_token_age_hours: config.token_safety.min_token_age_hours,
         min_token_age_pumpfun_hours: config.token_safety.min_token_age_pumpfun_hours,
+        min_token_age_proven_hours: config.token_safety.min_token_age_proven_hours,
         min_wqs_score: std::env::var("CHIMERA_SELECTION__MIN_WQS_SCORE")
             .ok()
             .and_then(|v| v.parse().ok())

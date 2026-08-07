@@ -23,7 +23,7 @@ use tower::ServiceExt;
 
 use chimera_operator::config::AppConfig;
 use chimera_operator::db_abstraction::Database;
-use chimera_operator::engine::{SelectionService, SelectionConfig};
+use chimera_operator::engine::{SelectionConfig, SelectionService};
 use chimera_operator::handlers::{webhook_handler, WebhookState};
 use chimera_operator::middleware::{hmac_verify, HmacState};
 use chimera_operator::monitoring::SignalAggregator;
@@ -318,6 +318,7 @@ async fn build_real_webhook_app() -> (Router, Arc<dyn Database>, crate::common::
         allow_graduated_pumpfun: config.token_safety.allow_graduated_pumpfun,
         min_token_age_hours: config.token_safety.min_token_age_hours,
         min_token_age_pumpfun_hours: config.token_safety.min_token_age_pumpfun_hours,
+        min_token_age_proven_hours: config.token_safety.min_token_age_proven_hours,
         min_wqs_score: 70.0,
         spear_lite_max_size_sol: dec!(0.10),
         spear_lite_wqs_threshold: 40.0,
@@ -337,6 +338,8 @@ async fn build_real_webhook_app() -> (Router, Arc<dyn Database>, crate::common::
         token_velocity_gate_enabled: false,
         token_min_liquidity_velocity: 0.10,
         token_max_curve_completion: 0.85,
+        cluster_gate_enabled: true,
+        cluster_min_profitable_wallets: 3,
     };
     let selection = Arc::new(SelectionService::new(
         db.clone(),
