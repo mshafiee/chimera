@@ -15,8 +15,19 @@ pub mod notifications;
 pub mod state;
 pub mod vault;
 pub mod monitoring {
+    pub use helius::HeliusClient;
+    pub mod dexscreener;
+    pub mod exit_detector;
     pub mod helius;
+    pub mod helius_wss_subscription;
+    pub mod nav_snapshot;
+    pub mod pre_validator;
     pub mod rate_limiter;
+    pub mod signal_aggregator;
+    pub mod transaction_parser;
+    pub mod wallet_performance;
+    pub mod webhook_health_task;
+    pub mod webhook_lifecycle;
 }
 pub mod token;
 pub mod jupiter_http_client;

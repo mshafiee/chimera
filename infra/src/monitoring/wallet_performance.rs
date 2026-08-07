@@ -6,7 +6,7 @@
 //! - Average return per trade
 //! - Exit timing accuracy
 
-use crate::config::AppConfig;
+use chimera_core::config::AppConfig;
 use crate::db_abstraction::Database;
 use rust_decimal::prelude::*;
 use std::sync::Arc;
@@ -29,7 +29,7 @@ pub fn classify_copy_tier(
     net_sol: rust_decimal::Decimal,
     winrate: f64,
     days_since_last_trade: i64,
-    cfg: &crate::config::MonitoringConfig,
+    cfg: &chimera_core::config::MonitoringConfig,
 ) -> CopyTier {
     if !cfg.wallet_boost_enabled {
         return CopyTier::Base;
@@ -673,8 +673,8 @@ mod tier_tests {
     use super::*;
     use rust_decimal::Decimal;
 
-    fn cfg() -> crate::config::MonitoringConfig {
-        let mut c = crate::config::MonitoringConfig::default();
+    fn cfg() -> chimera_core::config::MonitoringConfig {
+        let mut c = chimera_core::config::MonitoringConfig::default();
         c.wallet_boost_enabled = true;
         c
     }
@@ -724,7 +724,7 @@ mod tier_tests {
 
     #[test]
     fn base_when_disabled() {
-        let c = crate::config::MonitoringConfig::default(); // wallet_boost_enabled = false
+        let c = chimera_core::config::MonitoringConfig::default(); // wallet_boost_enabled = false
         assert_eq!(
             classify_copy_tier(20, Decimal::new(5, 1), 0.50, 1, &c),
             CopyTier::Base

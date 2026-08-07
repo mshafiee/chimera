@@ -18,10 +18,10 @@ use std::sync::Arc;
 use rust_decimal::Decimal;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::AppConfig;
+use chimera_core::config::AppConfig;
 use crate::db_abstraction::Database;
-use crate::error::AppResult;
-use crate::price_cache::PriceCache;
+use chimera_core::error::AppResult;
+use chimera_core::price_cache::PriceCache;
 
 /// How often a NAV snapshot is written.
 const SNAPSHOT_INTERVAL_SECS: u64 = 60;

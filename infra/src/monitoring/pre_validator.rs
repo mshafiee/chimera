@@ -6,9 +6,9 @@
 //! - Slippage estimation
 //! - Token age check
 
-use crate::config::AppConfig;
+use chimera_core::config::AppConfig;
 use crate::monitoring::HeliusClient;
-use crate::price_cache::PriceCache;
+use chimera_core::price_cache::PriceCache;
 use crate::token::TokenMetadataFetcher;
 use anyhow::Result;
 use rust_decimal::prelude::*;
@@ -253,7 +253,7 @@ impl PreValidator {
 
         if liquidity_usd > Decimal::ZERO {
             let sol_price = price_cache
-                .get_price_usd(crate::constants::mints::SOL)
+                .get_price_usd(chimera_core::constants::mints::SOL)
                 .unwrap_or_else(|| Decimal::from(150));
 
             let trade_usd = amount_sol * sol_price;
@@ -285,7 +285,7 @@ impl PreValidator {
 
         if let Some(ref fetcher) = self.token_fetcher {
             let sol_price = price_cache
-                .get_price_usd(crate::constants::mints::SOL)
+                .get_price_usd(chimera_core::constants::mints::SOL)
                 .unwrap_or_else(|| Decimal::from(150));
             let trade_usd = amount_sol * sol_price;
 

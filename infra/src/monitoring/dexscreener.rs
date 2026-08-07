@@ -12,7 +12,7 @@ use parking_lot::RwLock;
 use reqwest::Client;
 use rust_decimal::Decimal;
 
-use crate::engine::volume_cache::VolumeCache;
+use chimera_core::engine::volume_cache::VolumeCache;
 use crate::monitoring::rate_limiter::{RateLimiter, RequestPriority};
 
 /// Per-token market snapshot.

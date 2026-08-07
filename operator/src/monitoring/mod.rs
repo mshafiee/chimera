@@ -3,41 +3,19 @@
 //! Handles on-chain transaction monitoring via Helius webhooks, WebSocket, and RPC polling,
 //! signal processing, and intelligent trade detection.
 
-pub mod exit_detector;
-pub mod dexscreener;
 pub use chimera_infra::monitoring::helius;
-pub mod helius_wss;
 pub mod helius_wss_health;
-pub mod nav_snapshot;
-pub mod helius_wss_subscription;
+pub mod helius_wss;
 pub mod polling_task;
-pub mod pre_validator;
 pub use chimera_infra::monitoring::rate_limiter;
 pub mod rpc_polling;
-pub mod signal_aggregator;
-pub mod transaction_parser;
-pub mod wallet_performance;
-pub mod webhook_health_task;
-pub mod webhook_lifecycle;
 
-pub use exit_detector::ExitDetector;
-pub use dexscreener::{DexScreenerClient, TokenMarketData};
 pub use helius::HeliusClient;
 pub use helius_wss::{ConnectionState, LaserStreamClient, LaserStreamConfig, ReconnectConfig};
 pub use helius_wss_health::{HealthMetrics, WebSocketHealth};
-pub use helius_wss_subscription::SubscriptionManager;
 pub use polling_task::{start_polling_task, PollingConfig};
-pub use pre_validator::PreValidator;
 pub use rate_limiter::{RateLimitMetrics, RateLimiter, RequestPriority};
 pub use rpc_polling::RpcPollingState;
-pub use signal_aggregator::SignalAggregator;
-pub use wallet_performance::WalletPerformanceTracker;
-pub use wallet_performance::{classify_copy_tier, CopyTier};
-pub use webhook_health_task::{
-    reconcile_helius_webhooks_async, run_startup_webhook_check, start_webhook_health_task,
-    StartupWebhookResult, WebhookHealthConfig,
-};
-pub use webhook_lifecycle::{WebhookLifecycleConfig, WebhookLifecycleManager};
 
 use crate::circuit_breaker::CircuitBreaker;
 use crate::config::AppConfig;
@@ -259,10 +237,21 @@ impl MonitoringState {
 }
 
 // Re-export types for convenience
-pub use exit_detector::{ExitSignal, ExitType};
 pub use helius::HeliusWebhookPayload;
-pub use pre_validator::ValidationResult;
 pub use rpc_polling::WalletTransaction;
-pub use signal_aggregator::ConsensusSignal;
-pub use transaction_parser::{ParsedSwap, SwapDirection, TransactionInfo};
-pub use wallet_performance::WalletCopyMetrics;
+
+pub use chimera_infra::monitoring::{
+    dexscreener, exit_detector, helius_wss_subscription, nav_snapshot,
+    pre_validator, signal_aggregator, transaction_parser, wallet_performance,
+    webhook_health_task, webhook_lifecycle,
+};
+pub use chimera_infra::monitoring::dexscreener::*;
+pub use chimera_infra::monitoring::exit_detector::*;
+pub use chimera_infra::monitoring::helius_wss_subscription::SubscriptionManager;
+pub use chimera_infra::monitoring::nav_snapshot::*;
+pub use chimera_infra::monitoring::pre_validator::*;
+pub use chimera_infra::monitoring::signal_aggregator::*;
+pub use chimera_infra::monitoring::transaction_parser::*;
+pub use chimera_infra::monitoring::wallet_performance::*;
+pub use chimera_infra::monitoring::webhook_health_task::*;
+pub use chimera_infra::monitoring::webhook_lifecycle::*;
