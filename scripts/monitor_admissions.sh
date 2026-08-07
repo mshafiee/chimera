@@ -34,7 +34,7 @@ query_positions() {
 
 query_admitted() {
     docker exec chimera-postgres psql -U chimera -d chimera -t -A -F'|' -c "
-      SELECT 'ADMITTED', decided_at, wallet_address, token_address, wqs_score
+      SELECT 'ADMITTED', decided_at, wallet_address, token_address, wqs
       FROM decision_records WHERE admitted AND decided_at > '$LAST_CHECK'::timestamptz
       ORDER BY decided_at;" 2>&1
 }

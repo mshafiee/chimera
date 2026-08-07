@@ -229,6 +229,18 @@ struct DecisionRow {
     roster_hash: String,
 }
 
+/// Column precision bounds for decision_records numeric columns.
+/// NUMERIC(30,18) → 12 integer digits; NUMERIC(20,10) → 10 integer digits.
+/// A garbage in-flight value (corrupted DexScreener/Helius response) must
+/// never fail the insert with `numeric field overflow` and lose the record
+/// (observed live 2026-08-07: 12+ decision persists failed with overflow).
+const NUMERIC_30_18_BOUND: f64 = 999_999_999_999.0; // 12 digits before the point
+const NUMERIC_20_10_BOUND: f64 = 9_999_999_999.0; // 10 digits before the point
+
+fn clamp_num(v: f64, bound: f64) -> f64 {
+    v.clamp(-bound, bound)
+}
+
 impl DecisionRow {
     fn from_decision(
         decision: &BuyDecision,
@@ -252,17 +264,35 @@ impl DecisionRow {
             admitted: decision.admitted,
             rejection_code: decision.rejection_code.map(|s| s.to_string()),
             rejection_reason: decision.rejection_reason.clone(),
-            size_sol: decision.size_sol.and_then(|d| d.to_f64()),
-            source_amount_sol: decision.source_amount_sol.to_f64().unwrap_or(0.0),
+            size_sol: decision
+                .size_sol
+                .and_then(|d| d.to_f64())
+                .map(|v| clamp_num(v, NUMERIC_30_18_BOUND)),
+            source_amount_sol: clamp_num(
+                decision.source_amount_sol.to_f64().unwrap_or(0.0),
+                NUMERIC_30_18_BOUND,
+            ),
             wqs: decision.wqs,
             wqs_confidence: decision.wqs_confidence,
             quality_score: decision.quality_score,
             consensus_wallet_count: decision.consensus_wallet_count.and_then(|c| i32::try_from(c).ok()),
-            regime_multiplier: decision.regime_multiplier.and_then(|d| d.to_f64()),
+            regime_multiplier: decision
+                .regime_multiplier
+                .and_then(|d| d.to_f64())
+                .map(|v| clamp_num(v, NUMERIC_20_10_BOUND)),
             token_age_hours: decision.token_age_hours,
-            liquidity_usd: decision.liquidity_usd.and_then(|d| d.to_f64()),
-            volume_24h_usd: decision.volume_24h_usd.and_then(|d| d.to_f64()),
-            price_impact_pct: decision.price_impact_pct.and_then(|d| d.to_f64()),
+            liquidity_usd: decision
+                .liquidity_usd
+                .and_then(|d| d.to_f64())
+                .map(|v| clamp_num(v, NUMERIC_30_18_BOUND)),
+            volume_24h_usd: decision
+                .volume_24h_usd
+                .and_then(|d| d.to_f64())
+                .map(|v| clamp_num(v, NUMERIC_30_18_BOUND)),
+            price_impact_pct: decision
+                .price_impact_pct
+                .and_then(|d| d.to_f64())
+                .map(|v| clamp_num(v, NUMERIC_20_10_BOUND)),
             source_slot: req.source_slot.and_then(|s| i64::try_from(s).ok()),
             received_at,
             decided_at: Utc::now(),

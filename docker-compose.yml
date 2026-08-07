@@ -4,8 +4,11 @@ services:
     image: postgres:15-alpine
     container_name: chimera-postgres
     restart: unless-stopped
+    # Localhost-only binding (security, 2026-08-07): the DB must never be
+    # reachable from the internet. External tools connect via
+    # `docker compose exec` or an ssh tunnel. UFW additionally denies 5432.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       # Database credentials
       - POSTGRES_USER=${POSTGRES_USER:-chimera}
@@ -527,7 +530,7 @@ services:
     environment:
       - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER:-chimera}:${POSTGRES_PASSWORD:-changeme_asap}@postgres:5432/${POSTGRES_DB:-chimera}?sslmode=disable
     ports:
-      - "9187:9187"
+      - "127.0.0.1:9187:9187"
     networks:
       - chimera-network
     depends_on:

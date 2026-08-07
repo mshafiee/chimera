@@ -250,6 +250,15 @@ class ProductionMonitor:
         self._alert_cooldown = int(os.getenv("SCOUT_ALERT_COOLDOWN", "300"))  # 5 minutes
         self._last_alert_time: Dict[str, float] = {}
 
+        # Alert debounce (2026-08-07): system metrics are 1s samples taken
+        # every check interval, so a brief full-host spike (e.g. postgres
+        # crash-restart cycles observed on 2026-08-07) reads as 90%+ for a
+        # single sample and fired false CRITICAL alerts. Require the
+        # condition to persist across SUSTAINED_SAMPLES consecutive checks
+        # before alerting; a clean sample resets the counter.
+        self._sustained_counts: Dict[str, int] = {}
+        self._sustained_samples = int(os.getenv("SCOUT_ALERT_SUSTAINED_SAMPLES", "3"))
+
         # Guards shared state mutated by the monitor thread and read by
         # API/threads (get_health_status, get_recent_alerts, create_alert...)
         self._alert_lock = threading.Lock()
@@ -508,11 +517,25 @@ class ProductionMonitor:
                 logger.error(f"Alert handler failed: {e}")
 
     def check_thresholds(self, metrics: PerformanceMetrics) -> List[Alert]:
-        """Check metrics against thresholds and create alerts."""
+        """Check metrics against thresholds and create alerts.
+
+        Alerts are debounced: the condition must persist across
+        `_sustained_samples` consecutive checks (see __init__), so 1-second
+        host spikes cannot fire alerts.
+        """
         alerts = []
 
+        def sustained(alert_key: str, breached: bool) -> bool:
+            """Return True when breached for _sustained_samples checks."""
+            if breached:
+                n = self._sustained_counts.get(alert_key, 0) + 1
+                self._sustained_counts[alert_key] = n
+                return n >= self._sustained_samples
+            self._sustained_counts[alert_key] = 0
+            return False
+
         # CPU checks
-        if metrics.cpu_percent >= self._thresholds['cpu_critical']:
+        if sustained('cpu_critical', metrics.cpu_percent >= self._thresholds['cpu_critical']):
             if self._can_alert('cpu_critical'):
                 alerts.append(self.create_alert(
                     severity=AlertSeverity.CRITICAL,
@@ -521,7 +544,7 @@ class ProductionMonitor:
                     source="system_monitor",
                     details={'cpu_percent': metrics.cpu_percent}
                 ))
-        elif metrics.cpu_percent >= self._thresholds['cpu_warning']:
+        elif sustained('cpu_warning', metrics.cpu_percent >= self._thresholds['cpu_warning']):
             if self._can_alert('cpu_warning'):
                 alerts.append(self.create_alert(
                     severity=AlertSeverity.WARNING,
@@ -532,7 +555,7 @@ class ProductionMonitor:
                 ))
 
         # Memory checks
-        if metrics.memory_percent >= self._thresholds['memory_critical']:
+        if sustained('memory_critical', metrics.memory_percent >= self._thresholds['memory_critical']):
             if self._can_alert('memory_critical'):
                 alerts.append(self.create_alert(
                     severity=AlertSeverity.CRITICAL,
@@ -541,7 +564,7 @@ class ProductionMonitor:
                     source="system_monitor",
                     details={'memory_percent': metrics.memory_percent}
                 ))
-        elif metrics.memory_percent >= self._thresholds['memory_warning']:
+        elif sustained('memory_warning', metrics.memory_percent >= self._thresholds['memory_warning']):
             if self._can_alert('memory_warning'):
                 alerts.append(self.create_alert(
                     severity=AlertSeverity.WARNING,
@@ -552,7 +575,7 @@ class ProductionMonitor:
                 ))
 
         # Disk checks
-        if metrics.disk_usage_percent >= self._thresholds['disk_critical']:
+        if sustained('disk_critical', metrics.disk_usage_percent >= self._thresholds['disk_critical']):
             if self._can_alert('disk_critical'):
                 alerts.append(self.create_alert(
                     severity=AlertSeverity.CRITICAL,
@@ -561,7 +584,7 @@ class ProductionMonitor:
                     source="system_monitor",
                     details={'disk_usage_percent': metrics.disk_usage_percent}
                 ))
-        elif metrics.disk_usage_percent >= self._thresholds['disk_warning']:
+        elif sustained('disk_warning', metrics.disk_usage_percent >= self._thresholds['disk_warning']):
             if self._can_alert('disk_warning'):
                 alerts.append(self.create_alert(
                     severity=AlertSeverity.WARNING,
