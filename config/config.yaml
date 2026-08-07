@@ -99,6 +99,13 @@ token_safety:
   min_liquidity_pumpfun_usd: 15000  # Pump.fun floor: $15K (was $5K; pump.fun blocked anyway but kept sane)
   # Enable honeypot detection via transaction simulation
   honeypot_detection_enabled: true
+  # Holder-concentration gate (enabled 2026-08-07): reject tokens where the
+  # top-10 non-DEX holders control >50% of supply — bundle-bot / manipulation
+  # proxy (Nansen: "top 10 wallets hold over 50% supply → manipulation risk";
+  # arxiv 2602.14860: bot-dominated tokens have systematically lower
+  # graduation probability).
+  holder_concentration_check_enabled: true
+  max_holder_concentration_pct: 50.0
   # Token cache settings
   cache_capacity: 1000
   cache_ttl_seconds: 3600  # 1 hour
