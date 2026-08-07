@@ -61,7 +61,8 @@ working — every phase is green and deployable.
 | 3 | `infra` = db_abstraction backend (traits + Postgres + migrations moved as a unit; trait/impl split is follow-up), `core` += `config` (ExecutionLockConfig untied from engine) | ✅ 2026-08-07 |
 | 4 | `api` = main.rs + HTTP transport (binary keeps legacy name `chimera_operator`); tools exposed as lib modules + wrapper bins | ✅ 2026-08-07 |
 | 5 | `core` += `jupiter` helpers, `price_cache`, `models` (domain entities), `experiment`, `roster`; `infra` += jupiter clients, `token` fetchers, `helius`, `rate_limiter`, `notifications`, `state`, `keypair_utils`, `vault` | ✅ 2026-08-07 |
-| 6 | engine split (onion-ectomy: executor/jupiter/monitoring impls → infra behind core traits; pure services → core), circuit_breaker, handlers + middleware + metrics → `api` | pending — multi-session |
+| 6 | engine split: 13 pure services → `core::engine`, 4 db-backed services (kelly_sizer, momentum_exit, portfolio_heat, tips) → `infra::engine`; 10 monitoring modules → `infra::monitoring` | ✅ 2026-08-07 |
+| 7 | remaining cluster (executor, selection, signal_pipeline, transaction_builder, circuit_breaker, handlers, metrics, middleware, remaining monitoring) — needs trait boundaries (core `Executor`/`PriceApi`-style traits, impls in infra) | pending — multi-session |
 
 ### Known pragmatic exceptions (documented in code)
 - `core` keeps `sqlx`/`config`/`solana-sdk` deps: `AppError` wraps `sqlx::Error`/
@@ -69,12 +70,15 @@ working — every phase is green and deployable.
   phase splits `CoreError` from `InfraError` and moves those variants out.
 - `db_abstraction` moved to infra as a unit (traits + impl together); the
   repository-trait/impl split into core is follow-up work.
-- `engine`, `monitoring` (remaining), `circuit_breaker`, `handlers`,
-  `metrics`, `middleware`, `jupiter_error_handling` remain in the operator
-  crate: they form a mutually-entangled cluster (engine → everything) that
-  needs the trait-boundary refactor (phase 6) to split.
+- The remaining operator cluster (`executor`, `selection`, `signal_pipeline`,
+  `transaction_builder`, `circuit_breaker`, `handlers`, `metrics`,
+  `middleware`, `helius_wss`, `polling_task`, `rpc_polling`, etc.) is
+  mutually entangled — `executor` → circuit_breaker/metrics/notifications/
+  vault, `selection` → monitoring, `signal_pipeline` → handlers. Splitting it
+  requires defining core traits (e.g. `Executor`, `NotificationSender`,
+  `MetricsReporter`) with infra implementations (phase 7).
 - `db_abstraction`'s repository traits co-locate with the Postgres impl in
-  infra; a trait/impl split into core is part of phase 6.
+  infra; a trait/impl split into core is part of phase 7.
 
 ## Versioning
 
