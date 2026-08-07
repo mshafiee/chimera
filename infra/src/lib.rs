@@ -9,6 +9,10 @@
 //! incremental extraction.
 
 pub mod db_abstraction;
+pub mod keypair_utils;
+pub mod notifications;
+pub mod state;
+pub mod vault;
 pub mod monitoring {
     pub mod helius;
     pub mod rate_limiter;

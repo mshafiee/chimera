@@ -11,26 +11,26 @@ pub mod circuit_breaker;
 pub use chimera_core::{config, constants, error, retry, utils};
 pub use chimera_infra::db_abstraction;
 pub mod engine;
-pub mod experiment;
+pub use chimera_core::experiment;
 pub mod handlers;
 pub use chimera_core::{jupiter, price_cache};
 pub mod jupiter_error_handling;
 pub use chimera_infra::jupiter_http_client;
 pub use chimera_infra::jupiter_monitoring;
 pub use chimera_infra::jupiter_skills_integration;
-pub mod keypair_utils;
+pub use chimera_infra::keypair_utils;
 pub mod metrics;
 pub mod middleware;
 pub use chimera_core::models;
 pub mod monitoring;
-pub mod notifications;
+pub use chimera_infra::notifications;
 
-pub mod roster;
-pub mod state;
+pub use chimera_core::roster;
+pub use chimera_infra::state;
 pub use chimera_infra::token;
 #[allow(dead_code)]
 pub mod tools;
-pub mod vault;
+pub use chimera_infra::vault;
 
 // Re-export commonly used types for tests
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerState, TripReason};

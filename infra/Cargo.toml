@@ -7,7 +7,15 @@ description = "Chimera adapters: Postgres backend implementing the core reposito
 
 [dependencies]
 chimera_core = { path = "../core" }
+aes-gcm = "0.10"
 anyhow = { workspace = true }
+base64 = "0.22"
+bs58 = "0.5"
+getrandom = "0.2"
+hex = "0.4"
+dashmap = "6"
+rand = { workspace = true }
+zeroize = { version = "1.7", features = ["derive"] }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 parking_lot = "0.12"
@@ -21,6 +29,7 @@ rust_decimal = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }

@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 //! Chimera Core — domain-pure foundation crate.
 //!
 //! Architectural law (see docs/architecture/rust-workspace.md):
@@ -8,6 +10,8 @@
 
 pub mod config;
 pub mod constants;
+pub mod experiment;
+pub mod roster;
 pub mod error;
 pub mod jupiter;
 pub mod models;

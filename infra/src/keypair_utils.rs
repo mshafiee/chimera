@@ -32,7 +32,7 @@
 //! Callers that need a verifiably-consistent keypair must validate via
 //! `solana_sdk::signature::Keypair::try_from` before use.
 
-use crate::error::{AppError, AppResult};
+use chimera_core::error::{AppError, AppResult};
 use zeroize::Zeroizing;
 
 /// Bitcoin/Solana base58 alphabet (excludes `0`, `O`, `I`, `l`).
