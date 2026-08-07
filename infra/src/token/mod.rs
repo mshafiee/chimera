@@ -4,6 +4,7 @@
 //! - Fast Path (Ingress): Check freeze/mint authority from cached metadata
 //! - Slow Path (Executor): Honeypot detection via transaction simulation
 
+pub mod bonding_curve;
 mod cache;
 pub mod metadata;
 mod parser;

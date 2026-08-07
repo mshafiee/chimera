@@ -140,6 +140,9 @@ fn build_selection_service(
         wallet_tstat_threshold: 1.645,
         wallet_tstat_min_samples: 10,
         wallet_tstat_window_days: 30,
+        token_velocity_gate_enabled: false,
+        token_min_liquidity_velocity: 0.10,
+        token_max_curve_completion: 0.85,
     };
     let service = SelectionService::new(
         db,

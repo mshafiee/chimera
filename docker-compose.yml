@@ -199,6 +199,13 @@ services:
        - CHIMERA_SELECTION__WALLET_TSTAT_THRESHOLD=1.645
        - CHIMERA_SELECTION__WALLET_TSTAT_MIN_SAMPLES=10
        - CHIMERA_SELECTION__WALLET_TSTAT_WINDOW_DAYS=30
+       # Token liquidity-velocity gate (2026-08-07): pump.fun curve tokens
+       # only — require fast accumulation (>=0.10 SOL/trade) and reject the
+       # late-curve dump zone (completion > 0.85). "Liquidity velocity is the
+       # single most informative predictor of graduation" (arxiv 2602.14860).
+       - CHIMERA_SELECTION__TOKEN_VELOCITY_GATE_ENABLED=true
+       - CHIMERA_SELECTION__TOKEN_MIN_LIQUIDITY_VELOCITY=0.10
+       - CHIMERA_SELECTION__TOKEN_MAX_CURVE_COMPLETION=0.85
        # Paper trading mode (simulated execution, no real SOL)
        - CHIMERA_TRADE_MODE=paper
        # Dune Analytics API key for wallet PnL monitoring

@@ -168,6 +168,52 @@ impl TokenParser {
         self.fetcher.get_liquidity(token_address).await
     }
 
+    /// Fetch a pump.fun token's bonding-curve state (PDA-derived, RPC).
+    /// `Ok(None)` = not a curve token / curve account missing or closed.
+    /// The RPC call is blocking — offloaded to a blocking thread.
+    pub async fn get_bonding_curve_state(
+        &self,
+        token_address: &str,
+    ) -> AppResult<Option<crate::token::bonding_curve::BondingCurveState>> {
+        let rpc = self.fetcher.get_rpc_client();
+        let token_address = token_address.to_string();
+        let handle = tokio::task::spawn_blocking(move || {
+            crate::token::bonding_curve::fetch_bonding_curve(&rpc, &token_address)
+        });
+        match handle.await {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(AppError::Validation(format!(
+                "bonding curve fetch failed: {e}"
+            ))),
+            Err(e) => Err(AppError::Validation(format!(
+                "bonding curve task join failed: {e}"
+            ))),
+        }
+    }
+
+    /// Number of swaps touching a token's bonding-curve account (each pump.fun
+    /// swap updates the curve). Used for liquidity velocity. Capped at `limit`.
+    pub async fn get_bonding_curve_swap_count(
+        &self,
+        token_address: &str,
+        limit: usize,
+    ) -> AppResult<u64> {
+        let rpc = self.fetcher.get_rpc_client();
+        let token_address = token_address.to_string();
+        let handle = tokio::task::spawn_blocking(move || {
+            crate::token::bonding_curve::fetch_swap_count(&rpc, &token_address, limit)
+        });
+        match handle.await {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(AppError::Validation(format!(
+                "bonding curve swap count failed: {e}"
+            ))),
+            Err(e) => Err(AppError::Validation(format!(
+                "bonding curve task join failed: {e}"
+            ))),
+        }
+    }
+
     /// Quote a token→SOL sell and return the executable output in SOL (Decimal).
     /// `Ok(None)` = no sell route (honeypot/illiquid); `Err` = API unreachable.
     /// Used by exit managers to re-validate profit-side exits against the

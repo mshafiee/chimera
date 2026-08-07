@@ -601,6 +601,21 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(30),
+        // Token liquidity-velocity gate: only pump.fun curve tokens in the
+        // fast-accumulation phase (velocity >= 0.10 SOL/trade) and before the
+        // late-curve dump zone (completion <= 0.85).
+        token_velocity_gate_enabled: std::env::var("CHIMERA_SELECTION__TOKEN_VELOCITY_GATE_ENABLED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(true),
+        token_min_liquidity_velocity: std::env::var("CHIMERA_SELECTION__TOKEN_MIN_LIQUIDITY_VELOCITY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.10),
+        token_max_curve_completion: std::env::var("CHIMERA_SELECTION__TOKEN_MAX_CURVE_COMPLETION")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.85),
     };
     let roster_addresses: Vec<String> = db_pool
         .get_active_wallets()

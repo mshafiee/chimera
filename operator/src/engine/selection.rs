@@ -131,6 +131,15 @@ pub struct SelectionConfig {
     pub wallet_tstat_threshold: f64,
     pub wallet_tstat_min_samples: i32,
     pub wallet_tstat_window_days: i32,
+    /// Token liquidity-velocity gate (2026-08-07): for pump.fun bonding-curve
+    /// tokens, only admit those in the FAST-accumulation phase — "liquidity
+    /// velocity is the single most informative predictor of graduation"
+    /// (arxiv 2602.14860). Velocity = real_sol_reserves / swap_count; slow,
+    /// fragmented accumulation signals weak engagement. Also rejects tokens
+    /// in the late-curve dump zone (depth discontinuity at graduation).
+    pub token_velocity_gate_enabled: bool,
+    pub token_min_liquidity_velocity: f64,
+    pub token_max_curve_completion: f64,
 }
 
 impl SelectionConfig {
@@ -166,6 +175,9 @@ impl SelectionConfig {
         hasher.update(self.wallet_tstat_threshold.to_le_bytes());
         hasher.update(self.wallet_tstat_min_samples.to_le_bytes());
         hasher.update(self.wallet_tstat_window_days.to_le_bytes());
+        hasher.update(u8::from(self.token_velocity_gate_enabled).to_le_bytes());
+        hasher.update(self.token_min_liquidity_velocity.to_le_bytes());
+        hasher.update(self.token_max_curve_completion.to_le_bytes());
         hex::encode(&hasher.finalize()[..8])
     }
 }
@@ -1189,6 +1201,87 @@ impl SelectionService {
             }
         }
 
+        // ── 7d. Token liquidity-velocity gate ───────────────────────────────
+        // For pump.fun bonding-curve tokens only: reject (a) tokens in the
+        // late-curve dump zone (completion > max — depth discontinuity at
+        // graduation makes pre-graduation dumping always more profitable) and
+        // (b) tokens with slow, fragmented accumulation (velocity < min).
+        // Research: "liquidity velocity is the single most informative
+        // predictor of graduation" (arxiv 2602.14860). Fail-open on RPC
+        // errors / non-pump tokens — the mirror + confirmation gates still
+        // protect. Bypassed in the entry-confirmation re-decision (the
+        // price-hold supplies the entry evidence instead).
+        if !bypass_consensus_proven
+            && self.config.token_velocity_gate_enabled
+            && crate::token::is_pumpfun_token(&req.token_address)
+        {
+            let parser = self.token_parser.clone();
+            match parser.get_bonding_curve_state(&req.token_address).await {
+                Ok(Some(curve)) if !curve.complete => {
+                    let completion = curve.completion_pct();
+                    if completion > self.config.token_max_curve_completion {
+                        let reason = format!(
+                            "Token in late bonding-curve dump zone ({:.1}% complete > {:.0}%) — depth discontinuity at graduation",
+                            completion * 100.0,
+                            self.config.token_max_curve_completion * 100.0
+                        );
+                        tracing::info!(
+                            ingress = ?req.ingress,
+                            decision = "BUY",
+                            token = %req.token_address,
+                            rejection_code = "BONDING_CURVE_DUMP_ZONE",
+                            reason = %reason,
+                            completion_pct = completion,
+                            "selection: BUY rejected by gate"
+                        );
+                        return BuyDecision::rejected(
+                            req,
+                            &self.config_hash,
+                            "BONDING_CURVE_DUMP_ZONE",
+                            reason,
+                        );
+                    }
+                    if let Ok(swap_count) =
+                        parser.get_bonding_curve_swap_count(&req.token_address, 1000).await
+                    {
+                        let velocity = curve.liquidity_velocity(swap_count);
+                        if velocity < self.config.token_min_liquidity_velocity {
+                            let reason = format!(
+                                "Slow fragmented accumulation: {:.3} SOL/trade over {swap_count} swaps (min {:.2})",
+                                velocity, self.config.token_min_liquidity_velocity
+                            );
+                            tracing::info!(
+                                ingress = ?req.ingress,
+                                decision = "BUY",
+                                token = %req.token_address,
+                                rejection_code = "LOW_LIQUIDITY_VELOCITY",
+                                reason = %reason,
+                                velocity_sol_per_trade = velocity,
+                                swap_count,
+                                "selection: BUY rejected by gate"
+                            );
+                            return BuyDecision::rejected(
+                                req,
+                                &self.config_hash,
+                                "LOW_LIQUIDITY_VELOCITY",
+                                reason,
+                            );
+                        }
+                    }
+                }
+                Ok(_) => {
+                    // Graduated or non-curve token — velocity gate doesn't apply.
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        token = %req.token_address,
+                        error = %e,
+                        "Velocity gate: curve fetch failed — skipping (fail-open)"
+                    );
+                }
+            }
+        }
+
         // ── 8. Signal-quality score ─────────────────────────────────────────
         let quality = SignalQuality::calculate(
             wallet_wqs,
@@ -1673,6 +1766,9 @@ mod tests {
             wallet_tstat_threshold: 1.645,
             wallet_tstat_min_samples: 10,
             wallet_tstat_window_days: 30,
+            token_velocity_gate_enabled: false,
+            token_min_liquidity_velocity: 0.10,
+            token_max_curve_completion: 0.85,
         };
 
         let mut config2 = config1.clone();
