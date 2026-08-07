@@ -136,6 +136,10 @@ fn build_selection_service(
         mirror_gate_min_avg_pct: dec("1.5"),
         mirror_gate_min_samples: 10,
         mirror_gate_window_hours: 48,
+        wallet_tstat_enabled: true,
+        wallet_tstat_threshold: 1.645,
+        wallet_tstat_min_samples: 10,
+        wallet_tstat_window_days: 30,
     };
     let service = SelectionService::new(
         db,
@@ -316,8 +320,9 @@ async fn test_proven_wallet_single_signal_passes_gate() {
     let (db, _tmp) = create_test_db().await;
     let wallet = format!("G2{}", &WALLET_PREFIX[..27]);
     insert_wallet(&db, &wallet, Some(90.0)).await;
-    // 10 closed copy-trades with positive 30d PnL → proven branch admits.
-    insert_closed_trades(&db, &wallet, 10, "0.05").await;
+    // 10 shadow mirror_main exits with consistent +5% PnL → t-stat is
+    // infinite (zero variance) → wallet passes the t-stat gate.
+    insert_wallet_shadow(&db, &wallet, &["5.0"; 10]).await;
     let (service, _, _) = build_selection_service(db);
 
     let req = SelectionRequest {
@@ -431,6 +436,33 @@ async fn insert_shadow_mirror(db: &Arc<dyn Database>, token: &str, pnl_pcts: &[&
     }
 }
 
+/// Insert shadow mirror_main exits FOR A WALLET (t-stat gate tests). The
+/// wallet's PnL distribution determines its t-statistic significance.
+async fn insert_wallet_shadow(db: &Arc<dyn Database>, wallet: &str, pnl_pcts: &[&str]) {
+    let pool = pg_pool(db);
+    for (i, pct) in pnl_pcts.iter().enumerate() {
+        let shadow_id = format!("wallet_shadow_{}_{}", &wallet[..8], i);
+        sqlx::query(
+            "INSERT INTO shadow_positions (shadow_id, wallet_address, token_address, main_admitted, entry_amount_sol, ingress, opened_at, fully_closed)
+             VALUES ($1, $2, 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', false, 0.1, 'Webhook', NOW() - INTERVAL '1 hour', true)",
+        )
+        .bind(&shadow_id)
+        .bind(wallet)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO shadow_exits (shadow_id, exit_strategy, exit_price_usd, exit_sol_price_usd, pnl_pct, pnl_sol, exit_reason, hold_duration_secs)
+             VALUES ($1, 'mirror_main', 1.0, 150.0, $2, 0.001, 'recovery_gate', 600)",
+        )
+        .bind(&shadow_id)
+        .bind(dec(pct))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+}
+
 // ── Shadow-mirror token gate (2026-08-06) ─────────────────────────────────
 // The gate sits after the consensus-OR-proven gate, so these tests use a
 // proven wallet (passes step 7b) to reach the mirror evaluation.
@@ -440,7 +472,7 @@ async fn test_mirror_gate_rejects_negative_token() {
     let (db, _tmp) = create_test_db().await;
     let wallet = format!("M1{}", &WALLET_PREFIX[..27]);
     insert_wallet(&db, &wallet, Some(90.0)).await;
-    insert_closed_trades(&db, &wallet, 10, "0.05").await; // proven wallet
+    insert_wallet_shadow(&db, &wallet, &["5.0"; 10]).await; // proven wallet
     let token = "ZEUS1aR7aX8DFFJf5QjWj2ftDDdNTroMNGo8YoQm3Gq";
     insert_shadow_mirror(&db, token, &["-1.0", "-2.0", "-3.0", "-1.5", "-2.5", "-1.0", "-2.0", "-3.0", "-1.5", "-2.5"]).await;
     let (service, _, _) = build_selection_service(db);
@@ -467,7 +499,7 @@ async fn test_mirror_gate_passes_positive_token() {
     let (db, _tmp) = create_test_db().await;
     let wallet = format!("M2{}", &WALLET_PREFIX[..27]);
     insert_wallet(&db, &wallet, Some(90.0)).await;
-    insert_closed_trades(&db, &wallet, 10, "0.05").await;
+    insert_wallet_shadow(&db, &wallet, &["5.0"; 10]).await;
     let token = "CortexFv3fRcLKTgACr7aLqckGh5eP7TP3z9JHoKqMc6";
     insert_shadow_mirror(&db, token, &["4.0", "5.0", "6.0", "5.5", "4.5", "5.0", "6.5", "4.0", "5.5", "6.0"]).await;
     let (service, _, _) = build_selection_service(db);
@@ -499,7 +531,7 @@ async fn test_mirror_gate_insufficient_evidence_rejected() {
     let (db, _tmp) = create_test_db().await;
     let wallet = format!("M3{}", &WALLET_PREFIX[..27]);
     insert_wallet(&db, &wallet, Some(90.0)).await;
-    insert_closed_trades(&db, &wallet, 10, "0.05").await;
+    insert_wallet_shadow(&db, &wallet, &["5.0"; 10]).await;
     let (service, _, _) = build_selection_service(db);
 
     let req = SelectionRequest {
@@ -516,5 +548,98 @@ async fn test_mirror_gate_insufficient_evidence_rejected() {
         decision.rejection_code,
         Some("SHADOW_MIRROR_INSUFFICIENT"),
         "token without enough shadow-mirror samples must fail closed"
+    );
+}
+
+// ── Wallet t-statistic gate (2026-08-07) ───────────────────────────────────
+// wallet_is_proven() uses shadow mirror_main PnL significance when the
+// t-stat gate is enabled (shared test config has it on).
+
+#[tokio::test]
+async fn test_tstat_wallet_with_significant_pnl_passes_wallet_gate() {
+    let (db, _tmp) = create_test_db().await;
+    let wallet = format!("T1{}", &WALLET_PREFIX[..27]);
+    insert_wallet(&db, &wallet, Some(90.0)).await;
+    // Consistent +5% across 10 exits → mean 5, stddev 0 → t = inf.
+    insert_wallet_shadow(&db, &wallet, &["5.0"; 10]).await;
+    let (service, _, _) = build_selection_service(db);
+
+    let req = SelectionRequest {
+        wallet_address: wallet,
+        token_address: "ZEUS1aR7aX8DFFJf5QjWj2ftDDdNTroMNGo8YoQm3Gq".to_string(),
+        action: Action::Buy,
+        source_amount_sol: dec("1.0"),
+        ingress: Ingress::Webhook,
+        source_slot: None,
+        exit_fraction: None,
+    };
+    let decision = service.decide(&req).await;
+    assert_ne!(
+        decision.rejection_code,
+        Some("SINGLE_WALLET_UNPROVEN"),
+        "statistically profitable wallet must pass the wallet gate"
+    );
+    // The subsequent mirror gate has no token data → insufficient.
+    assert_eq!(
+        decision.rejection_code,
+        Some("SHADOW_MIRROR_INSUFFICIENT"),
+        "wallet gate passed; next gate (mirror) rejects for lack of token data"
+    );
+}
+
+#[tokio::test]
+async fn test_tstat_wallet_with_zero_mean_rejected() {
+    let (db, _tmp) = create_test_db().await;
+    let wallet = format!("T2{}", &WALLET_PREFIX[..27]);
+    insert_wallet(&db, &wallet, Some(90.0)).await;
+    // Alternating +5/-5 → mean 0 → t = 0 → not significant.
+    insert_wallet_shadow(
+        &db,
+        &wallet,
+        &["5.0", "-5.0", "5.0", "-5.0", "5.0", "-5.0", "5.0", "-5.0", "5.0", "-5.0"],
+    )
+    .await;
+    let (service, _, _) = build_selection_service(db);
+
+    let req = SelectionRequest {
+        wallet_address: wallet,
+        token_address: "ZEUS1aR7aX8DFFJf5QjWj2ftDDdNTroMNGo8YoQm3Gq".to_string(),
+        action: Action::Buy,
+        source_amount_sol: dec("1.0"),
+        ingress: Ingress::Webhook,
+        source_slot: None,
+        exit_fraction: None,
+    };
+    let decision = service.decide(&req).await;
+    assert_eq!(
+        decision.rejection_code,
+        Some("SINGLE_WALLET_UNPROVEN"),
+        "zero-mean wallet must fail the t-stat gate"
+    );
+}
+
+#[tokio::test]
+async fn test_tstat_wallet_insufficient_samples_rejected() {
+    let (db, _tmp) = create_test_db().await;
+    let wallet = format!("T3{}", &WALLET_PREFIX[..27]);
+    insert_wallet(&db, &wallet, Some(90.0)).await;
+    // Only 3 exits — below the 10-sample minimum.
+    insert_wallet_shadow(&db, &wallet, &["5.0", "5.0", "5.0"]).await;
+    let (service, _, _) = build_selection_service(db);
+
+    let req = SelectionRequest {
+        wallet_address: wallet,
+        token_address: "ZEUS1aR7aX8DFFJf5QjWj2ftDDdNTroMNGo8YoQm3Gq".to_string(),
+        action: Action::Buy,
+        source_amount_sol: dec("1.0"),
+        ingress: Ingress::Webhook,
+        source_slot: None,
+        exit_fraction: None,
+    };
+    let decision = service.decide(&req).await;
+    assert_eq!(
+        decision.rejection_code,
+        Some("SINGLE_WALLET_UNPROVEN"),
+        "wallet below min-samples must fail the t-stat gate"
     );
 }

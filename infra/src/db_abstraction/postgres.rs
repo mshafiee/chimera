@@ -3942,6 +3942,29 @@ impl Database for PostgresBackend {
         Ok(avg.map(|a| a.0))
     }
 
+    async fn get_wallet_pnl_statistics(
+        &self,
+        wallet_address: &str,
+        window_days: i32,
+    ) -> AppResult<Option<(i64, rust_decimal::Decimal, rust_decimal::Decimal)>> {
+        let row: Option<(i64, rust_decimal::Decimal, rust_decimal::Decimal)> = sqlx::query_as(
+            "SELECT COUNT(*)::bigint AS n,
+                    COALESCE(AVG(se.pnl_pct), 0) AS mean,
+                    COALESCE(STDDEV(se.pnl_pct), 0) AS stddev
+             FROM shadow_exits se
+             JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
+             WHERE sp.wallet_address = $1
+               AND se.exit_strategy = 'mirror_main'
+               AND sp.opened_at > NOW() - ($2 || ' days')::interval
+             HAVING COUNT(*) > 0",
+        )
+        .bind(wallet_address)
+        .bind(window_days)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
     async fn get_wallet_copy_performance(
         &self,
         wallet_address: &str,

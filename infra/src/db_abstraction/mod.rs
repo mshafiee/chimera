@@ -827,6 +827,18 @@ pub trait Database: Send + Sync {
         min_samples: i32,
     ) -> AppResult<Option<rust_decimal::Decimal>>;
 
+    /// Per-wallet shadow-mirror PnL statistics for t-statistic scoring.
+    /// Returns `(count, mean_pnl_pct, stddev_pnl_pct)` from shadow_exits
+    /// (mirror_main strategy, pre-cost). Drives the wallet profitability
+    /// gate: t = mean / (stddev / sqrt(n)) > threshold = statistically
+    /// significant positive returns. Research: wallet selection is the
+    /// dominant factor in copier profitability (arxiv 2601.08641).
+    async fn get_wallet_pnl_statistics(
+        &self,
+        wallet_address: &str,
+        window_days: i32,
+    ) -> AppResult<Option<(i64, rust_decimal::Decimal, rust_decimal::Decimal)>>;
+
     /// Get wallet copy performance metrics
     async fn get_wallet_copy_performance(
         &self,

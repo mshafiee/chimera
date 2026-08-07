@@ -191,6 +191,14 @@ services:
        - CHIMERA_SELECTION__MIRROR_GATE_MIN_AVG_PCT=1.5
        - CHIMERA_SELECTION__MIRROR_GATE_MIN_SAMPLES=10
        - CHIMERA_SELECTION__MIRROR_GATE_WINDOW_HOURS=48
+       # Wallet profitability gate (2026-08-07): only wallets with
+       # statistically significant shadow PnL (t-stat > 1.645, >=10 samples,
+       # 30d) are proven signal sources. Research: wallet selection is the
+       # dominant copier-profitability factor (arxiv 2601.08641).
+       - CHIMERA_SELECTION__WALLET_TSTAT_ENABLED=true
+       - CHIMERA_SELECTION__WALLET_TSTAT_THRESHOLD=1.645
+       - CHIMERA_SELECTION__WALLET_TSTAT_MIN_SAMPLES=10
+       - CHIMERA_SELECTION__WALLET_TSTAT_WINDOW_DAYS=30
        # Paper trading mode (simulated execution, no real SOL)
        - CHIMERA_TRADE_MODE=paper
        # Dune Analytics API key for wallet PnL monitoring

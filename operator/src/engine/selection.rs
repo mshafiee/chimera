@@ -30,7 +30,7 @@
 
 use std::sync::Arc;
 
-use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::Decimal;
 
 use crate::db_abstraction::Database;
@@ -122,6 +122,15 @@ pub struct SelectionConfig {
     pub mirror_gate_min_avg_pct: Decimal,
     pub mirror_gate_min_samples: i32,
     pub mirror_gate_window_hours: i32,
+    /// Wallet profitability gate (2026-08-07): only admit wallets whose
+    /// shadow mirror_main PnL is statistically significant (t-statistic >
+    /// threshold). Research: wallet selection is the dominant factor in
+    /// copier profitability — 11.3% AUC drop when removed (arxiv 2601.08641).
+    /// The only profitable copier strategy used t-stat > 1.645 as a hard gate.
+    pub wallet_tstat_enabled: bool,
+    pub wallet_tstat_threshold: f64,
+    pub wallet_tstat_min_samples: i32,
+    pub wallet_tstat_window_days: i32,
 }
 
 impl SelectionConfig {
@@ -153,6 +162,10 @@ impl SelectionConfig {
         hasher.update(self.mirror_gate_min_avg_pct.to_string().as_bytes());
         hasher.update(self.mirror_gate_min_samples.to_le_bytes());
         hasher.update(self.mirror_gate_window_hours.to_le_bytes());
+        hasher.update(u8::from(self.wallet_tstat_enabled).to_le_bytes());
+        hasher.update(self.wallet_tstat_threshold.to_le_bytes());
+        hasher.update(self.wallet_tstat_min_samples.to_le_bytes());
+        hasher.update(self.wallet_tstat_window_days.to_le_bytes());
         hex::encode(&hasher.finalize()[..8])
     }
 }
@@ -1483,6 +1496,14 @@ impl SelectionService {
     /// positive realized net PnL, per the live `trades` table. Fails closed on
     /// any error — an unverifiable wallet must not bypass the gate.
     async fn wallet_is_proven(&self, wallet_address: &str) -> bool {
+        // Research-backed criterion (arxiv 2601.08641): wallet selection is
+        // the dominant factor in copier profitability. Only wallets whose
+        // shadow mirror_main PnL is STATISTICALLY significant (t > threshold)
+        // are proven. Falls back to the live-trades ledger check when the
+        // t-stat gate is disabled (e.g. during shadow A/B calibration).
+        if self.config.wallet_tstat_enabled {
+            return self.wallet_has_significant_pnl(wallet_address).await;
+        }
         let (closed_trades, net_pnl_sol) = match self.db.get_wallet_copy_stats(wallet_address).await
         {
             Ok(stats) => stats,
@@ -1520,6 +1541,74 @@ impl SelectionService {
             "Proven-wallet check passed"
         );
         true
+    }
+
+    /// T-statistic significance test on a wallet's shadow mirror_main PnL:
+    /// t = mean / (stddev / sqrt(n)). Requires t > threshold with at least
+    /// `wallet_tstat_min_samples` exits in the window. Fail-closed on any
+    /// error, missing data, non-positive mean, or insufficient samples.
+    async fn wallet_has_significant_pnl(&self, wallet_address: &str) -> bool {
+        let stats = match self
+            .db
+            .get_wallet_pnl_statistics(wallet_address, self.config.wallet_tstat_window_days)
+            .await
+        {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                tracing::debug!(
+                    wallet = wallet_address,
+                    "T-stat check: no shadow mirror_main data in window — unproven"
+                );
+                return false;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    wallet = wallet_address,
+                    error = %e,
+                    "T-stat check failed — treating as unproven (fail-closed)"
+                );
+                return false;
+            }
+        };
+        let (n, mean, stddev) = stats;
+        if n < self.config.wallet_tstat_min_samples as i64 {
+            tracing::debug!(
+                wallet = wallet_address,
+                n,
+                min_samples = self.config.wallet_tstat_min_samples,
+                "T-stat check: insufficient shadow samples"
+            );
+            return false;
+        }
+        if mean <= Decimal::ZERO {
+            tracing::debug!(
+                wallet = wallet_address,
+                n,
+                mean = %mean,
+                "T-stat check: mean PnL not positive"
+            );
+            return false;
+        }
+        let t = if stddev > Decimal::ZERO {
+            let se = stddev
+                / Decimal::from_f64((n as f64).sqrt()).unwrap_or(Decimal::ONE);
+            (mean / se).to_f64().unwrap_or(0.0)
+        } else {
+            // Zero variance with positive mean = perfectly consistent.
+            f64::INFINITY
+        };
+        let passes = t > self.config.wallet_tstat_threshold;
+        tracing::debug!(
+            wallet = wallet_address,
+            n,
+            mean = %mean,
+            stddev = %stddev,
+            t_statistic = t,
+            threshold = self.config.wallet_tstat_threshold,
+            passes,
+            "T-stat check"
+        );
+        passes
     }
 
     /// Persist a BUY signal to the signal_aggregation table so the stop-loss
@@ -1580,6 +1669,10 @@ mod tests {
             mirror_gate_min_avg_pct: Decimal::new(15, 1),
             mirror_gate_min_samples: 10,
             mirror_gate_window_hours: 48,
+            wallet_tstat_enabled: true,
+            wallet_tstat_threshold: 1.645,
+            wallet_tstat_min_samples: 10,
+            wallet_tstat_window_days: 30,
         };
 
         let mut config2 = config1.clone();

@@ -330,6 +330,10 @@ async fn build_real_webhook_app() -> (Router, Arc<dyn Database>, crate::common::
         mirror_gate_min_avg_pct: dec!(1.5),
         mirror_gate_min_samples: 10,
         mirror_gate_window_hours: 48,
+        wallet_tstat_enabled: true,
+        wallet_tstat_threshold: 1.645,
+        wallet_tstat_min_samples: 10,
+        wallet_tstat_window_days: 30,
     };
     let selection = Arc::new(SelectionService::new(
         db.clone(),

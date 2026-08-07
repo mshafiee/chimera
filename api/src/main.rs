@@ -581,6 +581,26 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(48),
+        // Wallet profitability gate: only wallets with statistically
+        // significant shadow mirror_main PnL (t-stat > 1.645, >= 10 samples,
+        // 30d window) are proven signal sources. Research-backed
+        // (arxiv 2601.08641): wallet selection is the dominant factor.
+        wallet_tstat_enabled: std::env::var("CHIMERA_SELECTION__WALLET_TSTAT_ENABLED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(true),
+        wallet_tstat_threshold: std::env::var("CHIMERA_SELECTION__WALLET_TSTAT_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.645),
+        wallet_tstat_min_samples: std::env::var("CHIMERA_SELECTION__WALLET_TSTAT_MIN_SAMPLES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10),
+        wallet_tstat_window_days: std::env::var("CHIMERA_SELECTION__WALLET_TSTAT_WINDOW_DAYS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30),
     };
     let roster_addresses: Vec<String> = db_pool
         .get_active_wallets()
