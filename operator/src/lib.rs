@@ -21,7 +21,7 @@ pub use chimera_infra::jupiter_skills_integration;
 pub mod keypair_utils;
 pub mod metrics;
 pub mod middleware;
-pub mod models;
+pub use chimera_core::models;
 pub mod monitoring;
 pub mod notifications;
 
@@ -55,6 +55,6 @@ pub use engine::recovery::{RecoveryAction, DEFAULT_STUCK_THRESHOLD_SECS};
 pub use engine::{Engine, EngineHandle, PriorityQueue, TipManager};
 pub use error::{AppError, AppResult};
 pub use middleware::{AuthState, HmacState, Role};
-pub use models::{Action, Signal, SignalPayload, Strategy, Trade, TradeStatus};
+pub use chimera_core::models::{Action, Signal, SignalPayload, Strategy, Trade, TradeStatus};
 pub use notifications::{CompositeNotifier, NotificationEvent};
 pub use token::{TokenCache, TokenParser, TokenSafetyConfig, TokenSafetyResult};

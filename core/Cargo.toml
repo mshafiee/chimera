@@ -10,6 +10,8 @@ anyhow = { workspace = true }
 parking_lot = "0.12"
 prometheus = "0.14.0"
 config = { workspace = true }
+hex = "0.4"
+sha2 = "0.10"
 chrono = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
