@@ -249,7 +249,9 @@ async fn should_ratchet_trailing_stop_price_as_peak_rises() {
         PriceSource::Jupiter,
         Some(9),
     );
-    let _ = mgr.check_targets("uuid-ratchet-fix", TOKEN, "SHIELD").await;
+    let _ = mgr
+        .check_targets("uuid-ratchet-fix", TOKEN, TOKEN, "SHIELD")
+        .await;
 
     // New peak at $2.00 → ratcheted stop ≈ $1.60
     price_cache.set_price(
@@ -258,7 +260,9 @@ async fn should_ratchet_trailing_stop_price_as_peak_rises() {
         PriceSource::Jupiter,
         Some(9),
     );
-    let _ = mgr.check_targets("uuid-ratchet-fix", TOKEN, "SHIELD").await;
+    let _ = mgr
+        .check_targets("uuid-ratchet-fix", TOKEN, TOKEN, "SHIELD")
+        .await;
 
     // Price falls to $1.40 — below ratcheted stop ≈ $1.60 → must Exit
     price_cache.set_price(
@@ -267,7 +271,9 @@ async fn should_ratchet_trailing_stop_price_as_peak_rises() {
         PriceSource::Jupiter,
         Some(9),
     );
-    let action = mgr.check_targets("uuid-ratchet-fix", TOKEN, "SHIELD").await;
+    let action = mgr
+        .check_targets("uuid-ratchet-fix", TOKEN, TOKEN, "SHIELD")
+        .await;
 
     assert!(
         matches!(action, ProfitTargetAction::FullExit),

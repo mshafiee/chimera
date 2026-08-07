@@ -53,6 +53,9 @@ pub struct SizingFactors {
     /// floored by min_size_sol). Set by selection for wallets whose recent copy
     /// trades qualify them as BOOSTED.
     pub boost_target_sol: Option<Decimal>,
+    /// Token address for the conviction-size cap (75th percentile of the
+    /// token's own recent entry sizes). None disables the token-based cap.
+    pub token_address: Option<String>,
 }
 
 impl PositionSizer {
@@ -165,10 +168,8 @@ impl PositionSizer {
                         .unwrap_or(dec!(0.02))
                     } else {
                         let conf_f64 = factors.wqs_confidence.unwrap_or(0.50).clamp(0.35, 1.0);
-                        Decimal::from_f64_retain(
-                            (conf_f64 * 0.075 + 0.02).min(0.10),
-                        )
-                        .unwrap_or(dec!(0.075))
+                        Decimal::from_f64_retain((conf_f64 * 0.075 + 0.02).min(0.10))
+                            .unwrap_or(dec!(0.075))
                     };
                     full_kelly_cap = Some(factors.total_capital_sol * fallback_cap_pct);
                     // Do NOT clamp to min_size_sol here — the fallback cap already
@@ -301,8 +302,9 @@ impl PositionSizer {
         let boost_multiplier = (
             confidence_mult.max(Decimal::ONE) +     // consensus boost: 1.0x - 1.5x
             performance_mult.max(Decimal::ONE) +    // performance boost: 1.0x - 1.1x
-            quality_mult.max(Decimal::ONE)          // quality boost: 1.0x - 1.3x
-        ) / dec!(3.0);  // Average boosts (1.0x - 1.3x range)
+            quality_mult.max(Decimal::ONE)
+            // quality boost: 1.0x - 1.3x
+        ) / dec!(3.0); // Average boosts (1.0x - 1.3x range)
 
         // Penalty multipliers (≤ 1.0x) - risk adjustment factors.
         // performance_mult (0.8x for success rate < 0.4) and quality_mult
@@ -314,8 +316,9 @@ impl PositionSizer {
             slippage_mult.min(Decimal::ONE) +       // slippage penalty: 0.5x - 1.0x
             volatility_mult.min(Decimal::ONE) +      // volatility penalty: 0.5x - 1.0x
             performance_mult.min(Decimal::ONE) +     // performance penalty: 0.8x - 1.0x
-            quality_mult.min(Decimal::ONE)           // quality penalty: 0.7x - 1.0x
-        ) / dec!(5.0);  // Average penalties (0.5x - 1.0x range)
+            quality_mult.min(Decimal::ONE)
+            // quality penalty: 0.7x - 1.0x
+        ) / dec!(5.0); // Average penalties (0.5x - 1.0x range)
 
         // Apply hybrid sizing with regime multiplicative (special case - market conditions)
         size = size * boost_multiplier * penalty_multiplier * factors.regime_multiplier;
@@ -400,6 +403,36 @@ impl PositionSizer {
             }
         }
 
+        // Conviction-size cap (Phase 5, 2026-08-07): never be the "large entry"
+        // on a token — clamp to the 75th percentile of the token's own recent
+        // entry sizes (7d), falling back to the default cap (0.25 SOL) when
+        // history is too thin. Keeps the bot small and invisible so copy-traders
+        // don't pile onto our entry as exit liquidity (arxiv 2601.08641).
+        if self.config.conviction_size_cap_enabled {
+            if let Some(ref token) = factors.token_address {
+                let cap = self
+                    .token_conviction_cap_sol(token)
+                    .await
+                    .unwrap_or(self.config.conviction_size_default_cap_sol);
+                if cap < self.config.min_size_sol {
+                    tracing::warn!(
+                        token = %token,
+                        conviction_cap = %cap,
+                        min_size_sol = %self.config.min_size_sol,
+                        "Conviction cap below min_size_sol — skipping cap to avoid dust trade"
+                    );
+                } else if size > cap {
+                    tracing::debug!(
+                        token = %token,
+                        original_size = %size,
+                        capped_size = %cap,
+                        "Applying conviction-size cap (75th percentile of token entries)"
+                    );
+                    size = cap;
+                }
+            }
+        }
+
         // Hard floor guarantee: the returned size can never fall below
         // min_size_sol regardless of any earlier cap (strategy max, WQS
         // micro-position cap, or multiplicative shrinkage). Sub-floor positions
@@ -451,7 +484,9 @@ impl PositionSizer {
         // stale/absent data at a default.
         let success_rate = match self.db.get_wallet_copy_performance(wallet_address).await {
             Ok(Some(metrics)) => metrics.signal_success_rate / rust_decimal::Decimal::from(100),
-            Ok(None) => rust_decimal::Decimal::from_str("0.4").unwrap_or(rust_decimal::Decimal::ZERO),
+            Ok(None) => {
+                rust_decimal::Decimal::from_str("0.4").unwrap_or(rust_decimal::Decimal::ZERO)
+            }
             Err(e) => return Err(e),
         };
 
@@ -489,7 +524,31 @@ impl PositionSizer {
             regime_multiplier: Decimal::ONE,
             wqs_capped_max_size: None,
             boost_target_sol: None,
+            token_address: token_address.map(|s| s.to_string()),
         })
+    }
+
+    /// 75th percentile of the token's own entry sizes over the last 7 days
+    /// (nearest-rank, 1-based index ceil(0.75*n)). `None` when the token has
+    /// fewer than 3 historical entries — caller falls back to the default cap.
+    async fn token_conviction_cap_sol(&self, token_address: &str) -> Option<Decimal> {
+        use crate::db_abstraction::DbPool;
+        let DbPool::PostgreSQL(pool) = self.db.pool();
+        let rows: Vec<Decimal> = sqlx::query_scalar(
+            "SELECT entry_amount_sol FROM positions
+             WHERE token_address = $1 AND opened_at > NOW() - INTERVAL '7 days'
+             ORDER BY entry_amount_sol",
+        )
+        .bind(token_address)
+        .fetch_all(&mut *pool.clone().acquire().await.ok()?)
+        .await
+        .ok()?;
+        let n = rows.len();
+        if n < 3 {
+            return None;
+        }
+        let idx = (0.75_f64 * n as f64).ceil() as usize - 1; // nearest-rank, 0-based
+        Some(rows[idx.min(n - 1)])
     }
 
     /// Check if we can open a new position (portfolio limits)

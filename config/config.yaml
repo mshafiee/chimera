@@ -235,6 +235,8 @@ profit_management:
   wick_protection_max_loss_percent: -3.0  # Tightened from -5%: exit if loss reaches -3% in first 30s (catches instant dumps)
   recovery_gate_secs: 60            # Tightened from 90: identify losers faster
   recovery_gate_threshold: -2.0     # Exit if PnL below -2% at gate time (was -1.5%)
+  pre_graduation_exit_enabled: true   # Phase 5: exit pump.fun curve tokens at >85% completion (dump zone)
+  pre_graduation_exit_threshold: 0.85 # Before the graduation depth discontinuity
   # Per-wallet exit profiles: derive per-wallet time-exit hours + trailing
   # params from the wallet's on-chain round-trip behavior (median hold,
   # win/loss size), blended with the global values above via Bayesian
@@ -265,6 +267,11 @@ position_sizing:
   use_kelly_sizing: false  # Fixed sizing at base_size_sol for consistent cost ratios
   total_capital_sol: 10.0  # Total trading capital in SOL (adjust to actual wallet balance)
   off_hours_size_multiplier: 0.75  # Was 0.5; less penalization during off-hours for more trade volume
+  # Phase 5 conviction-size cap: clamp to 75th percentile of the token's own
+  # 7d entry sizes (fallback 0.25 SOL) — stay small and invisible, never the
+  # "large entry" copy-traders pile onto as exit liquidity.
+  conviction_size_cap_enabled: true
+  conviction_size_default_cap_sol: 0.25
 
 # MEV protection configuration
 mev_protection:

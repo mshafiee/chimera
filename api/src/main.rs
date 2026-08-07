@@ -1706,6 +1706,7 @@ async fn main() -> anyhow::Result<()> {
         stop_loss_mgr
             .set_signal_aggregator(signal_aggregator.clone())
             .await;
+        stop_loss_mgr.set_token_parser(token_parser.clone()).await;
         let volume_cache = shared_volume_cache.clone();
         let momentum_exit = Arc::new(
             MomentumExit::with_volume_cache(
@@ -1907,6 +1908,45 @@ async fn main() -> anyhow::Result<()> {
                                 let signal = build_exit_signal(&pos, rust_decimal::Decimal::ONE);
                                 if let Err(e) = monitor_engine.queue_signal(signal, None).await {
                                     tracing::error!(error = %e, trade_uuid = %pos.trade_uuid, "Stop-loss signal failed — will retry next monitoring cycle");
+                                    continue;
+                                }
+                                monitor_pt.remove_position(&pos.trade_uuid).await;
+                                continue;
+                            }
+
+                            // Pre-graduation dump-zone exit (Phase 5, 2026-08-07):
+                            // exit pump.fun curve tokens above ~85% completion
+                            // before the graduation depth discontinuity. Lower
+                            // priority than stop-loss; fail-open on RPC errors.
+                            let pg_action = monitor_sl
+                                .check_pre_graduation(&pos.trade_uuid, &pos.token_address)
+                                .await;
+                            if pg_action == StopLossAction::Exit {
+                                tracing::warn!(
+                                    trade_uuid = %pos.trade_uuid,
+                                    token = %pos.token_address,
+                                    exit_reason = "pre_graduation_dump_zone",
+                                    exit_price = ?current_price,
+                                    pnl_percent = ?pnl_pct,
+                                    pnl_sol = ?est_pnl_sol,
+                                    "Pre-graduation dump zone reached, queuing EXIT signal"
+                                );
+                                tracing::debug!(
+                                    trade_uuid = %pos.trade_uuid,
+                                    token = %pos.token_address,
+                                    wallet = %pos.wallet_address,
+                                    strategy = %pos.strategy,
+                                    side = "long",
+                                    entry_price = %pos.entry_price,
+                                    current_price = ?current_price,
+                                    elapsed_secs = elapsed_secs,
+                                    est_pnl_sol = ?est_pnl_sol,
+                                    exit = "pre_graduation_dump_zone",
+                                    "position_monitor: tick"
+                                );
+                                let signal = build_exit_signal(&pos, rust_decimal::Decimal::ONE);
+                                if let Err(e) = monitor_engine.queue_signal(signal, None).await {
+                                    tracing::error!(error = %e, trade_uuid = %pos.trade_uuid, "Pre-graduation exit signal failed — will retry next monitoring cycle");
                                     continue;
                                 }
                                 monitor_pt.remove_position(&pos.trade_uuid).await;

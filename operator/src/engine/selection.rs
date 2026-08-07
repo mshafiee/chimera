@@ -544,7 +544,12 @@ impl SelectionService {
                     error = %e,
                     "selection: SELL rejected by gate"
                 );
-                return BuyDecision::rejected(req, &self.config_hash, "WALLET_LOOKUP_ERROR", reason);
+                return BuyDecision::rejected(
+                    req,
+                    &self.config_hash,
+                    "WALLET_LOOKUP_ERROR",
+                    reason,
+                );
             }
         };
         if wallet.status != "ACTIVE" {
@@ -700,7 +705,12 @@ impl SelectionService {
                     error = %e,
                     "selection: BUY rejected by gate"
                 );
-                return BuyDecision::rejected(req, &self.config_hash, "WALLET_LOOKUP_ERROR", reason);
+                return BuyDecision::rejected(
+                    req,
+                    &self.config_hash,
+                    "WALLET_LOOKUP_ERROR",
+                    reason,
+                );
             }
         };
         if wallet.status != "ACTIVE" {
@@ -1332,6 +1342,7 @@ impl SelectionService {
                     None
                 },
                 boost_target_sol,
+                token_address: Some(req.token_address.clone()),
             };
             let size = match sizer.calculate_size(factors).await {
                 Ok(s) => s,

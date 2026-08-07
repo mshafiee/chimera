@@ -71,6 +71,8 @@ fn neutral_factors() -> SizingFactors {
         consensus_wallet_count: None,
         regime_multiplier: Decimal::ONE,
         wqs_capped_max_size: None,
+        boost_target_sol: None,
+        token_address: None,
     }
 }
 
@@ -280,9 +282,9 @@ async fn test_position_size_capped_at_max() {
     let sizer = PositionSizer::new(db, cfg);
 
     let factors = SizingFactors {
-        is_consensus: true,                                       // 1.5x
+        is_consensus: true, // 1.5x
         wallet_wqs: 90.0,
-        wqs_confidence: None,                                         // 1.2x
+        wqs_confidence: None,                                     // 1.2x
         wallet_success_rate: Decimal::from_str("0.8").unwrap(),   // 1.1x
         token_age_hours: Some(100.0),                             // no penalty
         estimated_slippage: Decimal::from_str("0.5").unwrap(),    // no penalty
@@ -294,6 +296,8 @@ async fn test_position_size_capped_at_max() {
         consensus_wallet_count: None,
         regime_multiplier: Decimal::ONE,
         wqs_capped_max_size: None,
+        boost_target_sol: None,
+        token_address: None,
     };
 
     let size = sizer.calculate_size(factors).await.unwrap();
@@ -321,10 +325,10 @@ async fn test_position_size_floor_at_minimum() {
     let factors = SizingFactors {
         is_consensus: false,
         wallet_wqs: 10.0,
-        wqs_confidence: None,                                        // low: no WQS bonus
-        wallet_success_rate: Decimal::from_str("0.2").unwrap(),  // 0.8x penalty
-        token_age_hours: Some(1.0),                              // 0.5x penalty
-        estimated_slippage: Decimal::from_str("5.0").unwrap(),   // 0.7x penalty
+        wqs_confidence: None, // low: no WQS bonus
+        wallet_success_rate: Decimal::from_str("0.2").unwrap(), // 0.8x penalty
+        token_age_hours: Some(1.0), // 0.5x penalty
+        estimated_slippage: Decimal::from_str("5.0").unwrap(), // 0.7x penalty
         signal_quality: Some(Decimal::from_str("0.5").unwrap()), // 0.7x penalty
         token_volatility_24h: Some(Decimal::from_str("50.0").unwrap()), // additional reduction
         wallet_address: "test_wallet".to_string(),
@@ -333,6 +337,8 @@ async fn test_position_size_floor_at_minimum() {
         consensus_wallet_count: None,
         regime_multiplier: Decimal::ONE,
         wqs_capped_max_size: None,
+        boost_target_sol: None,
+        token_address: None,
     };
 
     let size = sizer.calculate_size(factors).await.unwrap();
@@ -416,12 +422,12 @@ async fn test_hybrid_sizing_eliminated_multiplier_drift() {
 
     // Setup moderately conservative factors (all around 0.8x equivalent)
     let factors = SizingFactors {
-        is_consensus: false,                                     // 1.0x (no boost)
+        is_consensus: false, // 1.0x (no boost)
         wallet_wqs: 50.0,
-        wqs_confidence: None,                                       // neutral WQS
-        wallet_success_rate: Decimal::from_str("0.5").unwrap(),  // neutral performance
-        token_age_hours: Some(72.0),                            // old token: 1.0x (no penalty)
-        estimated_slippage: Decimal::from_str("3.0").unwrap(),  // ~0.8x penalty
+        wqs_confidence: None,                                     // neutral WQS
+        wallet_success_rate: Decimal::from_str("0.5").unwrap(),   // neutral performance
+        token_age_hours: Some(72.0),                              // old token: 1.0x (no penalty)
+        estimated_slippage: Decimal::from_str("3.0").unwrap(),    // ~0.8x penalty
         signal_quality: Some(Decimal::from_str("0.75").unwrap()), // neutral quality: 1.0x
         token_volatility_24h: Some(Decimal::from_str("35.0").unwrap()), // ~0.8x penalty
         wallet_address: "test_wallet".to_string(),
@@ -430,6 +436,8 @@ async fn test_hybrid_sizing_eliminated_multiplier_drift() {
         consensus_wallet_count: None,
         regime_multiplier: Decimal::ONE,
         wqs_capped_max_size: None, // 1.0x (neutral regime)
+        boost_target_sol: None,
+        token_address: None,
     };
 
     let size = sizer.calculate_size(factors).await.unwrap();
@@ -450,7 +458,7 @@ async fn test_hybrid_sizing_eliminated_multiplier_drift() {
 
     // Most important: verify it's NOT the old compounding result (~0.21x for pure multiplication)
     // and NOT the extremely low Kelly-only result (~0.02x)
-    let old_compound_result = Decimal::from_str("0.10").unwrap();  // Upper bound for old logic
+    let old_compound_result = Decimal::from_str("0.10").unwrap(); // Upper bound for old logic
     assert!(
         ratio > old_compound_result,
         "Hybrid sizing should eliminate drift: result {}x should be much higher than old compounding ~0.21x",
@@ -490,20 +498,22 @@ async fn test_kelly_caps_work_with_hybrid_sizing() {
 
     // Setup factors with maximum boost multipliers
     let factors = SizingFactors {
-        is_consensus: true,                                      // 1.5x boost
+        is_consensus: true, // 1.5x boost
         wallet_wqs: 90.0,
-        wqs_confidence: None,                                       // high WQS
-        wallet_success_rate: Decimal::from_str("0.8").unwrap(), // 1.1x boost
-        token_age_hours: Some(100.0),                            // 1.0x (no penalty)
-        estimated_slippage: Decimal::from_str("0.5").unwrap(),   // 1.0x (no penalty)
+        wqs_confidence: None,                                     // high WQS
+        wallet_success_rate: Decimal::from_str("0.8").unwrap(),   // 1.1x boost
+        token_age_hours: Some(100.0),                             // 1.0x (no penalty)
+        estimated_slippage: Decimal::from_str("0.5").unwrap(),    // 1.0x (no penalty)
         signal_quality: Some(Decimal::from_str("0.95").unwrap()), // 1.3x boost
-        token_volatility_24h: None,                              // 1.0x (no penalty)
+        token_volatility_24h: None,                               // 1.0x (no penalty)
         wallet_address: "kelly_wallet".to_string(),
         total_capital_sol: Decimal::from_str("10.0").unwrap(),
         strategy: chimera_operator::models::Strategy::Shield,
         consensus_wallet_count: Some(4), // 4 wallets consensus: 1.45x boost
-        regime_multiplier: Decimal::from_str("1.5").unwrap(),  // 1.5x regime boost
+        regime_multiplier: Decimal::from_str("1.5").unwrap(), // 1.5x regime boost
         wqs_capped_max_size: None,
+        boost_target_sol: None,
+        token_address: None,
     };
 
     let size = sizer.calculate_size(factors).await.unwrap();
@@ -526,5 +536,84 @@ async fn test_kelly_caps_work_with_hybrid_sizing() {
     assert!(
         size > Decimal::from_str("0.1").unwrap(),
         "Kelly calculation should produce non-zero size for positive edge wallet"
+    );
+}
+
+// ─── Conviction-size cap (Phase 5, 2026-08-07) ─────────────────────────────
+
+/// Insert trades + positions for a token with the given entry sizes (SOL).
+async fn insert_token_positions(pool: &Pool<Postgres>, token: &str, sizes: &[f64]) {
+    for (i, size) in sizes.iter().enumerate() {
+        let uuid = format!("uuid-conv-{}-{}", &token[..6], i);
+        sqlx::query(
+            "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status) \
+             VALUES ($1, 'wallet_x', $2, 'SHIELD', 'BUY', $3, 'ACTIVE')",
+        )
+        .bind(&uuid)
+        .bind(token)
+        .bind(*size)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO positions (trade_uuid, wallet_address, token_address, strategy, \
+             entry_amount_sol, entry_price, entry_tx_signature, state) \
+             VALUES ($1, 'wallet_x', $2, 'SHIELD', $3, 1.0, 'sig', 'ACTIVE')",
+        )
+        .bind(&uuid)
+        .bind(token)
+        .bind(*size)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_conviction_cap_applies_75th_percentile() {
+    let (db, _tmp) = create_test_db().await;
+    let pool = pg_pool(&db);
+    // Sorted 75th percentile (nearest-rank, n=5) = 0.25 SOL.
+    insert_token_positions(&pool, "token_a", &[0.1, 0.15, 0.2, 0.25, 0.3]).await;
+
+    let sizer = PositionSizer::new(db, default_sizing_config());
+    let mut factors = neutral_factors();
+    factors.token_address = Some("token_a".to_string());
+    let size = sizer.calculate_size(factors).await.unwrap();
+    assert_eq!(
+        size,
+        Decimal::from_str("0.25").unwrap(),
+        "base size 0.5 must be capped at the token's 75th-percentile entry size"
+    );
+}
+
+#[tokio::test]
+async fn test_conviction_cap_falls_back_to_default_when_thin_history() {
+    let (db, _tmp) = create_test_db().await;
+    let pool = pg_pool(&db);
+    // Only 2 historical entries (< 3) → fall back to the default cap 0.25.
+    insert_token_positions(&pool, "token_b", &[0.1, 0.2]).await;
+
+    let sizer = PositionSizer::new(db, default_sizing_config());
+    let mut factors = neutral_factors();
+    factors.token_address = Some("token_b".to_string());
+    let size = sizer.calculate_size(factors).await.unwrap();
+    assert_eq!(
+        size,
+        Decimal::from_str("0.25").unwrap(),
+        "thin history must fall back to the default conviction cap"
+    );
+}
+
+#[tokio::test]
+async fn test_conviction_cap_skipped_without_token_context() {
+    let (db, _tmp) = create_test_db().await;
+    let sizer = PositionSizer::new(db, default_sizing_config());
+    let factors = neutral_factors(); // token_address: None
+    let size = sizer.calculate_size(factors).await.unwrap();
+    assert_eq!(
+        size,
+        Decimal::from_str("0.5").unwrap(),
+        "no token context → base size unchanged (cap disabled)"
     );
 }

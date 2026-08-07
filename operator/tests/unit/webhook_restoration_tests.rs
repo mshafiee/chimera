@@ -18,9 +18,7 @@ use chimera_operator::monitoring::helius::{
     TokenBalanceChange,
 };
 use chimera_operator::monitoring::rate_limiter::RateLimiter;
-use chimera_operator::monitoring::transaction_parser::{
-    parse_helius_webhook, SwapDirection,
-};
+use chimera_operator::monitoring::transaction_parser::{parse_helius_webhook, SwapDirection};
 use chimera_operator::monitoring::webhook_lifecycle::{
     is_valid_solana_address, WebhookLifecycleConfig, WebhookLifecycleManager,
 };
@@ -34,7 +32,10 @@ mod common;
 const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
 const TEST_WALLET: &str = "DakNYZdrGeFwF6BhD7ZhLU5qFPnGHXkAsLwq1w3SAJVc";
 
-fn make_payload(account_data: Vec<AccountData>, native_transfers: Vec<NativeTransfer>) -> HeliusWebhookPayload {
+fn make_payload(
+    account_data: Vec<AccountData>,
+    native_transfers: Vec<NativeTransfer>,
+) -> HeliusWebhookPayload {
     HeliusWebhookPayload {
         account_data,
         native_transfers,
@@ -43,6 +44,7 @@ fn make_payload(account_data: Vec<AccountData>, native_transfers: Vec<NativeTran
         timestamp: chrono::Utc::now().timestamp(),
         transaction_error: None,
         transaction_type: "SWAP".to_string(),
+        events: chimera_operator::monitoring::helius::WebhookEvents { swap: None },
     }
 }
 
@@ -65,7 +67,10 @@ fn test_config_default_dry_run_true() {
     // Helius webhooks.
     let config: chimera_operator::config::WebhookLifecycleConfig =
         serde_json::from_str("{}").expect("empty config must deserialize with defaults");
-    assert!(config.helius_dry_run, "Default helius_dry_run should be true for safety");
+    assert!(
+        config.helius_dry_run,
+        "Default helius_dry_run should be true for safety"
+    );
 }
 
 #[test]
@@ -112,7 +117,11 @@ async fn test_register_wallet_webhook_invalid_address_rejected() {
 
     assert!(!result.success, "invalid address must be rejected");
     assert!(
-        result.error_message.as_deref().unwrap_or("").contains("Invalid Solana address"),
+        result
+            .error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("Invalid Solana address"),
         "error must explain the invalid address, got: {:?}",
         result.error_message
     );
@@ -145,7 +154,10 @@ async fn test_parse_helius_webhook_buy() {
 
     assert_eq!(parsed.direction, SwapDirection::Buy);
     assert_eq!(parsed.token_in, SOL_MINT);
-    assert_eq!(parsed.token_out, "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263");
+    assert_eq!(
+        parsed.token_out,
+        "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+    );
     assert_eq!(parsed.amount_in, Decimal::from_str("0.5").unwrap());
     assert_eq!(parsed.amount_out, Decimal::from_str("1000000").unwrap());
 }
@@ -255,7 +267,10 @@ async fn test_reconciliation_result_structure() {
         orphaned: 1,
         updated: 0,
         failed: 0,
-        would_delete: vec![("webhook_orphan".to_string(), "no matching DB record".to_string())],
+        would_delete: vec![(
+            "webhook_orphan".to_string(),
+            "no matching DB record".to_string(),
+        )],
         duration_ms: 5,
     };
 

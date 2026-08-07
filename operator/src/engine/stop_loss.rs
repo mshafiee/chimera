@@ -11,6 +11,7 @@ use crate::config::ProfitManagementConfig;
 use crate::db_abstraction::Database;
 use crate::monitoring::SignalAggregator;
 use crate::price_cache::PriceCache;
+use crate::token::TokenParser;
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use std::sync::Arc;
@@ -19,10 +20,10 @@ use tokio::sync::RwLock;
 /// Market regime for stop-loss adjustment
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarketRegime {
-    Bull,    // Widen stops (follow trends)
-    Bear,    // Tighten stops (preserve capital)
+    Bull,     // Widen stops (follow trends)
+    Bear,     // Tighten stops (preserve capital)
     Volatile, // Widen stops significantly (avoid wick-outs)
-    Neutral, // Standard parameters
+    Neutral,  // Standard parameters
 }
 
 impl MarketRegime {
@@ -63,6 +64,9 @@ pub struct StopLossManager {
     /// Optional in-memory consensus cache (avoids per-position DB query every 5 s).
     /// Set via `set_signal_aggregator` after construction.
     signal_aggregator: Arc<RwLock<Option<Arc<SignalAggregator>>>>,
+    /// Optional token parser for the pre-graduation exit rail (bonding-curve
+    /// completion checks). Set via `set_token_parser` after construction.
+    token_parser: Arc<RwLock<Option<Arc<TokenParser>>>>,
 }
 
 /// Stop-loss action
@@ -85,6 +89,7 @@ impl StopLossManager {
             config,
             price_cache,
             signal_aggregator: Arc::new(RwLock::new(None)),
+            token_parser: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -92,6 +97,12 @@ impl StopLossManager {
     /// the in-memory cache instead of issuing a DB query on every position tick.
     pub async fn set_signal_aggregator(&self, agg: Arc<SignalAggregator>) {
         *self.signal_aggregator.write().await = Some(agg);
+    }
+
+    /// Wire in the token parser after construction so the pre-graduation exit
+    /// rail can read pump.fun bonding-curve state.
+    pub async fn set_token_parser(&self, parser: Arc<TokenParser>) {
+        *self.token_parser.write().await = Some(parser);
     }
 
     /// Calculate ATR (Average True Range) from a close-price series.
@@ -337,7 +348,8 @@ impl StopLossManager {
             if let Some(volatility_f64) = self.price_cache.calculate_volatility(token_address) {
                 let market_regime = self.get_market_regime();
                 let atr_value = Decimal::from_f64(volatility_f64).unwrap_or(Decimal::ZERO);
-                let atr_stop_price = self.calculate_atr_stop_loss(entry_price, atr_value, market_regime);
+                let atr_stop_price =
+                    self.calculate_atr_stop_loss(entry_price, atr_value, market_regime);
 
                 // Convert ATR stop price to percentage threshold
                 let atr_loss_percent = ((atr_stop_price - entry_price) / entry_price) * dec!(100.0);
@@ -526,6 +538,72 @@ impl StopLossManager {
             "Stop-loss NOT triggered — holding position"
         );
 
+        StopLossAction::None
+    }
+
+    /// Pre-graduation exit rail (2026-08-07, Phase 5): exit a pump.fun curve
+    /// token when its bonding curve enters the late-curve dump zone — above
+    /// `pre_graduation_exit_threshold` completion but not yet complete — so
+    /// the position is closed BEFORE the depth discontinuity at graduation.
+    /// Research: late-curve is the dump zone (arxiv 2602.14860); 86% of pump
+    /// tokens dump within 5 min of peak.
+    ///
+    /// Fail-open: RPC errors, non-curve tokens, and missing parser all return
+    /// `None` — the stop-loss/recovery rails remain the safety net. The check
+    /// is skipped entirely when `pre_graduation_exit_enabled` is false.
+    pub async fn check_pre_graduation(
+        &self,
+        trade_uuid: &str,
+        token_address: &str,
+    ) -> StopLossAction {
+        if !self.config.pre_graduation_exit_enabled {
+            return StopLossAction::None;
+        }
+        let parser = {
+            let guard = self.token_parser.read().await;
+            guard.clone()
+        };
+        let Some(parser) = parser else {
+            return StopLossAction::None;
+        };
+        match parser.get_bonding_curve_state(token_address).await {
+            Ok(Some(curve)) => {
+                if curve.complete {
+                    return StopLossAction::None; // already graduated — no curve dump zone left
+                }
+                let completion = curve.completion_pct();
+                let threshold = self
+                    .config
+                    .pre_graduation_exit_threshold
+                    .to_f64()
+                    .unwrap_or(0.85);
+                if completion > threshold {
+                    tracing::warn!(
+                        trade_uuid = %trade_uuid,
+                        token_address = token_address,
+                        completion_pct = completion,
+                        threshold,
+                        "PRE_GRADUATION_DUMP_ZONE: curve above threshold — exiting before graduation depth discontinuity"
+                    );
+                    return StopLossAction::Exit;
+                }
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    trade_uuid = %trade_uuid,
+                    token_address = token_address,
+                    "Pre-graduation check: not a pump.fun curve token — skipping (fail-open)"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    trade_uuid = %trade_uuid,
+                    token_address = token_address,
+                    error = %e,
+                    "Pre-graduation check: curve fetch failed — skipping (fail-open)"
+                );
+            }
+        }
         StopLossAction::None
     }
 }

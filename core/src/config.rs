@@ -1960,6 +1960,19 @@ pub struct ProfitManagementConfig {
     /// after recovery_gate_secs. Default -2.5 (exit if still below -2.5%).
     #[serde(default = "default_recovery_gate_threshold")]
     pub recovery_gate_threshold: Decimal,
+    /// Pre-graduation exit rail (2026-08-07, Phase 5): exit pump.fun curve
+    /// tokens when the bonding curve reaches the late-curve dump zone
+    /// (completion > threshold, curve not yet complete) — before the depth
+    /// discontinuity at graduation. Research: late-curve entries/exits are
+    /// systematically the dump zone (arxiv 2602.14860); 86% of pump tokens
+    /// dump within 5 min of their peak. The stop-loss remains the safety net;
+    /// this rail is fail-open on RPC errors.
+    #[serde(default = "default_pre_graduation_exit_enabled")]
+    pub pre_graduation_exit_enabled: bool,
+    /// Curve completion fraction that triggers the pre-graduation exit.
+    /// Default 0.85 — above this, the remaining curve is the dump zone.
+    #[serde(default = "default_pre_graduation_exit_threshold")]
+    pub pre_graduation_exit_threshold: Decimal,
     /// Per-wallet exit profiles: derive per-wallet time-exit and trailing-stop
     /// parameters from the wallet's on-chain round-trip behavior (hold
     /// duration, win/loss size), blended with these global defaults via
@@ -2068,6 +2081,14 @@ fn default_recovery_gate_threshold() -> Decimal {
     dec!(-2.5)
 }
 
+fn default_pre_graduation_exit_enabled() -> bool {
+    true
+}
+
+fn default_pre_graduation_exit_threshold() -> Decimal {
+    dec!(0.85)
+}
+
 fn default_profit_targets() -> Vec<Decimal> {
     vec![dec!(25.0), dec!(50.0), dec!(100.0), dec!(200.0)]
 }
@@ -2148,6 +2169,8 @@ impl Default for ProfitManagementConfig {
             atr_stop_loss_enabled: default_atr_stop_loss_enabled(),
             recovery_gate_secs: default_recovery_gate_secs(),
             recovery_gate_threshold: default_recovery_gate_threshold(),
+            pre_graduation_exit_enabled: default_pre_graduation_exit_enabled(),
+            pre_graduation_exit_threshold: default_pre_graduation_exit_threshold(),
             exit_profiles: ExitProfileConfig::default(),
         }
     }
@@ -2195,6 +2218,24 @@ pub struct PositionSizingConfig {
     /// to low-liquidity windows. Set to 1.0 to disable the reduction.
     #[serde(default = "default_off_hours_size_multiplier")]
     pub off_hours_size_multiplier: Decimal,
+    /// Conviction-size cap (2026-08-07, Phase 5): cap the final position size
+    /// at the 75th percentile of the token's own recent entry sizes (7d),
+    /// falling back to `conviction_size_default_cap_sol` when the token has
+    /// < 3 historical entries. Keeps the bot small and invisible — never the
+    /// "large entry" that copy-traders pile onto as exit liquidity (arxiv
+    /// 2601.08641: copier flows amplify the initial whale's exit).
+    #[serde(default = "default_conviction_size_cap_enabled")]
+    pub conviction_size_cap_enabled: bool,
+    #[serde(default = "default_conviction_size_default_cap_sol")]
+    pub conviction_size_default_cap_sol: Decimal,
+}
+
+fn default_conviction_size_cap_enabled() -> bool {
+    true
+}
+
+fn default_conviction_size_default_cap_sol() -> Decimal {
+    dec!(0.25)
 }
 
 fn default_base_size_sol() -> Decimal {
@@ -2288,6 +2329,8 @@ impl Default for PositionSizingConfig {
             total_capital_sol: default_total_capital_sol(),
             kelly_fraction: default_kelly_fraction(),
             off_hours_size_multiplier: default_off_hours_size_multiplier(),
+            conviction_size_cap_enabled: default_conviction_size_cap_enabled(),
+            conviction_size_default_cap_sol: default_conviction_size_default_cap_sol(),
         }
     }
 }
