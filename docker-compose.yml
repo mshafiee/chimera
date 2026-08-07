@@ -240,9 +240,9 @@ services:
       - evaluation
 
   # Dune bootstrap - one-shot wallet PnL history + roster seed. Not started
-  # by `up`; run manually:
-  #   dry-run:  docker compose run --rm bootstrap_dune bootstrap_dune --dry-run
-  #   real run: docker compose run --rm bootstrap_dune bootstrap_dune --apply --roster
+  # by `up`; run manually (note: /app is not on PATH, use the absolute path):
+  #   dry-run:  docker compose run --rm bootstrap_dune /app/bootstrap_dune --dry-run
+  #   real run: docker compose run --rm bootstrap_dune /app/bootstrap_dune --apply --roster
   bootstrap_dune:
     build:
       context: .
@@ -267,7 +267,7 @@ services:
         condition: service_healthy
     networks:
       - chimera-network
-    command: ["bootstrap_dune", "--dry-run"]
+    command: ["/app/bootstrap_dune", "--dry-run"]
     profiles:
       - mainnet-paper
       - mainnet-prod
