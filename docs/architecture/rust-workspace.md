@@ -60,7 +60,8 @@ working — every phase is green and deployable.
 | 2 | `core` += `error` (axum impl behind `api` feature flag), `utils` | ✅ 2026-08-07 |
 | 3 | `infra` = db_abstraction backend (traits + Postgres + migrations moved as a unit; trait/impl split is follow-up), `core` += `config` (ExecutionLockConfig untied from engine) | ✅ 2026-08-07 |
 | 4 | `api` = main.rs + HTTP transport (binary keeps legacy name `chimera_operator`); tools exposed as lib modules + wrapper bins | ✅ 2026-08-07 |
-| 5 | `core` += `price_cache` (extract Jupiter client into infra behind a trait), engine service split (onion-ectomy of executor/jupiter/token), handlers + middleware → `api` | pending — multi-session |
+| 5 | `core` += `jupiter` helpers, `price_cache`, `models` (domain entities), `experiment`, `roster`; `infra` += jupiter clients, `token` fetchers, `helius`, `rate_limiter`, `notifications`, `state`, `keypair_utils`, `vault` | ✅ 2026-08-07 |
+| 6 | engine split (onion-ectomy: executor/jupiter/monitoring impls → infra behind core traits; pure services → core), circuit_breaker, handlers + middleware + metrics → `api` | pending — multi-session |
 
 ### Known pragmatic exceptions (documented in code)
 - `core` keeps `sqlx`/`config`/`solana-sdk` deps: `AppError` wraps `sqlx::Error`/
@@ -68,8 +69,12 @@ working — every phase is green and deployable.
   phase splits `CoreError` from `InfraError` and moves those variants out.
 - `db_abstraction` moved to infra as a unit (traits + impl together); the
   repository-trait/impl split into core is follow-up work.
-- `handlers`/`middleware` remain in the operator crate until the engine split
-  (phase 5) completes — they reference engine/monitoring/token directly.
+- `engine`, `monitoring` (remaining), `circuit_breaker`, `handlers`,
+  `metrics`, `middleware`, `jupiter_error_handling` remain in the operator
+  crate: they form a mutually-entangled cluster (engine → everything) that
+  needs the trait-boundary refactor (phase 6) to split.
+- `db_abstraction`'s repository traits co-locate with the Postgres impl in
+  infra; a trait/impl split into core is part of phase 6.
 
 ## Versioning
 
