@@ -20,7 +20,6 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use tokio_util::sync::CancellationToken;
 
-
 use chimera_operator::circuit_breaker::CircuitBreaker;
 use chimera_operator::config::{AppConfig, TradeMode};
 use chimera_operator::db_abstraction;
@@ -30,72 +29,30 @@ use chimera_operator::engine::{
     ProfitTargetManager, RecoveryManager, StopLossAction, StopLossManager, TipManager, VolumeCache,
 };
 use chimera_operator::handlers::{
-    bulk_cleanup_webhooks,
-    bulk_register_webhooks,
-    debug_backtest_smoke,
-    disable_wallet_monitoring,
-    enable_wallet_monitoring,
-    export_trades,
-    get_config,
-    get_cost_metrics,
-    get_health_check_details,
-    get_market_conditions,
-    get_market_regime,
-    get_monitoring_status,
-    get_performance_metrics,
-    get_position,
-    get_rate_limit_status,
-    get_resources,
-    get_scout_metrics,
-    get_scout_status,
-    get_budget_status,
-    get_cache_stats,
-    get_conviction_allocation,
-    get_secrets,
-    get_strategy_performance,
-    get_wallet,
-    get_wallet_monitoring_states,
-    get_webhook_audit_log,
-    get_webhook_stats,
-    get_wqs_distribution,
-    health_check,
-    health_simple,
-    helius_webhook_handler,
-    list_config_audit,
-    list_dead_letter_queue,
-    list_positions,
-    list_trades,
-    list_wallets,
-    manual_health_check,
-    manual_reconcile_webhooks,
-    reset_circuit_breaker,
-    retry_webhook_registration,
-    retry_dead_letter_item,
-    toggle_wallet_webhook,
-    trigger_scout_run,
-    trip_circuit_breaker,
-    update_config,
-    update_reconciliation_metrics,
-    update_secret_rotation_metrics,
-    update_wallet,
-    wallet_auth,
-    refresh_token,
-    webhook_handler,
-    ws_handler,
-    profitability_verdict,
-    ApiState,
-    AppState,
-    OperationsState,
-    WalletAuthState,
-    WebhookState,
-    WsState,
+    bulk_cleanup_webhooks, bulk_register_webhooks, debug_backtest_smoke, disable_wallet_monitoring,
+    enable_wallet_monitoring, export_trades, get_budget_status, get_cache_stats, get_config,
+    get_conviction_allocation, get_cost_metrics, get_health_check_details, get_market_conditions,
+    get_market_regime, get_monitoring_status, get_performance_metrics, get_position,
+    get_rate_limit_status, get_resources, get_scout_metrics, get_scout_status, get_secrets,
+    get_strategy_performance, get_wallet, get_wallet_monitoring_states, get_webhook_audit_log,
+    get_webhook_stats, get_wqs_distribution, health_check, health_simple, helius_webhook_handler,
+    list_config_audit, list_dead_letter_queue, list_positions, list_trades, list_wallets,
+    manual_health_check, manual_reconcile_webhooks, profitability_verdict, refresh_token,
+    reset_circuit_breaker, retry_dead_letter_item, retry_webhook_registration,
+    toggle_wallet_webhook, trigger_scout_run, trip_circuit_breaker, update_config,
+    update_reconciliation_metrics, update_secret_rotation_metrics, update_wallet, wallet_auth,
+    webhook_handler, ws_handler, ApiState, AppState, OperationsState, WalletAuthState,
+    WebhookState, WsState,
+};
+use chimera_operator::handlers::{
+    count_invalid_pnl, count_missing_outcomes, fetch_outcomes, CachedVerdict,
 };
 use chimera_operator::metrics::{metrics_router, MetricsState};
 use chimera_operator::middleware::{self, bearer_auth, AuthState, Role};
+use chimera_operator::monitoring::signal_aggregator::WalletTstatConfig;
 use chimera_operator::monitoring::{rate_limiter, HeliusClient, MonitoringState, SignalAggregator};
 use chimera_operator::notifications::{self, NotificationEvent};
 use chimera_operator::price_cache::PriceCache;
-use chimera_operator::handlers::{fetch_outcomes, count_missing_outcomes, count_invalid_pnl, CachedVerdict};
 use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
 use chimera_operator::vault;
 use chimera_operator::{Action, Signal, SignalPayload, Strategy};
@@ -153,7 +110,9 @@ async fn run_preflight(config: &AppConfig) -> anyhow::Result<()> {
 pub(crate) fn validate_jwt_secret(secret: &str) -> Result<(), anyhow::Error> {
     // Minimum length: 64 characters for hex encoding
     if secret.len() < 64 {
-        return Err(anyhow::anyhow!("JWT secret too short (minimum 64 characters)"));
+        return Err(anyhow::anyhow!(
+            "JWT secret too short (minimum 64 characters)"
+        ));
     }
 
     // Check for hex format (0-9, a-f, A-F)
@@ -166,19 +125,21 @@ pub(crate) fn validate_jwt_secret(secret: &str) -> Result<(), anyhow::Error> {
     // Calculate entropy: 4 bits per hex character
     let entropy_bits = secret.len() * 4;
     if entropy_bits < 256 {
-        return Err(anyhow::anyhow!("JWT secret entropy too low (minimum 256 bits)"));
+        return Err(anyhow::anyhow!(
+            "JWT secret entropy too low (minimum 256 bits)"
+        ));
     }
 
     // Check for common dictionary words and patterns
-    let common_patterns = ["0000000000000000000000000000000000000000000000000000000000000000",
+    let common_patterns = [
+        "0000000000000000000000000000000000000000000000000000000000000000",
         "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         "1234567890123456789012345678901234567890123456789012345678901234",
-        "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd"];
+        "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+    ];
 
     if common_patterns.contains(&secret.to_lowercase().as_str()) {
-        return Err(anyhow::anyhow!(
-            "JWT secret matches a common weak pattern"
-        ));
+        return Err(anyhow::anyhow!("JWT secret matches a common weak pattern"));
     }
 
     // Check for repeated character patterns (e.g., "aaaaa...")
@@ -288,7 +249,10 @@ async fn auto_promote_wallets(
         return; // roster full — nothing to do
     }
     let gap = (max_active - active_count) as i64;
-    let candidates = match db.get_promotion_candidates(min_wqs, max_age_days, gap).await {
+    let candidates = match db
+        .get_promotion_candidates(min_wqs, max_age_days, gap)
+        .await
+    {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "auto_promote: get_promotion_candidates failed");
@@ -393,11 +357,21 @@ async fn main() -> anyhow::Result<()> {
         .api_key
         .clone()
         .filter(|k| !k.trim().is_empty())
-        .or_else(|| std::env::var("CHIMERA_JUPITER__API_KEY").ok().filter(|s| !s.trim().is_empty()))
-        .or_else(|| std::env::var("JUPITER_API_KEY").ok().filter(|s| !s.trim().is_empty()));
+        .or_else(|| {
+            std::env::var("CHIMERA_JUPITER__API_KEY")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+        .or_else(|| {
+            std::env::var("JUPITER_API_KEY")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        });
     chimera_operator::jupiter::set_api_key(jupiter_api_key.clone());
     if jupiter_api_key.is_some() {
-        tracing::info!("Jupiter API key installed (x-api-key will be sent on all Jupiter requests)");
+        tracing::info!(
+            "Jupiter API key installed (x-api-key will be sent on all Jupiter requests)"
+        );
     } else {
         tracing::warn!(
             "No Jupiter API key configured (CHIMERA_JUPITER__API_KEY) — requests will be rate-limited; \
@@ -551,18 +525,22 @@ async fn main() -> anyhow::Result<()> {
         // with a proven copy-trade record. Enabled by default — single-wallet
         // signals from unproven wallets were the negative-EV class (verified
         // 2026-08: 17/17 wallets net-negative).
-        require_consensus_or_proven: std::env::var("CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(true),
+        require_consensus_or_proven: std::env::var(
+            "CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN",
+        )
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(true),
         min_proven_trades: std::env::var("CHIMERA_SELECTION__MIN_PROVEN_TRADES")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10),
-        require_proven_positive_pnl: std::env::var("CHIMERA_SELECTION__REQUIRE_PROVEN_POSITIVE_PNL")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(true),
+        require_proven_positive_pnl: std::env::var(
+            "CHIMERA_SELECTION__REQUIRE_PROVEN_POSITIVE_PNL",
+        )
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(true),
         // Shadow-mirror token gate: only admit tokens whose whale round-trips
         // clear the post-cost breakeven (+1.5% mirror avg, >=10 samples, 48h).
         mirror_gate_enabled: std::env::var("CHIMERA_SELECTION__MIRROR_GATE_ENABLED")
@@ -604,18 +582,36 @@ async fn main() -> anyhow::Result<()> {
         // Token liquidity-velocity gate: only pump.fun curve tokens in the
         // fast-accumulation phase (velocity >= 0.10 SOL/trade) and before the
         // late-curve dump zone (completion <= 0.85).
-        token_velocity_gate_enabled: std::env::var("CHIMERA_SELECTION__TOKEN_VELOCITY_GATE_ENABLED")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(true),
-        token_min_liquidity_velocity: std::env::var("CHIMERA_SELECTION__TOKEN_MIN_LIQUIDITY_VELOCITY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.10),
+        token_velocity_gate_enabled: std::env::var(
+            "CHIMERA_SELECTION__TOKEN_VELOCITY_GATE_ENABLED",
+        )
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(true),
+        token_min_liquidity_velocity: std::env::var(
+            "CHIMERA_SELECTION__TOKEN_MIN_LIQUIDITY_VELOCITY",
+        )
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.10),
         token_max_curve_completion: std::env::var("CHIMERA_SELECTION__TOKEN_MAX_CURVE_COMPLETION")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.85),
+        // Smart-money cluster gate: a single-wallet signal may bypass the
+        // consensus-OR-proven gate when >= cluster_min_profitable_wallets
+        // statistically-profitable wallets have BUY signals on the same token
+        // within the 12h cluster window (Nansen coordinated-conviction signal).
+        cluster_gate_enabled: std::env::var("CHIMERA_SELECTION__CLUSTER_GATE_ENABLED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(true),
+        cluster_min_profitable_wallets: std::env::var(
+            "CHIMERA_SELECTION__CLUSTER_MIN_PROFITABLE_WALLETS",
+        )
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3),
     };
     let roster_addresses: Vec<String> = db_pool
         .get_active_wallets()
@@ -652,7 +648,8 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // Initialize price cache with Jupiter configuration
-    let price_cache = match PriceCache::with_jupiter_price_api(config.jupiter.price_api_url.clone()) {
+    let price_cache = match PriceCache::with_jupiter_price_api(config.jupiter.price_api_url.clone())
+    {
         Ok(cache) => Arc::new(cache),
         Err(e) => {
             tracing::error!(error = %e, "Failed to initialize price cache — HTTP client build failed");
@@ -702,7 +699,10 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         });
-        tracing::info!("Per-wallet exit profiles enabled (refresh {}s)", ep_interval);
+        tracing::info!(
+            "Per-wallet exit profiles enabled (refresh {}s)",
+            ep_interval
+        );
     }
 
     // Shadow paper trader: trades every signal for later evaluation
@@ -727,9 +727,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("✓ Volume Cache initialized (shared) for liquidity monitoring");
 
     // DexScreener client (B3) — feeds the shared VolumeCache with 24h volume samples.
-    let dexscreener_rate_limiter = Arc::new(
-        chimera_operator::monitoring::rate_limiter::RateLimiter::new(5, 1),
-    );
+    let dexscreener_rate_limiter =
+        Arc::new(chimera_operator::monitoring::rate_limiter::RateLimiter::new(5, 1));
     let dexscreener_client = Arc::new(
         chimera_operator::monitoring::dexscreener::DexScreenerClient::new(
             dexscreener_rate_limiter,
@@ -925,13 +924,13 @@ async fn main() -> anyhow::Result<()> {
             from_config
         }
     };
-    let helius_client: Option<Arc<HeliusClient>> = HeliusClient::new(
-        helius_api_key_resolved,
-        token_fetcher.get_metadata_cache(),
-    )
-    .map(Arc::new)
-    .map_err(|e| tracing::warn!(error = %e, "HeliusClient unavailable, signal quality limited"))
-    .ok();
+    let helius_client: Option<Arc<HeliusClient>> =
+        HeliusClient::new(helius_api_key_resolved, token_fetcher.get_metadata_cache())
+            .map(Arc::new)
+            .map_err(
+                |e| tracing::warn!(error = %e, "HeliusClient unavailable, signal quality limited"),
+            )
+            .ok();
 
     let token_safety_config = TokenSafetyConfig {
         freeze_authority_whitelist: config
@@ -963,11 +962,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("State registry initialized");
 
     let portfolio_heat = Arc::new(
-        PortfolioHeat::new(
-            db_pool.clone(),
-            config.position_sizing.total_capital_sol,
-        )
-        .with_registry(Arc::clone(&state_registry))
+        PortfolioHeat::new(db_pool.clone(), config.position_sizing.total_capital_sol)
+            .with_registry(Arc::clone(&state_registry)),
     );
     tracing::info!(
         total_capital_sol = ?config.position_sizing.total_capital_sol,
@@ -976,18 +972,21 @@ async fn main() -> anyhow::Result<()> {
 
     // B3: Wallet performance tracker + toxic flow detector
     let wallet_performance_tracker = Arc::new(
-        chimera_operator::monitoring::WalletPerformanceTracker::new_with_config(db_pool.clone(), Arc::new(config.clone())),
+        chimera_operator::monitoring::WalletPerformanceTracker::new_with_config(
+            db_pool.clone(),
+            Arc::new(config.clone()),
+        ),
     );
-    let toxic_flow_detector = Arc::new(
-        chimera_operator::experiment::ToxicFlowDetector::new(config.experiment.clone()),
-    );
+    let toxic_flow_detector = Arc::new(chimera_operator::experiment::ToxicFlowDetector::new(
+        config.experiment.clone(),
+    ));
     let rejection_mute_detector = Arc::new(
-        chimera_operator::engine::rejection_mute::RejectionMuteDetector::new(config.rejection_mute.clone()),
+        chimera_operator::engine::rejection_mute::RejectionMuteDetector::new(
+            config.rejection_mute.clone(),
+        ),
     );
-    let mut dune_pnl_monitor = chimera_operator::engine::dune_monitor::DunePnlMonitor::new(
-        &config.dune,
-        db_pool.clone(),
-    );
+    let mut dune_pnl_monitor =
+        chimera_operator::engine::dune_monitor::DunePnlMonitor::new(&config.dune, db_pool.clone());
     tracing::info!(
         toxic_threshold = config.experiment.toxic_threshold_percent,
         dune_enabled = config.dune.enabled,
@@ -1021,7 +1020,7 @@ async fn main() -> anyhow::Result<()> {
             Some(token_parser.clone()),
             Some(portfolio_heat.clone()),
             Some(state_registry.clone()), // state_registry for fast portfolio heat
-            None, // write_queue
+            None,                         // write_queue
             Some(wallet_performance_tracker.clone()),
             Some(toxic_flow_detector.clone()),
             Some(verdict_cache.clone()),
@@ -1690,7 +1689,14 @@ async fn main() -> anyhow::Result<()> {
     let market_regime_detector = Arc::new(MarketRegimeDetector::new(price_cache.clone()));
     // Create SignalAggregator early so the stop-loss manager can read consensus from
     // its in-memory cache instead of issuing a DB query on every 5-second position tick.
-    let signal_aggregator = Arc::new(SignalAggregator::new(db_pool.clone()));
+    let signal_aggregator = Arc::new(SignalAggregator::with_tstat_config(
+        db_pool.clone(),
+        WalletTstatConfig {
+            threshold: selection_config.wallet_tstat_threshold,
+            min_samples: selection_config.wallet_tstat_min_samples,
+            window_days: selection_config.wallet_tstat_window_days,
+        },
+    ));
     {
         let stop_loss_mgr = Arc::new(StopLossManager::new(
             db_pool.clone(),
@@ -1701,22 +1707,26 @@ async fn main() -> anyhow::Result<()> {
             .set_signal_aggregator(signal_aggregator.clone())
             .await;
         let volume_cache = shared_volume_cache.clone();
-        let momentum_exit = Arc::new(MomentumExit::with_volume_cache(
-            db_pool.clone(),
-            price_cache.clone(),
-            volume_cache,
-            config.profit_management.wick_protection_secs,
-        )
-        .with_quote_client(token_parser.clone()));
-        let profit_target_mgr = Arc::new(ProfitTargetManager::with_extras(
-            db_pool.clone(),
-            Arc::new(config.profit_management.clone()),
-            price_cache.clone(),
-            Some(momentum_exit),
-            Some(market_regime_detector.clone()),
-        )
-        .with_quote_client(token_parser.clone())
-        .with_exit_profiles(Some(exit_profile_cache.clone())));
+        let momentum_exit = Arc::new(
+            MomentumExit::with_volume_cache(
+                db_pool.clone(),
+                price_cache.clone(),
+                volume_cache,
+                config.profit_management.wick_protection_secs,
+            )
+            .with_quote_client(token_parser.clone()),
+        );
+        let profit_target_mgr = Arc::new(
+            ProfitTargetManager::with_extras(
+                db_pool.clone(),
+                Arc::new(config.profit_management.clone()),
+                price_cache.clone(),
+                Some(momentum_exit),
+                Some(market_regime_detector.clone()),
+            )
+            .with_quote_client(token_parser.clone())
+            .with_exit_profiles(Some(exit_profile_cache.clone())),
+        );
 
         // Dedicated HWM sweep task — runs every 5 minutes independent of the position
         // monitoring loop so memory is reclaimed even if that loop stalls or panics.
@@ -2028,8 +2038,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Create exit detector early for use in both polling task and monitoring state
-    let exit_detector = chimera_operator::monitoring::ExitDetector::new()
-        .with_db(db_pool.clone());
+    let exit_detector = chimera_operator::monitoring::ExitDetector::new().with_db(db_pool.clone());
     let exit_detector = Arc::new(exit_detector);
 
     // Spawn metrics update task
@@ -2110,22 +2119,34 @@ async fn main() -> anyhow::Result<()> {
 
         let polling_config = chimera_operator::monitoring::PollingConfig {
             interval_secs,
-            tiered_polling_enabled: config.monitoring.as_ref()
+            tiered_polling_enabled: config
+                .monitoring
+                .as_ref()
                 .map(|m| m.tiered_polling_enabled)
                 .unwrap_or(true),
-            high_conviction_interval_secs: config.monitoring.as_ref()
+            high_conviction_interval_secs: config
+                .monitoring
+                .as_ref()
                 .and_then(|m| m.tiered_polling.as_ref())
                 .map(|t| t.high_conviction_interval_secs),
-            regular_conviction_interval_secs: config.monitoring.as_ref()
+            regular_conviction_interval_secs: config
+                .monitoring
+                .as_ref()
                 .and_then(|m| m.tiered_polling.as_ref())
                 .map(|t| t.regular_conviction_interval_secs),
-            emerging_conviction_interval_secs: config.monitoring.as_ref()
+            emerging_conviction_interval_secs: config
+                .monitoring
+                .as_ref()
                 .and_then(|m| m.tiered_polling.as_ref())
                 .map(|t| t.emerging_conviction_interval_secs),
-            high_conviction_wqs_threshold: config.monitoring.as_ref()
+            high_conviction_wqs_threshold: config
+                .monitoring
+                .as_ref()
                 .and_then(|m| m.tiered_polling.as_ref())
                 .map(|t| t.high_conviction_wqs_threshold),
-            regular_conviction_wqs_threshold: config.monitoring.as_ref()
+            regular_conviction_wqs_threshold: config
+                .monitoring
+                .as_ref()
                 .and_then(|m| m.tiered_polling.as_ref())
                 .map(|t| t.regular_conviction_wqs_threshold),
             batch_size,
@@ -2235,7 +2256,8 @@ async fn main() -> anyhow::Result<()> {
         let helius_client = chimera_operator::monitoring::helius::HeliusClient::new(
             helius_api_key.clone(),
             token_fetcher.get_metadata_cache(),
-        ).map_err(|e| anyhow::anyhow!("Failed to create Helius client: {}", e))?;
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create Helius client: {}", e))?;
 
         let laserstream_config = chimera_operator::monitoring::helius_wss::LaserStreamConfig {
             websocket_url: config
@@ -2243,21 +2265,20 @@ async fn main() -> anyhow::Result<()> {
                 .as_ref()
                 .and_then(|m| m.helius_websocket_url.clone())
                 .unwrap_or_else(|| {
-                    format!(
-                        "wss://mainnet.helius-rpc.com/?api-key={}",
-                        helius_api_key
-                    )
+                    format!("wss://mainnet.helius-rpc.com/?api-key={}", helius_api_key)
                 }),
             reconnect: config
                 .monitoring
                 .as_ref()
                 .and_then(|m| m.websocket_reconnect.as_ref())
-                .map(|ws_reconnect| chimera_operator::monitoring::helius_wss::ReconnectConfig {
-                    initial_backoff_secs: ws_reconnect.initial_backoff_secs,
-                    max_backoff_secs: ws_reconnect.max_backoff_secs,
-                    backoff_multiplier: ws_reconnect.backoff_multiplier,
-                    max_attempts: ws_reconnect.max_attempts,
-                })
+                .map(
+                    |ws_reconnect| chimera_operator::monitoring::helius_wss::ReconnectConfig {
+                        initial_backoff_secs: ws_reconnect.initial_backoff_secs,
+                        max_backoff_secs: ws_reconnect.max_backoff_secs,
+                        backoff_multiplier: ws_reconnect.backoff_multiplier,
+                        max_attempts: ws_reconnect.max_attempts,
+                    },
+                )
                 .unwrap_or_else(chimera_operator::monitoring::helius_wss::ReconnectConfig::default),
             health_timeout_secs: config
                 .monitoring
@@ -2291,7 +2312,9 @@ async fn main() -> anyhow::Result<()> {
 
         tracing::info!("✓ LaserStream WebSocket client started");
     } else {
-        tracing::info!("LaserStream WebSocket disabled in config, relying on webhooks + RPC polling");
+        tracing::info!(
+            "LaserStream WebSocket disabled in config, relying on webhooks + RPC polling"
+        );
     }
 
     // Spawn market regime price history update task (every 5 minutes)
@@ -2316,10 +2339,9 @@ async fn main() -> anyhow::Result<()> {
         if let Ok(scavenger_enabled) = std::env::var("RENT_SCAVENGER_ENABLED") {
             if scavenger_enabled == "true" || scavenger_enabled == "1" {
                 use chimera_operator::engine::transaction_builder::load_wallet_keypair;
-                
-                
+
                 let rpc_url = config.rpc.primary_url.clone();
-                
+
                 match vault::load_secrets_with_fallback()
                     .ok()
                     .and_then(|s| load_wallet_keypair(&s).ok())
@@ -2343,7 +2365,10 @@ async fn main() -> anyhow::Result<()> {
 
                         // Register with the shared registry so rent-scavenger
                         // metrics are actually scraped at /metrics.
-                        let rent_metrics = Arc::new(chimera_operator::metrics::RentScavengerMetrics::new(metrics_state.registry()));
+                        let rent_metrics =
+                            Arc::new(chimera_operator::metrics::RentScavengerMetrics::new(
+                                metrics_state.registry(),
+                            ));
                         // Use the configured interval (RENT_SCAVENGER_INTERVAL_SECS),
                         // not a hardcoded 6-hour ticker.
                         let scavenger_interval_secs = rent_scavenger_config.interval_secs;
@@ -2360,7 +2385,9 @@ async fn main() -> anyhow::Result<()> {
                         let circuit_breaker_clone = circuit_breaker.clone();
 
                         tokio::spawn(async move {
-                            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(scavenger_interval_secs));
+                            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+                                scavenger_interval_secs,
+                            ));
 
                             loop {
                                 tokio::select! {
@@ -2400,7 +2427,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Stale trade reaper: cancel PENDING/QUEUED trades older than threshold
-    let stale_trade_max_age = config.monitoring.as_ref()
+    let stale_trade_max_age = config
+        .monitoring
+        .as_ref()
         .map(|m| m.stale_trade_reaper_minutes)
         .unwrap_or(30);
     if stale_trade_max_age > 0 {
@@ -2409,7 +2438,10 @@ async fn main() -> anyhow::Result<()> {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // Every 5 minutes
             loop {
                 interval.tick().await;
-                match stale_trades_db.cancel_stale_trades(stale_trade_max_age).await {
+                match stale_trades_db
+                    .cancel_stale_trades(stale_trade_max_age)
+                    .await
+                {
                     Ok(count) if count > 0 => {
                         tracing::info!("Stale trade reaper cancelled {} stale trades", count);
                     }
@@ -2420,7 +2452,10 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }));
-        tracing::info!(max_age_minutes = stale_trade_max_age, "Stale trade reaper started");
+        tracing::info!(
+            max_age_minutes = stale_trade_max_age,
+            "Stale trade reaper started"
+        );
     } else {
         tracing::info!("Stale trade reaper disabled (stale_trade_reaper_minutes = 0)");
     }
@@ -2827,7 +2862,10 @@ async fn main() -> anyhow::Result<()> {
         // State-changing operations — protected with bearer auth (these were
         // previously exposed on the unauthenticated public router: retrying a
         // dead-lettered trade can flip it back into the trading queue).
-        .route("/incidents/dead-letter/:trade_uuid/retry", post(retry_dead_letter_item))
+        .route(
+            "/incidents/dead-letter/:trade_uuid/retry",
+            post(retry_dead_letter_item),
+        )
         .route("/scout/run", post(trigger_scout_run))
         .route("/debug/backtest-smoke", post(debug_backtest_smoke))
         .route(
@@ -2973,13 +3011,19 @@ async fn main() -> anyhow::Result<()> {
         let decision_recorder = api_state.decision_recorder.clone();
         let total_capital_sol = {
             let cfg = api_state.config.read().await;
-            cfg.position_sizing.total_capital_sol
+            cfg.position_sizing
+                .total_capital_sol
                 .to_f64()
                 .unwrap_or(0.0)
                 .max(1.0)
         };
         let mut refresh_interval = tokio::time::interval(std::time::Duration::from_secs(
-            api_state.config.read().await.profitability_gate.refresh_interval_seconds,
+            api_state
+                .config
+                .read()
+                .await
+                .profitability_gate
+                .refresh_interval_seconds,
         ));
         task_handles.push(tokio::spawn(async move {
             loop {
@@ -2987,13 +3031,18 @@ async fn main() -> anyhow::Result<()> {
                 let pg_pool = match db_pool.pool() {
                     chimera_operator::db_abstraction::DbPool::PostgreSQL(p) => p,
                 };
-                match refresh_verdict(&pg_pool, &run_id, &decision_recorder, total_capital_sol).await {
+                match refresh_verdict(&pg_pool, &run_id, &decision_recorder, total_capital_sol)
+                    .await
+                {
                     Ok(Some(new_verdict)) => {
                         let old_verdict = {
                             let mut cache = verdict_cache.write().await;
                             std::mem::replace(&mut *cache, Some(new_verdict.clone()))
                         };
-                        if old_verdict.is_none() || old_verdict.as_ref().map(|v| &v.verdict) != Some(&new_verdict.verdict) {
+                        if old_verdict.is_none()
+                            || old_verdict.as_ref().map(|v| &v.verdict)
+                                != Some(&new_verdict.verdict)
+                        {
                             tracing::warn!(
                                 verdict = %new_verdict.verdict,
                                 from = old_verdict.map(|v| v.verdict),
@@ -3017,7 +3066,12 @@ async fn main() -> anyhow::Result<()> {
         }));
         tracing::info!(
             "Profitability verdict refresh task spawned ({}s interval, enabled: {})",
-            api_state.config.read().await.profitability_gate.refresh_interval_seconds,
+            api_state
+                .config
+                .read()
+                .await
+                .profitability_gate
+                .refresh_interval_seconds,
             api_state.config.read().await.profitability_gate.enabled
         );
     } else {
@@ -3040,9 +3094,8 @@ async fn main() -> anyhow::Result<()> {
     // realistic offset. Both are shared with SelectionService below.
     let latency_tracker = Arc::new(chimera_operator::engine::LatencyTracker::new(2048));
     let shadow_quote_client = {
-        let rpc = solana_client::nonblocking::rpc_client::RpcClient::new(
-            config.rpc.primary_url.clone(),
-        );
+        let rpc =
+            solana_client::nonblocking::rpc_client::RpcClient::new(config.rpc.primary_url.clone());
         chimera_operator::engine::transaction_builder::TransactionBuilder::new(
             Arc::new(rpc),
             Arc::new(config.clone()),
@@ -3194,20 +3247,21 @@ async fn main() -> anyhow::Result<()> {
     // Entry confirmation: single-wallet unproven BUY signals are deferred and
     // admitted only if the whale's entry price holds for the confirmation
     // window (see engine::entry_confirmation). Env-tunable.
-    let entry_confirmation_config = chimera_operator::engine::entry_confirmation::EntryConfirmationConfig {
-        enabled: std::env::var("CHIMERA_ENTRY_CONFIRMATION__ENABLED")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(true),
-        wait_secs: std::env::var("CHIMERA_ENTRY_CONFIRMATION__WAIT_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(300),
-        max_drawdown_pct: std::env::var("CHIMERA_ENTRY_CONFIRMATION__MAX_DRAWDOWN_PCT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(rust_decimal::Decimal::new(3, 0)),
-    };
+    let entry_confirmation_config =
+        chimera_operator::engine::entry_confirmation::EntryConfirmationConfig {
+            enabled: std::env::var("CHIMERA_ENTRY_CONFIRMATION__ENABLED")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(true),
+            wait_secs: std::env::var("CHIMERA_ENTRY_CONFIRMATION__WAIT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
+            max_drawdown_pct: std::env::var("CHIMERA_ENTRY_CONFIRMATION__MAX_DRAWDOWN_PCT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(rust_decimal::Decimal::new(3, 0)),
+        };
     let entry_confirmation = Arc::new(
         chimera_operator::engine::entry_confirmation::EntryConfirmationManager::new(
             entry_confirmation_config,
@@ -3464,13 +3518,13 @@ async fn main() -> anyhow::Result<()> {
             }
         };
         if let Err(e) = axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(async move {
-                shutdown_token.cancelled().await;
-            })
-            .await
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            shutdown_token.cancelled().await;
+        })
+        .await
         {
             tracing::error!(error = %e, "Server exited with error");
         }
@@ -3498,7 +3552,10 @@ async fn main() -> anyhow::Result<()> {
         use chimera_operator::db_abstraction::DbPool;
         if let DbPool::PostgreSQL(pg_pool) = db_pool.pool() {
             let run_id = format!("v{}", env!("CARGO_PKG_VERSION"));
-            if let Err(e) = toxic_flow_detector.persist_to_database(&pg_pool, &run_id).await {
+            if let Err(e) = toxic_flow_detector
+                .persist_to_database(&pg_pool, &run_id)
+                .await
+            {
                 tracing::warn!(error = %e, "Final toxic wallet persist failed on shutdown");
             } else {
                 tracing::info!("Toxic wallet state persisted on shutdown");
@@ -3511,7 +3568,10 @@ async fn main() -> anyhow::Result<()> {
         use chimera_operator::db_abstraction::DbPool;
         if let DbPool::PostgreSQL(pg_pool) = db_pool.pool() {
             let run_id = format!("v{}", env!("CARGO_PKG_VERSION"));
-            if let Err(e) = rejection_mute_detector.persist_to_database(&pg_pool, &run_id).await {
+            if let Err(e) = rejection_mute_detector
+                .persist_to_database(&pg_pool, &run_id)
+                .await
+            {
                 tracing::warn!(error = %e, "Final muted-wallet persist failed on shutdown");
             }
         }
@@ -3847,7 +3907,10 @@ mod tests {
         // Defaults must be safe: disabled unless explicitly opted in, sensible
         // WQS floor (60 = "regular" conviction), 7-day TTL.
         let m = chimera_operator::config::MonitoringConfig::default();
-        assert!(!m.auto_promote_enabled, "auto_promote must default to false");
+        assert!(
+            !m.auto_promote_enabled,
+            "auto_promote must default to false"
+        );
         assert_eq!(m.auto_promote_min_wqs, 60.0);
         assert_eq!(m.auto_promote_ttl_hours, 168);
         assert_eq!(m.auto_promote_max_age_days, 7);
@@ -3857,14 +3920,18 @@ mod tests {
     #[test]
     fn test_wallet_boost_config_defaults() {
         let m = chimera_operator::config::MonitoringConfig::default();
-        assert!(!m.wallet_boost_enabled, "wallet_boost must default to false");
+        assert!(
+            !m.wallet_boost_enabled,
+            "wallet_boost must default to false"
+        );
         assert_eq!(m.wallet_boost_min_sample, 15);
         assert_eq!(m.wallet_boost_window_trades, 20);
         assert_eq!(m.wallet_boost_window_days, 30);
         assert_eq!(m.wallet_boost_min_winrate, 0.40);
         assert_eq!(m.wallet_boost_recency_days, 7);
         assert_eq!(m.wallet_boost_size_sol, rust_decimal::Decimal::new(50, 2)); // 0.50
-        assert_eq!(m.wallet_boost_min_net_sol, rust_decimal::Decimal::new(1, 2)); // 0.01
+        assert_eq!(m.wallet_boost_min_net_sol, rust_decimal::Decimal::new(1, 2));
+        // 0.01
     }
 
     #[test]

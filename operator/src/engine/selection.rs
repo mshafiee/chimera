@@ -140,6 +140,15 @@ pub struct SelectionConfig {
     pub token_velocity_gate_enabled: bool,
     pub token_min_liquidity_velocity: f64,
     pub token_max_curve_completion: f64,
+    /// Smart-money cluster gate (2026-08-07): a single-wallet signal may also
+    /// pass the consensus-OR-proven gate when >= `cluster_min_profitable_wallets`
+    /// statistically-profitable wallets (t-stat > threshold, see
+    /// `wallet_tstat_*`) have BUY signals on the same token within the cluster
+    /// window (12h). Research: "10+ smart money wallets buying the same token
+    /// within 48 hours indicates coordinated conviction" (Nansen); wallet
+    /// selection is the dominant copier-profitability factor (arxiv 2601.08641).
+    pub cluster_gate_enabled: bool,
+    pub cluster_min_profitable_wallets: usize,
 }
 
 impl SelectionConfig {
@@ -178,6 +187,8 @@ impl SelectionConfig {
         hasher.update(u8::from(self.token_velocity_gate_enabled).to_le_bytes());
         hasher.update(self.token_min_liquidity_velocity.to_le_bytes());
         hasher.update(self.token_max_curve_completion.to_le_bytes());
+        hasher.update(u8::from(self.cluster_gate_enabled).to_le_bytes());
+        hasher.update((self.cluster_min_profitable_wallets as u64).to_le_bytes());
         hex::encode(&hasher.finalize()[..8])
     }
 }
@@ -519,12 +530,7 @@ impl SelectionService {
                     reason = %reason,
                     "selection: SELL rejected by gate"
                 );
-                return BuyDecision::rejected(
-                    req,
-                    &self.config_hash,
-                    "UNKNOWN_WALLET",
-                    reason,
-                )
+                return BuyDecision::rejected(req, &self.config_hash, "UNKNOWN_WALLET", reason);
             }
             Err(e) => {
                 let reason = format!("DB error fetching wallet: {}", e);
@@ -538,12 +544,7 @@ impl SelectionService {
                     error = %e,
                     "selection: SELL rejected by gate"
                 );
-                return BuyDecision::rejected(
-                    req,
-                    &self.config_hash,
-                    "WALLET_LOOKUP_ERROR",
-                    reason,
-                )
+                return BuyDecision::rejected(req, &self.config_hash, "WALLET_LOOKUP_ERROR", reason);
             }
         };
         if wallet.status != "ACTIVE" {
@@ -558,12 +559,7 @@ impl SelectionService {
                 wallet_status = %wallet.status,
                 "selection: SELL rejected by gate"
             );
-            return BuyDecision::rejected(
-                req,
-                &self.config_hash,
-                "WALLET_NOT_ACTIVE",
-                reason,
-            );
+            return BuyDecision::rejected(req, &self.config_hash, "WALLET_NOT_ACTIVE", reason);
         }
 
         // 2. Only exit if we actually hold an active position for this token.
@@ -584,12 +580,7 @@ impl SelectionService {
                     reason = %reason,
                     "selection: SELL rejected by gate"
                 );
-                return BuyDecision::rejected(
-                    req,
-                    &self.config_hash,
-                    "NO_ACTIVE_POSITION",
-                    reason,
-                )
+                return BuyDecision::rejected(req, &self.config_hash, "NO_ACTIVE_POSITION", reason);
             }
             Err(e) => {
                 let reason = format!("Position lookup failed: {}", e);
@@ -608,7 +599,7 @@ impl SelectionService {
                     &self.config_hash,
                     "POSITION_LOOKUP_ERROR",
                     reason,
-                )
+                );
             }
         }
 
@@ -616,7 +607,8 @@ impl SelectionService {
         // Apply exit_fraction so a partial exit is recorded at the size that
         // will actually be sold, not the full source amount.
         let exit_fraction = req.exit_fraction.unwrap_or(Decimal::ONE);
-        let size_sol = Some((req.source_amount_sol * exit_fraction).min(self.config.max_position_sol));
+        let size_sol =
+            Some((req.source_amount_sol * exit_fraction).min(self.config.max_position_sol));
         tracing::debug!(
             ingress = ?req.ingress,
             decision = "SELL",
@@ -677,12 +669,7 @@ impl SelectionService {
                 reason = %reason,
                 "selection: BUY rejected by gate"
             );
-            return BuyDecision::rejected(
-                req,
-                &self.config_hash,
-                "INVALID_TOKEN_ADDRESS",
-                reason,
-            );
+            return BuyDecision::rejected(req, &self.config_hash, "INVALID_TOKEN_ADDRESS", reason);
         }
 
         // ── 1. Wallet fetch + ACTIVE status gate ────────────────────────────
@@ -699,12 +686,7 @@ impl SelectionService {
                     reason = %reason,
                     "selection: BUY rejected by gate"
                 );
-                return BuyDecision::rejected(
-                    req,
-                    &self.config_hash,
-                    "UNKNOWN_WALLET",
-                    reason,
-                )
+                return BuyDecision::rejected(req, &self.config_hash, "UNKNOWN_WALLET", reason);
             }
             Err(e) => {
                 let reason = format!("DB error fetching wallet: {}", e);
@@ -718,12 +700,7 @@ impl SelectionService {
                     error = %e,
                     "selection: BUY rejected by gate"
                 );
-                return BuyDecision::rejected(
-                    req,
-                    &self.config_hash,
-                    "WALLET_LOOKUP_ERROR",
-                    reason,
-                )
+                return BuyDecision::rejected(req, &self.config_hash, "WALLET_LOOKUP_ERROR", reason);
             }
         };
         if wallet.status != "ACTIVE" {
@@ -738,12 +715,7 @@ impl SelectionService {
                 wallet_status = %wallet.status,
                 "selection: BUY rejected by gate"
             );
-            return BuyDecision::rejected(
-                req,
-                &self.config_hash,
-                "WALLET_NOT_ACTIVE",
-                reason,
-            );
+            return BuyDecision::rejected(req, &self.config_hash, "WALLET_NOT_ACTIVE", reason);
         }
 
         // B3: Toxic-wallet gate — reject signals from wallets flagged toxic.
@@ -760,12 +732,7 @@ impl SelectionService {
                     reason = %reason,
                     "selection: BUY rejected by gate"
                 );
-                return BuyDecision::rejected(
-                    req,
-                    &self.config_hash,
-                    "TOXIC_WALLET",
-                    reason,
-                );
+                return BuyDecision::rejected(req, &self.config_hash, "TOXIC_WALLET", reason);
             }
         }
 
@@ -782,12 +749,7 @@ impl SelectionService {
                     rejection_code = "WALLET_MUTED",
                     "selection: BUY rejected by rejection-mute gate"
                 );
-                return BuyDecision::rejected(
-                    req,
-                    &self.config_hash,
-                    "WALLET_MUTED",
-                    reason,
-                );
+                return BuyDecision::rejected(req, &self.config_hash, "WALLET_MUTED", reason);
             }
         }
 
@@ -814,12 +776,7 @@ impl SelectionService {
                 min_wqs = min_wqs,
                 "selection: BUY rejected by gate"
             );
-            return BuyDecision::rejected(
-                req,
-                &self.config_hash,
-                "WQS_TOO_LOW",
-                reason,
-            );
+            return BuyDecision::rejected(req, &self.config_hash, "WQS_TOO_LOW", reason);
         }
         let is_pumpfun = is_pumpfun_token(&req.token_address);
         let strategy = if wallet_wqs >= 80.0 || is_pumpfun {
@@ -842,12 +799,7 @@ impl SelectionService {
                 is_pumpfun = is_pumpfun,
                 "selection: BUY rejected by gate"
             );
-            return BuyDecision::rejected(
-                req,
-                &self.config_hash,
-                "NON_SPECULATIVE_TOKEN",
-                reason,
-            );
+            return BuyDecision::rejected(req, &self.config_hash, "NON_SPECULATIVE_TOKEN", reason);
         }
         let is_pumpfun = is_pumpfun_token(&req.token_address); // computed above for strategy routing
         if is_pumpfun && !self.config.allow_graduated_pumpfun {
@@ -864,12 +816,7 @@ impl SelectionService {
                 allow_graduated_pumpfun = self.config.allow_graduated_pumpfun,
                 "selection: BUY rejected by gate"
             );
-            return BuyDecision::rejected(
-                req,
-                &self.config_hash,
-                "PUMPFUN_BONDING_CURVE",
-                reason,
-            );
+            return BuyDecision::rejected(req, &self.config_hash, "PUMPFUN_BONDING_CURVE", reason);
         }
 
         // ── 4. Token fast_check ─────────────────────────────────────────────
@@ -957,12 +904,7 @@ impl SelectionService {
                         is_pumpfun = is_pumpfun,
                         "selection: BUY rejected by gate"
                     );
-                    return BuyDecision::rejected(
-                        req,
-                        &self.config_hash,
-                        "TOKEN_TOO_NEW",
-                        reason,
-                    );
+                    return BuyDecision::rejected(req, &self.config_hash, "TOKEN_TOO_NEW", reason);
                 }
                 None => {
                     // Unknown age — policy: reject SPEAR, allow SHIELD.
@@ -1070,9 +1012,24 @@ impl SelectionService {
         // consensus for subsequent signals.
         let mut consensus_wallet_count: Option<usize> = None;
         let is_consensus = if let Some(ref aggregator) = self.signal_aggregator {
-            let count = aggregator.peek_consensus_wallet_count(&req.token_address).await;
+            let count = aggregator
+                .peek_consensus_wallet_count(&req.token_address)
+                .await;
             consensus_wallet_count = Some(count.max(1));
             count >= 2
+        } else {
+            false
+        };
+
+        // Smart-money cluster: distinct statistically-profitable wallets with
+        // BUY signals on this token within the (12h) cluster window.
+        let mut profitable_cluster_count: Option<usize> = None;
+        let is_smart_money_cluster = if let Some(ref aggregator) = self.signal_aggregator {
+            let count = aggregator
+                .peek_profitable_cluster_count(&req.token_address)
+                .await;
+            profitable_cluster_count = Some(count);
+            count >= self.config.cluster_min_profitable_wallets
         } else {
             false
         };
@@ -1088,12 +1045,14 @@ impl SelectionService {
         if !bypass_consensus_proven
             && self.config.require_consensus_or_proven
             && !is_consensus
+            && !is_smart_money_cluster
             && strategy != Strategy::Exit
         {
             let proven = self.wallet_is_proven(&req.wallet_address).await;
             if !proven {
                 let reason = format!(
-                    "Single-wallet signal from unproven wallet — requires consensus (≥2 wallets) or ≥{} closed copy-trades{}",
+                    "Single-wallet signal from unproven wallet — requires consensus (≥2 wallets), smart-money cluster (≥{} profitable wallets), or ≥{} closed copy-trades{}",
+                    self.config.cluster_min_profitable_wallets,
                     self.config.min_proven_trades,
                     if self.config.require_proven_positive_pnl {
                         " with positive 30d copy PnL"
@@ -1110,6 +1069,8 @@ impl SelectionService {
                     reason = %reason,
                     strategy = ?strategy,
                     is_consensus,
+                    is_smart_money_cluster,
+                    profitable_cluster_count,
                     "selection: BUY rejected by gate"
                 );
                 return BuyDecision::rejected(
@@ -1241,8 +1202,9 @@ impl SelectionService {
                             reason,
                         );
                     }
-                    if let Ok(swap_count) =
-                        parser.get_bonding_curve_swap_count(&req.token_address, 1000).await
+                    if let Ok(swap_count) = parser
+                        .get_bonding_curve_swap_count(&req.token_address, 1000)
+                        .await
                     {
                         let velocity = curve.liquidity_velocity(swap_count);
                         if velocity < self.config.token_min_liquidity_velocity {
@@ -1289,6 +1251,17 @@ impl SelectionService {
             liquidity_usd,
             token_age_hours,
         );
+        // Smart-money cluster bonus: a ≥N-wallet profitable cluster is a
+        // research-backed conviction signal — small quality boost so cluster
+        // signals clear tighter quality thresholds than lone signals.
+        let quality = if is_smart_money_cluster {
+            SignalQuality {
+                score: (quality.score + 0.05).min(1.0),
+                ..quality
+            }
+        } else {
+            quality
+        };
         let quality_threshold = match strategy {
             Strategy::Shield => self.config.shield_signal_quality_threshold,
             Strategy::Spear => self.config.spear_signal_quality_threshold,
@@ -1313,12 +1286,7 @@ impl SelectionService {
                 consensus_wallet_count = ?consensus_wallet_count,
                 "selection: BUY rejected by gate"
             );
-            return BuyDecision::rejected(
-                req,
-                &self.config_hash,
-                "SIGNAL_QUALITY_TOO_LOW",
-                reason,
-            );
+            return BuyDecision::rejected(req, &self.config_hash, "SIGNAL_QUALITY_TOO_LOW", reason);
         }
 
         // ── 9. Market-regime multiplier ─────────────────────────────────────
@@ -1368,7 +1336,8 @@ impl SelectionService {
             let size = match sizer.calculate_size(factors).await {
                 Ok(s) => s,
                 Err(e) => {
-                    let reason = format!("Position sizer failed (DB error — fail-safe reject): {}", e);
+                    let reason =
+                        format!("Position sizer failed (DB error — fail-safe reject): {}", e);
                     tracing::warn!(
                         ingress = ?req.ingress,
                         decision = "BUY",
@@ -1378,12 +1347,17 @@ impl SelectionService {
                         error = %e,
                         "selection: BUY rejected by gate"
                     );
-                    return BuyDecision::rejected(req, &self.config_hash, "POSITION_SIZER_ERROR", reason);
+                    return BuyDecision::rejected(
+                        req,
+                        &self.config_hash,
+                        "POSITION_SIZER_ERROR",
+                        reason,
+                    );
                 }
             };
             if size.is_zero() {
-                let reason = "Position sizer returned zero (strategy_max below min_size_sol)"
-                    .to_string();
+                let reason =
+                    "Position sizer returned zero (strategy_max below min_size_sol)".to_string();
                 tracing::info!(
                     ingress = ?req.ingress,
                     decision = "BUY",
@@ -1397,19 +1371,16 @@ impl SelectionService {
                     regime_multiplier = %regime_multiplier,
                     "selection: BUY rejected by gate"
                 );
-                return BuyDecision::rejected(
-                    req,
-                    &self.config_hash,
-                    "POSITION_SIZE_ZERO",
-                    reason,
-                );
+                return BuyDecision::rejected(req, &self.config_hash, "POSITION_SIZE_ZERO", reason);
             }
             size
         } else {
             // No sizer configured — fall back to the source amount clamped to
             // the configured capital ceiling. This should not happen in
             // production; logged loudly.
-            tracing::warn!("PositionSizer unavailable; using source amount clamped to max_position_sol");
+            tracing::warn!(
+                "PositionSizer unavailable; using source amount clamped to max_position_sol"
+            );
             req.source_amount_sol.min(self.config.max_position_sol)
         };
 
@@ -1434,7 +1405,7 @@ impl SelectionService {
                         &self.config_hash,
                         "PORTFOLIO_HEAT_LIMIT",
                         reason,
-                    )
+                    );
                 }
                 Ok(true) => {
                     match heat
@@ -1447,10 +1418,8 @@ impl SelectionService {
                         .await
                     {
                         Ok(false) => {
-                            let reason = format!(
-                                "Strategy allocation limit reached for {:?}",
-                                strategy
-                            );
+                            let reason =
+                                format!("Strategy allocation limit reached for {:?}", strategy);
                             tracing::info!(
                                 ingress = ?req.ingress,
                                 decision = "BUY",
@@ -1467,7 +1436,7 @@ impl SelectionService {
                                 &self.config_hash,
                                 "STRATEGY_HEAT_LIMIT",
                                 reason,
-                            )
+                            );
                         }
                         Ok(true) => {}
                         Err(e) => {
@@ -1683,8 +1652,7 @@ impl SelectionService {
             return false;
         }
         let t = if stddev > Decimal::ZERO {
-            let se = stddev
-                / Decimal::from_f64((n as f64).sqrt()).unwrap_or(Decimal::ONE);
+            let se = stddev / Decimal::from_f64((n as f64).sqrt()).unwrap_or(Decimal::ONE);
             (mean / se).to_f64().unwrap_or(0.0)
         } else {
             // Zero variance with positive mean = perfectly consistent.
@@ -1769,28 +1737,37 @@ mod tests {
             token_velocity_gate_enabled: false,
             token_min_liquidity_velocity: 0.10,
             token_max_curve_completion: 0.85,
+            cluster_gate_enabled: true,
+            cluster_min_profitable_wallets: 3,
         };
 
         let mut config2 = config1.clone();
-        assert_eq!(config1.hash(), config2.hash(), "identical configs should hash identically");
+        assert_eq!(
+            config1.hash(),
+            config2.hash(),
+            "identical configs should hash identically"
+        );
 
         config2.allow_graduated_pumpfun = false;
         assert_ne!(
-            config1.hash(), config2.hash(),
+            config1.hash(),
+            config2.hash(),
             "changing allow_graduated_pumpfun should change hash"
         );
 
         config2 = config1.clone();
         config2.min_liquidity_pumpfun_usd = Decimal::from(50000);
         assert_ne!(
-            config1.hash(), config2.hash(),
+            config1.hash(),
+            config2.hash(),
             "changing min_liquidity_pumpfun_usd should change hash"
         );
 
         config2 = config1.clone();
         config2.require_consensus_or_proven = false;
         assert_ne!(
-            config1.hash(), config2.hash(),
+            config1.hash(),
+            config2.hash(),
             "changing require_consensus_or_proven should change hash"
         );
     }

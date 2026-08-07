@@ -18,9 +18,9 @@ use chimera_operator::engine::selection::{
     Ingress, SelectionConfig, SelectionRequest, SelectionService,
 };
 use chimera_operator::engine::MarketRegimeDetector;
+use chimera_operator::models::{Action, Strategy};
 use chimera_operator::monitoring::helius::HeliusClient;
 use chimera_operator::monitoring::signal_aggregator::SignalAggregator;
-use chimera_operator::models::{Action, Strategy};
 use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
 use rust_decimal::Decimal;
 
@@ -88,11 +88,7 @@ async fn insert_closed_trades(
 
 fn build_selection_service(
     db: Arc<dyn Database>,
-) -> (
-    SelectionService,
-    Arc<TokenParser>,
-    Arc<PositionSizer>,
-) {
+) -> (SelectionService, Arc<TokenParser>, Arc<PositionSizer>) {
     let DbPool::PostgreSQL(_pool) = db.pool();
     let token_parser = Arc::new({
         let config = TokenSafetyConfig::default();
@@ -110,9 +106,7 @@ fn build_selection_service(
     let market_regime = Arc::new(MarketRegimeDetector::new(Arc::new(
         chimera_operator::price_cache::PriceCache::new().unwrap(),
     )));
-    let helius = Arc::new(
-        HeliusClient::new("test_key".to_string(), Default::default()).unwrap(),
-    );
+    let helius = Arc::new(HeliusClient::new("test_key".to_string(), Default::default()).unwrap());
     let config = SelectionConfig {
         total_capital_sol: dec("10.0"),
         max_position_sol: dec("5.0"),
@@ -143,6 +137,8 @@ fn build_selection_service(
         token_velocity_gate_enabled: false,
         token_min_liquidity_velocity: 0.10,
         token_max_curve_completion: 0.85,
+        cluster_gate_enabled: true,
+        cluster_min_profitable_wallets: 3,
     };
     let service = SelectionService::new(
         db,
@@ -477,7 +473,14 @@ async fn test_mirror_gate_rejects_negative_token() {
     insert_wallet(&db, &wallet, Some(90.0)).await;
     insert_wallet_shadow(&db, &wallet, &["5.0"; 10]).await; // proven wallet
     let token = "ZEUS1aR7aX8DFFJf5QjWj2ftDDdNTroMNGo8YoQm3Gq";
-    insert_shadow_mirror(&db, token, &["-1.0", "-2.0", "-3.0", "-1.5", "-2.5", "-1.0", "-2.0", "-3.0", "-1.5", "-2.5"]).await;
+    insert_shadow_mirror(
+        &db,
+        token,
+        &[
+            "-1.0", "-2.0", "-3.0", "-1.5", "-2.5", "-1.0", "-2.0", "-3.0", "-1.5", "-2.5",
+        ],
+    )
+    .await;
     let (service, _, _) = build_selection_service(db);
 
     let req = SelectionRequest {
@@ -504,7 +507,14 @@ async fn test_mirror_gate_passes_positive_token() {
     insert_wallet(&db, &wallet, Some(90.0)).await;
     insert_wallet_shadow(&db, &wallet, &["5.0"; 10]).await;
     let token = "CortexFv3fRcLKTgACr7aLqckGh5eP7TP3z9JHoKqMc6";
-    insert_shadow_mirror(&db, token, &["4.0", "5.0", "6.0", "5.5", "4.5", "5.0", "6.5", "4.0", "5.5", "6.0"]).await;
+    insert_shadow_mirror(
+        &db,
+        token,
+        &[
+            "4.0", "5.0", "6.0", "5.5", "4.5", "5.0", "6.5", "4.0", "5.5", "6.0",
+        ],
+    )
+    .await;
     let (service, _, _) = build_selection_service(db);
 
     let req = SelectionRequest {
@@ -599,7 +609,9 @@ async fn test_tstat_wallet_with_zero_mean_rejected() {
     insert_wallet_shadow(
         &db,
         &wallet,
-        &["5.0", "-5.0", "5.0", "-5.0", "5.0", "-5.0", "5.0", "-5.0", "5.0", "-5.0"],
+        &[
+            "5.0", "-5.0", "5.0", "-5.0", "5.0", "-5.0", "5.0", "-5.0", "5.0", "-5.0",
+        ],
     )
     .await;
     let (service, _, _) = build_selection_service(db);

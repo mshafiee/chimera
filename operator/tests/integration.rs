@@ -68,6 +68,9 @@ mod accounting_characterization_tests;
 #[path = "integration/selection_service_tests.rs"]
 mod selection_service_tests;
 
+#[path = "integration/smart_money_cluster_tests.rs"]
+mod smart_money_cluster_tests;
+
 #[path = "integration/parallel_execution_test.rs"]
 mod parallel_execution_test;
 

@@ -4,6 +4,11 @@
 //! - Consensus: Multiple wallets buying same token
 //! - Divergence: Some wallets exiting while others hold
 //! - Clusters: Wallets that trade together
+//! - Smart-money cluster: N statistically-profitable wallets converging on
+//!   the same token within a window (research-backed signal — Nansen:
+//!   "10+ smart money wallets buying the same token within 48 hours =
+//!   coordinated conviction"; arxiv 2601.08641: wallet selection is the
+//!   dominant copier-profitability factor)
 
 use crate::db_abstraction::Database;
 use rust_decimal::prelude::*;
@@ -13,6 +18,29 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::Instant;
 
+/// T-statistic configuration for wallet profitability classification.
+#[derive(Debug, Clone, Copy)]
+pub struct WalletTstatConfig {
+    pub threshold: f64,
+    pub min_samples: i32,
+    pub window_days: i32,
+}
+
+impl Default for WalletTstatConfig {
+    fn default() -> Self {
+        Self {
+            threshold: 1.645,
+            min_samples: 10,
+            window_days: 30,
+        }
+    }
+}
+
+/// Smart-money cluster window: how long a wallet's BUY signal stays relevant
+/// for cluster detection. Longer than the 5-minute consensus window so that
+/// coordinated accumulation over hours is captured (Nansen: 48h window).
+pub const CLUSTER_WINDOW_SECS: u64 = 12 * 3600;
+
 /// Signal aggregator state
 pub struct SignalAggregator {
     #[allow(dead_code)]
@@ -21,6 +49,10 @@ pub struct SignalAggregator {
     recent_signals: Arc<RwLock<HashMap<String, Vec<TokenSignal>>>>,
     /// Wallet clusters (wallets that trade together)
     wallet_clusters: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    /// Cached wallet profitability (t-stat pass/fail) with TTL.
+    profitable_cache: Arc<RwLock<HashMap<String, (bool, Instant)>>>,
+    /// T-stat config for the smart-money cluster signal.
+    tstat_config: WalletTstatConfig,
 }
 
 /// Token signal from a wallet
@@ -47,10 +79,16 @@ pub struct ConsensusSignal {
 
 impl SignalAggregator {
     pub fn new(db: Arc<dyn Database>) -> Self {
+        Self::with_tstat_config(db, WalletTstatConfig::default())
+    }
+
+    pub fn with_tstat_config(db: Arc<dyn Database>, tstat_config: WalletTstatConfig) -> Self {
         Self {
             db,
             recent_signals: Arc::new(RwLock::new(HashMap::new())),
             wallet_clusters: Arc::new(RwLock::new(HashMap::new())),
+            profitable_cache: Arc::new(RwLock::new(HashMap::new())),
+            tstat_config,
         }
     }
 
@@ -86,10 +124,12 @@ impl SignalAggregator {
 
         let mut signals = self.recent_signals.write().await;
 
-        // Clean up old signals (older than 5 minutes)
-        let five_min_ago = Instant::now() - Duration::from_secs(300);
+        // Clean up old signals (older than the cluster window; per-reader
+        // timestamps (5-min consensus, 1h divergence) filter their own
+        // sub-windows, so retaining the longer horizon is safe)
+        let cutoff = Instant::now() - Duration::from_secs(CLUSTER_WINDOW_SECS);
         signals.retain(|_, token_signals| {
-            token_signals.retain(|s| s.timestamp > five_min_ago);
+            token_signals.retain(|s| s.timestamp > cutoff);
             !token_signals.is_empty()
         });
 
@@ -131,6 +171,60 @@ impl SignalAggregator {
     /// Reads from the in-memory cache — no DB query needed.
     pub async fn is_consensus_token(&self, token_address: &str) -> bool {
         self.peek_consensus_wallet_count(token_address).await >= 2
+    }
+
+    /// Number of statistically-profitable (t-stat) wallets with BUY signals on
+    /// this token within the cluster window. Results are cached per wallet
+    /// (1h TTL) so repeated calls don't hammer the DB.
+    pub async fn peek_profitable_cluster_count(&self, token_address: &str) -> usize {
+        let cutoff = Instant::now() - Duration::from_secs(CLUSTER_WINDOW_SECS);
+        let signals = self.recent_signals.read().await;
+        let Some(token_signals) = signals.get(token_address) else {
+            return 0;
+        };
+        let mut seen = std::collections::HashSet::new();
+        for s in token_signals {
+            if s.direction == "BUY"
+                && s.timestamp > cutoff
+                && !seen.contains(&s.wallet_address)
+                && self.wallet_is_profitable_cached(&s.wallet_address).await
+            {
+                seen.insert(s.wallet_address.clone());
+            }
+        }
+        seen.len()
+    }
+
+    /// Cached t-stat profitability classification for a wallet.
+    async fn wallet_is_profitable_cached(&self, wallet_address: &str) -> bool {
+        let one_hour_ago = Instant::now() - Duration::from_secs(3600);
+        {
+            let cache = self.profitable_cache.read().await;
+            if let Some((is_profitable, cached_at)) = cache.get(wallet_address) {
+                if *cached_at > one_hour_ago {
+                    return *is_profitable;
+                }
+            }
+        }
+        let cfg = self.tstat_config;
+        let is_profitable = match self
+            .db
+            .get_wallet_pnl_statistics(wallet_address, cfg.window_days)
+            .await
+        {
+            Ok(Some((sample_count, mean, stderr))) => {
+                sample_count >= cfg.min_samples as i64
+                    && stderr > rust_decimal::Decimal::ZERO
+                    && (mean / stderr)
+                        .to_f64()
+                        .map(|t| t > cfg.threshold)
+                        .unwrap_or(false)
+            }
+            _ => false,
+        };
+        let mut cache = self.profitable_cache.write().await;
+        cache.insert(wallet_address.to_string(), (is_profitable, Instant::now()));
+        is_profitable
     }
 
     /// Read-only consensus estimate: the number of distinct wallets with BUY
