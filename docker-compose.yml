@@ -147,20 +147,7 @@ services:
        # Redis configuration
        - REDIS_ENABLED=${REDIS_ENABLED:-true}
        - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-       # Jupiter API (optional: an INVALID key returns 401 on every request,
-       # fail-closing the honeypot check + price fetches + swap execution.
-       # Observed 2026-08-06: the configured key 401'd 5/5 while keyless
-       # requests returned 200. Keyless works (rate-limited); keep unset
-       # until a valid key is available.)
        - CHIMERA_JUPITER__API_KEY=${JUPITER_API_KEY:-}
-       # Jupiter-via-Tor stopgap (2026-08-06): server IP 216.151.164.105 is
-       # permanently 429'd by lite-api.jup.ag and throttled on api.jup.ag —
-       # every honeypot/price call fails and signals die in DEAD_LETTER.
-       # Tor exit IPs get a fresh anonymous quota (verified 200/200). Only
-       # Jupiter hosts go through the proxy; Helius/Jito/Dune/Telegram/RPC
-       # stay direct. REMOVE both vars once a valid JUPITER_API_KEY exists.
-       - HTTPS_PROXY=http://tor:8118
-       - NO_PROXY=localhost,127.0.0.1,postgres,redis,api.helius.xyz,mainnet.helius-rpc.com,api.dune.com,api.telegram.org,api.dexscreener.com,api.mainnet-beta.solana.com,mainnet.block-engine.jito.wtf,tokyo.mainnet.block-engine.jito.wtf
        # Helius API key (config crate reads CHIMERA_ prefix, not raw HELIUS_API_KEY)
        - CHIMERA_MONITORING__HELIUS_API_KEY=${HELIUS_API_KEY}
        # RPC endpoints: use Helius RPC (reliable from this network) instead of
