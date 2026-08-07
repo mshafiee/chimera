@@ -17,9 +17,18 @@ use crate::error::AppResult;
 
 /// Rejection codes that indicate the wallet fundamentally trades untradeable
 /// assets. These count toward the mute threshold.
+///
+/// `TOKEN_UNSAFE` is deliberately NOT hard (2026-08-07): freeze/mint
+/// authority is a token-level property that is extremely common in the
+/// pump ecosystem, so a wallet trading that class gets ~90% hard-rejection
+/// rates and is muted even though its remaining signals are legitimate
+/// (observed live: top proven signaler FrhLfj81…, t-stat 8.74 over 339
+/// mirror exits, silenced 12:32–18:32 by unsafe-token muting). Each unsafe
+/// signal is still rejected individually by the token-safety gate; the mute
+/// exists to skip expensive checks for wallets whose signals NEVER pass,
+/// not to silence the best signalers.
 const HARD_REJECTION_CODES: &[&str] = &[
     "NON_SPECULATIVE_TOKEN",
-    "TOKEN_UNSAFE",
     "PUMPFUN_INSUFFICIENT_LIQUIDITY",
     "PUMPFUN_BONDING_CURVE",
     "INVALID_TOKEN_ADDRESS",
@@ -272,15 +281,22 @@ mod tests {
         assert!(RejectionMuteDetector::is_hard_rejection(
             "NON_SPECULATIVE_TOKEN"
         ));
-        assert!(RejectionMuteDetector::is_hard_rejection("TOKEN_UNSAFE"));
         assert!(RejectionMuteDetector::is_hard_rejection(
             "PUMPFUN_INSUFFICIENT_LIQUIDITY"
+        ));
+        assert!(RejectionMuteDetector::is_hard_rejection(
+            "PUMPFUN_BONDING_CURVE"
         ));
         assert!(!RejectionMuteDetector::is_hard_rejection(
             "SIGNAL_QUALITY_TOO_LOW"
         ));
         assert!(!RejectionMuteDetector::is_hard_rejection("WQS_TOO_LOW"));
         assert!(!RejectionMuteDetector::is_hard_rejection("WALLET_MUTED"));
+        // Token-level property (freeze/mint authority), not wallet signal
+        // quality — excluding it prevents muting wallets that trade the
+        // (very common) unsafe-token class while their valid signals still
+        // pass (2026-08-07: top signaler muted 6h on this).
+        assert!(!RejectionMuteDetector::is_hard_rejection("TOKEN_UNSAFE"));
     }
 
     #[tokio::test]
@@ -288,7 +304,7 @@ mod tests {
         let det = RejectionMuteDetector::new(test_config());
         // 9 hard rejections, 1 admitted = 90% hard rate, >= min_samples(5), >= threshold(80%)
         for _ in 0..9 {
-            det.record_decision("walletA", false, Some("TOKEN_UNSAFE"))
+            det.record_decision("walletA", false, Some("PUMPFUN_BONDING_CURVE"))
                 .await
                 .unwrap();
         }
@@ -319,7 +335,7 @@ mod tests {
         let det = RejectionMuteDetector::new(test_config()); // threshold = 80%
         // 3 hard, 7 soft = 30% — well below threshold
         for _ in 0..3 {
-            det.record_decision("walletC", false, Some("TOKEN_UNSAFE"))
+            det.record_decision("walletC", false, Some("PUMPFUN_BONDING_CURVE"))
                 .await
                 .unwrap();
         }
@@ -344,7 +360,7 @@ mod tests {
             det.record_decision("walletD", true, None).await.unwrap();
         }
         for _ in 0..7 {
-            det.record_decision("walletD", false, Some("TOKEN_UNSAFE"))
+            det.record_decision("walletD", false, Some("PUMPFUN_BONDING_CURVE"))
                 .await
                 .unwrap();
         }
@@ -360,7 +376,7 @@ mod tests {
         cfg.enabled = false;
         let det = RejectionMuteDetector::new(cfg);
         for _ in 0..10 {
-            det.record_decision("walletE", false, Some("TOKEN_UNSAFE"))
+            det.record_decision("walletE", false, Some("PUMPFUN_BONDING_CURVE"))
                 .await
                 .unwrap();
         }
@@ -375,7 +391,7 @@ mod tests {
         let det = RejectionMuteDetector::new(test_config()); // window=10, threshold=80%, min=5
         // Mute the wallet with 5 hard rejections (100%)
         for _ in 0..5 {
-            det.record_decision("walletF", false, Some("TOKEN_UNSAFE"))
+            det.record_decision("walletF", false, Some("PUMPFUN_BONDING_CURVE"))
                 .await
                 .unwrap();
         }
@@ -393,7 +409,7 @@ mod tests {
         cfg.mute_duration_hours = 0; // expires immediately (0 hours)
         let det = RejectionMuteDetector::new(cfg);
         for _ in 0..5 {
-            det.record_decision("walletG", false, Some("TOKEN_UNSAFE"))
+            det.record_decision("walletG", false, Some("PUMPFUN_BONDING_CURVE"))
                 .await
                 .unwrap();
         }

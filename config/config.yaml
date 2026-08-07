@@ -329,13 +329,20 @@ dune:
   bootstrap_wallets_max: 60  # max distinct wallets per bootstrap run (credit bound)
   bootstrap_roster_enabled: true  # seed new wallets as CANDIDATE (never ACTIVE/REJECTED)
   check_interval_secs: 7200 # shadow quality demote cadence (local DB, 2h)
-  promote_check_interval_secs: 21600  # Dune promote + on-chain audit (6h)
+  # Dune promote + on-chain audit cadence. 1h (was 6h, 2026-08-07) so the
+  # 55+ evidence-rich CANDIDATE wallets seeded by the bootstrap are assessed
+  # and promoted within hours instead of days (Helius rate limit binds the
+  # per-cycle assessment count, not the cadence).
+  promote_check_interval_secs: 3600  # Dune promote + on-chain audit (1h)
   promote_enabled: true     # promote Dune-verified profitable CANDIDATE wallets
   promote_query_id: 8221520 # Dune query: top profitable traders (7d)
   promote_query_id_24h: 8235367 # Dune query: top profitable traders (24h active) — finds wallets trading RIGHT NOW, prioritized over 7d-only wallets
   promote_min_roi: 1.2      # min ROI (net PnL / buy volume) to promote
   promote_max_per_cycle: 10 # max promotions per hourly cycle
-  promote_max_active_total: 60  # Dune-verified promotions take priority above auto-promote cap (50)
+  # Cap on total ACTIVE wallets. Raised 60->90 (2026-08-07): the bootstrap
+  # cohort adds up to 30 t-stat-passing wallets, and the promote cycle must
+  # keep working through the remaining CANDIDATEs.
+  promote_max_active_total: 90  # Dune-verified promotions take priority above auto-promote cap (50)
   # Wallets demoted within this window are ineligible for Dune promotion.
   # Prevents churn: shadow quality demotes on recent 48h signal PnL, Dune
   # re-promotes on historical 7d PnL (observed live: demote 15:32:44,
