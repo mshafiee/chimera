@@ -1476,6 +1476,17 @@ impl SignalProcessor {
                             // B3: Wire trade-close outcome to WalletPerformanceTracker
                             // and ToxicFlowDetector (only on confirmed CLOSED).
                             if final_status == "CLOSED" {
+                                // B3b: Keep the in-memory registry consistent.
+                                // The duplicate-token guard reads
+                                // `token_position_counts`, and a position closed
+                                // in the DB stayed ACTIVE in the registry —
+                                // every re-BUY for the token was then
+                                // DEAD_LETTERed as a duplicate (observed
+                                // 2026-08-08: 9p84TE2Z… closed +12.9% at 01:43,
+                                // re-entries blocked 02:39/03:23/03:33).
+                                if let Some(ref registry) = self.state_registry {
+                                    let _ = registry.update_position_state(&trade_uuid, "CLOSED");
+                                }
                                 let wallet = &signal.payload.wallet_address;
                                 // Query the trade for its net PnL.
                                 let pnl_sol = self
