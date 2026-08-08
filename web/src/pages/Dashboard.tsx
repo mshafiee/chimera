@@ -752,7 +752,7 @@ export function Dashboard() {
         </div>
         {positionsLoading ? (
           <div className="p-6 md:p-8 text-center text-text-muted text-sm">Loading positions...</div>
-        ) : positions.length === 0 ? (
+        ) : activePositions.length === 0 ? (
           <div className="p-6 md:p-8 text-center text-text-muted text-sm">No active positions</div>
         ) : (
           <div className="overflow-x-auto -mx-4 md:mx-0">
@@ -771,7 +771,7 @@ export function Dashboard() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {positions.slice(0, 10).map((position) => (
+              {activePositions.slice(0, 10).map((position) => (
                 <TableRow key={position.trade_uuid}>
                   <TableCell className="text-xs md:text-sm">
                     <div className="font-semibold">
