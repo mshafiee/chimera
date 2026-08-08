@@ -193,26 +193,26 @@ services:
        # only — require fast accumulation (>=0.10 SOL/trade) and reject the
        # late-curve dump zone (completion > 0.85). "Liquidity velocity is the
        # single most informative predictor of graduation" (arxiv 2602.14860).
-        - CHIMERA_SELECTION__TOKEN_VELOCITY_GATE_ENABLED=true
-        - CHIMERA_SELECTION__TOKEN_MIN_LIQUIDITY_VELOCITY=0.10
-        - CHIMERA_SELECTION__TOKEN_MAX_CURVE_COMPLETION=0.85
-        # Whale averaging-down gate (2026-08-08): reject BUYs when the signal
-        # wallet has >= 2 prior buys on the token within 12h and its latest
-        # buy is >= 3% below its first — the whale is catching a falling knife
-        # (both 2026-08-08 big losers were 3rd-4th-cycle entries into -97% tokens).
-        - CHIMERA_SELECTION__AVG_DOWN_ENABLED=true
-        - CHIMERA_SELECTION__AVG_DOWN_WINDOW_HOURS=12
-        - CHIMERA_SELECTION__AVG_DOWN_MIN_BUYS=2
-        - CHIMERA_SELECTION__AVG_DOWN_MIN_DROP_PCT=3
-        # Pump-chase gate (2026-08-08): reject BUYs on tokens up > 10% in 15m
-        # unless multi-wallet consensus/cluster (entered DcdNm2UX at +15.6%/15m
-        # — the pump top — and stopped out 2s later).
-        - CHIMERA_SELECTION__PUMP_CHASE_ENABLED=true
-        - CHIMERA_SELECTION__PUMP_CHASE_MAX_DELTA_PCT=10
-        # Stop-loss re-entry cooldown (2026-08-08): after a >= 5% net loss on a
-        # token, block re-entries for 12h (9p84TE2Z was re-entered 3x after
-        # losses and shadow-closed at -83%).
-        - CHIMERA_SELECTION__SL_COOLDOWN_ENABLED=true
+       - CHIMERA_SELECTION__TOKEN_VELOCITY_GATE_ENABLED=true
+       - CHIMERA_SELECTION__TOKEN_MIN_LIQUIDITY_VELOCITY=0.10
+       - CHIMERA_SELECTION__TOKEN_MAX_CURVE_COMPLETION=0.85
+       # Whale averaging-down gate (2026-08-08): reject BUYs when the signal
+       # wallet has >= 2 prior buys on the token within 12h and its latest
+       # buy is >= 3% below its first — the whale is catching a falling knife
+       # (both 2026-08-08 big losers were 3rd-4th-cycle entries into -97% tokens).
+       - CHIMERA_SELECTION__AVG_DOWN_ENABLED=true
+       - CHIMERA_SELECTION__AVG_DOWN_WINDOW_HOURS=12
+       - CHIMERA_SELECTION__AVG_DOWN_MIN_BUYS=2
+       - CHIMERA_SELECTION__AVG_DOWN_MIN_DROP_PCT=3
+       # Pump-chase gate (2026-08-08): reject BUYs on tokens up > 10% in 15m
+       # unless multi-wallet consensus/cluster (entered DcdNm2UX at +15.6%/15m
+       # — the pump top — and stopped out 2s later).
+       - CHIMERA_SELECTION__PUMP_CHASE_ENABLED=true
+       - CHIMERA_SELECTION__PUMP_CHASE_MAX_DELTA_PCT=10
+       # Stop-loss re-entry cooldown (2026-08-08): after a >= 5% net loss on a
+       # token, block re-entries for 12h (9p84TE2Z was re-entered 3x after
+       # losses and shadow-closed at -83%).
+       - CHIMERA_SELECTION__SL_COOLDOWN_ENABLED=true
         - CHIMERA_SELECTION__SL_COOLDOWN_HOURS=12
         - CHIMERA_SELECTION__SL_COOLDOWN_LOSS_PCT=5
         # Paper trading mode (simulated execution, no real SOL)
