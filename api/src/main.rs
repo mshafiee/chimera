@@ -613,6 +613,53 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(3),
+        // Whale averaging-down gate (2026-08-08): reject BUYs when the signal
+        // wallet has >= 2 prior buys on the token within 12h and its latest
+        // buy is >= 3% below its first — the whale is catching a falling
+        // knife. Verified: both 2026-08-08 big losers (-9.4%, -12.2%) were
+        // entered after the whale's 3rd-4th buy into -83%..-99% tokens.
+        averaging_down_enabled: std::env::var("CHIMERA_SELECTION__AVG_DOWN_ENABLED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(true),
+        averaging_down_window_hours: std::env::var("CHIMERA_SELECTION__AVG_DOWN_WINDOW_HOURS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(12),
+        averaging_down_min_buys: std::env::var("CHIMERA_SELECTION__AVG_DOWN_MIN_BUYS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2),
+        averaging_down_min_drop_pct: std::env::var("CHIMERA_SELECTION__AVG_DOWN_MIN_DROP_PCT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(rust_decimal::Decimal::new(3, 0)), // 3%
+        // Pump-chase gate (2026-08-08): reject BUYs on tokens up > 10% over
+        // 15m unless consensus/cluster. Verified: DcdNm2UX entered at
+        // +15.6%/15m — the pump top — and stopped out 2s later.
+        pump_chase_enabled: std::env::var("CHIMERA_SELECTION__PUMP_CHASE_ENABLED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(true),
+        pump_chase_max_delta_pct: std::env::var("CHIMERA_SELECTION__PUMP_CHASE_MAX_DELTA_PCT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(rust_decimal::Decimal::new(10, 0)), // 10%
+        // Stop-loss re-entry cooldown (2026-08-08): after a >= 5% net loss on
+        // a token, block re-entries for 12h. Verified: 9p84TE2Z re-entered 3x
+        // after losses (-3.7% then -12.2%); shadow closed at -83%.
+        stop_loss_cooldown_enabled: std::env::var("CHIMERA_SELECTION__SL_COOLDOWN_ENABLED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(true),
+        stop_loss_cooldown_hours: std::env::var("CHIMERA_SELECTION__SL_COOLDOWN_HOURS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(12),
+        stop_loss_cooldown_loss_pct: std::env::var("CHIMERA_SELECTION__SL_COOLDOWN_LOSS_PCT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(rust_decimal::Decimal::new(5, 0)), // 5%
     };
     let roster_addresses: Vec<String> = db_pool
         .get_active_wallets()
@@ -1793,7 +1840,13 @@ async fn main() -> anyhow::Result<()> {
         let monitor_pc = price_cache.clone();
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            // 1s tick (2026-08-08): positions younger than FAST_WINDOW_SECS are
+            // checked every tick — instant dumps (0 -> -9% in 2s, verified on
+            // 4nj1oFAt) gapped through the old 5s tick. Steady-state positions
+            // are throttled back to 5s below.
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            const FAST_WINDOW_SECS: i64 = 120;
+            const STEADY_STATE_THROTTLE_SECS: u64 = 5;
             let mut last_checked: std::collections::HashMap<String, std::time::Instant> =
                 std::collections::HashMap::new();
             let mut last_eager_fetch: std::collections::HashMap<String, std::time::Instant> =
@@ -1838,7 +1891,6 @@ async fn main() -> anyhow::Result<()> {
                         }
 
                         for pos in &positions {
-                            last_checked.insert(pos.trade_uuid.clone(), now);
                             monitor_pc.track_token(&pos.token_address);
                         }
 
@@ -1846,6 +1898,26 @@ async fn main() -> anyhow::Result<()> {
                         last_eager_fetch.retain(|token, _| positions.iter().any(|p| &p.token_address == token));
 
                         for pos in positions {
+                            // Early-warning fast window (2026-08-08): positions
+                            // younger than FAST_WINDOW_SECS are checked on every
+                            // 1s tick — instant dumps gapped through the old 5s
+                            // tick (0 -> -9% in 2s on 4nj1oFAt, -10% in 5s on
+                            // 9p84TE2Z). Steady-state positions keep the 5s cadence.
+                            let elapsed_secs = chrono::Utc::now()
+                                .signed_duration_since(pos.entry_time)
+                                .num_seconds();
+                            let since_last = match last_checked.get(&pos.trade_uuid) {
+                                Some(&last) => now.duration_since(last),
+                                None => std::time::Duration::from_secs(0),
+                            };
+                            if elapsed_secs >= FAST_WINDOW_SECS
+                                && since_last
+                                    < std::time::Duration::from_secs(STEADY_STATE_THROTTLE_SECS)
+                            {
+                                continue;
+                            }
+                            last_checked.insert(pos.trade_uuid.clone(), now);
+
                             // Eager-fetch fallback: when there is no cached price
                             // (micro-cap tokens missing from Jupiter's price API),
                             // fetch once instead of skipping the position. Without
@@ -3206,7 +3278,8 @@ async fn main() -> anyhow::Result<()> {
         .with_decision_recorder(decision_recorder.clone())
         .with_shadow_fill_opt(shadow_quote_client.clone(), latency_tracker.clone())
         .with_wallet_performance(wallet_performance_tracker.clone())
-        .with_shadow_trader(shadow_trader.clone()),
+        .with_shadow_trader(shadow_trader.clone())
+        .with_price_cache(price_cache.clone()),
     );
 
     let webhook_state = Arc::new(WebhookState {

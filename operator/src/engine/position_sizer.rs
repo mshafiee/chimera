@@ -323,6 +323,27 @@ impl PositionSizer {
         // Apply hybrid sizing with regime multiplicative (special case - market conditions)
         size = size * boost_multiplier * penalty_multiplier * factors.regime_multiplier;
 
+        // Conviction sizing (2026-08-08): multi-wallet consensus or a proven
+        // wallet (copy-boost target set) gets the conviction multiplier —
+        // larger sizes amortize the near-fixed jito tip + dex fee (~0.005 SOL
+        // round trip ≈ 2% of a 0.25 SOL position). Still bounded below by the
+        // full-Kelly cap and per-strategy max, so conviction cannot exceed
+        // risk limits. 1.0 disables.
+        if self.config.conviction_size_multiplier > Decimal::ONE
+            && (factors.is_consensus || factors.boost_target_sol.is_some())
+        {
+            let pre_conviction_size = size;
+            size *= self.config.conviction_size_multiplier;
+            tracing::debug!(
+                wallet = %factors.wallet_address,
+                strategy = ?factors.strategy,
+                pre_conviction_size = %pre_conviction_size,
+                conviction_size = %size,
+                multiplier = %self.config.conviction_size_multiplier,
+                "Conviction size multiplier applied (consensus or proven wallet)"
+            );
+        }
+
         // When Kelly is active, cap at full Kelly × capital before the strategy_max clamp.
         // Full Kelly already maximises long-term growth; exceeding it guarantees ruin.
         //

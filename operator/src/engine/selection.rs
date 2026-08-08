@@ -15,6 +15,9 @@
 //! 5. Token-age enforcement
 //! 6. Liquidity floor (strategy-specific) + 24h volume (telemetry until B3)
 //! 7. Consensus detection (SignalAggregator)
+//!    7e. Stop-loss re-entry cooldown (block re-buying tokens we just lost on)
+//!    7f. Whale averaging-down gate (block copying a falling-knife buyer)
+//!    7g. Pump-chase gate (block buying the top of a fresh pump)
 //! 8. Signal-quality score
 //! 9. Market-regime multiplier
 //! 10. `PositionSizer` size (Kelly + confidence)
@@ -155,6 +158,31 @@ pub struct SelectionConfig {
     /// selection is the dominant copier-profitability factor (arxiv 2601.08641).
     pub cluster_gate_enabled: bool,
     pub cluster_min_profitable_wallets: usize,
+    /// Whale averaging-down gate (2026-08-08): reject BUYs when the signal
+    /// wallet has >= `avg_down_min_buys` prior buys on the token within
+    /// `avg_down_window_hours` and its latest buy is >= `avg_down_min_drop_pct`
+    /// below its FIRST buy — the whale is averaging into a falling knife.
+    /// Verified on 2026-08-08: both big losers (-9.4%, -12.2%) were entries
+    /// after the whale's 3rd-4th buy into tokens that shadow-closed at
+    /// -83%..-99%. Fresh entries and pyramiding-up whales are unaffected.
+    pub averaging_down_enabled: bool,
+    pub averaging_down_window_hours: i64,
+    pub averaging_down_min_buys: usize,
+    pub averaging_down_min_drop_pct: Decimal,
+    /// Pump-chase gate (2026-08-08): reject BUYs on tokens already up more
+    /// than `pump_chase_max_delta_pct` over the last 15 minutes, unless the
+    /// signal is multi-wallet consensus or a smart-money cluster (those can
+    /// ride pumps with crowd support). Verified: the -2.05% exit on
+    /// DcdNm2UX was entered at +15.6%/15m — the top of a pump.
+    pub pump_chase_enabled: bool,
+    pub pump_chase_max_delta_pct: Decimal,
+    /// Stop-loss re-entry cooldown (2026-08-08): after a closed position on a
+    /// token lost >= `stop_loss_cooldown_loss_pct` of its entry amount, block
+    /// new BUYs on that token for `stop_loss_cooldown_hours`. Verified:
+    /// 9p84TE2Z was re-entered 3x after losses and shadow-closed at -83%.
+    pub stop_loss_cooldown_enabled: bool,
+    pub stop_loss_cooldown_hours: i64,
+    pub stop_loss_cooldown_loss_pct: Decimal,
 }
 
 impl SelectionConfig {
@@ -196,6 +224,15 @@ impl SelectionConfig {
         hasher.update(self.token_max_curve_completion.to_le_bytes());
         hasher.update(u8::from(self.cluster_gate_enabled).to_le_bytes());
         hasher.update((self.cluster_min_profitable_wallets as u64).to_le_bytes());
+        hasher.update(u8::from(self.averaging_down_enabled).to_le_bytes());
+        hasher.update(self.averaging_down_window_hours.to_le_bytes());
+        hasher.update((self.averaging_down_min_buys as u64).to_le_bytes());
+        hasher.update(self.averaging_down_min_drop_pct.to_string().as_bytes());
+        hasher.update(u8::from(self.pump_chase_enabled).to_le_bytes());
+        hasher.update(self.pump_chase_max_delta_pct.to_string().as_bytes());
+        hasher.update(u8::from(self.stop_loss_cooldown_enabled).to_le_bytes());
+        hasher.update(self.stop_loss_cooldown_hours.to_le_bytes());
+        hasher.update(self.stop_loss_cooldown_loss_pct.to_string().as_bytes());
         hex::encode(&hasher.finalize()[..8])
     }
 }
@@ -301,6 +338,9 @@ pub struct SelectionService {
     shadow_trader: Option<Arc<crate::engine::ShadowTrader>>,
     /// Rejection-rate wallet mute detector.
     mute_detector: Option<Arc<crate::engine::rejection_mute::RejectionMuteDetector>>,
+    /// Shared price cache — used by the pump-chase gate (15m price delta).
+    /// Optional: the gate fails open when not wired.
+    price_cache: Option<Arc<crate::price_cache::PriceCache>>,
     config: SelectionConfig,
     config_hash: String,
 }
@@ -334,6 +374,7 @@ impl SelectionService {
             wallet_performance: None,
             shadow_trader: None,
             mute_detector: None,
+            price_cache: None,
             config,
             config_hash,
         }
@@ -417,6 +458,13 @@ impl SelectionService {
         detector: Arc<crate::engine::rejection_mute::RejectionMuteDetector>,
     ) -> Self {
         self.mute_detector = Some(detector);
+        self
+    }
+
+    /// Attach the shared price cache for the pump-chase gate (15m delta).
+    /// The gate fails open (does not reject) when no cache is attached.
+    pub fn with_price_cache(mut self, price_cache: Arc<crate::price_cache::PriceCache>) -> Self {
+        self.price_cache = Some(price_cache);
         self
     }
 
@@ -915,8 +963,7 @@ impl SelectionService {
                     // still filters instant rug pulls). Unproven wallets keep
                     // the full maturity filter.
                     let proven = self.wallet_has_significant_pnl(&req.wallet_address).await;
-                    let effective_min = if proven && self.config.min_token_age_proven_hours > 0.0
-                    {
+                    let effective_min = if proven && self.config.min_token_age_proven_hours > 0.0 {
                         self.config.min_token_age_proven_hours
                     } else {
                         min_age
@@ -1292,6 +1339,180 @@ impl SelectionService {
                         error = %e,
                         "Velocity gate: curve fetch failed — skipping (fail-open)"
                     );
+                }
+            }
+        }
+
+        // ── 7e. Stop-loss re-entry cooldown (2026-08-08) ───────────────────
+        // After losing >= stop_loss_cooldown_loss_pct on a token, block new
+        // BUYs for the cooldown window. Re-buying the next pump cycle of a
+        // dying token was the pattern behind 3 of 9 losses on 2026-08-08
+        // (9p84TE2Z: -3.7%, -12.2% re-entries; shadow closed at -83%).
+        // Applies in every path including the entry-confirmation re-decision.
+        if self.config.stop_loss_cooldown_enabled {
+            match self
+                .db
+                .has_recent_net_loss(
+                    &req.token_address,
+                    self.config.stop_loss_cooldown_hours,
+                    self.config.stop_loss_cooldown_loss_pct,
+                )
+                .await
+            {
+                Ok(true) => {
+                    let reason = format!(
+                        "Token lost >= {:.0}% net within the last {}h — re-entry cooldown active",
+                        self.config.stop_loss_cooldown_loss_pct,
+                        self.config.stop_loss_cooldown_hours
+                    );
+                    tracing::info!(
+                        ingress = ?req.ingress,
+                        decision = "BUY",
+                        token = %req.token_address,
+                        wallet = %req.wallet_address,
+                        rejection_code = "STOP_LOSS_COOLDOWN",
+                        reason = %reason,
+                        cooldown_hours = self.config.stop_loss_cooldown_hours,
+                        loss_threshold_pct = %self.config.stop_loss_cooldown_loss_pct,
+                        "selection: BUY rejected by gate"
+                    );
+                    return BuyDecision::rejected(
+                        req,
+                        &self.config_hash,
+                        "STOP_LOSS_COOLDOWN",
+                        reason,
+                    );
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        token = %req.token_address,
+                        error = %e,
+                        "Re-entry cooldown check failed — failing open"
+                    );
+                }
+            }
+        }
+
+        // ── 7f. Whale averaging-down gate (2026-08-08) ─────────────────────
+        // A wallet whose buys on a token are each lower than the previous is
+        // averaging into a falling knife. Verified: the -9.4% and -12.2%
+        // losers were entered after the whale's 3rd-4th buy into tokens that
+        // shadow-closed at -83%..-99%. Pyramiding-up whales (each buy higher)
+        // are strong signals and pass. Applies in every path.
+        if self.config.averaging_down_enabled {
+            let whale_buys = match self
+                .db
+                .get_whale_buy_prices(
+                    &req.wallet_address,
+                    &req.token_address,
+                    self.config.averaging_down_window_hours,
+                )
+                .await
+            {
+                Ok(buys) => buys,
+                Err(e) => {
+                    tracing::warn!(
+                        wallet = %req.wallet_address,
+                        token = %req.token_address,
+                        error = %e,
+                        "Averaging-down check failed — failing open"
+                    );
+                    Vec::new()
+                }
+            };
+            if is_averaging_down(
+                &whale_buys,
+                self.config.averaging_down_min_buys,
+                self.config.averaging_down_min_drop_pct,
+            ) {
+                let first = whale_buys.first().copied().unwrap_or(Decimal::ZERO);
+                let last = whale_buys.last().copied().unwrap_or(Decimal::ZERO);
+                let drop_pct = if first > Decimal::ZERO {
+                    ((first - last) / first) * Decimal::from(100)
+                } else {
+                    Decimal::ZERO
+                };
+                let reason = format!(
+                    "Whale averaging down: {} prior buys on this token in {}h, latest buy {:.2}% below first — catching a falling knife",
+                    whale_buys.len(),
+                    self.config.averaging_down_window_hours,
+                    drop_pct
+                );
+                tracing::info!(
+                    ingress = ?req.ingress,
+                    decision = "BUY",
+                    token = %req.token_address,
+                    wallet = %req.wallet_address,
+                    rejection_code = "WHALE_AVERAGING_DOWN",
+                    reason = %reason,
+                    prior_buys = whale_buys.len(),
+                    first_buy_price = %first,
+                    latest_buy_price = %last,
+                    drop_pct = %drop_pct,
+                    "selection: BUY rejected by gate"
+                );
+                return BuyDecision::rejected(
+                    req,
+                    &self.config_hash,
+                    "WHALE_AVERAGING_DOWN",
+                    reason,
+                );
+            }
+        }
+
+        // ── 7g. Pump-chase gate (2026-08-08) ───────────────────────────────
+        // Reject BUYs on tokens already up more than the threshold over 15m —
+        // buying the top of a fresh pump. Consensus / smart-money cluster
+        // signals are exempt (crowd support can carry the move). Fail-open
+        // when no price history exists (young tokens). Verified: DcdNm2UX was
+        // entered at +15.6%/15m — the top — and stopped out minutes later.
+        if self.config.pump_chase_enabled && !is_consensus && !is_smart_money_cluster {
+            if let Some(ref price_cache) = self.price_cache {
+                let history = price_cache.price_history_read();
+                if let Some(token_history) = history.get(&req.token_address) {
+                    let fifteen_min_ago = chrono::Utc::now() - chrono::Duration::minutes(15);
+                    let mut price_15m_ago: Option<Decimal> = None;
+                    let mut current_token_price: Option<Decimal> = None;
+                    for (timestamp, price) in token_history.iter().rev() {
+                        if current_token_price.is_none() {
+                            current_token_price = Some(*price);
+                        }
+                        if *timestamp <= fifteen_min_ago && price_15m_ago.is_none() {
+                            price_15m_ago = Some(*price);
+                            break;
+                        }
+                    }
+                    if let (Some(old_price), Some(new_price)) = (price_15m_ago, current_token_price)
+                    {
+                        if old_price > Decimal::ZERO {
+                            let delta_pct =
+                                ((new_price - old_price) / old_price) * Decimal::from(100);
+                            if delta_pct > self.config.pump_chase_max_delta_pct {
+                                let reason = format!(
+                                    "Token up {:.1}% in 15m — buying the top of a fresh pump (max {:.0}%)",
+                                    delta_pct, self.config.pump_chase_max_delta_pct
+                                );
+                                tracing::info!(
+                                    ingress = ?req.ingress,
+                                    decision = "BUY",
+                                    token = %req.token_address,
+                                    wallet = %req.wallet_address,
+                                    rejection_code = "PUMP_CHASE",
+                                    reason = %reason,
+                                    delta_15m_pct = %delta_pct,
+                                    max_delta_pct = %self.config.pump_chase_max_delta_pct,
+                                    "selection: BUY rejected by gate"
+                                );
+                                return BuyDecision::rejected(
+                                    req,
+                                    &self.config_hash,
+                                    "PUMP_CHASE",
+                                    reason,
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1753,10 +1974,101 @@ impl SelectionService {
     }
 }
 
+/// True when the whale's buy sequence shows the averaging-down signature:
+/// at least `min_buys` prior buys, and the LATEST buy at least
+/// `min_drop_pct` below the FIRST — the whale keeps buying into a falling
+/// price. Pyramiding-up sequences (each buy higher) are strong signals and
+/// never rejected. `prices` must be in ascending time order (as returned by
+/// `get_whale_buy_prices`).
+pub fn is_averaging_down(prices: &[Decimal], min_buys: usize, min_drop_pct: Decimal) -> bool {
+    if prices.len() < min_buys || min_buys == 0 {
+        return false;
+    }
+    let Some(first) = prices.first() else {
+        return false;
+    };
+    let Some(latest) = prices.last() else {
+        return false;
+    };
+    if *first <= Decimal::ZERO || *latest <= Decimal::ZERO || min_drop_pct < Decimal::ZERO {
+        return false;
+    }
+    let drop_pct = ((*first - *latest) / *first) * Decimal::from(100);
+    drop_pct >= min_drop_pct
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rust_decimal::Decimal;
+    use std::str::FromStr;
+
+    #[test]
+    fn averaging_down_rejects_falling_knife() {
+        // Whale bought at 1.0, 0.9, 0.8 — each buy lower: catching a falling knife.
+        let prices = vec![
+            Decimal::from_str("1.0").unwrap(),
+            Decimal::from_str("0.9").unwrap(),
+            Decimal::from_str("0.8").unwrap(),
+        ];
+        assert!(
+            is_averaging_down(&prices, 2, Decimal::from(3)),
+            "latest 20% below first with >=2 buys must be flagged"
+        );
+    }
+
+    #[test]
+    fn averaging_down_requires_min_buys() {
+        let prices = vec![
+            Decimal::from_str("1.0").unwrap(),
+            Decimal::from_str("0.5").unwrap(),
+        ];
+        assert!(
+            !is_averaging_down(&prices, 3, Decimal::from(3)),
+            "fewer buys than min_buys must not be flagged"
+        );
+        assert!(
+            is_averaging_down(&prices, 2, Decimal::from(3)),
+            "2 buys with a 50% drop must be flagged"
+        );
+    }
+
+    #[test]
+    fn averaging_down_allows_pyramiding_up() {
+        // Each buy HIGHER — accumulation into strength, never flagged.
+        let prices = vec![
+            Decimal::from_str("1.0").unwrap(),
+            Decimal::from_str("1.1").unwrap(),
+            Decimal::from_str("1.2").unwrap(),
+        ];
+        assert!(
+            !is_averaging_down(&prices, 2, Decimal::from(3)),
+            "pyramiding up is a strong signal, must pass"
+        );
+    }
+
+    #[test]
+    fn averaging_down_ignores_small_drawdowns() {
+        let prices = vec![
+            Decimal::from_str("1.0").unwrap(),
+            Decimal::from_str("0.98").unwrap(),
+        ];
+        assert!(
+            !is_averaging_down(&prices, 2, Decimal::from(3)),
+            "2% drop below the 3% threshold must pass"
+        );
+    }
+
+    #[test]
+    fn averaging_down_guards_bad_input() {
+        assert!(!is_averaging_down(&[], 2, Decimal::from(3)));
+        assert!(!is_averaging_down(&[Decimal::ZERO], 1, Decimal::from(3)));
+        assert!(!is_averaging_down(
+            &[Decimal::ONE, Decimal::from(2)],
+            2,
+            Decimal::from(-3)
+        ));
+    }
 
     #[test]
     fn selection_config_hash_changes_with_pumpfun_fields() {
@@ -1793,6 +2105,15 @@ mod tests {
             token_max_curve_completion: 0.85,
             cluster_gate_enabled: true,
             cluster_min_profitable_wallets: 3,
+            averaging_down_enabled: true,
+            averaging_down_window_hours: 12,
+            averaging_down_min_buys: 2,
+            averaging_down_min_drop_pct: Decimal::new(3, 0),
+            pump_chase_enabled: true,
+            pump_chase_max_delta_pct: Decimal::new(10, 0),
+            stop_loss_cooldown_enabled: true,
+            stop_loss_cooldown_hours: 12,
+            stop_loss_cooldown_loss_pct: Decimal::new(5, 0),
         };
 
         let mut config2 = config1.clone();

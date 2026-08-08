@@ -868,6 +868,30 @@ pub trait Database: Send + Sync {
     /// Get positions with optional state filter (returns API detail type)
     async fn get_positions(&self, state_filter: Option<&str>) -> AppResult<Vec<PositionDetail>>;
 
+    /// Prior whale BUY entries on a token within the window, as USD entry
+    /// prices in ascending time order. Reads `shadow_positions` (every signal
+    /// is shadowed, CANDIDATE included). Drives the whale averaging-down gate
+    /// (2026-08-08): a wallet that keeps buying into a falling price is
+    /// catching a falling knife — reject copying it.
+    async fn get_whale_buy_prices(
+        &self,
+        wallet_address: &str,
+        token_address: &str,
+        window_hours: i64,
+    ) -> AppResult<Vec<rust_decimal::Decimal>>;
+
+    /// True when the token had a closed position within the window whose net
+    /// loss is at least `loss_threshold_pct` of the entry amount. Drives the
+    /// stop-loss re-entry cooldown (2026-08-08): after losing on a token,
+    /// block re-entries for the cooldown window instead of re-buying the
+    /// next pump cycle of a dying token.
+    async fn has_recent_net_loss(
+        &self,
+        token_address: &str,
+        window_hours: i64,
+        loss_threshold_pct: rust_decimal::Decimal,
+    ) -> AppResult<bool>;
+
     /// Get wallets with optional status filter (returns API detail type)
     async fn get_wallets(&self, status_filter: Option<&str>) -> AppResult<Vec<WalletDetail>>;
 

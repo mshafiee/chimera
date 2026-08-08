@@ -2230,6 +2230,13 @@ pub struct PositionSizingConfig {
     /// to low-liquidity windows. Set to 1.0 to disable the reduction.
     #[serde(default = "default_off_hours_size_multiplier")]
     pub off_hours_size_multiplier: Decimal,
+    /// Conviction-size multiplier (2026-08-08): applied to high-conviction
+    /// signals — multi-wallet consensus or a proven wallet (copy-boost
+    /// target set). Larger sizes amortize the near-fixed jito tip + dex fee
+    /// (~0.005 SOL round trip): on 0.25 SOL that is ~2% of capital, halved at
+    /// 0.50 SOL. Still bounded by full-Kelly cap and per-strategy max.
+    #[serde(default = "default_conviction_size_multiplier")]
+    pub conviction_size_multiplier: Decimal,
     /// Conviction-size cap (2026-08-07, Phase 5): cap the final position size
     /// at the 75th percentile of the token's own recent entry sizes (7d),
     /// falling back to `conviction_size_default_cap_sol` when the token has
@@ -2326,6 +2333,10 @@ fn default_off_hours_size_multiplier() -> Decimal {
     dec!(0.5) // 50% of normal size during 02:00–06:00 UTC low-liquidity window
 }
 
+fn default_conviction_size_multiplier() -> Decimal {
+    dec!(1.5) // 150% of normal size for consensus / proven-wallet signals
+}
+
 impl Default for PositionSizingConfig {
     fn default() -> Self {
         Self {
@@ -2341,6 +2352,7 @@ impl Default for PositionSizingConfig {
             total_capital_sol: default_total_capital_sol(),
             kelly_fraction: default_kelly_fraction(),
             off_hours_size_multiplier: default_off_hours_size_multiplier(),
+            conviction_size_multiplier: default_conviction_size_multiplier(),
             conviction_size_cap_enabled: default_conviction_size_cap_enabled(),
             conviction_size_default_cap_sol: default_conviction_size_default_cap_sol(),
         }

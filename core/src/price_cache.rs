@@ -532,6 +532,60 @@ impl PriceCache {
         }
     }
 
+    /// Force-refresh a single token's price (bypassing the "already cached"
+    /// short-circuit in `eager_fetch_token`) and return the fresh USD price.
+    ///
+    /// Used to validate marks before stop-loss exits (2026-08-08): a single
+    /// bad price observation must not stop a position. Returns None when the
+    /// fetch failed (both primary and lite-api fallback) — callers keep the
+    /// cached mark and may still exit, staying fail-safe.
+    pub async fn refresh_price_usd(&self, token_address: &str) -> Option<Decimal> {
+        let tokens = vec![token_address.to_string()];
+        let fetch = async {
+            match self.fetch_prices_jupiter(&tokens, None).await {
+                Ok((prices, decimals_map)) if !prices.is_empty() => {
+                    let _ = self.apply_price_updates(prices, decimals_map);
+                }
+                Ok(_) => {
+                    tracing::warn!(
+                        token = token_address,
+                        "Refresh price fetch returned 0 prices"
+                    );
+                }
+                Err(PriceCacheError::RateLimited) => {
+                    let lite_url = "https://lite-api.jup.ag/price";
+                    match self.fetch_prices_jupiter(&tokens, Some(lite_url)).await {
+                        Ok((prices, decimals_map)) if !prices.is_empty() => {
+                            let _ = self.apply_price_updates(prices, decimals_map);
+                        }
+                        Ok(_) => {
+                            tracing::warn!(
+                                token = token_address,
+                                "Refresh price fetch fallback returned 0 prices"
+                            );
+                        }
+                        Err(fallback_err) => {
+                            tracing::warn!(
+                                token = token_address,
+                                error = %fallback_err,
+                                "Refresh price fetch fallback failed"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        token = token_address,
+                        error = %e,
+                        "Refresh price fetch failed"
+                    );
+                }
+            }
+        };
+        fetch.await;
+        self.get_price_usd(token_address)
+    }
+
     /// Remove token from active tracking
     pub fn untrack_token(&self, token_address: &str) {
         let mut tokens = self.active_tokens.write();

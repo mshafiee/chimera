@@ -443,6 +443,39 @@ impl StopLossManager {
         }
 
         if loss_percent <= stop_loss_threshold {
+            // Mark validation (2026-08-08): a single bad price observation
+            // must not stop a position. Before honoring any stop breach,
+            // force-refresh the price once; if the fresh mark no longer
+            // breaches, hold. Verified: a -13.8% cache mark that was actually
+            // -2.05% (Jupiter quote) stopped a position 2s after entry.
+            if let Some(fresh_usd) = self.price_cache.refresh_price_usd(token_address).await {
+                let fresh_loss = if !entry_price.is_zero() {
+                    ((fresh_usd - entry_price) / entry_price) * dec!(100.0)
+                } else {
+                    loss_percent
+                };
+                if fresh_loss > stop_loss_threshold {
+                    tracing::warn!(
+                        trade_uuid = %trade_uuid,
+                        token_address = token_address,
+                        cached_loss_pct = %loss_percent,
+                        fresh_loss_pct = %fresh_loss,
+                        stop_loss_threshold = %stop_loss_threshold,
+                        "STOP_MARK_REJECTED: fresh quote no longer breaches stop — holding position"
+                    );
+                    return StopLossAction::None;
+                }
+                if fresh_loss > loss_percent {
+                    tracing::warn!(
+                        trade_uuid = %trade_uuid,
+                        token_address = token_address,
+                        cached_loss_pct = %loss_percent,
+                        fresh_loss_pct = %fresh_loss,
+                        "STOP_MARK_DIVERGENT: cached mark worse than fresh quote — exiting on fresh mark"
+                    );
+                }
+            }
+
             if elapsed_secs < self.config.wick_protection_secs as i64 {
                 // Hard stop at -25% always bypasses wick protection — a 25%+ crash
                 // in the first seconds is never "normal entry slippage."

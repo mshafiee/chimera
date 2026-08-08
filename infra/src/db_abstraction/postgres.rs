@@ -4506,6 +4506,58 @@ impl Database for PostgresBackend {
         Ok(positions)
     }
 
+    async fn get_whale_buy_prices(
+        &self,
+        wallet_address: &str,
+        token_address: &str,
+        window_hours: i64,
+    ) -> AppResult<Vec<Decimal>> {
+        let rows = sqlx::query(
+            r#"SELECT entry_price_usd
+               FROM shadow_positions
+               WHERE wallet_address = $1
+                 AND token_address = $2
+                 AND entry_price_usd IS NOT NULL
+                 AND entry_price_usd > 0
+                 AND opened_at > NOW() - (INTERVAL '1 hour' * $3)
+               ORDER BY opened_at ASC"#,
+        )
+        .bind(wallet_address)
+        .bind(token_address)
+        .bind(window_hours)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| row.try_get("entry_price_usd").unwrap_or(Decimal::ZERO))
+            .filter(|p| *p > Decimal::ZERO)
+            .collect())
+    }
+
+    async fn has_recent_net_loss(
+        &self,
+        token_address: &str,
+        window_hours: i64,
+        loss_threshold_pct: Decimal,
+    ) -> AppResult<bool> {
+        let exists: bool = sqlx::query_scalar(
+            r#"SELECT EXISTS(
+                 SELECT 1 FROM positions
+                 WHERE token_address = $1
+                   AND state = 'CLOSED'
+                   AND closed_at > NOW() - (INTERVAL '1 hour' * $2)
+                   AND COALESCE(realized_net_pnl_sol, realized_pnl_sol, 0)
+                       < -entry_amount_sol * $3 / 100
+               )"#,
+        )
+        .bind(token_address)
+        .bind(window_hours)
+        .bind(loss_threshold_pct)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(exists)
+    }
+
     async fn get_wallets(&self, status_filter: Option<&str>) -> AppResult<Vec<WalletDetail>> {
         let rows = match status_filter {
             Some(status) => {

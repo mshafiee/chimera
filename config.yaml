@@ -178,6 +178,7 @@ position_sizing:
   use_kelly_sizing: true   # Kelly Criterion sizing enabled
   total_capital_sol: 10.0  # Total trading capital in SOL (adjust to actual wallet balance)
   off_hours_size_multiplier: 0.5  # 50% position size during 02:00–06:00 UTC (wider spreads, lower liquidity)
+  conviction_size_multiplier: 1.5  # 150% size for consensus / proven-wallet signals (amortizes ~0.005 SOL round-trip fees)
 
 # MEV protection configuration
 mev_protection:
