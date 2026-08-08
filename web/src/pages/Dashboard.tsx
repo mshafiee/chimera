@@ -106,8 +106,17 @@ export function Dashboard() {
     }
   }, [lastMessage, refetchPositions, refetchHealth])
 
-  const positions = positionsData?.positions || []
+  const positions = useMemo(() => positionsData?.positions || [], [positionsData])
   const activePositions = positions.filter((p) => p.state === 'ACTIVE')
+
+  // Recently closed positions (last 24h) shown alongside live positions
+  const recentClosed = useMemo(() => {
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000
+    return positions
+      .filter((p) => p.state === 'CLOSED' && p.closed_at && new Date(p.closed_at).getTime() >= cutoff)
+      .sort((a, b) => (b.closed_at || '').localeCompare(a.closed_at || ''))
+      .slice(0, 5)
+  }, [positions])
 
   // Compute PnL data from actual trades
   const pnlData = useMemo(() => {
@@ -747,13 +756,18 @@ export function Dashboard() {
 
       {/* Live Positions - Mobile Optimized */}
       <Card padding="none">
-        <div className="p-3 md:p-4 border-b border-border">
+        <div className="p-3 md:p-4 border-b border-border flex items-center justify-between gap-2">
           <CardTitle className="text-base md:text-lg">Live Positions</CardTitle>
+          <div className="flex items-center gap-2 text-xs text-text-muted">
+            <span className="text-profit">● {activePositions.length} active</span>
+            <span>·</span>
+            <span>{recentClosed.length} closed 24h</span>
+          </div>
         </div>
         {positionsLoading ? (
           <div className="p-6 md:p-8 text-center text-text-muted text-sm">Loading positions...</div>
-        ) : activePositions.length === 0 ? (
-          <div className="p-6 md:p-8 text-center text-text-muted text-sm">No active positions</div>
+        ) : activePositions.length === 0 && recentClosed.length === 0 ? (
+          <div className="p-6 md:p-8 text-center text-text-muted text-sm">No positions yet</div>
         ) : (
           <div className="overflow-x-auto -mx-4 md:mx-0">
           <div className="inline-block min-w-full align-middle px-4 md:px-0">
@@ -771,6 +785,13 @@ export function Dashboard() {
               </TableRow>
             </TableHeader>
             <TableBody>
+              {activePositions.length > 0 && (
+                <TableRow hoverable={false} className="bg-surface-light/50">
+                  <TableCell colSpan={8} className="px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-shield">
+                    Active ({activePositions.length})
+                  </TableCell>
+                </TableRow>
+              )}
               {activePositions.slice(0, 10).map((position) => (
                 <TableRow key={position.trade_uuid}>
                   <TableCell className="text-xs md:text-sm">
@@ -831,6 +852,81 @@ export function Dashboard() {
                   </TableCell>
                 </TableRow>
               ))}
+              {recentClosed.length > 0 && (
+                <TableRow hoverable={false} className="bg-surface-light/50">
+                  <TableCell colSpan={8} className="px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+                    Recently Closed (24h)
+                  </TableCell>
+                </TableRow>
+              )}
+              {recentClosed.map((position) => {
+                const realizedPnlSol = toNum(position.realized_pnl_sol)
+                const realizedPnlPct = toNum(position.entry_amount_sol) > 0
+                  ? (realizedPnlSol / toNum(position.entry_amount_sol)) * 100
+                  : 0
+                return (
+                  <TableRow key={position.trade_uuid}>
+                    <TableCell className="text-xs md:text-sm">
+                      <div className="font-semibold">
+                        ${position.token_symbol || 'Unknown'}
+                      </div>
+                      <div className="text-xs text-text-muted">
+                        {position.token_address.slice(0, 8)}...
+                      </div>
+                      {/* Show strategy on mobile in token cell */}
+                      <div className="sm:hidden mt-1">
+                        <StrategyBadge strategy={position.strategy} />
+                      </div>
+                    </TableCell>
+                    <TableCell className="hidden sm:table-cell">
+                      <StrategyBadge strategy={position.strategy} />
+                    </TableCell>
+                    <TableCell mono className="text-xs md:text-sm">
+                      {safeToFixed(position.entry_amount_sol, 4)} SOL
+                    </TableCell>
+                    <TableCell mono className="hidden md:table-cell text-xs md:text-sm">
+                      {safeToFixed(position.entry_price, 8)}
+                    </TableCell>
+                    <TableCell mono className="hidden lg:table-cell text-xs md:text-sm">
+                      {position.exit_price !== null && position.exit_price !== undefined && position.exit_price !== ''
+                        ? safeToFixed(position.exit_price, 8)
+                        : '-'}
+                    </TableCell>
+                    <TableCell mono className="text-xs md:text-sm">
+                      {position.realized_pnl_sol !== null && position.realized_pnl_sol !== undefined && position.realized_pnl_sol !== '' ? (
+                        <div className={realizedPnlSol >= 0 ? 'text-profit' : 'text-loss'}>
+                          {realizedPnlSol >= 0 ? '+' : ''}
+                          {safeToFixed(position.realized_pnl_sol, 4)} SOL
+                          <div className={`text-xs ${realizedPnlPct >= 0 ? 'text-profit' : 'text-loss'}`}>
+                            {realizedPnlPct >= 0 ? '+' : ''}
+                            {safeToFixed(realizedPnlPct, 2)}%
+                          </div>
+                        </div>
+                      ) : (
+                        '-'
+                      )}
+                    </TableCell>
+                    <TableCell className="hidden sm:table-cell">
+                      <div className="flex flex-col gap-1">
+                        <StatusBadge status={position.state} />
+                        <span className="text-xs text-text-muted">{timeAgo(position.closed_at)}</span>
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-xs md:text-sm">
+                      {position.exit_tx_signature && (
+                        <a
+                          href={`https://solscan.io/tx/${position.exit_tx_signature}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-shield hover:text-shield-dark"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                        </a>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
             </TableBody>
           </Table>
           </div>
@@ -886,5 +982,18 @@ function formatUptime(seconds: number): string {
     return `${hours}h ${minutes}m`
   }
   return `${minutes}m`
+}
+
+function timeAgo(iso: string | null): string {
+  if (!iso) return ''
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return ''
+  const mins = Math.max(0, Math.floor((Date.now() - then) / 60000))
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  return `${days}d ago`
 }
 
