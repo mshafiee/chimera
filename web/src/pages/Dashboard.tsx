@@ -115,7 +115,6 @@ export function Dashboard() {
     return positions
       .filter((p) => p.state === 'CLOSED' && p.closed_at && new Date(p.closed_at).getTime() >= cutoff)
       .sort((a, b) => (b.closed_at || '').localeCompare(a.closed_at || ''))
-      .slice(0, 5)
   }, [positions])
 
   // Compute PnL data from actual trades
