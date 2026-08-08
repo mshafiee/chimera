@@ -27,8 +27,12 @@ use crate::error::AppResult;
 /// signal is still rejected individually by the token-safety gate; the mute
 /// exists to skip expensive checks for wallets whose signals NEVER pass,
 /// not to silence the best signalers.
+///
+/// `NON_SPECULATIVE_TOKEN` is also NOT hard (2026-08-08): stablecoin/WSOL
+/// buys are portfolio management, not garbage trading — counting them as
+/// wallet-quality failures mutes healthy wallets for no signal-quality
+/// reason (A/B shadow ledger: 5,121 such signals at exactly 0.00% PnL).
 const HARD_REJECTION_CODES: &[&str] = &[
-    "NON_SPECULATIVE_TOKEN",
     "PUMPFUN_INSUFFICIENT_LIQUIDITY",
     "PUMPFUN_BONDING_CURVE",
     "INVALID_TOKEN_ADDRESS",
@@ -278,7 +282,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_hard_rejection_classification() {
-        assert!(RejectionMuteDetector::is_hard_rejection(
+        // Token-class property (stablecoin/WSOL portfolio management) is not
+        // a wallet-quality failure (2026-08-08).
+        assert!(!RejectionMuteDetector::is_hard_rejection(
             "NON_SPECULATIVE_TOKEN"
         ));
         assert!(RejectionMuteDetector::is_hard_rejection(
@@ -320,7 +326,7 @@ mod tests {
         let det = RejectionMuteDetector::new(test_config()); // min_samples = 5
         // Only 4 hard rejections — below min_samples(5)
         for _ in 0..4 {
-            det.record_decision("walletB", false, Some("NON_SPECULATIVE_TOKEN"))
+            det.record_decision("walletB", false, Some("PUMPFUN_BONDING_CURVE"))
                 .await
                 .unwrap();
         }

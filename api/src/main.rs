@@ -1416,6 +1416,39 @@ async fn main() -> anyhow::Result<()> {
                             tracing::warn!(error = %e, "Failed to fetch DLQ items");
                         }
                     }
+
+                    // Retention (2026-08-08): purge terminal DLQ rows — items
+                    // already processed or permanently non-retryable
+                    // (can_retry=false) older than 7 days. Without this the
+                    // table accumulated a permanent 311-item backlog of
+                    // pre-fix dead payloads that the retry worker can never
+                    // process again. Recent terminal rows stay for inspection.
+                    if let chimera_operator::db_abstraction::DbPool::PostgreSQL(pool) =
+                        dlq_pool.pool()
+                    {
+                        match sqlx::query(
+                            "DELETE FROM dead_letter_queue \
+                             WHERE received_at < NOW() - INTERVAL '7 days' \
+                               AND (processed_at IS NOT NULL \
+                                    OR can_retry = false \
+                                    OR retry_count >= 3)"
+                        )
+                        .execute(&pool)
+                        .await
+                        {
+                            Ok(res) => {
+                                if res.rows_affected() > 0 {
+                                    tracing::info!(
+                                        purged = res.rows_affected(),
+                                        "DLQ retention: purged terminal rows"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "DLQ retention purge failed");
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -333,7 +333,20 @@ async fn handle_socket(
                     }
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, user = %user_id_for_recv, "WebSocket receive error");
+                    // Expected event: dashboard clients drop WS connections
+                    // routinely (tab close, network blip) — "Connection reset
+                    // by peer" is the normal case, not an operator failure.
+                    // Only log at ERROR for genuinely unexpected errors so the
+                    // error scanner isn't flooded with client drops.
+                    let err_str = e.to_string();
+                    if err_str.contains("Connection reset")
+                        || err_str.contains("closed")
+                        || err_str.contains("EOF")
+                    {
+                        tracing::debug!(error = %e, user = %user_id_for_recv, "WebSocket client disconnected");
+                    } else {
+                        tracing::error!(error = %e, user = %user_id_for_recv, "WebSocket receive error");
+                    }
                     break;
                 }
             }

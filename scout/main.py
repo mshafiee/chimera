@@ -2884,6 +2884,18 @@ async def main_async():
 
 def main():
     """Main entry point for the Scout (sync wrapper for async main)."""
+    # aiohttp ResourceWarnings (2026-08-08): the synchronous->async bridge
+    # (_run_async_coro / asyncio.run) creates a fresh event loop per call, so
+    # client sessions bound to the previous (already-closed) loop cannot be
+    # closed safely — closing them would schedule on a dead loop and hang the
+    # scout (documented in core/liquidity.py:_cleanup_async_client_session).
+    # The sessions are detached and GC-reclaimed; suppress the resulting
+    # "Unclosed client session/connector" warnings which flooded the log
+    # (~4400 lines/day) without actionable information.
+    import warnings
+    warnings.filterwarnings("ignore", message="Unclosed client session")
+    warnings.filterwarnings("ignore", message="Unclosed connector")
+
     args = parse_args()
     exit_code = 0
     

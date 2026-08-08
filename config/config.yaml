@@ -233,9 +233,14 @@ profit_management:
   trailing_stop_activation: 2.5   # Activate trailing at +2.5% (was 5): 60% of shadow wins ended via 4h time_exit at +0.94% avg because the +5% activation never engaged on winners peaking in the 0-5% band
   trailing_stop_distance: 2     # Trail 2% below peak (was 3): capture more of the peak on small runners
   hard_stop_loss: -8              # Tightened from -25: cap tail risk, avg loser already exits ~-8%
-  time_exit_hours: 4           # Force-close after 4h
-  losing_time_exit_hours_shield: 4  # SHIELD losers time out at 4h
-  losing_time_exit_hours_spear: 4
+  # Time-exit rails steered to 24h (2026-08-08, shadow A/B ledger): for
+  # ADMITTED signals the fixed_24h rail avg'd +18.4% vs fixed_4h -6.8% and
+  # fixed_1h -0.5% — the previous 4h rails were the LOSING rail. The -8%
+  # stop loss still cuts real losers first; time exits are the backstop
+  # for near-breakeven drift, and 24h captures the late-upside winners.
+  time_exit_hours: 24          # Force-close after 24h (was 4h — losing rail)
+  losing_time_exit_hours_shield: 24  # SHIELD losers time out at 24h (was 4h)
+  losing_time_exit_hours_spear: 24
   wick_protection_secs: 30            # Tightened from 60: catch rug pulls faster
   wick_protection_max_loss_percent: -3.0  # Tightened from -5%: exit if loss reaches -3% in first 30s (catches instant dumps)
   recovery_gate_secs: 60            # Tightened from 90: identify losers faster

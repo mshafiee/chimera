@@ -86,7 +86,12 @@ impl EffectiveExitParams {
     pub fn from_config(cfg: &ProfitManagementConfig, strategy: &str) -> Self {
         let is_spear = strategy == "SPEAR";
         Self {
-            high_profit_hours: if is_spear { 24 } else { 48 },
+            // High-profit tier: 24h for BOTH strategies (2026-08-08, shadow
+            // A/B ledger): the fixed_24h rail won on admitted signals
+            // (+18.4% vs fixed_4h -6.8%); the old 48h SHIELD hold pushed
+            // winners past the winning rail and gave back gains. The
+            // trailing stop locks in peaks regardless.
+            high_profit_hours: 24,
             medium_profit_hours: if is_spear {
                 12
             } else {
@@ -359,7 +364,9 @@ mod tests {
         let cfg = test_config();
         let global = test_global();
         let e = effective_params(&cfg, &global, None, "SHIELD");
-        assert_eq!(e.high_profit_hours, 48);
+        // Both strategies on the winning 24h high-profit rail (2026-08-08,
+        // shadow A/B: fixed_24h +18.4% vs fixed_4h -6.8% on admitted).
+        assert_eq!(e.high_profit_hours, 24);
         assert_eq!(e.medium_profit_hours, global.time_exit_hours);
         assert_eq!(e.trailing_activation_pct, global.trailing_stop_activation);
         assert_eq!(e.trailing_distance_pct, global.trailing_stop_distance);

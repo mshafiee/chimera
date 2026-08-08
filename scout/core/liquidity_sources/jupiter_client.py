@@ -38,12 +38,32 @@ class JupiterLiquidityClient:
         client is used across loops (main loop + threads spawned by
         _run_async_coro/asyncio.run), reusing a session from a dead loop hangs
         forever. Create a fresh session when the running loop differs.
+
+        The previous session is closed properly when its loop is still alive
+        (cross-loop close is safe — the connector schedules on its own loop);
+        when the loop is already closed (asyncio.run cleanup), the session is
+        detached so GC reclaims it without hanging (2026-08-08: without this,
+        every thread-path call leaked an "Unclosed client session/connector"
+        ResourceWarning — ~4400/day of log noise).
         """
         loop = asyncio.get_running_loop()
         if (
             self._session is None
             or getattr(self._session, "_loop", None) is not loop
         ):
+            old = self._session
+            if old is not None and not old.closed:
+                try:
+                    old_loop = getattr(old, "_loop", None)
+                    if old_loop is not None and not old_loop.is_closed():
+                        await old.close()
+                    else:
+                        old.detach()
+                except Exception:
+                    try:
+                        old.detach()
+                    except Exception:
+                        pass
             self._session = aiohttp.ClientSession()
             self._own_session = True
         return self._session
