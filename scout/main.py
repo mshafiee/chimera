@@ -2889,12 +2889,22 @@ def main():
     # client sessions bound to the previous (already-closed) loop cannot be
     # closed safely — closing them would schedule on a dead loop and hang the
     # scout (documented in core/liquidity.py:_cleanup_async_client_session).
-    # The sessions are detached and GC-reclaimed; suppress the resulting
-    # "Unclosed client session/connector" warnings which flooded the log
+    # The sessions are detached and GC-reclaimed; the resulting
+    # "Unclosed client session/connector" warnings flooded the log
     # (~4400 lines/day) without actionable information.
     import warnings
     warnings.filterwarnings("ignore", message="Unclosed client session")
     warnings.filterwarnings("ignore", message="Unclosed connector")
+
+    # aiohttp emits those warnings through the `asyncio` LOGGER (not
+    # warnings.warn), so a warnings filter alone cannot suppress them —
+    # drop them at the logger level instead.
+    class _SuppressUnclosedAiohttp(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            msg = record.getMessage()
+            return "Unclosed client session" not in msg and "Unclosed connector" not in msg
+
+    logging.getLogger("asyncio").addFilter(_SuppressUnclosedAiohttp())
 
     args = parse_args()
     exit_code = 0
