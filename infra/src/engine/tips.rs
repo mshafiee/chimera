@@ -427,6 +427,7 @@ pub struct TipStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::kelly_sizer::tests::MockDatabase;
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
@@ -842,5 +843,242 @@ mod tests {
                 < Decimal::from_str("0.0001").unwrap(),
             "Small trade should use floor"
         );
+    }
+
+    // ==========================================================================
+    // DATABASE-BACKED TipManager TESTS
+    // ==========================================================================
+
+    fn manager_with(tips: Vec<Decimal>, count: u32) -> (TipManager, Arc<MockDatabase>) {
+        let mock = Arc::new(MockDatabase {
+            recent_jito_tips: parking_lot::RwLock::new(tips),
+            jito_tip_count: parking_lot::RwLock::new(count),
+            ..Default::default()
+        });
+        let manager = TipManager::new(test_config(), mock.clone());
+        (manager, mock)
+    }
+
+    #[tokio::test]
+    async fn test_init_exits_cold_start_with_enough_history() {
+        let tips: Vec<Decimal> = (0..12).map(|i| Decimal::from_str(&format!("0.00{}", i)).unwrap()).collect();
+        let (manager, _db) = manager_with(tips, 12);
+        manager.init().await.unwrap();
+
+        assert!(!manager.is_cold_start());
+        // History loaded from DB.
+        assert_eq!(manager.history.read().len(), 12);
+        let stats = manager.stats();
+        assert_eq!(stats.count, 12);
+    }
+
+    #[tokio::test]
+    async fn test_init_stays_in_cold_start_with_few_samples() {
+        let tips = vec![Decimal::from_str("0.001").unwrap(); 5];
+        let (manager, _db) = manager_with(tips, 5);
+        manager.init().await.unwrap();
+
+        assert!(manager.is_cold_start());
+    }
+
+    #[tokio::test]
+    async fn test_seed_paper_history_when_empty() {
+        let (manager, db) = manager_with(Vec::new(), 0);
+        manager.seed_paper_history_if_empty().await.unwrap();
+
+        assert!(!manager.is_cold_start());
+        assert_eq!(manager.history.read().len(), 12);
+        // Seed rows were inserted via the mock DB.
+        let inserted = db.inserted_tips.read().clone();
+        assert_eq!(inserted.len(), 12);
+        assert!(inserted.iter().all(|(_, sig, _, success)| {
+            sig.as_deref() == Some("paper-seed") && *success
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_seed_paper_history_noop_when_rows_exist() {
+        let (manager, db) = manager_with(vec![Decimal::from_str("0.001").unwrap()], 1);
+        manager.seed_paper_history_if_empty().await.unwrap();
+
+        // count > 0 -> no seeding
+        assert!(manager.is_cold_start());
+        assert_eq!(db.inserted_tips.read().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_record_tip_accumulates_and_exits_cold_start() {
+        let (manager, db) = manager_with(Vec::new(), 0);
+        for i in 0..10 {
+            manager
+                .record_tip(
+                    Decimal::from_str(&format!("0.001{}", i)).unwrap(),
+                    Some(&format!("sig-{i}")),
+                    chimera_core::models::Strategy::Shield,
+                    true,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(manager.history.read().len(), 10);
+        assert!(!manager.is_cold_start());
+
+        // Failed tip is persisted but not added to history.
+        manager
+            .record_tip(
+                Decimal::from_str("0.002").unwrap(),
+                None,
+                chimera_core::models::Strategy::Spear,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(manager.history.read().len(), 10);
+        let inserted = db.inserted_tips.read().clone();
+        assert_eq!(inserted.len(), 11);
+        assert_eq!(inserted[10].2.as_deref(), Some("SPEAR"));
+        assert!(!inserted[10].3);
+    }
+
+    #[tokio::test]
+    async fn test_record_tip_trims_history_at_max() {
+        let (manager, _db) = manager_with(Vec::new(), 0);
+        for i in 0..105 {
+            manager
+                .record_tip(
+                    Decimal::from_str(&format!("0.001{i}")).unwrap(),
+                    None,
+                    chimera_core::models::Strategy::Shield,
+                    true,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(manager.history.read().len(), 100);
+    }
+
+    #[tokio::test]
+    async fn test_calculate_tip_cold_start_strategies() {
+        let (manager, _db) = manager_with(Vec::new(), 0);
+        // Shield: floor * 2 = 0.002
+        let tip = manager.calculate_tip(chimera_core::models::Strategy::Shield, Decimal::from_str("0.05").unwrap());
+        assert_eq!(tip, Decimal::from_str("0.002").unwrap());
+        // Spear: floor * 2 * 1.5 = 0.003
+        let tip = manager.calculate_tip(chimera_core::models::Strategy::Spear, Decimal::from_str("0.05").unwrap());
+        assert_eq!(tip, Decimal::from_str("0.003").unwrap());
+        // Exit: ceiling = 0.01 (trade size 1.0 -> 10% cap of 0.1 doesn't clamp).
+        let tip = manager.calculate_tip(chimera_core::models::Strategy::Exit, Decimal::from_str("1.0").unwrap());
+        assert_eq!(tip, Decimal::from_str("0.01").unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_calculate_tip_percentile_with_history() {
+        // 12 tips loaded via init -> percentile path (not cold start).
+        let tips: Vec<Decimal> = (1..=12).map(|i| Decimal::from_str(&format!("0.00{:02}", i)).unwrap()).collect();
+        let (manager, _db) = manager_with(tips, 12);
+        manager.init().await.unwrap();
+        assert!(!manager.is_cold_start());
+
+        // Shield percentile (25th of sorted 0.0001..0.0012) = index 3 = 0.0004 ->
+        // max(0.0004, floor 0.001) = 0.001; percent cap 0.1*0.1 = 0.01.
+        let tip = manager.calculate_tip(chimera_core::models::Strategy::Shield, Decimal::from_str("0.1").unwrap());
+        assert_eq!(tip, Decimal::from_str("0.001").unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_calculate_tip_ceiling_and_floor() {
+        let tips: Vec<Decimal> = (1..=12).map(|i| Decimal::from_str(&format!("0.00{:02}", i)).unwrap()).collect();
+        let (manager, _db) = manager_with(tips, 12);
+        manager.init().await.unwrap();
+
+        // Exit percentile 75th of 0.0001..0.0012 = index 9 = 0.0010 ->
+        // max(0.0010, mid 0.0055) = 0.0055; percent cap 1.0*0.1 = 0.1 -> 0.0055.
+        let tip = manager.calculate_tip(chimera_core::models::Strategy::Exit, Decimal::from_str("1.0").unwrap());
+        assert_eq!(tip, Decimal::from_str("0.0055").unwrap());
+
+        // Tiny trade: percent cap 0.004*0.1 = 0.0004; min(percentile 0.004, 0.0004, ceiling)
+        // = 0.0004 -> max(floor 0.001) = 0.001.
+        let tip = manager.calculate_tip(chimera_core::models::Strategy::Shield, Decimal::from_str("0.004").unwrap());
+        assert_eq!(tip, Decimal::from_str("0.001").unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_get_tip_success_rate() {
+        // total == 0 -> 0.0
+        let (manager, _db) = manager_with(Vec::new(), 0);
+        assert_eq!(manager.get_tip_success_rate(Decimal::from_str("0.001").unwrap()).await.unwrap(), 0.0);
+
+        // Recent tips: 4 of 5 within ±10% of 0.001 (range 0.0009-0.0011).
+        let tips = vec![
+            Decimal::from_str("0.00095").unwrap(),
+            Decimal::from_str("0.001").unwrap(),
+            Decimal::from_str("0.00105").unwrap(),
+            Decimal::from_str("0.0011").unwrap(),
+            Decimal::from_str("0.002").unwrap(),
+        ];
+        let (manager, _db) = manager_with(tips, 5);
+        let rate = manager.get_tip_success_rate(Decimal::from_str("0.001").unwrap()).await.unwrap();
+        assert_eq!(rate, 0.8);
+
+        // Empty recent tips but total > 0 -> 0.0 (no evidence of landing).
+        let (manager, _db) = manager_with(Vec::new(), 3);
+        assert_eq!(manager.get_tip_success_rate(Decimal::from_str("0.001").unwrap()).await.unwrap(), 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_is_tip_success_rate_acceptable() {
+        let tips = vec![Decimal::from_str("0.001").unwrap(); 10];
+        let (manager, _db) = manager_with(tips, 10);
+        assert!(manager.is_tip_success_rate_acceptable(Decimal::from_str("0.001").unwrap()).await.unwrap());
+        assert!(!manager.is_tip_success_rate_acceptable(Decimal::from_str("0.01").unwrap()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_get_recent_failure_rate() {
+        // No history -> 0.
+        let (manager, _db) = manager_with(Vec::new(), 0);
+        assert_eq!(manager.get_recent_failure_rate().await.unwrap(), 0.0);
+
+        // total 100, recent window 100 rows -> failure 0.
+        let tips: Vec<Decimal> = vec![Decimal::from_str("0.001").unwrap(); 100];
+        let (manager, _db) = manager_with(tips, 100);
+        assert_eq!(manager.get_recent_failure_rate().await.unwrap(), 0.0);
+
+        // total 100 but only 25 recent rows -> 75% "failure".
+        let tips: Vec<Decimal> = vec![Decimal::from_str("0.001").unwrap(); 25];
+        let (manager, _db) = manager_with(tips, 100);
+        assert_eq!(manager.get_recent_failure_rate().await.unwrap(), 0.75);
+    }
+
+    #[tokio::test]
+    async fn test_calculate_dynamic_tip_with_load() {
+        let (manager, _db) = manager_with(Vec::new(), 0);
+        let base = manager.calculate_tip(chimera_core::models::Strategy::Shield, Decimal::from_str("0.05").unwrap());
+        // High failure rate -> scaled up (capped at ceiling).
+        let scaled = manager
+            .calculate_dynamic_tip_with_load(
+                chimera_core::models::Strategy::Shield,
+                Decimal::from_str("0.05").unwrap(),
+                0.5,
+            )
+            .await;
+        assert_eq!(scaled, (base * Decimal::from_str("1.25").unwrap()).min(manager.config.tip_ceiling_sol));
+        // Low failure rate -> unchanged.
+        let unchanged = manager
+            .calculate_dynamic_tip_with_load(
+                chimera_core::models::Strategy::Shield,
+                Decimal::from_str("0.05").unwrap(),
+                0.1,
+            )
+            .await;
+        assert_eq!(unchanged, base);
+    }
+
+    #[tokio::test]
+    async fn test_stats_empty_history_reports_cold_start() {
+        let (manager, _db) = manager_with(Vec::new(), 0);
+        let stats = manager.stats();
+        assert_eq!(stats.count, 0);
+        assert!(stats.is_cold_start);
     }
 }

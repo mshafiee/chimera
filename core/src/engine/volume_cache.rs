@@ -47,6 +47,49 @@ impl VolumeCache {
         }
     }
 
+    /// Record volume with a custom timestamp (test only).
+    pub fn record_volume_with_time(
+        &self,
+        token_address: &str,
+        volume_usd: Decimal,
+        now: DateTime<Utc>,
+    ) {
+        let mut history = self.volume_history.write();
+        history.retain(|_, h| {
+            h.back().is_none_or(|(t, _)| now.signed_duration_since(*t) <= Duration::hours(24))
+        });
+        let token_history = history.entry(token_address.to_string()).or_default();
+        token_history.push_back((now, volume_usd));
+
+        let cutoff = now - Duration::hours(24);
+        while let Some(front) = token_history.front() {
+            if front.0 < cutoff {
+                token_history.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Replace a token's full volume history (test only).
+    pub fn set_volume_history(&self, token_address: &str, samples: Vec<(DateTime<Utc>, Decimal)>) {
+        self.volume_history
+            .write()
+            .insert(token_address.to_string(), samples.into_iter().collect());
+    }
+
+    /// Snapshot a token's volume history (test only).
+    pub fn volume_history_snapshot(
+        &self,
+        token_address: &str,
+    ) -> Vec<(DateTime<Utc>, Decimal)> {
+        self.volume_history
+            .read()
+            .get(token_address)
+            .map(|h| h.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
     /// Get 24h average volume for a token
     ///
     /// Returns None if insufficient data or the newest sample is stale
@@ -168,5 +211,168 @@ impl VolumeCache {
 impl Default for VolumeCache {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    fn now() -> DateTime<Utc> {
+        Utc::now()
+    }
+
+    #[test]
+    fn test_record_and_avg_volume() {
+        let cache = VolumeCache::new();
+        cache.record_volume("token1", dec!(10));
+        cache.record_volume("token1", dec!(20));
+        cache.record_volume("token1", dec!(30));
+        assert_eq!(cache.get_24h_average_volume("token1"), Some(dec!(20)));
+        assert_eq!(cache.get_current_volume("token1"), Some(dec!(30)));
+    }
+
+    #[test]
+    fn test_missing_token_returns_none() {
+        let cache = VolumeCache::new();
+        assert_eq!(cache.get_24h_average_volume("missing"), None);
+        assert_eq!(cache.get_current_volume("missing"), None);
+        assert!(!cache.has_volume_drop("missing", dec!(50)));
+    }
+
+    #[test]
+    fn test_empty_history_returns_none() {
+        let cache = VolumeCache::new();
+        cache.set_volume_history("token1", Vec::new());
+        assert_eq!(cache.get_24h_average_volume("token1"), None);
+    }
+
+    #[test]
+    fn test_default_impl() {
+        let cache: VolumeCache = Default::default();
+        cache.record_volume("token1", dec!(5));
+        assert_eq!(cache.get_current_volume("token1"), Some(dec!(5)));
+    }
+
+    #[test]
+    fn test_stale_volume_returns_none() {
+        let cache = VolumeCache::new();
+        let t = now() - Duration::minutes(11);
+        cache.set_volume_history("token1", vec![(t, dec!(100))]);
+        assert_eq!(cache.get_24h_average_volume("token1"), None);
+        assert_eq!(cache.get_current_volume("token1"), None);
+        assert!(!cache.has_volume_drop("token1", dec!(50)));
+    }
+
+    #[test]
+    fn test_history_trims_older_than_24h() {
+        let cache = VolumeCache::new();
+        let t = now();
+        cache.set_volume_history(
+            "token1",
+            vec![
+                (t - Duration::hours(25), dec!(1)),
+                (t - Duration::hours(23), dec!(2)),
+                (t - Duration::hours(1), dec!(3)),
+            ],
+        );
+        // 24h window: the -25h sample must be trimmed on the next record
+        cache.record_volume_with_time("token1", dec!(4), t);
+        let history = cache.volume_history_snapshot("token1");
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].0, t - Duration::hours(23));
+        assert_eq!(history[0].1, dec!(2));
+    }
+
+    #[test]
+    fn test_idle_token_evicted_on_record() {
+        let cache = VolumeCache::new();
+        let t = now();
+        cache.record_volume_with_time("idle", dec!(1), t - Duration::hours(25));
+        // Recording a different token evicts entries idle for 24h+
+        cache.record_volume("active", dec!(2));
+        assert_eq!(cache.get_24h_average_volume("idle"), None);
+        assert_eq!(cache.get_current_volume("active"), Some(dec!(2)));
+    }
+
+    #[test]
+    fn test_has_volume_drop_windowed_path() {
+        let cache = VolumeCache::new();
+        let t = now();
+        let mut samples = Vec::new();
+        for i in 1..=12 {
+            samples.push((t - Duration::minutes(23 * 60 - i * 60), dec!(100)));
+        }
+        samples.push((t - Duration::minutes(50), dec!(10)));
+        samples.push((t - Duration::minutes(30), dec!(10)));
+        samples.push((t - Duration::minutes(5), dec!(10)));
+        cache.set_volume_history("token1", samples);
+
+        assert!(cache.has_volume_drop("token1", dec!(50)));
+        // Below threshold: no drop reported
+        assert!(!cache.has_volume_drop("token1", dec!(95)));
+    }
+
+    #[test]
+    fn test_has_volume_drop_zero_baseline_skips_windowed() {
+        let cache = VolumeCache::new();
+        let t = now();
+        let mut samples = Vec::new();
+        for i in 1..=12 {
+            samples.push((t - Duration::minutes(23 * 60 - i * 60), dec!(0)));
+        }
+        samples.push((t - Duration::minutes(50), dec!(0)));
+        samples.push((t - Duration::minutes(30), dec!(0)));
+        samples.push((t - Duration::minutes(5), dec!(0)));
+        cache.set_volume_history("token1", samples);
+        // All-zero data: no drop reported, both branches for zero averages hit
+        assert!(!cache.has_volume_drop("token1", dec!(10)));
+    }
+
+    #[test]
+    fn test_has_volume_drop_fallback_path() {
+        let cache = VolumeCache::new();
+        let t = now();
+        let mut samples = Vec::new();
+        // 11 baseline samples (below the 12 required for windowed comparison)
+        for i in 1..=11 {
+            samples.push((t - Duration::minutes(23 * 60 - i * 60), dec!(100)));
+        }
+        samples.push((t - Duration::minutes(30), dec!(10)));
+        samples.push((t - Duration::minutes(5), dec!(10)));
+        cache.set_volume_history("token1", samples);
+
+        // Fallback: current (10) vs average of the rest (~92) = ~89% drop
+        assert!(cache.has_volume_drop("token1", dec!(50)));
+    }
+
+    #[test]
+    fn test_has_volume_drop_fallback_insufficient_history() {
+        let cache = VolumeCache::new();
+        let t = now();
+        // Oldest sample under 30 minutes: bail out
+        cache.set_volume_history(
+            "token1",
+            vec![(t - Duration::minutes(10), dec!(10)), (t - Duration::minutes(5), dec!(10))],
+        );
+        assert!(!cache.has_volume_drop("token1", dec!(50)));
+
+        // Single sample: n == 0, no baseline to compare
+        cache.set_volume_history("token1", vec![(t - Duration::minutes(1), dec!(10))]);
+        assert!(!cache.has_volume_drop("token1", dec!(50)));
+    }
+
+    #[test]
+    fn test_has_volume_drop_all_zero_fallback() {
+        let cache = VolumeCache::new();
+        let t = now();
+        let samples = vec![
+            (t - Duration::minutes(120), dec!(0)),
+            (t - Duration::minutes(60), dec!(0)),
+            (t - Duration::minutes(1), dec!(0)),
+        ];
+        cache.set_volume_history("token1", samples);
+        assert!(!cache.has_volume_drop("token1", dec!(10)));
     }
 }

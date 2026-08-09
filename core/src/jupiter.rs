@@ -52,6 +52,18 @@ mod tests {
     /// key and no test may assert on the global state afterwards.
     #[test]
     fn with_api_key_attaches_configured_key() {
+        // Exercise the no-key path BEFORE installing the key: at this point no
+        // other test can have installed it (set_api_key is only called here),
+        // so the `None` branch of with_api_key is deterministically covered.
+        let client = reqwest::Client::new();
+        let no_key_req = with_api_key(client.get("https://api.jup.ag/price/v3?ids=x"))
+            .build()
+            .expect("request must build");
+        assert!(
+            no_key_req.headers().get("x-api-key").is_none(),
+            "no key installed yet -> no header"
+        );
+
         // This is the only test in the crate that installs a key, so the
         // first-wins set must succeed deterministically.
         assert!(
@@ -64,7 +76,6 @@ mod tests {
             "a later conflicting set_api_key call must be rejected"
         );
 
-        let client = reqwest::Client::new();
         let rb = with_api_key(client.get("https://api.jup.ag/price/v3?ids=x"));
         let req = rb.build().expect("request must build");
         assert_eq!(

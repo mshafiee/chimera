@@ -465,31 +465,460 @@ fn out_amount(quote: &serde_json::Value) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal_macros::dec;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Tiny HTTP server that mocks Jupiter: dispatches each request line to the
+    /// handler and responds with `(status, body)`.
+    async fn mock_jupiter<F>(mut handler: F) -> String
+    where
+        F: FnMut(&str) -> (u16, String) + Send + 'static,
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 16384];
+                let Ok(n) = sock.read(&mut buf).await else {
+                    continue;
+                };
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let first_line = req.lines().next().unwrap_or("").to_string();
+                let (status, body) = handler(&first_line);
+                let reason = match status {
+                    200 => "OK",
+                    400 => "Bad Request",
+                    404 => "Not Found",
+                    429 => "Too Many Requests",
+                    _ => "Internal Server Error",
+                };
+                let resp = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    reason,
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://{}", addr)
+    }
+
+    /// A valid v1-style quote JSON with an `outAmount` of `out`.
+    fn v1_quote(out: &str) -> String {
+        serde_json::json!({
+            "outAmount": out,
+            "inAmount": "1000000000",
+            "priceImpactPct": "0.5",
+            "routePlan": []
+        })
+        .to_string()
+    }
+
+    const SOL: &str = "So11111111111111111111111111111111111111112";
+    const USDC: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+    fn make_comparator(base_url: String) -> DexComparator {
+        DexComparator::with_options(
+            base_url,
+            vec!["Raydium".to_string(), "Orca".to_string(), "Meteora".to_string()],
+            true,
+        )
+    }
+
+    #[test]
+    fn test_constructors_and_default() {
+        let c = DexComparator::new().expect("new");
+        assert_eq!(c.dex_labels, vec!["Raydium", "Orca", "Meteora"]);
+        assert!(c.multi_dex);
+        assert_eq!(c.jupiter_api_url, "https://api.jup.ag/swap/v2");
+
+        let c = DexComparator::with_jupiter_api_url("https://x.example".into()).expect("custom url");
+        assert_eq!(c.jupiter_api_url, "https://x.example");
+
+        let c = DexComparator::with_jupiter_api_url_and_labels(
+            "https://x.example".into(),
+            vec!["Raydium".into()],
+        )
+        .expect("custom labels");
+        assert_eq!(c.dex_labels, vec!["Raydium"]);
+        assert!(c.multi_dex);
+
+        let mut c = DexComparator::with_options("https://x.example".into(), vec![], false);
+        assert!(!c.multi_dex);
+        c.set_multi_dex(true);
+        assert!(c.multi_dex);
+        assert_eq!(c.cache_ttl, Duration::from_secs(5));
+
+        let _d = DexComparator::default();
+    }
 
     #[tokio::test]
-    #[ignore] // Requires a live Jupiter API key + network — covered by integration tests
-    async fn test_dex_route_caching_key_includes_slippage() {
-        // Exercises construction only (no network); real route behaviour is
-        // covered by the #[ignore] integration tests requiring a Jupiter key.
-        let comparator = DexComparator::new().expect("Failed to create DexComparator for test");
-        let _ = comparator
-            .select_route(
-                "So11111111111111111111111111111111111111112",
-                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-                1_000_000_000,
-                50,
-            )
-            .await;
-        // Second call within the TTL should hit the cache (no assertion beyond
-        // "does not panic" — network availability is environment-dependent).
-        let _ = comparator
-            .select_route(
-                "So11111111111111111111111111111111111111112",
-                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-                1_000_000_000,
-                50,
-            )
-            .await;
+    async fn test_select_route_restricted_dex_wins() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&count);
+        let base = mock_jupiter(move |req| {
+            count_clone.fetch_add(1, Ordering::Relaxed);
+            if req.contains("dexes=Raydium") {
+                (200, v1_quote("12000"))
+            } else if req.contains("dexes=Orca") || req.contains("dexes=Meteora") {
+                (200, v1_quote("9000"))
+            } else {
+                (200, v1_quote("10000"))
+            }
+        })
+        .await;
+
+        let comparator = make_comparator(base);
+        let sel = comparator.select_route(SOL, USDC, 1_000_000_000, 50).await.expect("route");
+        // 4 queries: aggregate + 3 restricted
+        assert_eq!(count.load(Ordering::Relaxed), 4);
+        assert_eq!(sel.selected_dex, "Raydium");
+        assert_eq!(out_amount(&sel.quote), 12000);
+        assert_eq!(sel.dex_url, comparator.jupiter_api_url);
+    }
+
+    #[tokio::test]
+    async fn test_select_route_aggregate_wins_when_better() {
+        let base = mock_jupiter(|req| {
+            if req.contains("dexes=") {
+                (200, v1_quote("1000"))
+            } else {
+                (200, v1_quote("5000"))
+            }
+        })
+        .await;
+        let comparator = make_comparator(base);
+        let sel = comparator.select_route(SOL, USDC, 1_000_000_000, 50).await.expect("route");
+        assert_eq!(sel.selected_dex, "Jupiter");
+    }
+
+    #[tokio::test]
+    async fn test_select_route_cache_hit_and_miss() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&count);
+        let base = mock_jupiter(move |_req| {
+            count_clone.fetch_add(1, Ordering::Relaxed);
+            (200, v1_quote("10000"))
+        })
+        .await;
+        let comparator = make_comparator(base);
+
+        let _ = comparator.select_route(SOL, USDC, 1_000_000_000, 50).await.expect("first");
+        // 4 requests: aggregate + 3 restricted
+        assert_eq!(count.load(Ordering::Relaxed), 4);
+        let _ = comparator.select_route(SOL, USDC, 1_000_000_000, 50).await.expect("second");
+        // Same key -> served from cache, no second fetch
+        assert_eq!(count.load(Ordering::Relaxed), 4);
+
+        // Different amount -> cache miss -> refetch
+        let _ = comparator.select_route(SOL, USDC, 2_000_000_000, 50).await.expect("third");
+        assert_eq!(count.load(Ordering::Relaxed), 8);
+    }
+
+    #[tokio::test]
+    async fn test_select_route_expired_cache_refetches() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&count);
+        let base = mock_jupiter(move |req| {
+            count_clone.fetch_add(1, Ordering::Relaxed);
+            (200, v1_quote("10000"))
+        })
+        .await;
+        let comparator = make_comparator(base);
+
+        // Insert an expired entry directly (private field access in-module)
+        let key = format!(
+            "{}:{}:{}:{}:{}:{}",
+            SOL,
+            USDC,
+            1_000_000_000u64,
+            50u16,
+            true,
+            "Raydium,Orca,Meteora"
+        );
+        comparator.cache.write().insert(
+            key.clone(),
+            CachedResult {
+                selection: RouteSelection {
+                    selected_dex: "Jupiter".into(),
+                    quote: serde_json::json!({}),
+                    total_cost_sol: Decimal::ZERO,
+                    fee_sol: Decimal::ZERO,
+                    slippage_sol: Decimal::ZERO,
+                    dex_url: String::new(),
+                },
+                cached_at: SystemTime::now() - Duration::from_secs(60),
+            },
+        );
+
+        let sel = comparator.select_route(SOL, USDC, 1_000_000_000, 50).await.expect("route");
+        assert_eq!(count.load(Ordering::Relaxed), 4);
+        assert_eq!(sel.selected_dex, "Jupiter");
+        // Fresh entry is now cached
+        let cache = comparator.cache.read();
+        let cached = cache.get(&key).unwrap();
+        assert_eq!(cached.selection.selected_dex, "Jupiter");
+    }
+
+    #[tokio::test]
+    async fn test_select_route_v2_aggregate_only() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&count);
+        let base = mock_jupiter(move |req| {
+            count_clone.fetch_add(1, Ordering::Relaxed);
+            let _ = &req;
+            assert!(req.contains("/order"), "v2 must use /order, got: {}", req);
+            assert!(!req.contains("dexes="), "v2 must not fan out to dexes, got: {}", req);
+            (200, v1_quote("10000"))
+        })
+        .await;
+
+        // v2 detection: URL contains /v2
+        let comparator = make_comparator(format!("{}/swap/v2", base));
+        let sel = comparator
+            .select_route(SOL, USDC, 1_000_000_000, 50)
+            .await
+            .expect("route");
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        assert_eq!(sel.selected_dex, "Jupiter");
+    }
+
+    #[tokio::test]
+    async fn test_select_route_multi_dex_disabled() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&count);
+        let base = mock_jupiter(move |req| {
+            count_clone.fetch_add(1, Ordering::Relaxed);
+            assert!(!req.contains("dexes="), "no fan-out when multi_dex=false: {}", req);
+            (200, v1_quote("10000"))
+        })
+        .await;
+        let comparator =
+            DexComparator::with_options(format!("{}/swap/v1", base), vec!["Raydium".into()], false);
+        let sel = comparator.select_route(SOL, USDC, 1_000_000_000, 50).await.expect("route");
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        assert_eq!(sel.selected_dex, "Jupiter");
+    }
+
+    #[tokio::test]
+    async fn test_select_route_all_fail() {
+        let base = mock_jupiter(|_| (500, "boom".to_string())).await;
+        let comparator = make_comparator(base);
+        let err = comparator.select_route(SOL, USDC, 1_000_000_000, 50).await.unwrap_err();
+        assert!(err.to_string().contains("No viable DEX route"));
+    }
+
+    #[tokio::test]
+    async fn test_query_jupiter_v1_full_parsing() {
+        let quote = serde_json::json!({
+            "outAmount": "999000000",
+            "inAmount": "1000000000",
+            "priceImpactPct": "1.5",
+            "routePlan": [
+                { "swapInfo": { "feeAmount": "500000" } },
+                { "swapInfo": { "feeAmount": 250000 } },
+                { "swapInfo": { "feeAmount": 1.5 } },
+                { "swapInfo": {} },
+                { "swapInfo": { "feeAmount": "garbage" } }
+            ]
+        })
+        .to_string();
+        let base = mock_jupiter(move |_req| (200, quote.clone())).await;
+        let comparator = make_comparator(base);
+        let sel = comparator
+            .query_jupiter(SOL, USDC, 1_000_000_000, 50, Some("Raydium"))
+            .await
+            .expect("route");
+        assert_eq!(sel.selected_dex, "Raydium");
+        // fee = 500000 + 250000 + 1.5 (u64 path, u64 path, f64 path; missing & garbage ignored)
+        // fee_raw is in raw token units; in_amount = 1e9; trade_value = 1 SOL
+        // 750001.5 / 1e9 = 0.0007500015
+        assert_eq!(sel.fee_sol, dec!(0.0007500015));
+        // slippage = 1 SOL * 1.5% = 0.015
+        assert_eq!(sel.slippage_sol, dec!(0.015));
+        assert_eq!(sel.total_cost_sol, dec!(0.0157500015));
+    }
+
+    #[tokio::test]
+    async fn test_query_jupiter_v2_parsing() {
+        let quote = serde_json::json!({
+            "outAmount": "500000000",
+            "inAmount": 1000000000,
+            "priceImpact": -0.02,
+            "routePlan": [ { "swapInfo": { "feeAmount": 300000 } } ]
+        })
+        .to_string();
+        let base = mock_jupiter(move |_req| (200, quote.clone())).await;
+        let comparator = make_comparator(format!("{}/swap/v2", base));
+        // v2 with a dex label: labelled "Jupiter" (dexes is v1-only); token_in is
+        // not SOL, so trade value = outAmount/1e9 = 0.5 SOL; slippage = 0.5 * 2% = 0.01
+        let sel = comparator
+            .query_jupiter(USDC, SOL, 1_000_000_000, 50, Some("Raydium"))
+            .await
+            .expect("route");
+        assert_eq!(sel.selected_dex, "Jupiter");
+        assert_eq!(sel.slippage_sol, dec!(0.01));
+    }
+
+    #[tokio::test]
+    async fn test_query_jupiter_sell_side_value() {
+        // SELL: token_out == SOL -> trade value from outAmount
+        let quote = serde_json::json!({
+            "outAmount": "2000000000",
+            "inAmount": "1000000000",
+            "priceImpactPct": "1",
+            "routePlan": [ { "swapInfo": { "feeAmount": "10000000" } } ]
+        })
+        .to_string();
+        let base = mock_jupiter(move |_req| (200, quote.clone())).await;
+        let comparator = make_comparator(base);
+        let sel = comparator.query_jupiter(USDC, SOL, 1_000_000_000, 50, None).await.expect("route");
+        // trade value = 2 SOL; fee = 2 * 1e7 / 1e9 = 0.02; slippage = 2 * 1% = 0.02
+        assert_eq!(sel.fee_sol, dec!(0.02));
+        assert_eq!(sel.slippage_sol, dec!(0.02));
+    }
+
+    #[tokio::test]
+    async fn test_query_jupiter_in_amount_zero_and_missing_impact() {
+        // inAmount == 0 -> fee_sol forced to ZERO; no impact fields -> zero slippage
+        let quote = serde_json::json!({
+            "outAmount": "1000000000",
+            "inAmount": "0",
+            "routePlan": [ { "swapInfo": { "feeAmount": "500000" } } ]
+        })
+        .to_string();
+        let base = mock_jupiter(move |_req| (200, quote.clone())).await;
+        let comparator = make_comparator(base);
+        let sel = comparator.query_jupiter(SOL, USDC, 1_000_000_000, 50, None).await.expect("route");
+        assert_eq!(sel.fee_sol, Decimal::ZERO);
+        assert_eq!(sel.slippage_sol, Decimal::ZERO);
+
+        // inAmount missing -> falls back to amount_lamports
+        let quote = serde_json::json!({
+            "outAmount": "1000000000",
+            "priceImpactPct": "0.5",
+            "routePlan": [ { "swapInfo": { "feeAmount": "1000000000" } } ]
+        })
+        .to_string();
+        let base2 = mock_jupiter(move |_req| (200, quote.clone())).await;
+        let comparator2 = make_comparator(base2);
+        let sel2 = comparator2.query_jupiter(SOL, USDC, 1_000_000_000, 50, None).await.expect("route");
+        // fee = 1 * 1e9 / 1e9 = 1 SOL
+        assert_eq!(sel2.fee_sol, Decimal::ONE);
+    }
+
+    #[tokio::test]
+    async fn test_query_jupiter_unparseable_impact_fields() {
+        let quote = serde_json::json!({
+            "outAmount": "1000000000",
+            "inAmount": "1000000000",
+            "priceImpactPct": "not-a-number",
+            "routePlan": []
+        })
+        .to_string();
+        let base = mock_jupiter(move |_req| (200, quote.clone())).await;
+        let comparator = make_comparator(base);
+        let sel = comparator.query_jupiter(SOL, USDC, 1_000_000_000, 50, None).await.expect("route");
+        assert_eq!(sel.slippage_sol, Decimal::ZERO);
+
+        // priceImpact present but unparseable (string)
+        let quote = serde_json::json!({
+            "outAmount": "1000000000",
+            "inAmount": "1000000000",
+            "priceImpact": "nope",
+            "routePlan": []
+        })
+        .to_string();
+        let base2 = mock_jupiter(move |_req| (200, quote.clone())).await;
+        let comparator2 = make_comparator(base2);
+        let sel2 = comparator2.query_jupiter(SOL, USDC, 1_000_000_000, 50, None).await.expect("route");
+        assert_eq!(sel2.slippage_sol, Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn test_query_jupiter_dex_not_supported() {
+        let base = mock_jupiter(|_| (400, r#"{"error":"dexes contains unsupported value"}"#.into())).await;
+        let comparator = make_comparator(base);
+        let err = comparator
+            .query_jupiter(SOL, USDC, 1_000_000_000, 50, Some("FakeDex"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("DEX label not supported"));
+    }
+
+    #[tokio::test]
+    async fn test_query_jupiter_generic_error_bodies() {
+        // JSON error field
+        let base = mock_jupiter(|_| (500, r#"{"error":"upstream failed"}"#.into())).await;
+        let comparator = make_comparator(base);
+        let err = comparator.query_jupiter(SOL, USDC, 1_000_000_000, 50, None).await.unwrap_err();
+        assert!(err.to_string().contains("upstream failed"));
+
+        // errorMessage field
+        let base = mock_jupiter(|_| (500, r#"{"errorMessage":"bad request"}"#.into())).await;
+        let comparator = make_comparator(base);
+        let err = comparator.query_jupiter(SOL, USDC, 1_000_000_000, 50, None).await.unwrap_err();
+        assert!(err.to_string().contains("bad request"));
+
+        // Plain-text body
+        let base = mock_jupiter(|_| (500, "gateway timeout".into())).await;
+        let comparator = make_comparator(base);
+        let err = comparator.query_jupiter(SOL, USDC, 1_000_000_000, 50, None).await.unwrap_err();
+        assert!(err.to_string().contains("gateway timeout"));
+
+        // Empty body -> fallback message
+        let base = mock_jupiter(|_| (500, String::new())).await;
+        let comparator = make_comparator(base);
+        let err = comparator.query_jupiter(SOL, USDC, 1_000_000_000, 50, None).await.unwrap_err();
+        assert!(err.to_string().contains("Unknown Jupiter API error"));
+    }
+
+    #[tokio::test]
+    async fn test_query_jupiter_parse_error() {
+        let base = mock_jupiter(|_| (200, "not json at all".into())).await;
+        let comparator = make_comparator(base);
+        let err = comparator.query_jupiter(SOL, USDC, 1_000_000_000, 50, None).await.unwrap_err();
+        assert!(err.to_string().contains("Failed to parse Jupiter response"));
+    }
+
+    #[tokio::test]
+    async fn test_query_jupiter_zero_out_amount() {
+        let base = mock_jupiter(|_| (200, serde_json::json!({ "foo": 1 }).to_string())).await;
+        let comparator = make_comparator(base);
+        let err = comparator.query_jupiter(SOL, USDC, 1_000_000_000, 50, None).await.unwrap_err();
+        assert!(err.to_string().contains("missing/zero outAmount"));
+    }
+
+    #[test]
+    fn test_clear_expired_cache() {
+        let comparator = make_comparator("https://x.example".into());
+        let fresh = CachedResult {
+            selection: RouteSelection {
+                selected_dex: "Jupiter".into(),
+                quote: serde_json::json!({}),
+                total_cost_sol: Decimal::ZERO,
+                fee_sol: Decimal::ZERO,
+                slippage_sol: Decimal::ZERO,
+                dex_url: String::new(),
+            },
+            cached_at: SystemTime::now(),
+        };
+        let stale = CachedResult {
+            selection: fresh.selection.clone(),
+            cached_at: SystemTime::now() - Duration::from_secs(60),
+        };
+        comparator.cache.write().insert("fresh".into(), fresh);
+        comparator.cache.write().insert("stale".into(), stale);
+
+        comparator.clear_expired_cache();
+        let cache = comparator.cache.read();
+        assert!(cache.contains_key("fresh"));
+        assert!(!cache.contains_key("stale"));
     }
 
     #[test]

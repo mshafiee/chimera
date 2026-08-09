@@ -78,3 +78,123 @@ pub fn lamports_to_sol(lamports: u64) -> f64 {
 
     (lamports_dec / divisor).to_f64().unwrap_or(0.0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    /// Serializes the env-var-mutating tests so parallel test threads cannot
+    /// race each other (or other readers) on the process env.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn set_env(key: &str, value: Option<&str>) {
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[test]
+    fn test_is_dev_mode() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for (val, expected) in [
+            (None, false),
+            (Some(""), false),
+            (Some("0"), false),
+            (Some("false"), false),
+            (Some("off"), false),
+            (Some("garbage"), false),
+            (Some("1"), true),
+            (Some("true"), true),
+            (Some("YES"), true),
+            (Some("  on  "), true),
+        ] {
+            set_env("CHIMERA_DEV_MODE", val);
+            assert_eq!(is_dev_mode(), expected, "CHIMERA_DEV_MODE={:?}", val);
+        }
+    }
+
+    #[test]
+    fn test_helius_api_base_url() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        set_env("HELIUS_API_BASE_URL", None);
+        assert_eq!(helius_api_base_url(), "https://api.helius.xyz/v0");
+        set_env("HELIUS_API_BASE_URL", Some(""));
+        assert_eq!(helius_api_base_url(), "https://api.helius.xyz/v0");
+        set_env("HELIUS_API_BASE_URL", Some("https://custom.helius.xyz/v2"));
+        assert_eq!(helius_api_base_url(), "https://custom.helius.xyz/v2");
+    }
+
+    #[test]
+    fn test_helius_rpc_url() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        set_env("HELIUS_RPC_BASE_URL", None);
+        assert_eq!(
+            helius_rpc_url("abc123"),
+            "https://mainnet.helius-rpc.com?api-key=abc123"
+        );
+        set_env("HELIUS_RPC_BASE_URL", Some(""));
+        assert_eq!(
+            helius_rpc_url("abc123"),
+            "https://mainnet.helius-rpc.com?api-key=abc123"
+        );
+        set_env("HELIUS_RPC_BASE_URL", Some("https://rpc.example.com"));
+        // API key is percent-encoded
+        assert_eq!(
+            helius_rpc_url("a&b=c#d"),
+            "https://rpc.example.com?api-key=a%26b%3Dc%23d"
+        );
+    }
+
+    #[test]
+    fn test_sol_to_lamports() {
+        assert_eq!(sol_to_lamports(dec!(0)).unwrap(), 0);
+        assert_eq!(sol_to_lamports(dec!(1)).unwrap(), 1_000_000_000);
+        assert_eq!(sol_to_lamports(dec!(1.5)).unwrap(), 1_500_000_000);
+        assert_eq!(sol_to_lamports(dec!(0.000000001)).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_sol_to_lamports_negative() {
+        let err = sol_to_lamports(dec!(-1)).unwrap_err();
+        assert!(err.to_string().contains("Negative SOL value"));
+    }
+
+    #[test]
+    fn test_sol_to_lamports_overflow() {
+        // 2e10 SOL * 1e9 lamports = 2e19 > u64::MAX (~1.84e19)
+        let err = sol_to_lamports(dec!(20000000000)).unwrap_err();
+        assert!(err.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn test_sol_to_lamports_f64() {
+        assert_eq!(sol_to_lamports_f64(0.0).unwrap(), 0);
+        assert_eq!(sol_to_lamports_f64(2.0).unwrap(), 2_000_000_000);
+        // Negative propagates from sol_to_lamports
+        assert!(sol_to_lamports_f64(-0.5).is_err());
+    }
+
+    #[test]
+    fn test_sol_to_lamports_f64_unrepresentable() {
+        // NaN cannot be represented as a Decimal
+        let err = sol_to_lamports_f64(f64::NAN).unwrap_err();
+        assert!(err.to_string().contains("Cannot represent"));
+    }
+
+    #[test]
+    fn test_sol_to_lamports_f64_overflow() {
+        let err = sol_to_lamports_f64(3e10).unwrap_err();
+        assert!(err.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn test_lamports_to_sol() {
+        assert_eq!(lamports_to_sol(0), 0.0);
+        assert_eq!(lamports_to_sol(1_000_000_000), 1.0);
+        assert_eq!(lamports_to_sol(1_500_000_000), 1.5);
+        // Huge values still convert (f64 precision loss is expected here)
+        assert_eq!(lamports_to_sol(u64::MAX), 1.8446744073709552e10);
+    }
+}

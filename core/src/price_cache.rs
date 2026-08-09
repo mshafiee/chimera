@@ -322,7 +322,6 @@ impl PriceCache {
     }
 
     /// Set price for a token with a custom timestamp (test only).
-    #[cfg(feature = "test-utils")]
     pub fn set_price_with_time(
         &self,
         token_address: &str,

@@ -620,4 +620,307 @@ mod tests {
         assert!(compute_rsi_from_prices(&[1.0; 15]).is_none());
         assert!(compute_rsi_from_prices(&[1.0; 16]).is_some());
     }
+
+    // ==========================================================================
+    // MOMENTUM EXIT DETECTION TESTS
+    // ==========================================================================
+
+    fn db_mock() -> Arc<dyn Database> {
+        Arc::new(crate::engine::kelly_sizer::tests::MockDatabase::default())
+    }
+
+    fn price_cache_with(token: &str, prices: &[(Decimal, chimera_core::price_cache::PriceSource)]) -> Arc<PriceCache> {
+        let cache = Arc::new(PriceCache::new().unwrap());
+        for (price, source) in prices {
+            cache.set_price(token, *price, *source, None);
+        }
+        cache
+    }
+
+    fn detector(cache: Arc<PriceCache>) -> MomentumExit {
+        MomentumExit::new(db_mock(), cache, 10)
+    }
+
+    fn seconds_ago(secs: u64) -> SystemTime {
+        SystemTime::now() - Duration::from_secs(secs)
+    }
+
+    #[tokio::test]
+    async fn test_no_price_data_skips_check() {
+        let cache = Arc::new(PriceCache::new().unwrap());
+        let exit = detector(cache);
+        let action = exit
+            .check_momentum("t1", "TOKEN11111111111111111111111111111111111111", dec!(1.0), SystemTime::now())
+            .await;
+        assert_eq!(action, MomentumExitAction::None);
+    }
+
+    #[tokio::test]
+    async fn test_zero_entry_price_forces_exit() {
+        let cache = price_cache_with(
+            "TOKEN11111111111111111111111111111111111111",
+            &[(dec!(1.0), chimera_core::price_cache::PriceSource::Jupiter)],
+        );
+        let exit = detector(cache);
+        let action = exit
+            .check_momentum(
+                "t1",
+                "TOKEN11111111111111111111111111111111111111",
+                Decimal::ZERO,
+                SystemTime::now(),
+            )
+            .await;
+        assert_eq!(action, MomentumExitAction::Exit);
+    }
+
+    #[tokio::test]
+    async fn test_corrupt_zero_current_price_skips() {
+        let cache = price_cache_with(
+            "TOKEN11111111111111111111111111111111111111",
+            &[(Decimal::ZERO, chimera_core::price_cache::PriceSource::Jupiter)],
+        );
+        let exit = detector(cache);
+        let action = exit
+            .check_momentum(
+                "t1",
+                "TOKEN11111111111111111111111111111111111111",
+                dec!(1.0),
+                SystemTime::now(),
+            )
+            .await;
+        assert_eq!(action, MomentumExitAction::None);
+    }
+
+    #[tokio::test]
+    async fn test_price_drop_exceeds_threshold() {
+        // Entry 1.0, current 0.9 -> 10% drop >= 5% base (position < 8 min old).
+        let cache = price_cache_with(
+            "TOKEN11111111111111111111111111111111111111",
+            &[(dec!(0.9), chimera_core::price_cache::PriceSource::Jupiter)],
+        );
+        let exit = detector(cache);
+        let action = exit
+            .check_momentum(
+                "t1",
+                "TOKEN11111111111111111111111111111111111111",
+                Decimal::ONE,
+                seconds_ago(60),
+            )
+            .await;
+        assert_eq!(action, MomentumExitAction::Exit);
+    }
+
+    #[tokio::test]
+    async fn test_price_drop_within_threshold_holds() {
+        // Entry 1.0, current 0.97 -> 3% drop < 5% -> hold.
+        let cache = price_cache_with(
+            "TOKEN11111111111111111111111111111111111111",
+            &[(dec!(0.97), chimera_core::price_cache::PriceSource::Jupiter)],
+        );
+        let exit = detector(cache);
+        let action = exit
+            .check_momentum(
+                "t1",
+                "TOKEN11111111111111111111111111111111111111",
+                Decimal::ONE,
+                seconds_ago(60),
+            )
+            .await;
+        assert_eq!(action, MomentumExitAction::None);
+    }
+
+    #[tokio::test]
+    async fn test_wick_protection_suppresses_checks() {
+        // Within 10s of entry: all checks suppressed.
+        let cache = price_cache_with(
+            "TOKEN11111111111111111111111111111111111111",
+            &[(dec!(0.5), chimera_core::price_cache::PriceSource::Jupiter)],
+        );
+        let exit = detector(cache);
+        let action = exit
+            .check_momentum(
+                "t1",
+                "TOKEN11111111111111111111111111111111111111",
+                Decimal::ONE,
+                seconds_ago(5),
+            )
+            .await;
+        assert_eq!(action, MomentumExitAction::None);
+    }
+
+    #[tokio::test]
+    async fn test_volatility_widens_threshold() {
+        // 3 samples (1.0 -> 2.0 -> 1.0) give ~75% volatility -> vol bonus 15,
+        // threshold 5+15=20 (capped). 15% drop holds.
+        let cache = price_cache_with(
+            "TOKEN11111111111111111111111111111111111111",
+            &[
+                (dec!(1.0), chimera_core::price_cache::PriceSource::Jupiter),
+                (dec!(2.0), chimera_core::price_cache::PriceSource::Jupiter),
+                (dec!(1.0), chimera_core::price_cache::PriceSource::Jupiter),
+            ],
+        );
+        let exit = detector(cache);
+        let action = exit
+            .check_momentum(
+                "t1",
+                "TOKEN11111111111111111111111111111111111111",
+                Decimal::ONE,
+                seconds_ago(300),
+            )
+            .await;
+        assert_eq!(action, MomentumExitAction::None);
+    }
+
+    #[tokio::test]
+    async fn test_age_bonus_widens_old_positions() {
+        // Position 10 min old: base 8 + age bonus (10/60/2 = 0.0833) = 8.0833.
+        // 9% drop >= 8.0833 -> exit. Covers the elapsed_minutes >= 8 base branch.
+        let cache = price_cache_with(
+            "TOKEN11111111111111111111111111111111111111",
+            &[(dec!(0.91), chimera_core::price_cache::PriceSource::Jupiter)],
+        );
+        let exit = detector(cache);
+        let action = exit
+            .check_momentum(
+                "t1",
+                "TOKEN11111111111111111111111111111111111111",
+                Decimal::ONE,
+                seconds_ago(600),
+            )
+            .await;
+        assert_eq!(action, MomentumExitAction::Exit);
+    }
+
+    #[tokio::test]
+    async fn test_volume_cache_checked_when_present() {
+        // Volume cache present with a small drop (< 65%) -> holding.
+        let cache = price_cache_with(
+            "TOKEN11111111111111111111111111111111111111",
+            &[(dec!(0.98), chimera_core::price_cache::PriceSource::Jupiter)],
+        );
+        let volume = Arc::new(VolumeCache::new());
+        volume.record_volume(
+            "TOKEN11111111111111111111111111111111111111",
+            dec!(100),
+        );
+        volume.record_volume(
+            "TOKEN11111111111111111111111111111111111111",
+            dec!(95),
+        );
+        let exit = MomentumExit::with_volume_cache(db_mock(), cache, volume, 10);
+        let action = exit
+            .check_momentum(
+                "t1",
+                "TOKEN11111111111111111111111111111111111111",
+                Decimal::ONE,
+                seconds_ago(300),
+            )
+            .await;
+        // No volume drop detected (history too short), price drop 2% < 5% -> hold.
+        assert_eq!(action, MomentumExitAction::None);
+    }
+
+    #[tokio::test]
+    async fn test_rsi_insufficient_history_skips() {
+        // 20 price points recorded at the same instant: RSI sampling requires
+        // >= 30s spacing, so < 16 samples -> RSI skipped.
+        let cache = Arc::new(PriceCache::new().unwrap());
+        for _ in 0..20 {
+            cache.set_price(
+                "TOKEN11111111111111111111111111111111111111",
+                dec!(1.0),
+                chimera_core::price_cache::PriceSource::Jupiter,
+                None,
+            );
+        }
+        let exit = detector(cache);
+        let action = exit
+            .check_momentum(
+                "t1",
+                "TOKEN11111111111111111111111111111111111111",
+                dec!(1.0),
+                seconds_ago(300),
+            )
+            .await;
+        assert_eq!(action, MomentumExitAction::None);
+    }
+
+    #[tokio::test]
+    async fn test_should_exit_wraps_check() {
+        let cache = price_cache_with(
+            "TOKEN11111111111111111111111111111111111111",
+            &[(dec!(0.5), chimera_core::price_cache::PriceSource::Jupiter)],
+        );
+        let exit = detector(cache);
+        assert!(exit
+            .should_exit(
+                "t1",
+                "TOKEN11111111111111111111111111111111111111",
+                Decimal::ONE,
+                seconds_ago(60),
+            )
+            .await);
+        // No price -> hold.
+        let cache = Arc::new(PriceCache::new().unwrap());
+        let exit = detector(cache);
+        assert!(!exit
+            .should_exit(
+                "t1",
+                "TOKEN11111111111111111111111111111111111111",
+                Decimal::ONE,
+                seconds_ago(60),
+            )
+            .await);
+    }
+
+    #[tokio::test]
+    async fn test_clock_skew_future_entry_time() {
+        // entry_time in the future -> elapsed() errors -> Duration::ZERO,
+        // which lands inside the wick-protection window (all checks suppressed).
+        let cache = price_cache_with(
+            "TOKEN11111111111111111111111111111111111111",
+            &[(dec!(0.5), chimera_core::price_cache::PriceSource::Jupiter)],
+        );
+        let exit = detector(cache);
+        let action = exit
+            .check_momentum(
+                "t1",
+                "TOKEN11111111111111111111111111111111111111",
+                Decimal::ONE,
+                SystemTime::now() + Duration::from_secs(60),
+            )
+            .await;
+        assert_eq!(action, MomentumExitAction::None);
+    }
+
+    #[tokio::test]
+    async fn test_with_quote_client_noop_paths() {
+        // quote_confirms_profit with a quote client whose quote path fails
+        // closed... To keep this hermetic we only verify the no-client path
+        // returns true via an RSI-gated flow; here we exercise
+        // `with_quote_client` construction plus a plain check.
+        let cache = price_cache_with(
+            "TOKEN11111111111111111111111111111111111111",
+            &[(dec!(0.97), chimera_core::price_cache::PriceSource::Jupiter)],
+        );
+        let fetcher = Arc::new(crate::token::TokenMetadataFetcher::new(
+            "https://api.mainnet-beta.solana.com",
+        ));
+        let parser = Arc::new(crate::token::TokenParser::new(
+            crate::token::TokenSafetyConfig::default(),
+            Arc::new(crate::token::TokenCache::new(10, 3600)),
+            fetcher,
+        ));
+        let exit = MomentumExit::new(db_mock(), cache, 10).with_quote_client(parser);
+        let action = exit
+            .check_momentum(
+                "t1",
+                "TOKEN11111111111111111111111111111111111111",
+                Decimal::ONE,
+                seconds_ago(60),
+            )
+            .await;
+        assert_eq!(action, MomentumExitAction::None);
+    }
 }

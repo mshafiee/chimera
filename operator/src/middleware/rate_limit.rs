@@ -241,4 +241,284 @@ mod tests {
         // Should use rightmost (5.6.7.8) not leftmost (1.2.3.4)
         assert_eq!(key, "5.6.7.8", "Should prevent IP spoofing by using rightmost IP");
     }
+
+    // ==========================================================================
+    // is_trusted_proxy
+    // ==========================================================================
+
+    #[test]
+    fn test_is_trusted_proxy_v4() {
+        assert!(is_trusted_proxy(&"127.0.0.1".parse().unwrap()));
+        assert!(is_trusted_proxy(&"10.0.0.1".parse().unwrap()));
+        assert!(is_trusted_proxy(&"192.168.1.1".parse().unwrap()));
+        assert!(is_trusted_proxy(&"172.16.0.1".parse().unwrap()));
+        assert!(!is_trusted_proxy(&"8.8.8.8".parse().unwrap()));
+        assert!(!is_trusted_proxy(&"1.2.3.4".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_trusted_proxy_v6() {
+        // Loopback
+        assert!(is_trusted_proxy(&"::1".parse().unwrap()));
+        // Unique-local (fc00::/7)
+        assert!(is_trusted_proxy(&"fd00::1".parse().unwrap()));
+        assert!(is_trusted_proxy(&"fc00::1".parse().unwrap()));
+        // Link-local (fe80::/10)
+        assert!(is_trusted_proxy(&"fe80::1".parse().unwrap()));
+        assert!(is_trusted_proxy(&"febf::1".parse().unwrap()));
+        // IPv4-mapped loopback and private
+        assert!(is_trusted_proxy(&"::ffff:127.0.0.1".parse().unwrap()));
+        assert!(is_trusted_proxy(&"::ffff:10.1.2.3".parse().unwrap()));
+        // Global unicast
+        assert!(!is_trusted_proxy(&"2606:4700:4700::1111".parse().unwrap()));
+        assert!(!is_trusted_proxy(&"2001:4860:4860::8888".parse().unwrap()));
+        // fec0::/10 (site-local) is NOT treated as trusted
+        assert!(!is_trusted_proxy(&"fec0::1".parse().unwrap()));
+    }
+
+    // ==========================================================================
+    // Key extraction paths
+    // ==========================================================================
+
+    fn request_from(peer: [u16; 8], port: u16) -> Request<()> {
+        use axum::http::{Method, Uri, Version};
+        Request::builder()
+            .method(Method::GET)
+            .uri(Uri::from_static("/"))
+            .version(Version::HTTP_11)
+            .extension(ConnectInfo(std::net::SocketAddr::new(
+                std::net::IpAddr::V6(std::net::Ipv6Addr::from(peer)),
+                port,
+            )))
+            .body(())
+            .unwrap()
+    }
+
+    fn request_from_v4(octets: [u8; 4], port: u16) -> Request<()> {
+        use axum::http::{Method, Uri, Version};
+        Request::builder()
+            .method(Method::GET)
+            .uri(Uri::from_static("/"))
+            .version(Version::HTTP_11)
+            .extension(ConnectInfo(std::net::SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::from(octets)),
+                port,
+            )))
+            .body(())
+            .unwrap()
+    }
+
+    fn with_header(mut req: Request<()>, name: &str, value: &str) -> Request<()> {
+        use axum::http::HeaderName;
+        req.headers_mut().insert(
+            HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            HeaderValue::from_str(value).unwrap(),
+        );
+        req
+    }
+
+    #[test]
+    fn test_untrusted_peer_ignores_forwarded_headers() {
+        let extractor = ProxyAwareKeyExtractor;
+        // Public peer (8.8.8.8) supplying X-Forwarded-For must NOT be honored —
+        // the peer address is the only trustworthy key.
+        let req = with_header(
+            request_from_v4([8, 8, 8, 8], 443),
+            "X-Forwarded-For",
+            "1.2.3.4",
+        );
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(key, "8.8.8.8");
+    }
+
+    #[test]
+    fn test_untrusted_peer_ignores_x_real_ip() {
+        let extractor = ProxyAwareKeyExtractor;
+        let req = with_header(
+            request_from_v4([8, 8, 8, 8], 443),
+            "X-Real-IP",
+            "10.0.0.9",
+        );
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(key, "8.8.8.8");
+    }
+
+    #[test]
+    fn test_no_connect_info_errors() {
+        let extractor = ProxyAwareKeyExtractor;
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(Uri::from_static("/"))
+            .body(())
+            .unwrap();
+        assert!(matches!(
+            extractor.extract(&req),
+            Err(GovernorError::UnableToExtractKey)
+        ));
+    }
+
+    #[test]
+    fn test_forwarded_header_socket_addr_ipv6() {
+        let extractor = ProxyAwareKeyExtractor;
+        // RFC 7239 form with IPv6 in brackets (no port) — brackets are trimmed
+        let req = with_header(
+            create_request_with_header("Forwarded", "for=\"[2001:db8::1]\""),
+            "Forwarded",
+            "for=\"[2001:db8::1]\"",
+        );
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(key, "2001:db8::1");
+    }
+
+    #[test]
+    fn test_forwarded_header_socket_addr_with_port() {
+        let extractor = ProxyAwareKeyExtractor;
+        // Unbracketed host:port parses as a SocketAddr, extracting the IP
+        let req = with_header(
+            request_from_v4([127, 0, 0, 1], 8080),
+            "Forwarded",
+            "for=10.0.0.5:4711",
+        );
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(key, "10.0.0.5");
+    }
+
+    #[test]
+    fn test_forwarded_header_ipv6_brackets_no_port() {
+        let extractor = ProxyAwareKeyExtractor;
+        let req = with_header(
+            request_from_v4([127, 0, 0, 1], 8080),
+            "Forwarded",
+            "for=[2001:db8::1]",
+        );
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(key, "2001:db8::1");
+    }
+
+    #[test]
+    fn test_forwarded_header_quoted_simple_ip() {
+        let extractor = ProxyAwareKeyExtractor;
+        let req = with_header(
+            request_from_v4([127, 0, 0, 1], 8080),
+            "Forwarded",
+            "for=\"10.1.1.1\"",
+        );
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(key, "10.1.1.1");
+    }
+
+    #[test]
+    fn test_forwarded_header_multiple_hops_uses_last() {
+        let extractor = ProxyAwareKeyExtractor;
+        // Comma-separated hops; the last one is added by our trusted proxy.
+        let req = with_header(
+            request_from_v4([127, 0, 0, 1], 8080),
+            "Forwarded",
+            "for=1.2.3.4;proto=http, for=10.2.3.4;proto=https",
+        );
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(key, "10.2.3.4");
+    }
+
+    #[test]
+    fn test_forwarded_header_invalid_for_falls_back() {
+        let extractor = ProxyAwareKeyExtractor;
+        // Invalid `for=` value: both SocketAddr and IpAddr parses fail → peer key.
+        let req = with_header(
+            request_from_v4([127, 0, 0, 1], 8080),
+            "Forwarded",
+            "for=not-an-ip;proto=https",
+        );
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(key, "127.0.0.1");
+    }
+
+    #[test]
+    fn test_forwarded_header_no_for_part_falls_back() {
+        let extractor = ProxyAwareKeyExtractor;
+        let req = with_header(
+            request_from_v4([127, 0, 0, 1], 8080),
+            "Forwarded",
+            "proto=https;host=example.com",
+        );
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(key, "127.0.0.1");
+    }
+
+    #[test]
+    fn test_x_real_ip_invalid_falls_back_to_forwarded() {
+        let extractor = ProxyAwareKeyExtractor;
+        let req = with_header(
+            with_header(
+                request_from_v4([127, 0, 0, 1], 8080),
+                "X-Real-IP",
+                "definitely-not-an-ip",
+            ),
+            "Forwarded",
+            "for=10.9.9.9",
+        );
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(key, "10.9.9.9");
+    }
+
+    #[test]
+    fn test_x_forwarded_for_invalid_ip_falls_back_to_peer() {
+        let extractor = ProxyAwareKeyExtractor;
+        let req = with_header(
+            request_from_v4([127, 0, 0, 1], 8080),
+            "X-Forwarded-For",
+            "garbage, also-garbage",
+        );
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(key, "127.0.0.1");
+    }
+
+    #[test]
+    fn test_x_forwarded_for_whitespace_trimmed() {
+        let extractor = ProxyAwareKeyExtractor;
+        let req = with_header(
+            request_from_v4([127, 0, 0, 1], 8080),
+            "X-Forwarded-For",
+            "1.2.3.4,  5.6.7.8  ",
+        );
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(key, "5.6.7.8");
+    }
+
+    #[test]
+    fn test_x_real_ip_whitespace_trimmed() {
+        let extractor = ProxyAwareKeyExtractor;
+        let req = with_header(
+            request_from_v4([127, 0, 0, 1], 8080),
+            "X-Real-IP",
+            " 10.1.1.1 ",
+        );
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(key, "10.1.1.1");
+    }
+
+    #[test]
+    fn test_ipv6_trusted_proxy_with_forwarded_headers() {
+        let extractor = ProxyAwareKeyExtractor;
+        // IPv6 loopback peer counts as a trusted proxy
+        let req = with_header(
+            request_from([0, 0, 0, 0, 0, 0, 0, 1], 8080),
+            "X-Forwarded-For",
+            "1.2.3.4, 5.6.7.8",
+        );
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(key, "5.6.7.8");
+    }
+
+    #[test]
+    fn test_ipv6_untrusted_peer_uses_peer_address() {
+        let extractor = ProxyAwareKeyExtractor;
+        let req = with_header(
+            request_from([0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111], 443),
+            "X-Forwarded-For",
+            "1.2.3.4",
+        );
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(key, "2606:4700:4700::1111");
+    }
 }

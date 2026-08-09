@@ -74,3 +74,92 @@ impl MevProtection {
         tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{Action, SignalPayload};
+    use rust_decimal_macros::dec;
+
+    fn test_signal(strategy: Strategy) -> Signal {
+        Signal::new(
+            SignalPayload {
+                strategy,
+                token: "BONK".to_string(),
+                token_address: Some(
+                    "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+                ),
+                action: if strategy == Strategy::Exit {
+                    Action::Sell
+                } else {
+                    Action::Buy
+                },
+                amount_sol: dec!(0.5),
+                wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+                trade_uuid: None,
+                exit_fraction: None,
+            },
+            12345,
+            None,
+        )
+    }
+
+    #[test]
+    fn test_calculate_tip_exit_highest_priority() {
+        let config = Arc::new(MevProtectionConfig::default());
+        let mev = MevProtection::new(config.clone());
+        let tip = mev.calculate_tip(&test_signal(Strategy::Exit), false);
+        assert_eq!(tip, config.exit_tip_sol);
+        // Exit tip beats the consensus multiplier even when flagged consensus
+        assert_eq!(tip, dec!(0.007));
+    }
+
+    #[test]
+    fn test_calculate_tip_consensus_uses_multiplier() {
+        let config = Arc::new(MevProtectionConfig::default());
+        let mev = MevProtection::new(config.clone());
+        let tip = mev.calculate_tip(&test_signal(Strategy::Shield), true);
+        // 1.5x the consensus tip
+        assert_eq!(tip, dec!(0.0045));
+        assert_eq!(tip, config.consensus_tip_sol * Decimal::new(15, 1));
+    }
+
+    #[test]
+    fn test_calculate_tip_standard() {
+        let config = Arc::new(MevProtectionConfig::default());
+        let mev = MevProtection::new(config.clone());
+        let tip = mev.calculate_tip(&test_signal(Strategy::Spear), false);
+        assert_eq!(tip, config.standard_tip_sol);
+        assert_eq!(tip, dec!(0.0015));
+    }
+
+    #[test]
+    fn test_always_use_jito() {
+        let config = Arc::new(MevProtectionConfig::default());
+        assert!(MevProtection::new(config).always_use_jito());
+
+        let mut disabled = MevProtectionConfig::default();
+        disabled.always_use_jito = false;
+        assert!(!MevProtection::new(Arc::new(disabled)).always_use_jito());
+    }
+
+    #[test]
+    fn test_new_warns_on_non_positive_tips() {
+        let mut config = MevProtectionConfig::default();
+        config.exit_tip_sol = dec!(0.0);
+        config.consensus_tip_sol = dec!(-0.001);
+        config.standard_tip_sol = dec!(0.0015);
+        // Must not panic; just logs warnings and constructs
+        let mev = MevProtection::new(Arc::new(config));
+        assert_eq!(mev.calculate_tip(&test_signal(Strategy::Exit), false), dec!(0.0));
+    }
+
+    #[tokio::test]
+    async fn test_add_random_delay_returns() {
+        let config = Arc::new(MevProtectionConfig::default());
+        let mev = MevProtection::new(config);
+        let start = std::time::Instant::now();
+        mev.add_random_delay().await;
+        assert!(start.elapsed().as_millis() >= 40);
+    }
+}
