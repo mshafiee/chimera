@@ -889,7 +889,7 @@ impl DunePnlMonitor {
             JOIN wallets w ON w.address = dr.wallet_address
             WHERE w.status = 'CANDIDATE'
               AND dr.created_at > NOW() - INTERVAL '24 hours'
-              AND COALESCE(w.demoted_at, '-infinity') < NOW() - ($2 || ' hours')::interval
+              AND COALESCE(w.demoted_at, '-infinity') < NOW() - make_interval(hours => $2::int)
             GROUP BY dr.wallet_address
             ORDER BY COUNT(*) DESC
             LIMIT $1
@@ -1084,7 +1084,7 @@ impl DunePnlMonitor {
             SELECT sp.wallet_address, COUNT(*) AS n, AVG(se.pnl_pct)::float8 AS avg_pnl
             FROM shadow_exits se
             JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
-            WHERE sp.opened_at > NOW() - ($1 || ' hours')::interval
+            WHERE sp.opened_at > NOW() - make_interval(hours => $1::int)
               AND se.exit_strategy = 'mirror_main'
               AND sp.token_address NOT LIKE '%pump'
               AND sp.main_admitted = true

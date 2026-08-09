@@ -1163,8 +1163,8 @@ impl Database for PostgresBackend {
         let total: Decimal = if let Some(t) = to {
             sqlx::query_scalar::<_, Decimal>(
                 r#"SELECT COALESCE(SUM(realized_pnl_sol), 0.0) FROM positions
-                   WHERE state = 'CLOSED' AND pnl_data_valid AND closed_at >= NOW() - ($1 || ' hours')::interval
-                   AND closed_at < NOW() - ($2 || ' hours')::interval"#,
+                   WHERE state = 'CLOSED' AND pnl_data_valid AND closed_at >= NOW() - make_interval(hours => $1::int)
+                   AND closed_at < NOW() - make_interval(hours => $2::int)"#,
             )
             .bind(from)
             .bind(t)
@@ -1174,7 +1174,7 @@ impl Database for PostgresBackend {
         } else {
             sqlx::query_scalar::<_, Decimal>(
                 r#"SELECT COALESCE(SUM(realized_pnl_sol), 0.0) FROM positions
-                   WHERE state = 'CLOSED' AND pnl_data_valid AND closed_at >= NOW() - ($1 || ' hours')::interval"#,
+                   WHERE state = 'CLOSED' AND pnl_data_valid AND closed_at >= NOW() - make_interval(hours => $1::int)"#,
             )
             .bind(from)
             .fetch_one(&self.pool)
@@ -1309,7 +1309,7 @@ impl Database for PostgresBackend {
         let result = sqlx::query(
             r#"UPDATE trades SET status = 'DEAD_LETTER', updated_at = NOW()
                WHERE status IN ('PENDING', 'QUEUED')
-               AND created_at < NOW() - ($1 || ' minutes')::INTERVAL"#,
+               AND created_at < NOW() - make_interval(mins => $1::int)"#,
         )
         .bind(max_age_minutes)
         .execute(&self.pool)

@@ -873,18 +873,30 @@ impl PriceCache {
                         continue;
                     }
                 };
+                // Jupiter omits `usdPrice` for tokens with no recent trade
+                // (dead/untradeable — liquidity < ~$10). That is a normal
+                // absence, not a parse failure: skip quietly instead of
+                // spamming the log (2026-08-09: 3k+ warnings/day from
+                // stale shadow-tracked tokens).
+                let Some(usd_price) = price_data.usdPrice else {
+                    tracing::debug!(
+                        token = token,
+                        "No tradeable price for token (dead/untradeable) — skipping"
+                    );
+                    continue;
+                };
                 // Jupiter returns price in USD as f64, convert to Decimal for precision
                 // Try from_f64_retain first for best precision, fall back to string conversion
-                let price = match Decimal::from_f64_retain(price_data.usdPrice) {
+                let price = match Decimal::from_f64_retain(usd_price) {
                     Some(decimal) => decimal,
                     None => {
                         // Fallback: string conversion handles edge cases where from_f64_retain fails
-                        match Decimal::from_str(&price_data.usdPrice.to_string()) {
+                        match Decimal::from_str(&usd_price.to_string()) {
                             Ok(decimal) => decimal,
                             Err(_) => {
                                 tracing::error!(
                                     token = token,
-                                    price_f64 = price_data.usdPrice,
+                                    price_f64 = usd_price,
                                     "Failed to convert Jupiter price to Decimal — both from_f64_retain and from_str failed"
                                 );
                                 // Skip this token rather than using a zero price
@@ -925,14 +937,16 @@ impl PriceCache {
             "Fetched prices from Jupiter"
         );
 
-        // If we got 0 prices but requested >0, fail loudly so the caller can
+        // If we got 0 prices but requested >0, report it so the caller can
         // retry/fall back instead of silently letting the cache go stale.
+        // NOTE: this is normal for dead/untradeable tokens (Jupiter omits
+        // usdPrice) — the message must not blame the API key.
         if results.is_empty() && !tokens.is_empty() {
-            tracing::error!(
+            tracing::warn!(
                 token_count = tokens.len(),
                 url = %url,
                 "Jupiter price API returned 0 prices for {} requested tokens — \
-                 check API key and endpoint configuration. The token may have unreliable pricing and was omitted.",
+                 all lacked a tradeable price (dead/untradeable) or failed to parse",
                 tokens.len()
             );
             return Err(PriceCacheError::HttpError(format!(
@@ -1115,8 +1129,11 @@ struct JupiterPriceResponse {
 #[allow(dead_code)]
 #[allow(non_snake_case)]
 struct JupiterPriceData {
-    /// Price in USD (field name changed from "price" to "usdPrice" in V3)
-    usdPrice: f64,
+    /// Price in USD (field name changed from "price" to "usdPrice" in V3).
+    /// ABSENT for tokens with no recent trade (dead/untradeable) — optional
+    /// since 2026-08-09 so those entries skip quietly instead of failing parse.
+    #[serde(default)]
+    usdPrice: Option<f64>,
     /// Block height when this price was recorded
     #[serde(default)]
     blockId: Option<u64>,
