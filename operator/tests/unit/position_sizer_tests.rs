@@ -569,21 +569,43 @@ async fn insert_token_positions(pool: &Pool<Postgres>, token: &str, sizes: &[f64
     }
 }
 
+/// Give the wallet a proven trade history so the sizer's Kelly path (>= 15
+/// closed trades) yields a full-size base (0.5 SOL at WQS 100) instead of the
+/// conservative unproven-wallet fallback cap.
+async fn insert_closed_trades_conviction(pool: &Pool<Postgres>, wallet: &str, count: u32) {
+    for i in 0..count {
+        let uuid = format!("uuid-trades-{}", i);
+        sqlx::query(
+            "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status) \
+             VALUES ($1, $2, 'token_x', 'SHIELD', 'BUY', 0.25, 'CLOSED')",
+        )
+        .bind(&uuid)
+        .bind(wallet)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+}
+
 #[tokio::test]
 async fn test_conviction_cap_applies_75th_percentile() {
     let (db, _tmp) = create_test_db().await;
     let pool = pg_pool(&db);
     // Sorted 75th percentile (nearest-rank, n=5) = 0.25 SOL.
     insert_token_positions(&pool, "token_a", &[0.1, 0.15, 0.2, 0.25, 0.3]).await;
+    // Kelly path requires >= 15 closed trades; WQS 100 gives a 0.5 base that
+    // exceeds the 0.25 percentile cap, so the cap actually binds.
+    insert_closed_trades_conviction(&pool, "test_wallet", 15).await;
 
     let sizer = PositionSizer::new(db, default_sizing_config());
     let mut factors = neutral_factors();
+    factors.wallet_wqs = 100.0;
     factors.token_address = Some("token_a".to_string());
     let size = sizer.calculate_size(factors).await.unwrap();
     assert_eq!(
         size,
         Decimal::from_str("0.25").unwrap(),
-        "base size 0.5 must be capped at the token's 75th-percentile entry size"
+        "full-size base 0.5 must be capped at the token's 75th-percentile entry size"
     );
 }
 
@@ -593,9 +615,11 @@ async fn test_conviction_cap_falls_back_to_default_when_thin_history() {
     let pool = pg_pool(&db);
     // Only 2 historical entries (< 3) → fall back to the default cap 0.25.
     insert_token_positions(&pool, "token_b", &[0.1, 0.2]).await;
+    insert_closed_trades_conviction(&pool, "test_wallet", 15).await;
 
     let sizer = PositionSizer::new(db, default_sizing_config());
     let mut factors = neutral_factors();
+    factors.wallet_wqs = 100.0;
     factors.token_address = Some("token_b".to_string());
     let size = sizer.calculate_size(factors).await.unwrap();
     assert_eq!(
@@ -608,12 +632,15 @@ async fn test_conviction_cap_falls_back_to_default_when_thin_history() {
 #[tokio::test]
 async fn test_conviction_cap_skipped_without_token_context() {
     let (db, _tmp) = create_test_db().await;
+    let pool = pg_pool(&db);
+    insert_closed_trades_conviction(&pool, "test_wallet", 15).await;
     let sizer = PositionSizer::new(db, default_sizing_config());
-    let factors = neutral_factors(); // token_address: None
+    let mut factors = neutral_factors();
+    factors.wallet_wqs = 100.0;
     let size = sizer.calculate_size(factors).await.unwrap();
     assert_eq!(
         size,
         Decimal::from_str("0.5").unwrap(),
-        "no token context → base size unchanged (cap disabled)"
+        "no token context → full-size base unchanged (cap disabled)"
     );
 }

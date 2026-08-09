@@ -313,6 +313,7 @@ mod tests {
 
     #[test]
     fn test_memory_pressure_flag() {
+        let _guard = PRESSURE_LOCK.lock().unwrap();
         MEMORY_PRESSURE.store(false, Ordering::Relaxed);
         assert!(!is_memory_pressure_high());
 
@@ -322,11 +323,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_memory_pressure_real() {
+        // Serialize against test_memory_pressure_flag: MEMORY_PRESSURE is a
+        // process-global flag and the real check would race with it.
+        let _guard = PRESSURE_LOCK.lock().unwrap();
         MEMORY_PRESSURE.store(false, Ordering::Relaxed);
         let usage = check_memory_pressure().await.expect("memory check should work");
         assert!(usage > 0.0 && usage <= 1.0);
-        // Flag reflects the measured usage, whatever it is
-        assert_eq!(is_memory_pressure_high(), usage >= MEMORY_PRESSURE_THRESHOLD);
+        // Flag reflects the measured usage, whatever it is (comparison is
+        // tolerant: the internal store is usage_percent >= threshold*100)
+        assert_eq!(
+            is_memory_pressure_high(),
+            usage >= (MEMORY_PRESSURE_THRESHOLD * 100.0) / 100.0
+        );
     }
 
     #[tokio::test]
@@ -353,6 +361,8 @@ mod tests {
     // The RPC backoff multiplier is a process-global static; parallel tests
     // would race on it. Serialize the tests that touch it.
     static BACKOFF_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Same for the process-global memory-pressure flag.
+    static PRESSURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[tokio::test]
     async fn test_rpc_backoff_doubles_and_caps() {

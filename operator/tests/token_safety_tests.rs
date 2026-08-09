@@ -20,13 +20,13 @@ fn loaded_config() -> AppConfig {
 fn test_production_config_file_is_actually_loaded() {
     let config = loaded_config();
     // Prove the REAL file was loaded, not the silent-default fallback:
-    // operator/config.yaml sets min_liquidity_spear_usd: 10000, while the
-    // built-in default is 5000. If this fails, load_config resolved defaults
-    // and every other assertion in this file is meaningless.
+    // operator/config.yaml sets min_liquidity_spear_usd: 30000 (raised from
+    // $10k), while the built-in default is 5000. If this fails, load_config
+    // resolved defaults and every other assertion in this file is meaningless.
     assert_eq!(
         config.token_safety.min_liquidity_spear_usd,
-        dec!(10_000.0),
-        "operator/config.yaml sets spear liquidity to $10k — if this fails, \
+        dec!(30_000.0),
+        "operator/config.yaml sets spear liquidity to $30k — if this fails, \
          load_config fell back to defaults and the file was not resolved"
     );
 }
