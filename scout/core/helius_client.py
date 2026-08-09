@@ -229,8 +229,18 @@ class HeliusClient:
         - Limit per-host to 50 (matches Helius Developer Plan rate limits)
         - 5-minute keep-alive for connection reuse
         - Enable cleanup of closed connections
+
+        Sessions are bound to the event loop they were created on. The scout's
+        continuous mode runs ``asyncio.run`` per iteration and some callers
+        run coroutines in threads (``_run_async_coro``), so a session from a
+        previous (already-closed) loop must never be reused — it fails with
+        "Event loop is closed" (2026-08-09: 700+/day from discovery). Mirror
+        the loop-aware pattern from BirdeyeClient: recreate when the running
+        loop differs. The old session is detached (not awaited — closing on a
+        dead loop hangs; GC reclaims it, warnings are suppressed in main.py).
         """
-        if self._session is None:
+        loop = asyncio.get_running_loop()
+        if self._session is None or getattr(self._session, "_loop", None) is not loop:
             # Configure connection pool for Helius endpoints
             connector = aiohttp.TCPConnector(
                 limit=100,              # Total max connections
@@ -250,7 +260,12 @@ class HeliusClient:
     async def _close_session(self):
         """Close session if we own it."""
         if self._own_session and self._session:
-            await self._session.close()
+            try:
+                await self._session.close()
+            except Exception:
+                # Closing on an already-closed/foreign loop hangs — drop the
+                # reference instead so the caller never blocks.
+                pass
             self._session = None
             self._own_session = False
 

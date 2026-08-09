@@ -516,12 +516,48 @@ class ProductionMonitor:
             except Exception as e:
                 logger.error(f"Alert handler failed: {e}")
 
+    def _resolve_alerts(self, title: str):
+        """Mark all unresolved alerts with `title` as resolved.
+
+        2026-08-09: alerts were created when a threshold breached but never
+        resolved when it recovered, so `validate_production_readiness` always
+        reported the accumulated historical count (e.g. "43 unresolved
+        critical alerts" from a single Aug-7 CPU spike on an otherwise
+        healthy host). The in-memory store is authoritative for the
+        readiness report (persistence is best-effort); the DB rows are
+        updated too when writable.
+        """
+        now = time.time()
+        with self._alert_lock:
+            for alert in self._alerts:
+                if not alert.resolved and alert.title == title:
+                    alert.resolved = True
+                    alert.resolution_timestamp = now
+
+        # Best-effort DB sync (readonly mounts are skipped silently).
+        try:
+            conn = get_connection(self._db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE alerts SET resolved = 1, resolution_timestamp = ? "
+                "WHERE title = ? AND resolved = 0",
+                (now, title),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
     def check_thresholds(self, metrics: PerformanceMetrics) -> List[Alert]:
         """Check metrics against thresholds and create alerts.
 
         Alerts are debounced: the condition must persist across
         `_sustained_samples` consecutive checks (see __init__), so 1-second
         host spikes cannot fire alerts.
+
+        Alerts auto-resolve once the breached condition clears, so the
+        production-readiness report reflects CURRENT health instead of an
+        ever-growing historical backlog (2026-08-09).
         """
         alerts = []
 
@@ -535,7 +571,8 @@ class ProductionMonitor:
             return False
 
         # CPU checks
-        if sustained('cpu_critical', metrics.cpu_percent >= self._thresholds['cpu_critical']):
+        cpu_critical_breached = metrics.cpu_percent >= self._thresholds['cpu_critical']
+        if sustained('cpu_critical', cpu_critical_breached):
             if self._can_alert('cpu_critical'):
                 alerts.append(self.create_alert(
                     severity=AlertSeverity.CRITICAL,
@@ -544,7 +581,10 @@ class ProductionMonitor:
                     source="system_monitor",
                     details={'cpu_percent': metrics.cpu_percent}
                 ))
-        elif sustained('cpu_warning', metrics.cpu_percent >= self._thresholds['cpu_warning']):
+        elif not cpu_critical_breached:
+            self._resolve_alerts("CPU Critical")
+        cpu_warning_breached = metrics.cpu_percent >= self._thresholds['cpu_warning']
+        if sustained('cpu_warning', cpu_warning_breached):
             if self._can_alert('cpu_warning'):
                 alerts.append(self.create_alert(
                     severity=AlertSeverity.WARNING,
@@ -553,9 +593,12 @@ class ProductionMonitor:
                     source="system_monitor",
                     details={'cpu_percent': metrics.cpu_percent}
                 ))
+        elif not cpu_warning_breached:
+            self._resolve_alerts("CPU High")
 
         # Memory checks
-        if sustained('memory_critical', metrics.memory_percent >= self._thresholds['memory_critical']):
+        memory_critical_breached = metrics.memory_percent >= self._thresholds['memory_critical']
+        if sustained('memory_critical', memory_critical_breached):
             if self._can_alert('memory_critical'):
                 alerts.append(self.create_alert(
                     severity=AlertSeverity.CRITICAL,
@@ -564,7 +607,10 @@ class ProductionMonitor:
                     source="system_monitor",
                     details={'memory_percent': metrics.memory_percent}
                 ))
-        elif sustained('memory_warning', metrics.memory_percent >= self._thresholds['memory_warning']):
+        elif not memory_critical_breached:
+            self._resolve_alerts("Memory Critical")
+        memory_warning_breached = metrics.memory_percent >= self._thresholds['memory_warning']
+        if sustained('memory_warning', memory_warning_breached):
             if self._can_alert('memory_warning'):
                 alerts.append(self.create_alert(
                     severity=AlertSeverity.WARNING,
@@ -573,9 +619,12 @@ class ProductionMonitor:
                     source="system_monitor",
                     details={'memory_percent': metrics.memory_percent}
                 ))
+        elif not memory_warning_breached:
+            self._resolve_alerts("Memory High")
 
         # Disk checks
-        if sustained('disk_critical', metrics.disk_usage_percent >= self._thresholds['disk_critical']):
+        disk_critical_breached = metrics.disk_usage_percent >= self._thresholds['disk_critical']
+        if sustained('disk_critical', disk_critical_breached):
             if self._can_alert('disk_critical'):
                 alerts.append(self.create_alert(
                     severity=AlertSeverity.CRITICAL,
@@ -584,7 +633,10 @@ class ProductionMonitor:
                     source="system_monitor",
                     details={'disk_usage_percent': metrics.disk_usage_percent}
                 ))
-        elif sustained('disk_warning', metrics.disk_usage_percent >= self._thresholds['disk_warning']):
+        elif not disk_critical_breached:
+            self._resolve_alerts("Disk Critical")
+        disk_warning_breached = metrics.disk_usage_percent >= self._thresholds['disk_warning']
+        if sustained('disk_warning', disk_warning_breached):
             if self._can_alert('disk_warning'):
                 alerts.append(self.create_alert(
                     severity=AlertSeverity.WARNING,
@@ -593,6 +645,8 @@ class ProductionMonitor:
                     source="system_monitor",
                     details={'disk_usage_percent': metrics.disk_usage_percent}
                 ))
+        elif not disk_warning_breached:
+            self._resolve_alerts("Disk High")
 
         return alerts
 
