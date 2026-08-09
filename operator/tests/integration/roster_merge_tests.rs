@@ -29,7 +29,10 @@ async fn test_merge_roster_rejected_on_postgres() {
     let roster_path = std::env::temp_dir().join("roster_new.db");
 
     let result = merge_roster(&pool, &roster_path).await;
-    assert!(result.is_err(), "merge_roster must be rejected on PostgreSQL");
+    assert!(
+        result.is_err(),
+        "merge_roster must be rejected on PostgreSQL"
+    );
     let msg = result.err().unwrap().to_string();
     assert!(
         msg.contains("not supported with PostgreSQL"),
@@ -65,13 +68,11 @@ async fn test_direct_sql_import_path() {
     let pool = pg_pool(&db);
 
     let address = "roster-import-wallet-0001";
-    sqlx::query(
-        "INSERT INTO wallets (address, status, wqs_score) VALUES ($1, 'CANDIDATE', 70.0)",
-    )
-    .bind(address)
-    .execute(&pool)
-    .await
-    .expect("direct SQL roster import must work");
+    sqlx::query("INSERT INTO wallets (address, status, wqs_score) VALUES ($1, 'CANDIDATE', 70.0)")
+        .bind(address)
+        .execute(&pool)
+        .await
+        .expect("direct SQL roster import must work");
 
     let (status,): (String,) = sqlx::query_as("SELECT status FROM wallets WHERE address = $1")
         .bind(address)

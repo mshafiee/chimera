@@ -215,11 +215,12 @@ async fn test_close_position_closes_only_specified_position() {
     );
 
     // Verify uuid2 is still ACTIVE
-    let uuid2_state: (String,) = sqlx::query_as("SELECT state FROM positions WHERE trade_uuid = $1")
-        .bind(uuid2)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let uuid2_state: (String,) =
+        sqlx::query_as("SELECT state FROM positions WHERE trade_uuid = $1")
+            .bind(uuid2)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         uuid2_state.0, "ACTIVE",
         "Second position must remain ACTIVE"
@@ -452,16 +453,12 @@ async fn test_position_deleted_with_trade_via_cascade() {
         delete_result.is_ok(),
         "trade deletion should succeed (FK is ON DELETE CASCADE)"
     );
-    let pos_count: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM positions WHERE trade_uuid = $1")
-            .bind(uuid)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(
-        pos_count.0, 0,
-        "cascade should remove the child position"
-    );
+    let pos_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM positions WHERE trade_uuid = $1")
+        .bind(uuid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(pos_count.0, 0, "cascade should remove the child position");
 }
 
 // ─── Test 46 (plan) ── PnL precision f64 round-trip ─────────────────────────

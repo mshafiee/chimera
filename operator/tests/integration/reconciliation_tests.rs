@@ -121,17 +121,22 @@ async fn runner_logs_confirmed_entry_for_active_position() {
 
     // A log row was inserted recording the confirmed entry (discrepancy NONE).
     let pool = pg_pool(&db);
-    let (disc,): (String,) = sqlx::query_as(
-        "SELECT discrepancy FROM reconciliation_log WHERE trade_uuid = $1",
-    )
-    .bind("uuid-active")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(disc, "NONE", "confirmed entry must log a NONE discrepancy row");
+    let (disc,): (String,) =
+        sqlx::query_as("SELECT discrepancy FROM reconciliation_log WHERE trade_uuid = $1")
+            .bind("uuid-active")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        disc, "NONE",
+        "confirmed entry must log a NONE discrepancy row"
+    );
 
     let status = db.get_reconciliation_status(100).await.unwrap();
-    assert_eq!(status.checked_count, 1, "the run inspected exactly one position");
+    assert_eq!(
+        status.checked_count, 1,
+        "the run inspected exactly one position"
+    );
 
     // The checked counter advanced.
     assert_eq!(metrics.reconciliation_checked.get(), 1);
@@ -154,7 +159,10 @@ async fn runner_flags_missing_entry_transaction() {
     let result = run_reconciliation(db.as_ref(), &checker, &metrics).await;
 
     assert_eq!(result.checked_count, 1);
-    assert_eq!(result.discrepancies, 1, "missing entry should be a discrepancy");
+    assert_eq!(
+        result.discrepancies, 1,
+        "missing entry should be a discrepancy"
+    );
     assert!(metrics.reconciliation_discrepancies.get() >= 1);
 }
 
@@ -211,7 +219,10 @@ async fn runner_auto_resolves_confirmed_exit() {
 
     let result = run_reconciliation(db.as_ref(), &checker, &metrics).await;
 
-    assert_eq!(result.auto_resolved, 1, "confirmed exit should auto-resolve");
+    assert_eq!(
+        result.auto_resolved, 1,
+        "confirmed exit should auto-resolve"
+    );
 
     // The position should now be CLOSED.
     let positions = db.get_positions(Some("CLOSED")).await.unwrap();
@@ -348,7 +359,10 @@ mod tests {
         let result = run_reconciliation(db.as_ref(), &checker, &metrics()).await;
 
         assert_eq!(result.checked_count, 1);
-        assert_eq!(result.discrepancies, 1, "missing entry should be a discrepancy");
+        assert_eq!(
+            result.discrepancies, 1,
+            "missing entry should be a discrepancy"
+        );
 
         // A MISSING_TX reconciliation_log row was recorded for this position.
         let (cnt,): (i64,) = sqlx::query_as(
@@ -415,7 +429,10 @@ mod tests {
 
         let result = run_reconciliation(db.as_ref(), &checker, &metrics()).await;
 
-        assert_eq!(result.discrepancies, 1, "missing entry is a MISSING_TX discrepancy");
+        assert_eq!(
+            result.discrepancies, 1,
+            "missing entry is a MISSING_TX discrepancy"
+        );
 
         // The position is NOT auto-failed — it remains ACTIVE.
         let active = db.get_positions(Some("ACTIVE")).await.unwrap();
@@ -458,14 +475,22 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(non_none, 0, "no non-NONE discrepancy rows for a found entry");
+        assert_eq!(
+            non_none, 0,
+            "no non-NONE discrepancy rows for a found entry"
+        );
     }
 
     // 5. Reconciliation log captures the real discrepancy kinds via the real API.
     #[tokio::test]
     async fn test_reconciliation_log_entries() {
         let (db, _temp) = create_test_db().await;
-        let kinds = ["MISSING_TX", "TX_CHECK_ERROR", "AUTO_RESOLVE_FAILED", "NONE"];
+        let kinds = [
+            "MISSING_TX",
+            "TX_CHECK_ERROR",
+            "AUTO_RESOLVE_FAILED",
+            "NONE",
+        ];
 
         for (idx, kind) in kinds.iter().enumerate() {
             db.insert_reconciliation_log(

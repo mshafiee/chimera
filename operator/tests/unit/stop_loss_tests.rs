@@ -104,7 +104,8 @@ async fn test_zero_entry_price_forces_immediate_exit() {
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("1.0").unwrap(),
-        PriceSource::Jupiter, Some(9),
+        PriceSource::Jupiter,
+        Some(9),
     );
 
     let mgr = StopLossManager::new(db, default_config(), price_cache);
@@ -140,7 +141,8 @@ async fn test_consensus_query_failure_no_stop_widening() {
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("0.83").unwrap(),
-        PriceSource::Jupiter, Some(9),
+        PriceSource::Jupiter,
+        Some(9),
     );
 
     // No signal_aggregation rows → query returns 0 → is_consensus = false.
@@ -187,7 +189,8 @@ async fn test_consensus_widens_stop_for_high_wqs_wallet() {
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("0.78").unwrap(),
-        PriceSource::Jupiter, Some(9),
+        PriceSource::Jupiter,
+        Some(9),
     );
 
     let mgr = StopLossManager::new(db, config_with_stop_distance("-100.0"), price_cache);
@@ -232,7 +235,8 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
         price_cache.set_price(
             TOKEN,
             Decimal::from_str(&p.to_string()).unwrap(),
-            PriceSource::Jupiter, Some(9),
+            PriceSource::Jupiter,
+            Some(9),
         );
     }
 
@@ -248,7 +252,8 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("0.76").unwrap(),
-        PriceSource::Jupiter, Some(9),
+        PriceSource::Jupiter,
+        Some(9),
     );
     let mgr = StopLossManager::new(
         db.clone(),
@@ -274,7 +279,8 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("0.74").unwrap(),
-        PriceSource::Jupiter, Some(9),
+        PriceSource::Jupiter,
+        Some(9),
     );
     let mgr2 = StopLossManager::new(db, config_with_stop_distance("-25.0"), price_cache);
     let action_over = mgr2
@@ -317,12 +323,14 @@ async fn test_low_wqs_low_volatility_tightens_to_9pct() {
         price_cache.set_price(
             TOKEN,
             Decimal::from_str("1.001").unwrap(),
-            PriceSource::Jupiter, Some(9),
+            PriceSource::Jupiter,
+            Some(9),
         );
         price_cache.set_price(
             TOKEN,
             Decimal::from_str("0.999").unwrap(),
-            PriceSource::Jupiter, Some(9),
+            PriceSource::Jupiter,
+            Some(9),
         );
     }
 
@@ -331,13 +339,18 @@ async fn test_low_wqs_low_volatility_tightens_to_9pct() {
         assert!(v < 10.0, "Test setup requires low volatility, got {}", v);
     }
 
-    let mgr = StopLossManager::new(db.clone(), config_with_stop_distance("-50.0"), price_cache.clone());
+    let mgr = StopLossManager::new(
+        db.clone(),
+        config_with_stop_distance("-50.0"),
+        price_cache.clone(),
+    );
 
     // -6% loss: below the -9% threshold → must NOT exit
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("0.94").unwrap(),
-        PriceSource::Jupiter, Some(9),
+        PriceSource::Jupiter,
+        Some(9),
     );
     let action_small = mgr
         .check_stop_loss(
@@ -358,7 +371,8 @@ async fn test_low_wqs_low_volatility_tightens_to_9pct() {
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("0.90").unwrap(),
-        PriceSource::Jupiter, Some(9),
+        PriceSource::Jupiter,
+        Some(9),
     );
     let action_large = mgr
         .check_stop_loss(
@@ -397,7 +411,8 @@ async fn test_consensus_plus_high_volatility_widens_further() {
         price_cache.set_price(
             TOKEN,
             Decimal::from_str(&p.to_string()).unwrap(),
-            PriceSource::Jupiter, Some(9),
+            PriceSource::Jupiter,
+            Some(9),
         );
     }
     assert!(price_cache.calculate_volatility(TOKEN).unwrap_or(0.0) > 30.0);
@@ -411,7 +426,8 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("0.76").unwrap(),
-        PriceSource::Jupiter, Some(9),
+        PriceSource::Jupiter,
+        Some(9),
     );
     let mgr = StopLossManager::new(
         db.clone(),
@@ -437,7 +453,8 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("0.74").unwrap(),
-        PriceSource::Jupiter, Some(9),
+        PriceSource::Jupiter,
+        Some(9),
     );
     let mgr2 = StopLossManager::new(db, config_with_stop_distance("-25.0"), price_cache);
     let exit = mgr2
@@ -476,7 +493,8 @@ async fn test_hard_stop_overrides_wider_dynamic_threshold() {
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("0.87").unwrap(),
-        PriceSource::Jupiter, Some(9),
+        PriceSource::Jupiter,
+        Some(9),
     );
 
     let cfg = config_with_stop_distance("-12.0");
@@ -551,9 +569,14 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("0.90").unwrap(),
-        PriceSource::Jupiter, Some(9),
+        PriceSource::Jupiter,
+        Some(9),
     );
-    let mgr = StopLossManager::new(db.clone(), config_with_stop_distance("-100.0"), price_cache.clone());
+    let mgr = StopLossManager::new(
+        db.clone(),
+        config_with_stop_distance("-100.0"),
+        price_cache.clone(),
+    );
     let none = mgr
         .check_stop_loss(
             "uuid-med-1",
@@ -573,7 +596,8 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("0.85").unwrap(),
-        PriceSource::Jupiter, Some(9),
+        PriceSource::Jupiter,
+        Some(9),
     );
     let mgr2 = StopLossManager::new(db, config_with_stop_distance("-100.0"), price_cache);
     let exit = mgr2

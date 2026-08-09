@@ -45,7 +45,10 @@ async fn test_jupiter_failure_threshold_auto_trip() {
     // once the consecutive-failure count reaches max_jupiter_failures.
     let (breaker, _db, _guard) = create_test_breaker(test_config()).await;
 
-    assert!(breaker.is_trading_allowed(), "breaker must start un-tripped");
+    assert!(
+        breaker.is_trading_allowed(),
+        "breaker must start un-tripped"
+    );
     assert_eq!(breaker.current_state(), CircuitBreakerState::Active);
 
     for i in 1..5u32 {
@@ -63,12 +66,19 @@ async fn test_jupiter_failure_threshold_auto_trip() {
         .unwrap();
     assert!(tripped, "5th consecutive failure must auto-trip");
     assert_eq!(breaker.get_jupiter_failure_count(), 5);
-    assert!(!breaker.is_trading_allowed(), "breaker must block trading after trip");
+    assert!(
+        !breaker.is_trading_allowed(),
+        "breaker must block trading after trip"
+    );
     assert_eq!(breaker.current_state(), CircuitBreakerState::Tripped);
 
     let status = breaker.status();
     assert!(
-        status.trip_reason.as_deref().unwrap_or("").contains("Jupiter"),
+        status
+            .trip_reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("Jupiter"),
         "trip reason must explain the Jupiter failures, got: {:?}",
         status.trip_reason
     );

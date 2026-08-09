@@ -166,10 +166,7 @@ impl NotificationEvent {
                 // offsets panics when the address is shorter than 8 bytes or
                 // contains multi-byte characters.
                 let (head, tail) = if address.len() > 8 {
-                    (
-                        &address[..4],
-                        &address[address.len() - 4..],
-                    )
+                    (&address[..4], &address[address.len() - 4..])
                 } else {
                     (address.as_str(), "")
                 };
@@ -205,10 +202,7 @@ impl NotificationEvent {
                 )
             }
             NotificationEvent::JitoRecovered { latency_ms } => {
-                format!(
-                    "{prefix}✅ Jito recovered (latency: {}ms)",
-                    latency_ms
-                )
+                format!("{prefix}✅ Jito recovered (latency: {}ms)", latency_ms)
             }
             NotificationEvent::JitoHealthChanged {
                 healthy,

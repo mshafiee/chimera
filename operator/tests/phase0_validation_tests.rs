@@ -76,7 +76,8 @@ async fn test_phase0_trade_insert_and_query() {
         .expect("get_trades_filtered should work");
 
     assert_eq!(
-        trades.len(), 1,
+        trades.len(),
+        1,
         "Should find exactly 1 trade for {wallet_address}"
     );
     assert_eq!(trades[0].trade_uuid, trade_uuid);

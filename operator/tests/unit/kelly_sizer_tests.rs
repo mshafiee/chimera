@@ -94,14 +94,15 @@ async fn test_kelly_positive_edge() {
         .await
         .unwrap();
 
+    assert_eq!(result.win_rate, dec!(0.6), "win rate must be 12/20 = 0.6");
     assert_eq!(
-        result.win_rate,
-        dec!(0.6),
-        "win rate must be 12/20 = 0.6"
+        result.full_kelly,
+        dec!(0.5),
+        "full_kelly must hit the 0.5 cap"
     );
-    assert_eq!(result.full_kelly, dec!(0.5), "full_kelly must hit the 0.5 cap");
     assert_eq!(
-        result.conservative_kelly, dec!(0.15625),
+        result.conservative_kelly,
+        dec!(0.15625),
         "conservative = min(0.5 * 1.25 velocity * 0.25, full) = 0.15625"
     );
     assert!(
@@ -123,7 +124,15 @@ async fn test_kelly_negative_edge() {
         insert_closed_trade(&db, &format!("neg-win-{}", i), wallet, token, "1.0", "0.05").await;
     }
     for i in 0..14u32 {
-        insert_closed_trade(&db, &format!("neg-loss-{}", i), wallet, token, "1.0", "-0.1").await;
+        insert_closed_trade(
+            &db,
+            &format!("neg-loss-{}", i),
+            wallet,
+            token,
+            "1.0",
+            "-0.1",
+        )
+        .await;
     }
 
     let sizer = KellySizer::new(db);
@@ -159,7 +168,15 @@ async fn test_expected_profit_calculation() {
         insert_closed_trade(&db, &format!("ep-win-{}", i), wallet, token, "1.0", "0.1").await;
     }
     for i in 0..8u32 {
-        insert_closed_trade(&db, &format!("ep-loss-{}", i), wallet, token, "1.0", "-0.05").await;
+        insert_closed_trade(
+            &db,
+            &format!("ep-loss-{}", i),
+            wallet,
+            token,
+            "1.0",
+            "-0.05",
+        )
+        .await;
     }
 
     let sizer = KellySizer::new(db);
@@ -223,10 +240,26 @@ async fn test_expected_profit_negative_edge() {
     let token = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
 
     for i in 0..6u32 {
-        insert_closed_trade(&db, &format!("neg-ep-win-{}", i), wallet, token, "1.0", "0.05").await;
+        insert_closed_trade(
+            &db,
+            &format!("neg-ep-win-{}", i),
+            wallet,
+            token,
+            "1.0",
+            "0.05",
+        )
+        .await;
     }
     for i in 0..14u32 {
-        insert_closed_trade(&db, &format!("neg-ep-loss-{}", i), wallet, token, "1.0", "-0.1").await;
+        insert_closed_trade(
+            &db,
+            &format!("neg-ep-loss-{}", i),
+            wallet,
+            token,
+            "1.0",
+            "-0.1",
+        )
+        .await;
     }
 
     let sizer = KellySizer::new(db);
@@ -248,4 +281,3 @@ async fn test_expected_profit_negative_edge() {
         "Expected profit should be negative for losing wallet"
     );
 }
-

@@ -60,7 +60,8 @@ async fn test_get_wallets_by_conviction_tier() {
         .await
         .unwrap();
     assert_eq!(
-        regular.len(), 1,
+        regular.len(),
+        1,
         "Regular tier must contain exactly wallet_regular"
     );
     assert_eq!(regular[0].address, "wallet_regular");
@@ -70,7 +71,8 @@ async fn test_get_wallets_by_conviction_tier() {
         .await
         .unwrap();
     assert_eq!(
-        emerging.len(), 1,
+        emerging.len(),
+        1,
         "Emerging tier must contain exactly wallet_emerging"
     );
     assert_eq!(emerging[0].address, "wallet_emerging");
@@ -87,7 +89,10 @@ async fn test_tiered_polling_configuration_loading() {
     assert_eq!(config.emerging_conviction_interval_secs, 30);
 
     let monitoring = MonitoringConfig::default();
-    assert!(monitoring.tiered_polling_enabled, "tiered polling is on by default");
+    assert!(
+        monitoring.tiered_polling_enabled,
+        "tiered polling is on by default"
+    );
 }
 
 #[test]
@@ -135,21 +140,18 @@ fn test_polling_interval_calculation() {
     };
 
     let test_cases = vec![
-        (90, "ACTIVE", 5),    // High conviction
-        (80, "ACTIVE", 5),    // At high threshold (>= 80)
-        (75, "ACTIVE", 8),    // Regular conviction
-        (60, "ACTIVE", 8),    // At regular threshold (>= 60)
-        (59, "ACTIVE", 30),   // Just below regular → emerging
-        (50, "ACTIVE", 30),   // Emerging conviction
+        (90, "ACTIVE", 5),     // High conviction
+        (80, "ACTIVE", 5),     // At high threshold (>= 80)
+        (75, "ACTIVE", 8),     // Regular conviction
+        (60, "ACTIVE", 8),     // At regular threshold (>= 60)
+        (59, "ACTIVE", 30),    // Just below regular → emerging
+        (50, "ACTIVE", 30),    // Emerging conviction
         (90, "CANDIDATE", 30), // CANDIDATE always uses emerging
-        (95, "REJECTED", 5),  // Non-CANDIDATE statuses use WQS tiering
+        (95, "REJECTED", 5),   // Non-CANDIDATE statuses use WQS tiering
     ];
 
     for (wqs, status, expected_interval) in test_cases {
-        let interval = monitoring.get_polling_interval_for_wallet(
-            Some(Decimal::from(wqs)),
-            status,
-        );
+        let interval = monitoring.get_polling_interval_for_wallet(Some(Decimal::from(wqs)), status);
         assert_eq!(
             interval, expected_interval,
             "Failed for WQS: {}, status: {}",

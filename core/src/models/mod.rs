@@ -6,7 +6,6 @@ mod trade;
 pub use signal::*;
 pub use trade::*;
 
-
 // ── Strategy slippage bounds (moved from engine/slippage.rs 2026-08-07) ────
 // Domain logic on the Strategy entity: strategy-specific Jupiter tolerance
 // bounds. Kept with the entity so core owns its behavior (orphan rule).

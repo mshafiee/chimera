@@ -3,17 +3,17 @@
 //! Manages signal processing, priority queuing, and trade execution.
 
 pub mod decision_recorder;
-pub mod entry_confirmation;
 pub mod dune_monitor;
-pub mod exit_profile;
-pub mod onchain_assessment;
-pub mod executor;
+pub mod entry_confirmation;
 mod execution_lock;
+pub mod executor;
+pub mod exit_profile;
 pub mod jito_searcher;
+pub mod onchain_assessment;
 pub mod position_sizer;
 pub mod profit_targets;
-pub mod recovery;
 pub mod reconciliation;
+pub mod recovery;
 mod rent_scavenger;
 pub mod selection;
 pub mod shadow_fill;
@@ -26,27 +26,28 @@ pub mod worker_pool;
 // Engine modules extracted to workspace crates (2026-08-07): pure domain
 // services live in chimera_core::engine; db-backed services in
 // chimera_infra::engine. Re-exported so existing paths keep working.
-pub use chimera_core::engine::{
-    dex_comparator, market_regime, mev_protection, rejection_mute, rpc_cache,
-    run_context, signal_quality, slippage, tip_inlining, v0_reconstruction,
-    volume_cache,
-};
+pub use chimera_core::engine::channel::PriorityQueue;
 pub use chimera_core::engine::channel::*;
+pub use chimera_core::engine::degradation::handle_rpc_rate_limit;
 pub use chimera_core::engine::degradation::*;
 pub use chimera_core::engine::{
-    CacheStats, DexComparator, MarketRegime, MarketRegimeDetector, MevProtection,
-    QualityCategory, RpcCache, RouteSelection, RunContext, SignalFactors,
-    SignalQuality, VolumeCache,
+    dex_comparator, market_regime, mev_protection, rejection_mute, rpc_cache, run_context,
+    signal_quality, slippage, tip_inlining, v0_reconstruction, volume_cache,
+};
+pub use chimera_core::engine::{
+    CacheStats, DexComparator, MarketRegime, MarketRegimeDetector, MevProtection, QualityCategory,
+    RouteSelection, RpcCache, RunContext, SignalFactors, SignalQuality, VolumeCache,
 };
 pub use chimera_infra::engine::{kelly_sizer, momentum_exit, portfolio_heat, tips};
-pub use chimera_infra::engine::{HeatResult, KellyResult, KellySizer, MomentumExit, MomentumExitAction, PortfolioHeat, TipManager};
-pub use chimera_core::engine::channel::PriorityQueue;
-pub use chimera_core::engine::degradation::handle_rpc_rate_limit;
+pub use chimera_infra::engine::{
+    HeatResult, KellyResult, KellySizer, MomentumExit, MomentumExitAction, PortfolioHeat,
+    TipManager,
+};
 
-pub use decision_recorder::DecisionRecorder;
-pub use executor::*;
-pub use execution_lock::{ExecutionLock, LockGuard, LockInfo};
 pub use crate::config::ExecutionLockConfig;
+pub use decision_recorder::DecisionRecorder;
+pub use execution_lock::{ExecutionLock, LockGuard, LockInfo};
+pub use executor::*;
 pub use position_sizer::PositionSizer;
 pub use profit_targets::{ProfitTargetAction, ProfitTargetManager};
 pub use recovery::RecoveryManager;
@@ -63,8 +64,8 @@ use crate::metrics::MetricsState;
 use crate::models::Signal;
 use crate::notifications::CompositeNotifier;
 use crate::price_cache::PriceCache;
+use crate::state::{AsyncWriteQueue, StateRegistry};
 use crate::token::TokenParser;
-use crate::state::{StateRegistry, AsyncWriteQueue};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -347,7 +348,8 @@ impl Engine {
         ws_state: Option<Arc<WsState>>,
     ) -> (Self, EngineHandle) {
         Self::new_with_optional_extras_tip_manager_and_price_cache(
-            config, db, notifier, metrics, ws_state, None, None, None, None, None, None, None, None, None,
+            config, db, notifier, metrics, ws_state, None, None, None, None, None, None, None,
+            None, None,
         )
     }
 
@@ -409,7 +411,10 @@ impl Engine {
                 // so they are actually scraped at /metrics.
                 Arc::new(crate::metrics::ExecutionLockMetrics::new(m.registry()))
             });
-            Some(Arc::new(ExecutionLock::new(execution_lock_config, lock_metrics)))
+            Some(Arc::new(ExecutionLock::new(
+                execution_lock_config,
+                lock_metrics,
+            )))
         } else {
             None
         };
@@ -520,7 +525,8 @@ impl Engine {
         if let Some(ref execution_lock) = self.execution_lock {
             let lock_clone = execution_lock.clone();
             let cleanup_token = self.shutdown_token.clone();
-            let cleanup_interval = std::time::Duration::from_secs(self.config.execution_lock.cleanup_interval_seconds);
+            let cleanup_interval =
+                std::time::Duration::from_secs(self.config.execution_lock.cleanup_interval_seconds);
 
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(cleanup_interval);
@@ -652,7 +658,8 @@ impl Engine {
         if let Some(ref execution_lock) = self.execution_lock {
             let lock_clone = execution_lock.clone();
             let cleanup_token = self.shutdown_token.clone();
-            let cleanup_interval = std::time::Duration::from_secs(self.config.execution_lock.cleanup_interval_seconds);
+            let cleanup_interval =
+                std::time::Duration::from_secs(self.config.execution_lock.cleanup_interval_seconds);
 
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(cleanup_interval);

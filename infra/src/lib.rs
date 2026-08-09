@@ -29,7 +29,7 @@ pub mod monitoring {
     pub mod webhook_health_task;
     pub mod webhook_lifecycle;
 }
-pub mod token;
 pub mod jupiter_http_client;
 pub mod jupiter_monitoring;
 pub mod jupiter_skills_integration;
+pub mod token;

@@ -245,7 +245,10 @@ async fn test_backend_agnostic_wallet_insert() {
         .fetch_one(&pool)
         .await
         .expect("wallet should have been persisted");
-    assert_eq!(status, "CANDIDATE", "upserted wallet must be persisted as CANDIDATE");
+    assert_eq!(
+        status, "CANDIDATE",
+        "upserted wallet must be persisted as CANDIDATE"
+    );
 
     println!("Backend-agnostic wallet insert test passed");
 }

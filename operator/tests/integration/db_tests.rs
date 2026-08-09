@@ -28,10 +28,7 @@ async fn test_concurrent_reads() {
     for _ in 0..8 {
         let pool = pool.clone();
         handles.push(tokio::spawn(async move {
-            let row: (i32,) = sqlx::query_as("SELECT 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+            let row: (i32,) = sqlx::query_as("SELECT 1").fetch_one(&pool).await.unwrap();
             row.0
         }));
     }

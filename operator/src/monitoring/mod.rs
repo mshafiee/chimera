@@ -4,8 +4,8 @@
 //! signal processing, and intelligent trade detection.
 
 pub use chimera_infra::monitoring::helius;
-pub mod helius_wss_health;
 pub mod helius_wss;
+pub mod helius_wss_health;
 pub mod polling_task;
 pub use chimera_infra::monitoring::rate_limiter;
 pub mod rpc_polling;
@@ -21,18 +21,25 @@ use crate::circuit_breaker::CircuitBreaker;
 use crate::config::AppConfig;
 use crate::db_abstraction::Database;
 use crate::engine::{EngineHandle, PortfolioHeat};
-use crate::token::{TokenMetadataFetcher, TokenParser, is_non_speculative};
+use crate::token::{is_non_speculative, TokenMetadataFetcher, TokenParser};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Record speculative activity for a wallet (non-stablecoin swaps)
-pub async fn record_speculative_activity(db: std::sync::Arc<dyn Database>, wallet_address: &str, token: &str) {
+pub async fn record_speculative_activity(
+    db: std::sync::Arc<dyn Database>,
+    wallet_address: &str,
+    token: &str,
+) {
     if is_non_speculative(token) {
         return;
     }
     let timestamp = chrono::Utc::now();
-    if let Err(e) = db.update_last_speculative_signal(wallet_address, timestamp).await {
+    if let Err(e) = db
+        .update_last_speculative_signal(wallet_address, timestamp)
+        .await
+    {
         tracing::error!(
             wallet = %wallet_address,
             token = %token,
@@ -67,7 +74,8 @@ pub struct MonitoringState {
     /// Webhook signature dedup cache: signature → first-seen Instant.
     /// Prevents processing the same transaction delivered by multiple
     /// orphaned webhooks.
-    pub processed_signatures: Arc<parking_lot::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    pub processed_signatures:
+        Arc<parking_lot::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     /// TTL cache of ACTIVE wallet addresses (refreshed every 30s). The webhook
     /// handler receives 10K+ events/hour; without this, each event triggered a
     /// `get_wallets_by_status("ACTIVE")` DB query — the dominant DB load and a
@@ -138,10 +146,7 @@ impl MonitoringState {
             }
         };
 
-        let helius_client = Arc::new(HeliusClient::new(
-            helius_api_key_resolved,
-            metadata_cache,
-        )?);
+        let helius_client = Arc::new(HeliusClient::new(helius_api_key_resolved, metadata_cache)?);
 
         let signal_aggregator = Arc::new(SignalAggregator::new(db.clone()));
         let mut pv = PreValidator::new(config.clone()).with_helius(helius_client.clone());
@@ -240,11 +245,6 @@ impl MonitoringState {
 pub use helius::HeliusWebhookPayload;
 pub use rpc_polling::WalletTransaction;
 
-pub use chimera_infra::monitoring::{
-    dexscreener, exit_detector, helius_wss_subscription, nav_snapshot,
-    pre_validator, signal_aggregator, transaction_parser, wallet_performance,
-    webhook_health_task, webhook_lifecycle,
-};
 pub use chimera_infra::monitoring::dexscreener::*;
 pub use chimera_infra::monitoring::exit_detector::*;
 pub use chimera_infra::monitoring::helius_wss_subscription::SubscriptionManager;
@@ -255,3 +255,8 @@ pub use chimera_infra::monitoring::transaction_parser::*;
 pub use chimera_infra::monitoring::wallet_performance::*;
 pub use chimera_infra::monitoring::webhook_health_task::*;
 pub use chimera_infra::monitoring::webhook_lifecycle::*;
+pub use chimera_infra::monitoring::{
+    dexscreener, exit_detector, helius_wss_subscription, nav_snapshot, pre_validator,
+    signal_aggregator, transaction_parser, wallet_performance, webhook_health_task,
+    webhook_lifecycle,
+};

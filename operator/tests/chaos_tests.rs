@@ -140,7 +140,10 @@ async fn test_spear_disabled_in_fallback() {
     let executor = Executor::new(config, db);
     assert_eq!(executor.rpc_mode(), RpcMode::Standard);
 
-    let signal = shield_signal("uuid-spear-rejected", "SPEAR111111111111111111111111111111111111111");
+    let signal = shield_signal(
+        "uuid-spear-rejected",
+        "SPEAR111111111111111111111111111111111111111",
+    );
     let signal = Signal {
         payload: SignalPayload {
             strategy: Strategy::Spear,
@@ -206,7 +209,10 @@ async fn test_queue_load_shedding() {
     // Fill past the 80% threshold using Shield signals (they are not shed)
     let fill_to = (capacity * shed_threshold as usize) / 100 + 1;
     for i in 0..fill_to {
-        let signal = shield_signal(&format!("uuid-fill-{}", i), &format!("TOK{}111111111111111111111111111111111111111", i));
+        let signal = shield_signal(
+            &format!("uuid-fill-{}", i),
+            &format!("TOK{}111111111111111111111111111111111111111", i),
+        );
         let _ = queue.push(signal, None).await;
     }
 
@@ -337,7 +343,10 @@ async fn test_database_advisory_lock_serializes_opens() {
     );
 
     let wins = [r1.is_ok(), r2.is_ok()].iter().filter(|ok| **ok).count();
-    assert_eq!(wins, 1, "exactly one concurrent open must win the advisory lock");
+    assert_eq!(
+        wins, 1,
+        "exactly one concurrent open must win the advisory lock"
+    );
 
     let active = db.get_active_positions().await.unwrap();
     assert_eq!(active.len(), 1, "exactly one ACTIVE position may exist");
@@ -385,17 +394,20 @@ async fn test_vacuum_operation() {
     // Run VACUUM in background (no binds -> simple query protocol, so it
     // runs in autocommit, outside any transaction)
     let pool_vacuum = pool.clone();
-    let vacuum_handle =
-        tokio::spawn(async move { sqlx::query("VACUUM test_vacuum").execute(&pool_vacuum).await });
+    let vacuum_handle = tokio::spawn(async move {
+        sqlx::query("VACUUM test_vacuum")
+            .execute(&pool_vacuum)
+            .await
+    });
 
-        // While VACUUM is running, try to read
-        let pool_read = pool.clone();
-        let read_handle = tokio::spawn(async move {
-            // MVCC guarantees readers are never blocked by VACUUM
-            sqlx::query_as::<_, (i32, String)>("SELECT id, data FROM test_vacuum LIMIT 10")
-                .fetch_all(&pool_read)
-                .await
-        });
+    // While VACUUM is running, try to read
+    let pool_read = pool.clone();
+    let read_handle = tokio::spawn(async move {
+        // MVCC guarantees readers are never blocked by VACUUM
+        sqlx::query_as::<_, (i32, String)>("SELECT id, data FROM test_vacuum LIMIT 10")
+            .fetch_all(&pool_read)
+            .await
+    });
 
     // Both should complete
     let read_result = read_handle.await.unwrap();
@@ -542,4 +554,3 @@ async fn test_concurrent_webhook_processing() {
         n
     );
 }
-
