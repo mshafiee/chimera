@@ -330,7 +330,7 @@ class BacktestConfig:
 
 
 # Example usage
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - example/CLI block
     # Create a sample historical trade
     trade = HistoricalTrade(
         token_address="DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",

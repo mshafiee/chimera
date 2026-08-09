@@ -274,8 +274,17 @@ class HeliusCreditTracker:
                 self._day_start_time = time.time()
                 self._tracked_day = today
 
-                # Also roll over the monthly counter when the month changes
-                self._check_monthly_reset()
+                # Also roll over the monthly counter when the month changes.
+                # NOTE (2026-08-09): _lock is a plain (non-reentrant) threading.Lock
+                # and _check_monthly_reset acquires it again — calling it while
+                # holding _lock deadlocks the tracker thread on month rollover.
+                # Inline the monthly rollover here instead.
+                current_month = datetime.now().strftime('%Y-%m')
+                if current_month != self._tracked_month:
+                    logger.info("New calendar month detected, resetting monthly credits")
+                    self._credits_used_month = 0
+                    self._month_start_time = time.time()
+                    self._tracked_month = current_month
                 self._save_state()
 
     def _check_monthly_reset(self):
@@ -688,7 +697,7 @@ class HeliusCreditTracker:
                     0.5 * current_allocations[category] +
                     0.5 * max(0.05, weight)  # Minimum 5% allocation
                 )
-        else:
+        else:  # pragma: no cover - total_roi is `sum(...) or 1.0`, so it can never be 0 here
             # No ROI data yet, keep current allocations
             new_allocations = current_allocations.copy()
 
@@ -839,7 +848,7 @@ def can_validate_backtest() -> Tuple[bool, str]:
     )
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - example/CLI block
     # Test the credit tracker
     tracker = get_credit_tracker()
     tracker.print_status_report()

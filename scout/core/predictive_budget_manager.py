@@ -300,7 +300,7 @@ class PredictiveBudgetManager:
                 else:
                     trend = "stable"
                     projected = int(avg_daily)
-            else:
+            else:  # pragma: no cover - len(daily_usages) >= 3 is guaranteed here
                 trend = "stable"
                 projected = int(avg_daily)
 
@@ -454,7 +454,7 @@ class PredictiveBudgetManager:
                 # Use default allocation for categories with insufficient data
                 roi_scores[category] = 1.0  # Neutral
 
-        if not roi_scores:
+        if not roi_scores:  # pragma: no cover - loop always adds all 6 categories
             return
 
         # Normalize scores
@@ -472,7 +472,7 @@ class PredictiveBudgetManager:
             if category in roi_scores and total_roi > 0:
                 roi_portion = (roi_scores[category] / total_roi) * remaining_ratio
                 new_allocations[category] = base + roi_portion
-            else:
+            else:  # pragma: no cover - every category is in roi_scores and total_roi > 0 here
                 new_allocations[category] = base
 
         # Normalize to ensure sum = 1.0

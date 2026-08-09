@@ -371,8 +371,10 @@ def apply_cross_wallet_token_correlation(
             if not tokens1 & tokens2:
                 continue
             overlap = len(tokens1 & tokens2)
+            # Both token sets are guaranteed >= 2 entries at this point (the
+            # len() < 2 guards above), so min_size can never be 0.
             min_size = min(len(tokens1), len(tokens2))
-            if min_size == 0:
+            if min_size == 0:  # pragma: no cover - unreachable, see above
                 continue
             overlap_ratio = overlap / min_size
 

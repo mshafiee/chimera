@@ -891,7 +891,7 @@ class BacktestSimulator:
 
 
 # Example usage
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - example/CLI block
     from .liquidity import LiquidityProvider
     
     # Create simulator

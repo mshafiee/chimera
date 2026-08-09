@@ -2756,7 +2756,7 @@ class WalletAnalyzer:
                     # Infer cost basis: cost_basis = sol_amount - pnl_sol (since pnl = proceeds - cost)
                     # Fall back to sol_amount if pnl is None or cost_basis would be zero
                     def _infer_return(t) -> float:
-                        if t.pnl_sol is None:
+                        if t.pnl_sol is None:  # pragma: no cover - filtered by sell_trades above
                             return 0.0
                         cost_basis = t.sol_amount - t.pnl_sol
                         if cost_basis <= 0:
@@ -3178,7 +3178,7 @@ class WalletAnalyzer:
         recent = sorted_trades[-10:]
         all_unique = len(set(t.token_address for t in sorted_trades))
         recent_unique = len(set(t.token_address for t in recent))
-        if all_unique <= 0:
+        if all_unique <= 0:  # pragma: no cover - non-empty trades imply >= 1 unique token
             return None
         ratio = recent_unique / all_unique
         return max(0.0, min(1.0, ratio))
@@ -3355,7 +3355,7 @@ class WalletAnalyzer:
         # Determine wins/losses (1=win, 0=loss)
         outcomes = [1 if t.pnl_sol > 0 else 0 for t in closing_trades]
         n = len(outcomes)
-        if n < 5:
+        if n < 5:  # pragma: no cover - n == len(closing_trades) >= 5 by the check above
             return 0.0
 
         # Streak lengths of same outcome
@@ -3953,7 +3953,7 @@ class WalletAnalyzer:
                 pass  # Non-critical
 
 # Example usage
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     from .wqs import calculate_wqs, classify_wallet
     
     analyzer = WalletAnalyzer()

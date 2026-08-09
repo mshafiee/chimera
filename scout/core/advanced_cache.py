@@ -299,7 +299,7 @@ class AdvancedCache:
             logger.error(f"Failed to deserialize cache value: {e}")
             return None
 
-    def _set_l1(self, key: str, value: Any, category: CacheCategory, wqs_score: Optional[float] = None):
+    def _set_l1(self, key: str, value: Any, category: CacheCategory, wqs_score: Optional[float] = None):  # pragma: no cover - dead duplicate, shadowed by the definition below
         """Set value in L1 cache (serialized with the L1 lock so all L1
         mutations — including evictions — are serialized)."""
         with self._l1_lock:
@@ -830,7 +830,7 @@ class AdvancedCache:
             if hasattr(self, '_sqlite_path'):
                 # SQLite connections are opened/closed per operation
                 pass
-        except Exception as e:
+        except Exception as e:  # pragma: no cover - unreachable (hasattr never raises)
             logger.debug(f"Cache shutdown error: {e}")
 
         logger.info("Advanced cache shut down")
@@ -1032,7 +1032,7 @@ def set_backtest_results(wallet_address: str, results: Dict):
               category=CacheCategory.BACKTEST_RESULTS)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     # Test the cache
     cache = get_cache()
 

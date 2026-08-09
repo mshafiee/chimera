@@ -408,11 +408,11 @@ class RealtimeProfitTracker:
 
         # Calculate coefficient of variation in recent profits
         recent_snapshots = list(self._profit_history)[-50:]
-        if len(recent_snapshots) < 2:
+        if len(recent_snapshots) < 2:  # pragma: no cover - unreachable (>= 10 samples guaranteed above)
             return 0.5
 
         profits = [s.profit for s in recent_snapshots]
-        if not profits:
+        if not profits:  # pragma: no cover - unreachable (non-empty history)
             return 0.5
 
         # Calculate CV
@@ -428,7 +428,7 @@ class RealtimeProfitTracker:
             # Convert CV to confidence (lower CV = higher confidence)
             confidence = max(0.1, min(1.0, 1.0 - (cv / self._config.ETA_STABILITY_THRESHOLD)))
             return confidence
-        except statistics.StatisticsError:
+        except statistics.StatisticsError:  # pragma: no cover - unreachable (stdev of >= 2 samples never raises)
             return 0.5
 
     def trigger_optimization_if_needed(self) -> List[OptimizationAction]:

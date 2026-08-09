@@ -1088,7 +1088,7 @@ async def validate_wallet_for_promotion(
 
 
 # Example usage
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     from .wqs import WalletMetrics
     from .models import HistoricalTrade, TradeAction
     

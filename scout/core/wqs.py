@@ -805,7 +805,7 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
     if accumulation_score > 0.6:
         logger.debug("[WQS] bonus smart_accumulation +8.00 addr=%s accumulation_score=%.2f", addr, accumulation_score)
         tracker.add_pos("smart_accumulation", 8.0)
-    elif accumulation_score > 0.4:
+    elif accumulation_score > 0.4:  # pragma: no cover - unreachable: function yields 0.0/0.2/0.4/0.7 only
         logger.debug("[WQS] bonus smart_accumulation +5.00 addr=%s accumulation_score=%.2f", addr, accumulation_score)
         tracker.add_pos("smart_accumulation", 5.0)
     elif accumulation_score < 0.2:
@@ -1125,7 +1125,7 @@ def classify_wallet(
         return "REJECTED"
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     test_metrics = WalletMetrics(
         address="7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
         roi_7d=15.0,

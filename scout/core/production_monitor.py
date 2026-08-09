@@ -1434,7 +1434,7 @@ def get_growth_tracker(
     return _growth_tracker
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - example/CLI block
     # Test the monitor
     monitor = get_production_monitor()
 

@@ -567,7 +567,7 @@ def reset_circuit_breaker():
         _circuit_breaker = None
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     # Test the circuit breaker
     breaker = get_circuit_breaker()
 

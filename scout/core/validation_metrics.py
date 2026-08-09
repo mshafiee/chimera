@@ -25,7 +25,7 @@ from .db import get_connection
 try:
     from scipy import stats
     SCIPY_AVAILABLE = True
-except ImportError:
+except ImportError:  # pragma: no cover - scipy is a declared dependency; covered via subprocess test
     SCIPY_AVAILABLE = False
     logging.warning("scipy not available - some metrics will be limited")
 

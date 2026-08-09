@@ -1168,7 +1168,7 @@ class LiquidityProvider:
 
 
 # Example usage
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     provider = LiquidityProvider()
     
     # Test with known token

@@ -312,7 +312,7 @@ class MultiTimeframeDiscovery:
 
         for timeframe in sorted_timeframes:
             config = self._timeframe_configs.get(timeframe)
-            if not config:
+            if not config:  # pragma: no cover - unreachable (sorting above KeyErrors on unknown timeframes)
                 continue
 
             # Allocate budget for this timeframe

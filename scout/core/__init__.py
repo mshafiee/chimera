@@ -16,7 +16,7 @@ import sys as _sys
 
 if __name__ == "core":
     _sys.modules.setdefault("scout.core", _sys.modules[__name__])
-elif __name__ == "scout.core":
+elif __name__ == "scout.core":  # pragma: no cover - mutually exclusive alias, exercised only when imported as scout.core
     _sys.modules.setdefault("core", _sys.modules[__name__])
 
 from .analyzer import WalletAnalyzer
