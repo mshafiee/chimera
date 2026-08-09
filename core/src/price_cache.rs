@@ -1226,13 +1226,13 @@ mod tests {
             .get("So11111111111111111111111111111111111111112")
             .unwrap();
         let sol: JupiterPriceData = serde_json::from_value(sol_value.clone()).unwrap();
-        assert_eq!(sol.usdPrice, 180.5);
+        assert_eq!(sol.usdPrice, Some(180.5));
         let meme_value = data
             .data
             .get("32vUHPxVShN552WwJ36vWnxCoy34eTDHRiQwL6ZA3ntP")
             .unwrap();
         let meme: JupiterPriceData = serde_json::from_value(meme_value.clone()).unwrap();
-        assert_eq!(meme.usdPrice, 0.000046);
+        assert_eq!(meme.usdPrice, Some(0.000046));
         assert!(meme.priceChange24h.is_none());
         assert!(meme.blockId.is_none());
         assert!(meme.liquidity.is_none());
@@ -1259,7 +1259,7 @@ mod tests {
                 .clone(),
         )
         .unwrap();
-        assert_eq!(sol.usdPrice, 180.5);
+        assert_eq!(sol.usdPrice, Some(180.5));
         assert!(
             res.data.get("timeTaken").is_some(),
             "metadata field is kept in the map"

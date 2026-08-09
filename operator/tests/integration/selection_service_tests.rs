@@ -140,6 +140,15 @@ fn build_selection_service(
         token_max_curve_completion: 0.85,
         cluster_gate_enabled: true,
         cluster_min_profitable_wallets: 3,
+        averaging_down_enabled: false,
+        averaging_down_window_hours: 12,
+        averaging_down_min_buys: 2,
+        averaging_down_min_drop_pct: rust_decimal::Decimal::new(3, 0),
+        pump_chase_enabled: false,
+        pump_chase_max_delta_pct: rust_decimal::Decimal::new(10, 0),
+        stop_loss_cooldown_enabled: false,
+        stop_loss_cooldown_hours: 12,
+        stop_loss_cooldown_loss_pct: rust_decimal::Decimal::new(5, 0),
     };
     let service = SelectionService::new(
         db,
