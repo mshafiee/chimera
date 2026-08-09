@@ -256,7 +256,10 @@ async fn test_parse_helius_webhook_tracked_wallet_filter() {
     // Only the tracked wallet's delta (-2_000_000) counts.
     assert_eq!(parsed.direction, SwapDirection::Sell);
     assert_eq!(parsed.token_out, SOL_MINT);
-    assert_eq!(parsed.amount_out, Decimal::from_str("2000000").unwrap());
+    // The SOL leg is sized from the native balance change (lamports → SOL):
+    // -500_000_000 lamports = 0.5 SOL. (The raw token delta -2_000_000 is the
+    // speculative leg and is not the swap size.)
+    assert_eq!(parsed.amount_out, Decimal::from_str("0.5").unwrap());
 }
 
 #[tokio::test]

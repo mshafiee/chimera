@@ -98,4 +98,84 @@ describe('authStore', () => {
     useAuthStore.setState({ lastActivity: recent, isAuthenticated: true })
     expect(useAuthStore.getState().isSessionExpired()).toBe(false)
   })
+
+  it('updateTokens does nothing when no user is logged in', () => {
+    useAuthStore.setState({ user: null, isAuthenticated: false })
+    useAuthStore.getState().updateTokens('new.jwt', 'new-refresh', 3600)
+    const state = useAuthStore.getState()
+    expect(state.user).toBeNull()
+    expect(state.tokenExpiresAt).toBeNull()
+  })
+
+  it('updateActivity refreshes the last activity timestamp', () => {
+    const old = Date.now() - 60_000
+    useAuthStore.setState({ lastActivity: old })
+    useAuthStore.getState().updateActivity()
+    expect(useAuthStore.getState().lastActivity).toBeGreaterThan(old)
+  })
+})
+
+describe('authStore persistence', () => {
+  it('partialize strips the token from persisted state', () => {
+    const partial = useAuthStore.persist.getOptions().partialize
+    useAuthStore.getState().login({
+      identifier: 'admin1',
+      role: 'admin',
+      token: 'secret-token',
+    })
+    const persisted = partial(useAuthStore.getState())
+    expect(persisted.user).toEqual({ identifier: 'admin1', role: 'admin' })
+    expect(persisted.isAuthenticated).toBe(true)
+    expect((persisted.user as { token?: string }).token).toBeUndefined()
+  })
+
+  it('clears an authenticated session that was persisted without a token', async () => {
+    useAuthStore.setState({
+      user: null,
+      isAuthenticated: false,
+      tokenExpiresAt: null,
+      refreshToken: null,
+      lastActivity: null,
+    })
+    localStorage.setItem(
+      'chimera-auth',
+      JSON.stringify({
+        state: {
+          user: { identifier: 'admin1', role: 'admin' },
+          isAuthenticated: true,
+          lastActivity: Date.now(),
+        },
+        version: 0,
+      })
+    )
+    await useAuthStore.persist.rehydrate()
+    const state = useAuthStore.getState()
+    expect(state.isAuthenticated).toBe(false)
+    expect(state.user).toBeNull()
+  })
+
+  it('keeps a persisted session that already has a token', async () => {
+    useAuthStore.setState({
+      user: null,
+      isAuthenticated: false,
+      tokenExpiresAt: null,
+      refreshToken: null,
+      lastActivity: null,
+    })
+    localStorage.setItem(
+      'chimera-auth',
+      JSON.stringify({
+        state: {
+          user: { identifier: 'admin1', role: 'admin', token: 'some-token' },
+          isAuthenticated: true,
+          lastActivity: Date.now(),
+        },
+        version: 0,
+      })
+    )
+    await useAuthStore.persist.rehydrate()
+    const state = useAuthStore.getState()
+    expect(state.isAuthenticated).toBe(true)
+    expect(state.user?.token).toBe('some-token')
+  })
 })

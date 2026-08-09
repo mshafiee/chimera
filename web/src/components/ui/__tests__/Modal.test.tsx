@@ -46,6 +46,14 @@ describe('Modal', () => {
     expect(screen.getByLabelText('Close dialog')).toBeInTheDocument()
   })
 
+  it('closes when Escape is pressed on the panel itself', () => {
+    const onClose = vi.fn()
+    render(<Modal isOpen={true} onClose={onClose}>Content</Modal>)
+    const panel = screen.getByRole('dialog')
+    fireEvent.keyDown(panel, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
   it('does not close when clicking inside the modal panel', () => {
     const onClose = vi.fn()
     render(<Modal isOpen={true} onClose={onClose}>Content</Modal>)

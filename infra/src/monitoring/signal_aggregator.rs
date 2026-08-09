@@ -140,16 +140,26 @@ impl SignalAggregator {
         token_signals.push(signal);
 
         // Check for consensus (2+ DISTINCT wallets buying same token within 5 minutes).
-        // Dedup by wallet address so a single wallet retrying cannot fake consensus.
+        // The retention cutoff above is the 12h CLUSTER window; the consensus
+        // count itself must use the 5-minute window (matching
+        // peek_consensus_wallet_count) — otherwise hours-old signals would
+        // still form "consensus" (2026-08-09: caught by
+        // test_consensus_expires_after_5_minutes).
+        let five_min_ago = Instant::now() - Duration::from_secs(300);
         let mut seen = std::collections::HashSet::new();
         let unique_wallets: Vec<String> = token_signals
             .iter()
+            .filter(|s| s.timestamp > five_min_ago)
             .filter(|s| seen.insert(s.wallet_address.clone()))
             .map(|s| s.wallet_address.clone())
             .collect();
 
         if unique_wallets.len() >= 2 {
-            let total_amount: Decimal = token_signals.iter().map(|s| s.amount_sol).sum();
+            let total_amount: Decimal = token_signals
+                .iter()
+                .filter(|s| s.timestamp > five_min_ago)
+                .map(|s| s.amount_sol)
+                .sum();
             let confidence = (unique_wallets.len() as f64 / 5.0).min(1.0); // Max confidence at 5+ wallets
 
             // Update wallet clusters
