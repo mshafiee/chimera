@@ -89,7 +89,34 @@ class _PooledConnection:
         self._pool.putconn(self._conn)
 
 
-def get_connection(db_path: Optional[str] = None, force_sqlite: bool = False):
+def reset_pool():
+    """Replace the shared connection pool with a fresh one.
+
+    A connection acquired via ``get_connection()`` but never returned with
+    ``close()`` / ``putconn()`` (a "leak") permanently occupies a pool slot:
+    the pool tracks it as in-use, so ``max_lifetime`` / ``max_idle`` / ``check``
+    never recycle it, and the slot is only freed when the process exits. After
+    ``max_size`` such leaks every ``getconn()`` times out — which is what
+    stranded Scout's cold path (no wallet discovery/promotion, no signal flow).
+
+    Resetting drops the exhausted pool and lets the next ``get_connection()``
+    build a fresh one at full capacity. The old pool is best-effort closed
+    (bounded by a short timeout); any still-leaked raw connections are
+    abandoned for garbage collection. This is a safety net — the leaky call
+    sites themselves must still ``close()`` in a ``finally``.
+    """
+    global _postgres_pool
+    with _pool_lock:
+        old = _postgres_pool
+        _postgres_pool = None
+    if old is not None:
+        try:
+            old.close(timeout=2.0)
+        except Exception:
+            pass
+
+
+def get_connection(db_path: Optional[str] = None, force_sqlite: bool = False, _retried: bool = False):
     """
     Get a PostgreSQL database connection from the shared pool.
 
@@ -112,7 +139,7 @@ def get_connection(db_path: Optional[str] = None, force_sqlite: bool = False):
         )
     try:
         import psycopg
-        from psycopg_pool import ConnectionPool
+        from psycopg_pool import ConnectionPool, PoolTimeout
     except ImportError:
         raise ImportError(
             "psycopg3 is required for PostgreSQL support. "
@@ -176,8 +203,21 @@ def get_connection(db_path: Optional[str] = None, force_sqlite: bool = False):
                     min_size, max_size, timeout,
                 )
 
-    # Get connection from pool
-    conn = _postgres_pool.getconn()
+    # Get connection from pool. If the pool is exhausted (every slot leaked by
+    # a caller that never returned it), getconn() times out. Recover once by
+    # rebuilding the pool at full capacity instead of leaving the whole process
+    # unable to talk to the database for the rest of its lifetime.
+    try:
+        conn = _postgres_pool.getconn()
+    except PoolTimeout:
+        if _retried:
+            raise
+        logger.warning(
+            "DB connection pool exhausted (leaked slots) — resetting pool and "
+            "retrying once. Find the get_connection() caller missing close()."
+        )
+        reset_pool()
+        return get_connection(db_path, force_sqlite=force_sqlite, _retried=True)
 
     # Use dict row factory (belt-and-suspenders alongside the pool's
     # configure callback above).

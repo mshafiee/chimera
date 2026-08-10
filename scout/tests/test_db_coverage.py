@@ -289,6 +289,72 @@ class TestClosePool:
             db_module._postgres_pool = old
 
 
+class TestPoolSelfHealing:
+    """get_connection() must recover from an exhausted pool instead of
+    leaving Scout unable to reach the DB for the rest of the process life.
+
+    A leaked slot (get_connection() returned but never close()'d) permanently
+    occupies a pool slot; after max_size leaks every getconn() times out.
+    """
+
+    def _fakes(self):
+        # psycopg_pool isn't installed in the test env, so synthesize a module
+        # whose PoolTimeout the in-function `except PoolTimeout` can catch.
+        pool_timeout = type("PoolTimeout", (Exception,), {})
+        fake_psycopg = MagicMock()
+        fake_pool_module = MagicMock()
+        fake_pool_module.PoolTimeout = pool_timeout
+        return fake_psycopg, fake_pool_module, pool_timeout
+
+    def test_reset_pool_closes_old_and_clears_global(self):
+        pool = MagicMock()
+        db_module._postgres_pool = pool
+        try:
+            db_module.reset_pool()
+            assert db_module._postgres_pool is None
+            pool.close.assert_called_once_with(timeout=2.0)
+        finally:
+            db_module._postgres_pool = None
+
+    def test_reset_pool_noop_without_pool(self):
+        db_module._postgres_pool = None
+        try:
+            db_module.reset_pool()  # must not raise
+            assert db_module._postgres_pool is None
+        finally:
+            db_module._postgres_pool = None
+
+    def test_get_connection_resets_and_retries_on_pool_timeout(self):
+        fake_psycopg, fake_pool_module, pool_timeout = self._fakes()
+        fake_conn = MagicMock()
+        mock_pool = MagicMock()
+        mock_pool.getconn.side_effect = [pool_timeout("exhausted"), fake_conn]
+        db_module._postgres_pool = mock_pool
+        try:
+            with patch.dict(sys.modules, {"psycopg": fake_psycopg, "psycopg_pool": fake_pool_module}):
+                with patch.object(db_module, "reset_pool") as mock_reset:
+                    result = db_module.get_connection()
+            assert mock_pool.getconn.call_count == 2
+            mock_reset.assert_called_once()
+            assert result is not None
+        finally:
+            db_module._postgres_pool = None
+
+    def test_get_connection_reraises_when_retry_also_times_out(self):
+        fake_psycopg, fake_pool_module, pool_timeout = self._fakes()
+        mock_pool = MagicMock()
+        mock_pool.getconn.side_effect = pool_timeout("still exhausted")
+        db_module._postgres_pool = mock_pool
+        try:
+            with patch.dict(sys.modules, {"psycopg": fake_psycopg, "psycopg_pool": fake_pool_module}):
+                with patch.object(db_module, "reset_pool"):
+                    with pytest.raises(Exception):
+                        db_module.get_connection()
+            assert mock_pool.getconn.call_count == 2
+        finally:
+            db_module._postgres_pool = None
+
+
 class TestPsycopgImportError:
     """Reloads the module — must run last so later tests use fresh bindings."""
 

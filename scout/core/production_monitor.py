@@ -286,6 +286,7 @@ class ProductionMonitor:
 
     def _init_database(self):
         """Initialize monitoring database."""
+        conn = None
         try:
             conn = get_connection(self._db_path)
             cursor = conn.cursor()
@@ -306,11 +307,13 @@ class ProductionMonitor:
             """)
 
             conn.commit()
-            conn.close()
 
             logger.debug(f"Monitoring database initialized: {self._db_path}")
         except Exception as e:
             logger.warning(f"Failed to initialize monitoring database: {e}")
+        finally:
+            if conn:
+                conn.close()
 
     def register_health_check(self, name: str, check_func: Callable):
         """
@@ -472,6 +475,7 @@ class ProductionMonitor:
 
     def _store_alert(self, alert: Alert):
         """Store alert in database."""
+        conn = None
         try:
             conn = get_connection(self._db_path)
             cursor = conn.cursor()
@@ -502,9 +506,11 @@ class ProductionMonitor:
             ))
 
             conn.commit()
-            conn.close()
         except Exception as e:
             logger.debug(f"Failed to store alert: {e}")
+        finally:
+            if conn:
+                conn.close()
 
     def _trigger_alert_handlers(self, alert: Alert):
         """Trigger alert handlers for severity."""
@@ -535,18 +541,21 @@ class ProductionMonitor:
                     alert.resolution_timestamp = now
 
         # Best-effort DB sync (readonly mounts are skipped silently).
+        conn = None
         try:
             conn = get_connection(self._db_path)
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE alerts SET resolved = 1, resolution_timestamp = ? "
-                "WHERE title = ? AND resolved = 0",
+                "UPDATE alerts SET resolved = 1, resolution_timestamp = %s "
+                "WHERE title = %s AND resolved = 0",
                 (now, title),
             )
             conn.commit()
-            conn.close()
         except Exception:
             pass
+        finally:
+            if conn:
+                conn.close()
 
     def check_thresholds(self, metrics: PerformanceMetrics) -> List[Alert]:
         """Check metrics against thresholds and create alerts.
@@ -904,6 +913,7 @@ class GrowthTracker:
 
     def _init_database(self):
         """Initialize growth tracking database."""
+        conn = None
         try:
             conn = get_connection(self._db_path)
             cursor = conn.cursor()
@@ -957,14 +967,16 @@ class GrowthTracker:
 
             conn.commit()
 
-            conn.close()
-
             logger.debug(f"Growth database initialized: {self._db_path}")
         except Exception as e:
             logger.warning(f"Failed to initialize growth database: {e}")
+        finally:
+            if conn:
+                conn.close()
 
     def _load_latest_state(self):
         """Load latest capital state from database."""
+        conn = None
         try:
             conn = get_connection(self._db_path)
             cursor = conn.cursor()
@@ -979,9 +991,11 @@ class GrowthTracker:
                 self.current_capital = row["current_capital"]
                 logger.info(f"Loaded current capital: ${self.current_capital:.2f}")
 
-            conn.close()
         except Exception as e:
             logger.debug(f"Failed to load latest state: {e}")
+        finally:
+            if conn:
+                conn.close()
 
     def record_capital(
         self,
@@ -1034,6 +1048,7 @@ class GrowthTracker:
         week_ago = now - (7 * 86400)
         month_ago = now - (30 * 86400)
 
+        conn = None
         try:
             conn = get_connection(self._db_path)
             cursor = conn.cursor()
@@ -1060,8 +1075,6 @@ class GrowthTracker:
             """, (day_ago,))
             day_row = cursor.fetchone()
             capital_day_ago = day_row["current_capital"] if day_row else self.starting_capital
-
-            conn.close()
 
             # Calculate ROI
             roi_daily = ((self.current_capital - capital_day_ago) /
@@ -1108,6 +1121,9 @@ class GrowthTracker:
                 target_capital=self.target_capital,
                 starting_capital=self.starting_capital,
             )
+        finally:
+            if conn:
+                conn.close()
 
     def _estimate_days_to_target(self, daily_growth_rate: float) -> Optional[float]:
         """
@@ -1298,6 +1314,7 @@ class GrowthTracker:
         Returns:
             List of GrowthMetrics snapshots
         """
+        conn = None
         try:
             conn = get_connection(self._db_path)
             cursor = conn.cursor()
@@ -1331,12 +1348,14 @@ class GrowthTracker:
                     credits_roi=row["credits_roi"],
                 ))
 
-            conn.close()
             return history
 
         except Exception as e:
             logger.error(f"Failed to get growth history: {e}")
             return []
+        finally:
+            if conn:
+                conn.close()
 
     def print_growth_dashboard(self):
         """Print comprehensive growth dashboard."""
