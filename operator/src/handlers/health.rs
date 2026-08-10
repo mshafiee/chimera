@@ -214,13 +214,19 @@ pub async fn health_check(
         tracked_tokens: price_stats.tracked_tokens,
     };
 
-    // Determine overall status. A complete RPC outage makes the node unable to
-    // trade, so it must surface as Unhealthy (not just Degraded) to load balancers.
-    let overall_status = if matches!(db_health.status, HealthStatus::Unhealthy)
-        || matches!(rpc_health.status, HealthStatus::Unhealthy)
-    {
+    // Determine overall status.
+    // DB-unhealthy is fatal (nothing works without persistence) → Unhealthy.
+    // RPC-unhealthy is NOT fatal: the operator can still serve dashboard data
+    // from the DB, receive webhooks (HTTP), and report metrics. Only live
+    // trade execution is blocked (which the circuit breaker handles
+    // separately). Treating RPC-down as Unhealthy makes haproxy mark the
+    // backend down → the entire dashboard returns 503 even though the DB is
+    // perfectly healthy (2026-08-10: Helius quota exhaustion took the
+    // dashboard offline for hours). RPC-down → Degraded (HTTP 200).
+    let overall_status = if matches!(db_health.status, HealthStatus::Unhealthy) {
         HealthStatus::Unhealthy
-    } else if matches!(db_health.status, HealthStatus::Degraded)
+    } else if matches!(rpc_health.status, HealthStatus::Unhealthy)
+        || matches!(db_health.status, HealthStatus::Degraded)
         || matches!(rpc_health.status, HealthStatus::Degraded)
         || queue_depth > 800
         || cb_status.state == CircuitBreakerState::Tripped
