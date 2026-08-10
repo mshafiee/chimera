@@ -1320,15 +1320,15 @@ impl Default for TieredPollingConfig {
 }
 
 fn default_high_conviction_interval() -> u64 {
-    5
+    30
 }
 
 fn default_regular_conviction_interval() -> u64 {
-    8
+    60
 }
 
 fn default_emerging_conviction_interval() -> u64 {
-    30
+    120
 }
 
 fn default_high_conviction_threshold() -> i32 {

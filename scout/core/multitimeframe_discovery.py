@@ -148,11 +148,16 @@ class MultiTimeframeDiscovery:
         self._helius_client = helius_client
 
         # Default timeframe configurations (AGGRESSIVE targets from plan)
+        # 2026-08-10: wallet caps reduced 3x (600→200, 400→150, 300→100) so
+        # discovery stays within the Helius daily credit quota. The full sweep
+        # burned the account's daily quota in ~6h, which also killed webhook
+        # delivery and the operator's polling. Overridable via
+        # SCOUT_{DEEP,FAST,TRENDING}_MAX_WALLETS.
         self._timeframe_configs = {
             DiscoveryTimeframe.DEEP: TimeframeConfig(
                 timeframe=DiscoveryTimeframe.DEEP,
                 hours_back=int(os.getenv("SCOUT_DEEP_SCAN_HOURS", "720")),  # 30 days (expanded from 200)
-                max_wallets=int(os.getenv("SCOUT_DEEP_MAX_WALLETS", "600")),  # 3x expansion
+                max_wallets=int(os.getenv("SCOUT_DEEP_MAX_WALLETS", "200")),  # was 600
                 limit_per_token=100,
                 execution_priority=3,  # Lowest priority (runs last)
                 expected_quality_score=55.0,
@@ -161,7 +166,7 @@ class MultiTimeframeDiscovery:
             DiscoveryTimeframe.FAST: TimeframeConfig(
                 timeframe=DiscoveryTimeframe.FAST,
                 hours_back=int(os.getenv("SCOUT_FAST_SCAN_HOURS", "24")),  # 1 day
-                max_wallets=int(os.getenv("SCOUT_FAST_MAX_WALLETS", "400")),  # 4x expansion
+                max_wallets=int(os.getenv("SCOUT_FAST_MAX_WALLETS", "150")),  # was 400
                 limit_per_token=150,
                 execution_priority=2,  # Medium priority
                 expected_quality_score=60.0,
@@ -170,7 +175,7 @@ class MultiTimeframeDiscovery:
             DiscoveryTimeframe.TRENDING: TimeframeConfig(
                 timeframe=DiscoveryTimeframe.TRENDING,
                 hours_back=int(os.getenv("SCOUT_TRENDING_SCAN_HOURS", "4")),  # 4 hours
-                max_wallets=int(os.getenv("SCOUT_TRENDING_MAX_WALLETS", "300")),  # 6x expansion
+                max_wallets=int(os.getenv("SCOUT_TRENDING_MAX_WALLETS", "100")),  # was 300
                 limit_per_token=200,
                 execution_priority=1,  # Highest priority (runs first)
                 expected_quality_score=65.0,
