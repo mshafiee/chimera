@@ -640,3 +640,203 @@ impl StopLossManager {
         StopLossAction::None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::price_cache::PriceSource;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn test_calculate_atr_paths() {
+        let db = Arc::new(crate::monitoring::test_db::MockDb::new());
+        let cache = Arc::new(PriceCache::new().unwrap());
+        let mgr = StopLossManager::new(db, Arc::new(ProfitManagementConfig::default()), cache);
+
+        // Zero period → None.
+        assert!(mgr.calculate_atr(&[dec!(1), dec!(2)], 0).is_none());
+        // Not enough samples for the period → None.
+        assert!(mgr.calculate_atr(&[dec!(1), dec!(2)], 2).is_none());
+        // Empty history → None.
+        assert!(mgr.calculate_atr(&[], 1).is_none());
+
+        // Period 2 over [1, 3, 5]: ranges |3-1|=2, |5-3|=2 → ATR 2.
+        let atr = mgr.calculate_atr(&[dec!(1), dec!(3), dec!(5)], 2).unwrap();
+        assert_eq!(atr, dec!(2));
+
+        // Period 2 over [1, 3, 5, 4]: only the last 3 closes matter →
+        // ranges |5-3|=2, |4-5|=1 → ATR 1.5.
+        let atr = mgr
+            .calculate_atr(&[dec!(1), dec!(3), dec!(5), dec!(4)], 2)
+            .unwrap();
+        assert_eq!(atr, dec!(1.5));
+    }
+
+    #[test]
+    fn test_market_regime_parsing_and_multipliers() {
+        assert_eq!(MarketRegime::parse_regime("BULL"), MarketRegime::Bull);
+        assert_eq!(MarketRegime::parse_regime("bear"), MarketRegime::Bear);
+        assert_eq!(
+            MarketRegime::parse_regime("Volatile"),
+            MarketRegime::Volatile
+        );
+        assert_eq!(MarketRegime::parse_regime("NEUTRAL"), MarketRegime::Neutral);
+        // Unknown → Neutral (with a warn log).
+        assert_eq!(MarketRegime::parse_regime("typo"), MarketRegime::Neutral);
+
+        assert_eq!(MarketRegime::Bull.atr_multiplier(), dec!(1.5));
+        assert_eq!(MarketRegime::Bear.atr_multiplier(), dec!(1.0));
+        assert_eq!(MarketRegime::Volatile.atr_multiplier(), dec!(2.0));
+        assert_eq!(MarketRegime::Neutral.atr_multiplier(), dec!(1.25));
+    }
+
+    #[test]
+    fn test_calculate_atr_stop_loss_and_regime_getter() {
+        let db = Arc::new(crate::monitoring::test_db::MockDb::new());
+        let cache = Arc::new(PriceCache::new().unwrap());
+        let config = Arc::new(ProfitManagementConfig {
+            atr_multiplier: dec!(2.0),
+            market_regime: "BULL".to_string(),
+            ..ProfitManagementConfig::default()
+        });
+        let mgr = StopLossManager::new(db, config.clone(), cache);
+
+        assert_eq!(mgr.get_market_regime(), MarketRegime::Bull);
+
+        // entry 100, ATR 5, atr_multiplier 2, regime Bull 1.5 →
+        // distance = 5*2*1.5 = 15% → stop = 85.
+        let stop = mgr.calculate_atr_stop_loss(dec!(100), dec!(5), MarketRegime::Bull);
+        assert_eq!(stop, dec!(85));
+
+        // Volatile regime: distance 5*2*2 = 20% → stop 80.
+        let stop = mgr.calculate_atr_stop_loss(dec!(100), dec!(5), MarketRegime::Volatile);
+        assert_eq!(stop, dec!(80));
+    }
+
+    #[test]
+    fn test_set_signal_aggregator_and_token_parser() {
+        let db = Arc::new(crate::monitoring::test_db::MockDb::new());
+        let cache = Arc::new(PriceCache::new().unwrap());
+        let mgr = StopLossManager::new(db, Arc::new(ProfitManagementConfig::default()), cache);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let agg = Arc::new(crate::monitoring::SignalAggregator::new(Arc::new(
+                crate::monitoring::test_db::MockDb::new(),
+            )));
+            mgr.set_signal_aggregator(agg.clone()).await;
+            assert!(mgr.signal_aggregator.read().await.is_some());
+
+            let cache2 = Arc::new(crate::token::TokenCache::new(10, 10));
+            let fetcher = Arc::new(
+                crate::token::TokenMetadataFetcher::new_with_rate_limiter_and_jupiter(
+                    "http://127.0.0.1:1",
+                    None,
+                    "http://127.0.0.1:1".to_string(),
+                ),
+            );
+            let parser = Arc::new(crate::TokenParser::new(
+                crate::token::TokenSafetyConfig {
+                    freeze_authority_whitelist: std::collections::HashSet::new(),
+                    mint_authority_whitelist: std::collections::HashSet::new(),
+                    min_liquidity_shield_usd: dec!(0),
+                    min_liquidity_spear_usd: dec!(0),
+                    honeypot_detection_enabled: false,
+                    holder_concentration_check_enabled: false,
+                    max_holder_concentration_pct: 100.0,
+                },
+                cache2,
+                fetcher,
+            ));
+            mgr.set_token_parser(parser).await;
+            assert!(mgr.token_parser.read().await.is_some());
+        });
+    }
+
+    #[tokio::test]
+    async fn test_check_stop_loss_stale_and_missing_price() {
+        let db = Arc::new(crate::monitoring::test_db::MockDb::new());
+        let cache = Arc::new(PriceCache::new().unwrap());
+        let mgr = StopLossManager::new(
+            db,
+            Arc::new(ProfitManagementConfig::default()),
+            cache.clone(),
+        );
+        let entry = chrono::Utc::now() - chrono::TimeDelta::seconds(60);
+
+        // No cached price, token not tracked → None (fail-open).
+        assert_eq!(
+            mgr.check_stop_loss("u1", "w", dec!(1), "tok-unknown", entry)
+                .await,
+            StopLossAction::None
+        );
+
+        // Tracked token whose price went stale → force Exit.
+        cache.track_token("tok-stale");
+        let old = chrono::Utc::now() - chrono::TimeDelta::seconds(200);
+        cache.set_price_with_time("tok-stale", dec!(1), PriceSource::Jupiter, old, Some(9));
+        assert_eq!(
+            mgr.check_stop_loss("u2", "w", dec!(1), "tok-stale", entry)
+                .await,
+            StopLossAction::Exit
+        );
+
+        // Cached but stale (>90s) on a tracked token → force Exit.
+        cache.track_token("tok-freshish");
+        cache.set_price_with_time("tok-freshish", dec!(1), PriceSource::Jupiter, old, Some(9));
+        assert_eq!(
+            mgr.check_stop_loss("u3", "w", dec!(1), "tok-freshish", entry)
+                .await,
+            StopLossAction::Exit
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_stop_loss_zero_entry_forces_exit() {
+        let db = Arc::new(crate::monitoring::test_db::MockDb::new());
+        let cache = Arc::new(PriceCache::new().unwrap());
+        cache.set_price("tok-z", dec!(1), PriceSource::Jupiter, Some(9));
+        let mgr = StopLossManager::new(db, Arc::new(ProfitManagementConfig::default()), cache);
+        let entry = chrono::Utc::now() - chrono::TimeDelta::seconds(60);
+        assert_eq!(
+            mgr.check_stop_loss("u", "w", dec!(0), "tok-z", entry).await,
+            StopLossAction::Exit
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_pre_graduation_gates() {
+        let db = Arc::new(crate::monitoring::test_db::MockDb::new());
+        let cache = Arc::new(PriceCache::new().unwrap());
+
+        // Disabled → None immediately.
+        let mgr = StopLossManager::new(
+            db.clone(),
+            Arc::new(ProfitManagementConfig {
+                pre_graduation_exit_enabled: false,
+                ..ProfitManagementConfig::default()
+            }),
+            cache.clone(),
+        );
+        assert_eq!(
+            mgr.check_pre_graduation("u", "tok").await,
+            StopLossAction::None
+        );
+
+        // Enabled but no parser wired → None (fail-open).
+        let mgr = StopLossManager::new(
+            db,
+            Arc::new(ProfitManagementConfig {
+                pre_graduation_exit_enabled: true,
+                ..ProfitManagementConfig::default()
+            }),
+            cache,
+        );
+        assert_eq!(
+            mgr.check_pre_graduation("u", "tok").await,
+            StopLossAction::None
+        );
+    }
+}

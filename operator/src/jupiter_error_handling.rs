@@ -107,16 +107,32 @@ impl JupiterError {
     /// Classify an HTTP error into JupiterErrorType
     pub fn from_http_error(status: u16, message: String) -> Self {
         let (error_type, retryable, retry_delay) = match status {
-            429 => (JupiterErrorType::RateLimit, true, Some(Duration::from_secs(5))),
+            429 => (
+                JupiterErrorType::RateLimit,
+                true,
+                Some(Duration::from_secs(5)),
+            ),
             401 | 403 => (JupiterErrorType::Authentication, false, None),
             400 => (JupiterErrorType::BadRequest, false, None),
-            500 | 502 | 503 | 504 => (JupiterErrorType::ServerError, true, Some(Duration::from_secs(2))),
-            408 => (JupiterErrorType::Timeout, true, Some(Duration::from_secs(1))),
+            500 | 502 | 503 | 504 => (
+                JupiterErrorType::ServerError,
+                true,
+                Some(Duration::from_secs(2)),
+            ),
+            408 => (
+                JupiterErrorType::Timeout,
+                true,
+                Some(Duration::from_secs(1)),
+            ),
             // All other 4xx client errors (404, 409, 422, ...) are permanent —
             // retrying them with backoff only masks the root cause. Only
             // 5xx/network-level unknowns default to retryable.
             _ if (400..500).contains(&status) => (JupiterErrorType::Unknown, false, None),
-            _ => (JupiterErrorType::Unknown, true, Some(Duration::from_secs(1))),
+            _ => (
+                JupiterErrorType::Unknown,
+                true,
+                Some(Duration::from_secs(1)),
+            ),
         };
 
         JupiterError {
@@ -188,7 +204,9 @@ impl JupiterError {
             JupiterErrorType::BadRequest => {
                 AppError::Validation(format!("Jupiter bad request: {}", self.message))
             }
-            JupiterErrorType::ServerError | JupiterErrorType::NetworkError | JupiterErrorType::Timeout => {
+            JupiterErrorType::ServerError
+            | JupiterErrorType::NetworkError
+            | JupiterErrorType::Timeout => {
                 AppError::Http(format!("Jupiter API error: {}", self.message))
             }
             JupiterErrorType::ParseError => {
@@ -233,7 +251,9 @@ pub fn calculate_retry_delay(attempt: u32, config: &RetryConfig) -> Duration {
     // saturating_sub: attempt 0 must yield the initial delay, not a
     // sub-initial backoff multiplier.
     let base_delay = config.initial_delay_ms as f64
-        * config.backoff_multiplier.powi(attempt.saturating_sub(1) as i32);
+        * config
+            .backoff_multiplier
+            .powi(attempt.saturating_sub(1) as i32);
     let capped_delay = base_delay.min(config.max_delay_ms as f64);
 
     // Add jitter to avoid thundering herd
@@ -526,5 +546,551 @@ mod tests {
         // Even with high backoff, delay should be capped
         let delay = calculate_retry_delay(10, &config);
         assert!(delay.as_millis() <= 100 + 20); // Allow for jitter
+    }
+
+    // ==========================================================================
+    // ADDITIONAL COVERAGE
+    // ==========================================================================
+
+    #[test]
+    fn test_classify_all_http_statuses() {
+        // 429 → RateLimit, retryable, 5s delay
+        let e = JupiterError::from_http_error(429, "rl".into());
+        assert_eq!(e.error_type, JupiterErrorType::RateLimit);
+        assert!(e.retryable);
+        assert_eq!(e.status_code, Some(429));
+        assert_eq!(e.retry_delay, Some(Duration::from_secs(5)));
+
+        // 401/403 → Authentication, not retryable
+        for code in [401, 403] {
+            let e = JupiterError::from_http_error(code, "auth".into());
+            assert_eq!(e.error_type, JupiterErrorType::Authentication);
+            assert!(!e.retryable);
+            assert!(e.retry_delay.is_none());
+        }
+
+        // 400 → BadRequest, not retryable
+        let e = JupiterError::from_http_error(400, "bad".into());
+        assert_eq!(e.error_type, JupiterErrorType::BadRequest);
+        assert!(!e.retryable);
+
+        // 500/502/503/504 → ServerError, retryable, 2s
+        for code in [500, 502, 503, 504] {
+            let e = JupiterError::from_http_error(code, "srv".into());
+            assert_eq!(e.error_type, JupiterErrorType::ServerError);
+            assert!(e.retryable);
+            assert_eq!(e.retry_delay, Some(Duration::from_secs(2)));
+        }
+
+        // 408 → Timeout, retryable, 1s
+        let e = JupiterError::from_http_error(408, "to".into());
+        assert_eq!(e.error_type, JupiterErrorType::Timeout);
+        assert!(e.retryable);
+        assert_eq!(e.retry_delay, Some(Duration::from_secs(1)));
+
+        // Other 4xx (404) → Unknown, NOT retryable (permanent)
+        let e = JupiterError::from_http_error(404, "nf".into());
+        assert_eq!(e.error_type, JupiterErrorType::Unknown);
+        assert!(!e.retryable);
+        assert!(e.retry_delay.is_none());
+
+        // Anything else (600) → Unknown, retryable
+        let e = JupiterError::from_http_error(600, "weird".into());
+        assert_eq!(e.error_type, JupiterErrorType::Unknown);
+        assert!(e.retryable);
+        assert_eq!(e.retry_delay, Some(Duration::from_secs(1)));
+
+        // request_params/response_body start empty
+        assert!(e.request_params.is_none());
+        assert!(e.response_body.is_none());
+    }
+
+    #[test]
+    fn test_error_constructors() {
+        let net = JupiterError::network_error("refused".into());
+        assert_eq!(net.error_type, JupiterErrorType::NetworkError);
+        assert!(net.retryable);
+        assert_eq!(net.retry_delay, Some(Duration::from_secs(2)));
+        assert!(net.status_code.is_none());
+
+        let to = JupiterError::timeout_error("slow".into());
+        assert_eq!(to.error_type, JupiterErrorType::Timeout);
+        assert!(to.retryable);
+        assert_eq!(to.retry_delay, Some(Duration::from_secs(1)));
+
+        let parse = JupiterError::parse_error("bad json".into());
+        assert_eq!(parse.error_type, JupiterErrorType::ParseError);
+        assert!(!parse.retryable);
+        assert!(parse.retry_delay.is_none());
+    }
+
+    #[test]
+    fn test_to_app_error_all_variants() {
+        use crate::error::AppError;
+        let cases = [
+            JupiterErrorType::RateLimit,
+            JupiterErrorType::Authentication,
+            JupiterErrorType::BadRequest,
+            JupiterErrorType::ServerError,
+            JupiterErrorType::NetworkError,
+            JupiterErrorType::Timeout,
+            JupiterErrorType::ParseError,
+            JupiterErrorType::Unknown,
+        ];
+        for ty in &cases {
+            let err = JupiterError {
+                error_type: ty.clone(),
+                status_code: None,
+                message: "m".into(),
+                retryable: false,
+                retry_delay: None,
+                request_context: JupiterRequestContext::new(),
+                request_params: None,
+                response_body: None,
+            };
+            let app = err.to_app_error();
+            let expected = match ty {
+                JupiterErrorType::RateLimit => {
+                    AppError::ServiceUnavailable("Jupiter rate limit: m".into())
+                }
+                JupiterErrorType::Authentication => {
+                    AppError::Auth("Jupiter authentication failed: m".into())
+                }
+                JupiterErrorType::BadRequest => {
+                    AppError::Validation("Jupiter bad request: m".into())
+                }
+                JupiterErrorType::ServerError
+                | JupiterErrorType::NetworkError
+                | JupiterErrorType::Timeout => AppError::Http("Jupiter API error: m".into()),
+                JupiterErrorType::ParseError => {
+                    AppError::Parse("Jupiter response parsing failed: m".into())
+                }
+                JupiterErrorType::Unknown => AppError::Internal("Jupiter unknown error: m".into()),
+            };
+            assert_eq!(app.to_string(), expected.to_string(), "variant {ty:?}");
+        }
+    }
+
+    #[test]
+    fn test_request_context_helpers() {
+        let ctx = JupiterRequestContext::new();
+        assert_eq!(ctx.attempt, 1);
+        assert!(ctx.correlation_id.is_none());
+        assert!(ctx.trade_uuid.is_none());
+        assert!(!ctx.request_id.is_empty());
+
+        let mut ctx = ctx
+            .with_correlation_id("corr-1".into())
+            .with_trade_uuid("uuid-1".into());
+        assert_eq!(ctx.correlation_id.as_deref(), Some("corr-1"));
+        assert_eq!(ctx.trade_uuid.as_deref(), Some("uuid-1"));
+
+        ctx.increment_attempt();
+        assert_eq!(ctx.attempt, 2);
+
+        let default = JupiterRequestContext::default();
+        assert_eq!(default.attempt, 1);
+    }
+
+    #[test]
+    fn test_retry_delay_exact_without_jitter() {
+        let config = RetryConfig {
+            max_retries: 1,
+            initial_delay_ms: 100,
+            max_delay_ms: 10000,
+            backoff_multiplier: 2.0,
+            jitter_factor: 0.0,
+        };
+        // attempt 0 → initial (saturating_sub keeps 100ms)
+        assert_eq!(calculate_retry_delay(0, &config).as_millis(), 100);
+        // attempt 1 → 100 * 2^0 = 100
+        assert_eq!(calculate_retry_delay(1, &config).as_millis(), 100);
+        // attempt 2 → 100 * 2^1 = 200
+        assert_eq!(calculate_retry_delay(2, &config).as_millis(), 200);
+        // attempt 5 → 100 * 2^4 = 1600
+        assert_eq!(calculate_retry_delay(5, &config).as_millis(), 1600);
+        // attempt 20 → capped at 10000
+        assert_eq!(calculate_retry_delay(20, &config).as_millis(), 10000);
+    }
+
+    #[test]
+    fn test_retry_delay_jitter_bounds() {
+        let config = RetryConfig {
+            max_retries: 1,
+            initial_delay_ms: 1000,
+            max_delay_ms: 1000,
+            backoff_multiplier: 2.0,
+            jitter_factor: 0.2,
+        };
+        // base 1000, jitter ±20% of 1000 → final in [800, 1200]
+        for _ in 0..50 {
+            let ms = calculate_retry_delay(3, &config).as_millis();
+            assert!((800..=1200).contains(&ms), "jitter out of bounds: {ms}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_backoff_success_first_try() {
+        let config = RetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 1,
+            ..Default::default()
+        };
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let result = retry_with_backoff(
+            || async {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok::<u32, AppError>(42)
+            },
+            &config,
+            "op",
+        )
+        .await;
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_backoff_success_after_retry() {
+        let config = RetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 1,
+            ..Default::default()
+        };
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let result = retry_with_backoff(
+            || {
+                let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if n == 0 {
+                        Err::<u32, AppError>(AppError::Http("boom".into()))
+                    } else {
+                        Ok(7)
+                    }
+                }
+            },
+            &config,
+            "op",
+        )
+        .await;
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_backoff_non_retryable_fails_fast() {
+        let config = RetryConfig {
+            max_retries: 5,
+            initial_delay_ms: 10,
+            ..Default::default()
+        };
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let result = retry_with_backoff(
+            || async {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err::<u32, AppError>(AppError::Validation("bad".into()))
+            },
+            &config,
+            "op",
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Validation(_))));
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "permanent errors must not burn retry budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_backoff_exhausts_all_retries() {
+        let config = RetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 1,
+            ..Default::default()
+        };
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let result = retry_with_backoff(
+            || async {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err::<u32, AppError>(AppError::Http("always down".into()))
+            },
+            &config,
+            "op",
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Http(_))));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_circuit_breaker_without_cb() {
+        let config = RetryConfig {
+            max_retries: 2,
+            initial_delay_ms: 1,
+            ..Default::default()
+        };
+        // Same behavior as retry_with_backoff when no circuit breaker is wired.
+        let result = retry_with_circuit_breaker(
+            || async { Err::<u32, AppError>(AppError::Http("down".into())) },
+            &config,
+            "op",
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_circuit_breaker_success_resets_failures() {
+        let Some(db) = test_db().await else {
+            eprintln!("TEST_DATABASE_URL not set — skipping");
+            return;
+        };
+        let cb = Arc::new(CircuitBreaker::new(
+            cb_config(),
+            db,
+            rust_decimal::Decimal::from(1000),
+        ));
+        cb.record_jupiter_failure("http".into()).await.unwrap();
+        assert_eq!(cb.get_jupiter_failure_count(), 1);
+
+        let config = RetryConfig {
+            max_retries: 2,
+            initial_delay_ms: 1,
+            ..Default::default()
+        };
+        let result = retry_with_circuit_breaker(
+            || async { Ok::<u32, AppError>(1) },
+            &config,
+            "op",
+            Some(&cb),
+        )
+        .await;
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(
+            cb.get_jupiter_failure_count(),
+            0,
+            "success resets the failure counter"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_circuit_breaker_non_retryable_not_recorded() {
+        let Some(db) = test_db().await else {
+            eprintln!("TEST_DATABASE_URL not set — skipping");
+            return;
+        };
+        let cb = Arc::new(CircuitBreaker::new(
+            cb_config(),
+            db,
+            rust_decimal::Decimal::from(1000),
+        ));
+        let config = RetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 1,
+            ..Default::default()
+        };
+        let result = retry_with_circuit_breaker(
+            || async { Err::<u32, AppError>(AppError::Validation("bad".into())) },
+            &config,
+            "op",
+            Some(&cb),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Validation(_))));
+        assert_eq!(
+            cb.get_jupiter_failure_count(),
+            0,
+            "permanent errors must not accumulate toward a trip"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_circuit_breaker_trips_on_threshold() {
+        let Some(db) = test_db().await else {
+            eprintln!("TEST_DATABASE_URL not set — skipping");
+            return;
+        };
+        let mut cfg = cb_config();
+        cfg.max_jupiter_failures = 1; // trip on the first recorded failure
+        let cb = Arc::new(CircuitBreaker::new(
+            cfg,
+            db,
+            rust_decimal::Decimal::from(1000),
+        ));
+        let config = RetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 1,
+            ..Default::default()
+        };
+        let result = retry_with_circuit_breaker(
+            || async { Err::<u32, AppError>(AppError::Http("down".into())) },
+            &config,
+            "op",
+            Some(&cb),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AppError::CircuitBreaker(_))),
+            "threshold trip must surface a CircuitBreaker error"
+        );
+        assert_eq!(
+            cb.current_state(),
+            crate::circuit_breaker::CircuitBreakerState::Tripped
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_jupiter_error_handling_delegates() {
+        let config = RetryConfig {
+            max_retries: 2,
+            initial_delay_ms: 1,
+            ..Default::default()
+        };
+        let result = execute_with_jupiter_error_handling(
+            || async { Ok::<String, AppError>("done".into()) },
+            &config,
+            "op",
+        )
+        .await;
+        assert_eq!(result.unwrap(), "done");
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_backoff_zero_retries_unknown_error() {
+        let config = RetryConfig {
+            max_retries: 0,
+            initial_delay_ms: 1,
+            ..Default::default()
+        };
+        let result = retry_with_backoff(|| async { Ok::<u32, AppError>(1) }, &config, "op").await;
+        assert!(matches!(
+            result,
+            Err(AppError::Internal(msg)) if msg.contains("unknown error")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_circuit_breaker_zero_retries_unknown_error() {
+        let config = RetryConfig {
+            max_retries: 0,
+            initial_delay_ms: 1,
+            ..Default::default()
+        };
+        let result =
+            retry_with_circuit_breaker(|| async { Ok::<u32, AppError>(1) }, &config, "op", None)
+                .await;
+        assert!(matches!(
+            result,
+            Err(AppError::Internal(msg)) if msg.contains("unknown error")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_circuit_breaker_classifies_all_error_types() {
+        let Some(db) = test_db().await else {
+            eprintln!("TEST_DATABASE_URL not set — skipping");
+            return;
+        };
+        let cb = Arc::new(CircuitBreaker::new(
+            cb_config(),
+            db,
+            rust_decimal::Decimal::from(1000),
+        ));
+        let config = RetryConfig {
+            max_retries: 1,
+            initial_delay_ms: 1,
+            ..Default::default()
+        };
+        // Each classification arm records a Jupiter failure (below threshold)
+        // and returns the original error after exhausting retries.
+        let builders: Vec<fn() -> AppError> = vec![
+            || AppError::ServiceUnavailable("s".into()),
+            || AppError::Rpc("r".into()),
+            || AppError::Parse("p".into()),
+            || AppError::Validation("v".into()),
+            || AppError::BadRequest("b".into()),
+            || AppError::InvalidInput("i".into()),
+            || AppError::Auth("a".into()),
+            || {
+                AppError::Config(config::ConfigError::FileParse {
+                    uri: Some("test".into()),
+                    cause: std::io::Error::new(std::io::ErrorKind::Other, "x").into(),
+                })
+            },
+            || AppError::Internal("n".into()),
+            || AppError::Database(sqlx::Error::RowNotFound),
+        ];
+        for build in builders {
+            cb.reset_jupiter_failures();
+            let result = retry_with_circuit_breaker(
+                || {
+                    let err = build();
+                    async move { Err::<u32, AppError>(err) }
+                },
+                &config,
+                "op",
+                Some(&cb),
+            )
+            .await;
+            let err = build();
+            assert!(result.is_err(), "{err:?}");
+            // Permanent errors are NOT recorded toward a trip.
+            if !app_error_is_retryable(&err) {
+                assert_eq!(cb.get_jupiter_failure_count(), 0, "{err:?}");
+                cb.reset_jupiter_failures();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_circuit_breaker_retryable_below_threshold() {
+        let Some(db) = test_db().await else {
+            eprintln!("TEST_DATABASE_URL not set — skipping");
+            return;
+        };
+        let cb = Arc::new(CircuitBreaker::new(
+            cb_config(), // threshold 5
+            db,
+            rust_decimal::Decimal::from(1000),
+        ));
+        let config = RetryConfig {
+            max_retries: 2,
+            initial_delay_ms: 1,
+            ..Default::default()
+        };
+        // Retryable failures under the threshold: recorded, retried, then the
+        // last error is returned (Ok(false) arm of record_jupiter_failure).
+        let result = retry_with_circuit_breaker(
+            || async { Err::<u32, AppError>(AppError::Rpc("down".into())) },
+            &config,
+            "op",
+            Some(&cb),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(cb.get_jupiter_failure_count(), 2, "both attempts recorded");
+    }
+
+    /// Connect to the shared test database (migrations already applied).
+    async fn test_db() -> Option<Arc<dyn crate::db_abstraction::Database>> {
+        let url = std::env::var("TEST_DATABASE_URL").ok()?;
+        crate::db_abstraction::create_database(&crate::db_abstraction::DatabaseConfig::postgres(
+            url,
+        ))
+        .await
+        .ok()
+    }
+
+    fn cb_config() -> crate::config::CircuitBreakerConfig {
+        crate::config::CircuitBreakerConfig {
+            max_loss_24h_usd: rust_decimal::Decimal::from(500),
+            max_consecutive_losses: 3,
+            max_drawdown_percent: rust_decimal::Decimal::from(15),
+            portfolio_stop_loss_percent: rust_decimal::Decimal::from(-5),
+            cooldown_minutes: 30,
+            max_jupiter_failures: 5,
+        }
     }
 }

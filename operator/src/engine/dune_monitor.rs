@@ -29,6 +29,13 @@ const DUNE_API_BASE: &str = "https://api.dune.com/api/v1";
 const POLL_INTERVAL_SECS: u64 = 10;
 const MAX_POLLS: usize = 30;
 
+/// Dune API base URL. Production always uses the hardcoded endpoint; the
+/// `DUNE_API_BASE_URL` env override exists as a test seam so the monitor can
+/// be exercised against a local mock server (2026-08-10).
+fn dune_api_base() -> String {
+    std::env::var("DUNE_API_BASE_URL").unwrap_or_else(|_| DUNE_API_BASE.to_string())
+}
+
 /// A wallet with negative 24h PnL, parsed from the Dune CSV result.
 #[derive(Debug)]
 struct LosingWallet {
@@ -59,6 +66,9 @@ pub struct DunePromotionContext {
 /// promotes Dune-verified profitable CANDIDATE wallets.
 pub struct DunePnlMonitor {
     api_key: String,
+    /// Dune API base URL, captured at construction so the `DUNE_API_BASE_URL`
+    /// test seam survives env-var restore between construction and use.
+    dune_api_base: String,
     query_id: u64,
     check_interval_secs: u64,
     promote_check_interval_secs: u64,
@@ -106,6 +116,8 @@ impl DunePnlMonitor {
         }
         Self {
             api_key,
+            dune_api_base: std::env::var("DUNE_API_BASE_URL")
+                .unwrap_or_else(|_| DUNE_API_BASE.to_string()),
             query_id: config.pnl_query_id,
             check_interval_secs: config.check_interval_secs,
             promote_check_interval_secs: config.promote_check_interval_secs,
@@ -264,7 +276,7 @@ impl DunePnlMonitor {
     }
 
     /// Execute one full check cycle: query Dune → parse → demote.
-    async fn run_check(&self) -> AppResult<()> {
+    pub async fn run_check(&self) -> AppResult<()> {
         let started = std::time::Instant::now();
 
         // 1. Execute the Dune query.
@@ -303,7 +315,7 @@ impl DunePnlMonitor {
 
     /// Trigger execution of a Dune query.
     async fn execute_query(&self, query_id: u64) -> AppResult<String> {
-        let url = format!("{DUNE_API_BASE}/query/{query_id}/execute");
+        let url = format!("{}/query/{}/execute", self.dune_api_base, query_id);
         let resp = self
             .http
             .post(&url)
@@ -322,8 +334,8 @@ impl DunePnlMonitor {
 
     /// Poll execution status, then download CSV results.
     async fn poll_and_fetch_csv(&self, execution_id: &str) -> AppResult<String> {
-        let status_url = format!("{DUNE_API_BASE}/execution/{execution_id}/status");
-        let csv_url = format!("{DUNE_API_BASE}/execution/{execution_id}/results/csv");
+        let status_url = format!("{}/execution/{}/status", self.dune_api_base, execution_id);
+        let csv_url = format!("{}/execution/{}/results/csv", self.dune_api_base, execution_id);
 
         for _ in 0..MAX_POLLS {
             tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
@@ -386,7 +398,7 @@ impl DunePnlMonitor {
         &self,
         execution_id: &str,
     ) -> AppResult<Vec<serde_json::Value>> {
-        let results_url = format!("{DUNE_API_BASE}/execution/{execution_id}/results");
+        let results_url = format!("{}/execution/{}/results", self.dune_api_base, execution_id);
         let resp = self
             .http
             .get(&results_url)
@@ -548,7 +560,7 @@ impl DunePnlMonitor {
     /// webhook registration. Overrides scout's WQS rejection (which scores
     /// ground-truth profitable traders 0.0) — the missing "promote" half of
     /// the Dune integration.
-    async fn promote_dune_verified(&self) -> AppResult<usize> {
+    pub async fn promote_dune_verified(&self) -> AppResult<usize> {
         if !self.promote_enabled || self.api_key.is_empty() {
             return Ok(0);
         }
@@ -851,7 +863,7 @@ impl DunePnlMonitor {
     /// ordered by activity, capped at `promote_max_per_cycle` per cycle.
     /// Respects the same `promote_max_active_total` cap and demotion
     /// cooldown as the Dune path.
-    async fn promote_active_candidates_onchain(&self) -> AppResult<usize> {
+    pub async fn promote_active_candidates_onchain(&self) -> AppResult<usize> {
         // Helius API only — no Dune API, so no Dune-key guard.
         if !self.onchain_config.enabled {
             return Ok(0);
@@ -1063,7 +1075,7 @@ impl DunePnlMonitor {
     /// exits — mirror_main. Wallets with consistently negative mirror_main
     /// PnL on admitted DEX signals are demoted, with WQS lowered below the
     /// auto-promote threshold so the refill does not instantly re-promote.
-    async fn demote_shadow_losers(&self) -> AppResult<usize> {
+    pub async fn demote_shadow_losers(&self) -> AppResult<usize> {
         // Local DB only — no Dune API, so no Dune-key guard (a missing
         // DUNE_API_KEY must not silently disable shadow quality demotion).
         if !self.shadow_quality_enabled {
@@ -1173,7 +1185,7 @@ impl DunePnlMonitor {
     ///
     /// API-cost control: only the `audit_max_per_cycle` most-active wallets
     /// are assessed per cycle, so the sweep spreads over a few cycles.
-    async fn audit_actives_onchain(&self) -> AppResult<usize> {
+    pub async fn audit_actives_onchain(&self) -> AppResult<usize> {
         // Helius API only — no Dune API, so no Dune-key guard (a missing
         // DUNE_API_KEY must not silently disable the retroactive audit).
         if !self.onchain_config.enabled || !self.onchain_config.audit_actives_enabled {

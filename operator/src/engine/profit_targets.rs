@@ -266,11 +266,7 @@ impl ProfitTargetManager {
     /// the quoted USD value of 1 token must clear entry + cost breakeven, or
     /// the tier is suppressed (fail-closed — loss rails remain active). On
     /// any error/missing data the tier is NOT fired this tick.
-    async fn quote_confirms_profit(
-        &self,
-        token_address: &str,
-        entry_price_usd: Decimal,
-    ) -> bool {
+    async fn quote_confirms_profit(&self, token_address: &str, entry_price_usd: Decimal) -> bool {
         let Some(parser) = &self.quote_client else {
             return true;
         };
@@ -339,9 +335,10 @@ impl ProfitTargetManager {
     ) -> crate::engine::exit_profile::EffectiveExitParams {
         match &self.exit_profiles {
             Some(c) => c.effective(wallet, strategy).await,
-            None => {
-                crate::engine::exit_profile::EffectiveExitParams::from_config(&self.config, strategy)
-            }
+            None => crate::engine::exit_profile::EffectiveExitParams::from_config(
+                &self.config,
+                strategy,
+            ),
         }
     }
 
@@ -369,22 +366,21 @@ impl ProfitTargetManager {
                 let peak = data.peak_price.max(current_price);
                 let peak_pct = data.peak_profit_percent;
                 let targets_count = self.config.targets.len();
-                let targets_hit: Vec<usize> =
-                    serde_json::from_str::<Vec<usize>>(&data.targets_hit)
-                        .ok()
-                        .filter(|v| v.iter().all(|&i| i < targets_count))
-                        .unwrap_or_else(|| {
-                            // Backward compat: old rows stored Decimal values.
-                            // Clear and re-evaluate from scratch (safe — may re-trigger
-                            // a tier that was already hit, but that's better than panic).
-                            tracing::warn!(
-                                trade_uuid,
-                                raw = %data.targets_hit,
-                                targets_count,
-                                "Migrating targets_hit from value-based to index-based (resetting)"
-                            );
-                            Vec::new()
-                        });
+                let targets_hit: Vec<usize> = serde_json::from_str::<Vec<usize>>(&data.targets_hit)
+                    .ok()
+                    .filter(|v| v.iter().all(|&i| i < targets_count))
+                    .unwrap_or_else(|| {
+                        // Backward compat: old rows stored Decimal values.
+                        // Clear and re-evaluate from scratch (safe — may re-trigger
+                        // a tier that was already hit, but that's better than panic).
+                        tracing::warn!(
+                            trade_uuid,
+                            raw = %data.targets_hit,
+                            targets_count,
+                            "Migrating targets_hit from value-based to index-based (resetting)"
+                        );
+                        Vec::new()
+                    });
                 let t_price = data.trailing_stop_price;
                 let remaining = data.remaining_fraction;
                 tracing::debug!(trade_uuid, %remaining, "Restored profit target state from DB");
@@ -407,9 +403,11 @@ impl ProfitTargetManager {
                                 if self.config.target_vol_scale_threshold.is_zero() {
                                     None
                                 } else {
-                                    Some(((vol_dec / self.config.target_vol_scale_threshold)
-                                        .min(Decimal::ONE))
-                                        .max(Decimal::ZERO))
+                                    Some(
+                                        ((vol_dec / self.config.target_vol_scale_threshold)
+                                            .min(Decimal::ONE))
+                                        .max(Decimal::ZERO),
+                                    )
                                 }
                             }
                             None => None,
@@ -711,8 +709,7 @@ impl ProfitTargetManager {
         // and instantly fire: `calculate_volatility` returns Some(0.0) for a
         // flat/stable price history, which would otherwise make the stop
         // trigger the very tick it activates.
-        let scaled_base_distance =
-            (base_trailing_distance * vol_scale).max(Decimal::from(1)); // at least 1% trailing distance
+        let scaled_base_distance = (base_trailing_distance * vol_scale).max(Decimal::from(1)); // at least 1% trailing distance
         let trailing_distance =
             if let Some(vol) = self.price_cache.calculate_volatility(token_address) {
                 let vol_mult = if vol > 50.0 {
@@ -781,31 +778,34 @@ impl ProfitTargetManager {
         // Per-wallet time exits (effective params) replace the hardcoded
         // tiers when a wallet profile exists; losing-tier exits stay global.
         let is_spear = strategy == "SPEAR";
-        let (elapsed_hours, time_exit_limit_hours, time_exit) =
-            match state.entry_time.elapsed() {
-                Ok(elapsed) => {
-                    let elapsed_hours = elapsed.as_secs() / 3600;
-                    let exit_limit_hours = if profit_percent > dec!(25) {
-                        // High-profit: per-wallet hours (default Shield 48h, Spear 24h)
-                        eff.high_profit_hours
-                    } else if profit_percent > dec!(10) {
-                        // Medium-profit: per-wallet hours (default Shield
-                        // config.time_exit_hours, Spear 12h)
-                        eff.medium_profit_hours
+        let (elapsed_hours, time_exit_limit_hours, time_exit) = match state.entry_time.elapsed() {
+            Ok(elapsed) => {
+                let elapsed_hours = elapsed.as_secs() / 3600;
+                let exit_limit_hours = if profit_percent > dec!(25) {
+                    // High-profit: per-wallet hours (default Shield 48h, Spear 24h)
+                    eff.high_profit_hours
+                } else if profit_percent > dec!(10) {
+                    // Medium-profit: per-wallet hours (default Shield
+                    // config.time_exit_hours, Spear 12h)
+                    eff.medium_profit_hours
+                } else {
+                    // Low-profit and losing: use the configured losing_time_exit_hours
+                    // for the strategy so operators can control all near-breakeven/
+                    // losing exit timing through one config knob per strategy.
+                    if is_spear {
+                        self.config.losing_time_exit_hours_spear
                     } else {
-                        // Low-profit and losing: use the configured losing_time_exit_hours
-                        // for the strategy so operators can control all near-breakeven/
-                        // losing exit timing through one config knob per strategy.
-                        if is_spear {
-                            self.config.losing_time_exit_hours_spear
-                        } else {
-                            self.config.losing_time_exit_hours_shield
-                        }
-                    };
-                    (elapsed_hours, exit_limit_hours, elapsed_hours >= exit_limit_hours)
-                }
-                Err(_) => (0, 0, false),
-            };
+                        self.config.losing_time_exit_hours_shield
+                    }
+                };
+                (
+                    elapsed_hours,
+                    exit_limit_hours,
+                    elapsed_hours >= exit_limit_hours,
+                )
+            }
+            Err(_) => (0, 0, false),
+        };
 
         let entry_price_snap = state.entry_price;
         let entry_time_snap = state.entry_time;
@@ -1095,5 +1095,802 @@ mod vol_scale_tests {
         // If initial_vol_scale is set, no ramp — immediate scale
         let scale = compute_vol_scale(None, dec!(30.0), 5, Some(dec!(0.333)));
         assert_eq!(scale, dec!(0.333));
+    }
+
+    // ==========================================================================
+    // MANAGER BEHAVIOR (in-memory MockDb)
+    // ==========================================================================
+
+    mod manager_tests {
+        use super::*;
+        use crate::monitoring::test_db::MockDb;
+        use crate::price_cache::PriceSource;
+        use std::sync::atomic::Ordering;
+
+        const TOKEN: &str = "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R";
+        const WALLET: &str = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+
+        fn fresh_db() -> Arc<MockDb> {
+            Arc::new(MockDb::new())
+        }
+
+        fn no_ramp_config() -> Arc<ProfitManagementConfig> {
+            Arc::new(ProfitManagementConfig {
+                target_vol_scale_threshold: Decimal::ZERO,
+                ..ProfitManagementConfig::default()
+            })
+        }
+
+        fn cache_with_price(price: Decimal) -> Arc<PriceCache> {
+            let cache = Arc::new(PriceCache::new().unwrap());
+            cache.set_price(TOKEN, price, PriceSource::Jupiter, Some(9));
+            cache
+        }
+
+        fn manager(db: Arc<MockDb>, cache: Arc<PriceCache>) -> ProfitTargetManager {
+            ProfitTargetManager::new(db, no_ramp_config(), cache)
+        }
+
+        fn entry_time() -> std::time::SystemTime {
+            std::time::SystemTime::now()
+        }
+
+        // ── constructors ────────────────────────────────────────────────────
+
+        #[test]
+        fn test_all_constructors() {
+            let db = fresh_db();
+            let cache = Arc::new(PriceCache::new().unwrap());
+            let cfg = no_ramp_config();
+            let momentum = Arc::new(crate::engine::momentum_exit::MomentumExit::new(
+                db.clone(),
+                cache.clone(),
+                5,
+            ));
+            let regime = Arc::new(crate::engine::market_regime::MarketRegimeDetector::new(
+                cache.clone(),
+            ));
+            let _a = ProfitTargetManager::new(db.clone(), cfg.clone(), cache.clone());
+            let _b = ProfitTargetManager::with_momentum_exit(
+                db.clone(),
+                cfg.clone(),
+                cache.clone(),
+                momentum.clone(),
+            );
+            let _c = ProfitTargetManager::with_market_regime(
+                db.clone(),
+                cfg.clone(),
+                cache.clone(),
+                regime.clone(),
+            );
+            let _d = ProfitTargetManager::with_extras(
+                db.clone(),
+                cfg.clone(),
+                cache.clone(),
+                None,
+                None,
+            );
+            let e = ProfitTargetManager::with_extras(
+                db,
+                cfg,
+                cache.clone(),
+                Some(momentum),
+                Some(regime),
+            );
+            let _e = e
+                .with_exit_profiles(None)
+                .with_quote_client(Arc::new(make_parser()));
+            let _ = cache.stats();
+        }
+
+        fn make_parser() -> crate::TokenParser {
+            let cache = Arc::new(crate::token::TokenCache::new(100, 100));
+            let fetcher = Arc::new(
+                crate::token::TokenMetadataFetcher::new_with_rate_limiter_and_jupiter(
+                    "http://127.0.0.1:1",
+                    None,
+                    "http://127.0.0.1:1".to_string(),
+                ),
+            );
+            crate::TokenParser::new(
+                crate::token::TokenSafetyConfig {
+                    freeze_authority_whitelist: std::collections::HashSet::new(),
+                    mint_authority_whitelist: std::collections::HashSet::new(),
+                    min_liquidity_shield_usd: dec!(0),
+                    min_liquidity_spear_usd: dec!(0),
+                    honeypot_detection_enabled: false,
+                    holder_concentration_check_enabled: false,
+                    max_holder_concentration_pct: 100.0,
+                },
+                cache,
+                fetcher,
+            )
+        }
+
+        // ── quote_confirms_profit ───────────────────────────────────────────
+
+        #[tokio::test]
+        async fn test_quote_confirms_profit_paths() {
+            // No quote client → confirm (no gate).
+            let db = fresh_db();
+            let cache = cache_with_price(dec!(1));
+            let mgr = manager(db, cache.clone());
+            assert!(mgr.quote_confirms_profit(TOKEN, dec!(1)).await);
+
+            // With a quote client but no decimals → suppress.
+            let mgr = ProfitTargetManager::new(fresh_db(), no_ramp_config(), cache.clone())
+                .with_quote_client(Arc::new(make_parser()));
+            assert!(!mgr.quote_confirms_profit(TOKEN, dec!(1)).await);
+
+            // Decimals known but no SOL price → suppress.
+            let cache2 = cache_with_price(dec!(1));
+            cache2.set_price(
+                "So11111111111111111111111111111111111111112",
+                Decimal::ZERO,
+                PriceSource::Jupiter,
+                Some(9),
+            );
+            let mgr = ProfitTargetManager::new(fresh_db(), no_ramp_config(), cache2.clone())
+                .with_quote_client(Arc::new(make_parser()));
+            assert!(!mgr.quote_confirms_profit(TOKEN, dec!(1)).await);
+
+            // Quote fetch fails (dead URL) → suppress.
+            let cache3 = cache_with_price(dec!(1));
+            cache3.set_price(
+                "So11111111111111111111111111111111111111112",
+                dec!(180),
+                PriceSource::Jupiter,
+                Some(9),
+            );
+            let mgr = ProfitTargetManager::new(fresh_db(), no_ramp_config(), cache3.clone())
+                .with_quote_client(Arc::new(make_parser()));
+            assert!(!mgr.quote_confirms_profit(TOKEN, dec!(1)).await);
+        }
+
+        // ── register_position ──────────────────────────────────────────────
+
+        #[tokio::test]
+        async fn test_register_position_fresh_persists_and_idempotent() {
+            let db = fresh_db();
+            let cache = cache_with_price(dec!(1));
+            let mgr = manager(db.clone(), cache.clone());
+
+            mgr.register_position("uuid-1", dec!(1), dec!(10), TOKEN, entry_time())
+                .await;
+            assert_eq!(db.exit_target_upserts.lock().unwrap().len(), 1);
+
+            // Re-register: idempotent (no second upsert).
+            mgr.register_position("uuid-1", dec!(1), dec!(10), TOKEN, entry_time())
+                .await;
+            assert_eq!(db.exit_target_upserts.lock().unwrap().len(), 1);
+
+            // Fresh registration without price → falls back to entry price.
+            let cache2 = Arc::new(PriceCache::new().unwrap());
+            let mgr2 = manager(fresh_db(), cache2);
+            mgr2.register_position("uuid-2", dec!(2), dec!(10), TOKEN, entry_time())
+                .await;
+            assert_eq!(mgr2.active_targets.read().await.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn test_register_position_restores_from_db() {
+            let db = fresh_db();
+            // Seed the persisted row directly (bypasses the upsert counter).
+            db.exit_targets.lock().unwrap().insert(
+                "uuid-r".to_string(),
+                crate::db_abstraction::ExitTargetData {
+                    entry_price: dec!(1),
+                    entry_amount_sol: dec!(10),
+                    peak_price: dec!(1.5),
+                    peak_profit_percent: dec!(50),
+                    targets_hit: "[0]".to_string(),
+                    trailing_stop_active: true,
+                    trailing_stop_price: dec!(1.2),
+                    remaining_fraction: dec!(0.5),
+                },
+            );
+            let cache = cache_with_price(dec!(1));
+            let mgr = manager(db.clone(), cache.clone());
+
+            mgr.register_position("uuid-r", dec!(1), dec!(10), TOKEN, entry_time())
+                .await;
+
+            let targets = mgr.active_targets.read().await;
+            let state = targets.get("uuid-r").expect("restored state");
+            assert_eq!(state.peak_price, dec!(1.5));
+            assert_eq!(state.targets_hit, vec![0]);
+            assert!(state.trailing_stop_active);
+            assert_eq!(state.remaining_fraction, dec!(0.5));
+            // No fresh upsert for restored state.
+            assert_eq!(db.exit_target_upserts.lock().unwrap().len(), 0);
+        }
+
+        #[tokio::test]
+        async fn test_register_position_migrates_bad_targets_json() {
+            let db = fresh_db();
+            db.upsert_exit_target(
+                "uuid-m",
+                dec!(1),
+                dec!(10),
+                dec!(1.1),
+                dec!(10),
+                "not-json-or-out-of-range",
+                false,
+                dec!(0),
+                dec!(1),
+            )
+            .await
+            .unwrap();
+            let mgr = manager(db.clone(), cache_with_price(dec!(1)));
+            mgr.register_position("uuid-m", dec!(1), dec!(10), TOKEN, entry_time())
+                .await;
+            let state = mgr.active_targets.read().await;
+            let state = state.get("uuid-m").unwrap();
+            assert!(state.targets_hit.is_empty(), "bad json resets targets");
+        }
+
+        #[tokio::test]
+        async fn test_register_position_db_error_keeps_fresh_state() {
+            let db = fresh_db();
+            db.exit_target_error.store(true, Ordering::Relaxed);
+            let mgr = manager(db.clone(), cache_with_price(dec!(1)));
+            mgr.register_position("uuid-e", dec!(1), dec!(10), TOKEN, entry_time())
+                .await;
+            let state = mgr.active_targets.read().await;
+            assert!(state.contains_key("uuid-e"));
+            // DB row untouched: no upsert recorded.
+            assert!(db.exit_target_upserts.lock().unwrap().is_empty());
+        }
+
+        // ── check_targets ──────────────────────────────────────────────────
+
+        #[tokio::test]
+        async fn test_check_targets_missing_price_or_position() {
+            let db = fresh_db();
+            let mgr = manager(db.clone(), Arc::new(PriceCache::new().unwrap()));
+            // No price → None.
+            assert!(matches!(
+                mgr.check_targets("u", WALLET, TOKEN, "SHIELD").await,
+                ProfitTargetAction::None
+            ));
+
+            // Price present but position not registered → None.
+            let mgr = manager(db.clone(), cache_with_price(dec!(1)));
+            assert!(matches!(
+                mgr.check_targets("u", WALLET, TOKEN, "SHIELD").await,
+                ProfitTargetAction::None
+            ));
+        }
+
+        #[tokio::test]
+        async fn test_check_targets_tiered_exit() {
+            let db = fresh_db();
+            let cfg = Arc::new(ProfitManagementConfig {
+                target_vol_scale_threshold: Decimal::ZERO,
+                targets: vec![dec!(10), dec!(20)],
+                tiered_exit_percent: dec!(50),
+                min_size_sol: dec!(0.05),
+                ..ProfitManagementConfig::default()
+            });
+            let cache = Arc::new(PriceCache::new().unwrap());
+            cache.set_price(TOKEN, dec!(1), PriceSource::Jupiter, Some(9));
+            let mgr = ProfitTargetManager::new(db.clone(), cfg, cache.clone());
+
+            mgr.register_position("tier-uuid", dec!(1), dec!(1), TOKEN, entry_time())
+                .await;
+
+            // Price +30% → both tiers hit → compounded exit fraction.
+            cache.set_price(TOKEN, dec!(1.30), PriceSource::Jupiter, Some(9));
+            let action = mgr
+                .check_targets("tier-uuid", WALLET, TOKEN, "SHIELD")
+                .await;
+            match action {
+                ProfitTargetAction::ExitAmount(amount) => {
+                    // (1 - 0.5)^2 = 0.25 retained → sell 75% of remaining 1 SOL.
+                    assert_eq!(amount, dec!(0.75));
+                }
+                other => panic!("expected ExitAmount, got {other:?}"),
+            }
+
+            // State persisted after the tick.
+            assert!(!db.exit_target_upserts.lock().unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_check_targets_dust_triggers_full_exit() {
+            let db = fresh_db();
+            let cfg = Arc::new(ProfitManagementConfig {
+                target_vol_scale_threshold: Decimal::ZERO,
+                targets: vec![dec!(10)],
+                tiered_exit_percent: dec!(90),
+                min_size_sol: dec!(0.05),
+                ..ProfitManagementConfig::default()
+            });
+            let cache = Arc::new(PriceCache::new().unwrap());
+            cache.set_price(TOKEN, dec!(1), PriceSource::Jupiter, Some(9));
+            let mgr = ProfitTargetManager::new(db.clone(), cfg, cache.clone());
+            mgr.register_position("dust-uuid", dec!(1), dec!(0.1), TOKEN, entry_time())
+                .await;
+            cache.set_price(TOKEN, dec!(1.2), PriceSource::Jupiter, Some(9));
+            let action = mgr
+                .check_targets("dust-uuid", WALLET, TOKEN, "SHIELD")
+                .await;
+            assert!(matches!(action, ProfitTargetAction::FullExit));
+        }
+
+        #[tokio::test]
+        async fn test_check_targets_trailing_stop_flow() {
+            let db = fresh_db();
+            let cfg = Arc::new(ProfitManagementConfig {
+                target_vol_scale_threshold: Decimal::ZERO,
+                targets: vec![],
+                trailing_stop_activation: dec!(10),
+                trailing_stop_distance: dec!(20),
+                ..ProfitManagementConfig::default()
+            });
+            let cache = Arc::new(PriceCache::new().unwrap());
+            cache.set_price(TOKEN, dec!(1), PriceSource::Jupiter, Some(9));
+            let mgr = ProfitTargetManager::new(db.clone(), cfg, cache.clone());
+            mgr.register_position("trail-uuid", dec!(1), dec!(1), TOKEN, entry_time())
+                .await;
+
+            // +15% → activation threshold met → trailing stop armed.
+            cache.set_price(TOKEN, dec!(1.15), PriceSource::Jupiter, Some(9));
+            let action = mgr
+                .check_targets("trail-uuid", WALLET, TOKEN, "SHIELD")
+                .await;
+            assert!(matches!(action, ProfitTargetAction::None));
+            let state = mgr.active_targets.read().await;
+            let s = state.get("trail-uuid").unwrap();
+            assert!(s.trailing_stop_active);
+            assert!(s.trailing_stop_price > Decimal::ZERO);
+            drop(state);
+
+            // New peak ratchets the stop up.
+            cache.set_price(TOKEN, dec!(1.50), PriceSource::Jupiter, Some(9));
+            mgr.check_targets("trail-uuid", WALLET, TOKEN, "SHIELD")
+                .await;
+            let state = mgr.active_targets.read().await;
+            let s = state.get("trail-uuid").unwrap();
+            assert!(s.trailing_stop_price > dec!(1.15), "stop ratcheted");
+            drop(state);
+
+            // Drop below the ratcheted stop → FullExit.
+            cache.set_price(TOKEN, dec!(1.10), PriceSource::Jupiter, Some(9));
+            let action = mgr
+                .check_targets("trail-uuid", WALLET, TOKEN, "SHIELD")
+                .await;
+            assert!(matches!(action, ProfitTargetAction::FullExit));
+        }
+
+        #[tokio::test]
+        async fn test_check_targets_spear_time_exit_paths() {
+            let db = fresh_db();
+            let cfg = Arc::new(ProfitManagementConfig {
+                target_vol_scale_threshold: Decimal::ZERO,
+                targets: vec![],
+                time_exit_hours: 1,
+                losing_time_exit_hours_shield: 1,
+                losing_time_exit_hours_spear: 1,
+                ..ProfitManagementConfig::default()
+            });
+            let cache = Arc::new(PriceCache::new().unwrap());
+            cache.set_price(TOKEN, dec!(1), PriceSource::Jupiter, Some(9));
+            let mgr = ProfitTargetManager::new(db.clone(), cfg, cache.clone());
+            mgr.register_position("time-uuid", dec!(1), dec!(1), TOKEN, entry_time())
+                .await;
+            // Entry time is "now" → not elapsed; price flat → no exit yet.
+            let action = mgr.check_targets("time-uuid", WALLET, TOKEN, "SPEAR").await;
+            assert!(matches!(action, ProfitTargetAction::None));
+
+            // Manually backdate the entry time past the limit → time exit.
+            {
+                let mut targets = mgr.active_targets.write().await;
+                if let Some(s) = targets.get_mut("time-uuid") {
+                    s.entry_time =
+                        std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+                }
+            }
+            let action = mgr.check_targets("time-uuid", WALLET, TOKEN, "SPEAR").await;
+            assert!(
+                matches!(action, ProfitTargetAction::FullExit),
+                "time exit fires"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_check_targets_momentum_exit_priority() {
+            let db = fresh_db();
+            let cache = cache_with_price(dec!(1));
+            let momentum = Arc::new(crate::engine::momentum_exit::MomentumExit::new(
+                db.clone(),
+                cache.clone(),
+                5,
+            ));
+            let mgr = ProfitTargetManager::with_momentum_exit(
+                db.clone(),
+                no_ramp_config(),
+                cache.clone(),
+                momentum,
+            );
+            mgr.register_position("mom-uuid", dec!(1), dec!(1), TOKEN, entry_time())
+                .await;
+            cache.set_price(TOKEN, dec!(1.05), PriceSource::Jupiter, Some(9));
+            let action = mgr.check_targets("mom-uuid", WALLET, TOKEN, "SHIELD").await;
+            assert!(matches!(action, ProfitTargetAction::None));
+        }
+
+        // ── sweep / remove ─────────────────────────────────────────────────
+
+        #[tokio::test]
+        async fn test_sweep_stale_entries() {
+            let db = fresh_db();
+            let mgr = manager(db.clone(), cache_with_price(dec!(1)));
+            mgr.register_position("keep", dec!(1), dec!(1), TOKEN, entry_time())
+                .await;
+            mgr.register_position("drop", dec!(1), dec!(1), TOKEN, entry_time())
+                .await;
+            // Only "keep" is still an active position.
+            db.active_positions
+                .lock()
+                .unwrap()
+                .push(crate::db_abstraction::Position {
+                    id: 1,
+                    trade_uuid: "keep".to_string(),
+                    wallet_address: WALLET.to_string(),
+                    token_address: TOKEN.to_string(),
+                    token_symbol: None,
+                    strategy: "SHIELD".to_string(),
+                    entry_amount_sol: dec!(1),
+                    entry_price: dec!(1),
+                    entry_tx_signature: "sig".to_string(),
+                    current_price: None,
+                    unrealized_pnl_sol: None,
+                    unrealized_pnl_percent: None,
+                    state: "ACTIVE".to_string(),
+                    exit_price: None,
+                    exit_tx_signature: None,
+                    realized_pnl_sol: None,
+                    realized_pnl_usd: None,
+                    entry_sol_price_usd: None,
+                    opened_at: chrono::Utc::now(),
+                    last_updated: chrono::Utc::now(),
+                    closed_at: None,
+                    token_amount: None,
+                });
+            let removed = mgr.sweep_hwm_stale_entries().await;
+            assert_eq!(removed, 1);
+            let targets = mgr.active_targets.read().await;
+            assert!(targets.contains_key("keep"));
+            assert!(!targets.contains_key("drop"));
+        }
+
+        #[tokio::test]
+        async fn test_sweep_db_error_returns_zero() {
+            let db = fresh_db();
+            db.active_positions_error.store(true, Ordering::Relaxed);
+            let mgr = manager(db.clone(), cache_with_price(dec!(1)));
+            mgr.register_position("x", dec!(1), dec!(1), TOKEN, entry_time())
+                .await;
+            assert_eq!(mgr.sweep_hwm_stale_entries().await, 0);
+        }
+
+        /// Local mock of the Jupiter quote endpoint (outAmount in lamports).
+        async fn spawn_quote_mock(out_amount: Option<u64>) -> String {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                loop {
+                    let (mut sock, _) = listener.accept().await.unwrap();
+                    let mut buf = [0u8; 16384];
+                    let Ok(n) = sock.read(&mut buf).await else {
+                        continue;
+                    };
+                    let _req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let body = match out_amount {
+                        Some(amt) => serde_json::json!({"outAmount": amt.to_string()}).to_string(),
+                        None => serde_json::json!({"error": "No route found"}).to_string(),
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                }
+            });
+            format!("http://{addr}")
+        }
+
+        fn parser_with_quote_url(url: &str) -> Arc<crate::TokenParser> {
+            let cache = Arc::new(crate::token::TokenCache::new(100, 100));
+            let fetcher = Arc::new(
+                crate::token::TokenMetadataFetcher::new_with_rate_limiter_and_jupiter(
+                    "http://127.0.0.1:1",
+                    None,
+                    url.to_string(),
+                ),
+            );
+            Arc::new(crate::TokenParser::new(
+                crate::token::TokenSafetyConfig {
+                    freeze_authority_whitelist: std::collections::HashSet::new(),
+                    mint_authority_whitelist: std::collections::HashSet::new(),
+                    min_liquidity_shield_usd: dec!(0),
+                    min_liquidity_spear_usd: dec!(0),
+                    honeypot_detection_enabled: false,
+                    holder_concentration_check_enabled: false,
+                    max_holder_concentration_pct: 100.0,
+                },
+                cache,
+                fetcher,
+            ))
+        }
+
+        #[tokio::test]
+        async fn test_quote_confirms_profit_success_and_breakeven() {
+            // 1.0 SOL out for the 10-token probe; SOL at $180 → quoted $180 vs
+            // entry $100 × 1.015 = $101.5 → confirmed.
+            let base = spawn_quote_mock(Some(1_000_000_000)).await;
+            let db = fresh_db();
+            let cache = cache_with_price(dec!(100));
+            cache.set_price(
+                "So11111111111111111111111111111111111111112",
+                dec!(180),
+                PriceSource::Jupiter,
+                Some(9),
+            );
+            let mgr = ProfitTargetManager::new(db, no_ramp_config(), cache.clone())
+                .with_quote_client(parser_with_quote_url(&base));
+            assert!(mgr.quote_confirms_profit(TOKEN, dec!(100)).await);
+
+            // SOL at $1 → quoted $1 << $101.5 breakeven → suppressed.
+            let base2 = spawn_quote_mock(Some(1_000_000_000)).await;
+            let cache2 = cache_with_price(dec!(100));
+            cache2.set_price(
+                "So11111111111111111111111111111111111111112",
+                dec!(1),
+                PriceSource::Jupiter,
+                Some(9),
+            );
+            let mgr2 = ProfitTargetManager::new(fresh_db(), no_ramp_config(), cache2.clone())
+                .with_quote_client(parser_with_quote_url(&base2));
+            assert!(!mgr2.quote_confirms_profit(TOKEN, dec!(100)).await);
+        }
+
+        #[tokio::test]
+        async fn test_quote_confirms_profit_missing_sol_and_no_price() {
+            let base = spawn_quote_mock(Some(1_000_000_000)).await;
+            // No SOL price in the cache → suppressed.
+            let cache = cache_with_price(dec!(100));
+            let mgr = ProfitTargetManager::new(fresh_db(), no_ramp_config(), cache.clone())
+                .with_quote_client(parser_with_quote_url(&base));
+            assert!(!mgr.quote_confirms_profit(TOKEN, dec!(100)).await);
+
+            // SOL price present but ZERO → suppressed.
+            let cache2 = cache_with_price(dec!(100));
+            cache2.set_price(
+                "So11111111111111111111111111111111111111112",
+                Decimal::ZERO,
+                PriceSource::Jupiter,
+                Some(9),
+            );
+            let mgr2 = ProfitTargetManager::new(fresh_db(), no_ramp_config(), cache2.clone())
+                .with_quote_client(parser_with_quote_url(&base));
+            assert!(!mgr2.quote_confirms_profit(TOKEN, dec!(100)).await);
+
+            // No price entry for the token at all → suppressed.
+            let cache3 = Arc::new(PriceCache::new().unwrap());
+            cache3.set_price(
+                "So11111111111111111111111111111111111111112",
+                dec!(180),
+                PriceSource::Jupiter,
+                Some(9),
+            );
+            let mgr3 = ProfitTargetManager::new(fresh_db(), no_ramp_config(), cache3.clone())
+                .with_quote_client(parser_with_quote_url(&base));
+            assert!(!mgr3.quote_confirms_profit(TOKEN, dec!(100)).await);
+        }
+
+        #[tokio::test]
+        async fn test_effective_exit_params_with_profile_cache() {
+            let db = fresh_db();
+            let cache = cache_with_price(dec!(1));
+            let profile_cache = Arc::new(crate::engine::exit_profile::ExitProfileCache::new(
+                db.clone(),
+                no_ramp_config(),
+                crate::config::ExitProfileConfig::default(),
+            ));
+            let mgr = manager(db, cache.clone()).with_exit_profiles(Some(profile_cache));
+            // Empty profile cache → global-config fallback params.
+            let eff = mgr.effective_exit_params(WALLET, "SHIELD").await;
+            assert_eq!(
+                eff,
+                crate::engine::exit_profile::EffectiveExitParams::from_config(
+                    &mgr.config,
+                    "SHIELD"
+                )
+            );
+        }
+
+        #[tokio::test]
+        async fn test_quote_confirms_profit_no_route_and_missing_data() {
+            // No route (error body) → suppressed.
+            let base = spawn_quote_mock(None).await;
+            let db = fresh_db();
+            let cache = cache_with_price(dec!(100));
+            cache.set_price(
+                "So11111111111111111111111111111111111111112",
+                dec!(180),
+                PriceSource::Jupiter,
+                Some(9),
+            );
+            let mgr = ProfitTargetManager::new(db, no_ramp_config(), cache.clone())
+                .with_quote_client(parser_with_quote_url(&base));
+            assert!(!mgr.quote_confirms_profit(TOKEN, dec!(100)).await);
+
+            // Decimals unknown (price entry without decimals) → suppressed.
+            let cache2 = Arc::new(PriceCache::new().unwrap());
+            cache2.set_price(TOKEN, dec!(100), PriceSource::Jupiter, None);
+            let mgr2 = ProfitTargetManager::new(fresh_db(), no_ramp_config(), cache2.clone())
+                .with_quote_client(parser_with_quote_url(&base));
+            assert!(!mgr2.quote_confirms_profit(TOKEN, dec!(100)).await);
+
+            // Decimals too large for the probe amount (checked_pow overflow).
+            let cache3 = Arc::new(PriceCache::new().unwrap());
+            cache3.set_price(TOKEN, dec!(100), PriceSource::Jupiter, Some(255));
+            let mgr3 = ProfitTargetManager::new(fresh_db(), no_ramp_config(), cache3.clone())
+                .with_quote_client(parser_with_quote_url(&base));
+            assert!(!mgr3.quote_confirms_profit(TOKEN, dec!(100)).await);
+        }
+
+        #[tokio::test]
+        async fn test_tier_suppressed_when_quote_fails_breakeven() {
+            // Tier would fire at +30%, but the executable quote cannot clear
+            // cost breakeven → the tier hits are reverted and no action fires.
+            let base = spawn_quote_mock(Some(1_000_000_000)).await; // 1.0 SOL ≈ $1
+            let db = fresh_db();
+            let cfg = Arc::new(ProfitManagementConfig {
+                target_vol_scale_threshold: Decimal::ZERO,
+                targets: vec![dec!(10), dec!(20)],
+                tiered_exit_percent: dec!(50),
+                min_size_sol: dec!(0.05),
+                ..ProfitManagementConfig::default()
+            });
+            let cache = Arc::new(PriceCache::new().unwrap());
+            cache.set_price(TOKEN, dec!(1), PriceSource::Jupiter, Some(9));
+            cache.set_price(
+                "So11111111111111111111111111111111111111112",
+                dec!(1),
+                PriceSource::Jupiter,
+                Some(9),
+            );
+            let mgr = ProfitTargetManager::new(db, cfg, cache.clone())
+                .with_quote_client(parser_with_quote_url(&base));
+            mgr.register_position("sup-uuid", dec!(1), dec!(1), TOKEN, entry_time())
+                .await;
+            cache.set_price(TOKEN, dec!(1.30), PriceSource::Jupiter, Some(9));
+            let action = mgr.check_targets("sup-uuid", WALLET, TOKEN, "SHIELD").await;
+            assert!(
+                matches!(action, ProfitTargetAction::None),
+                "tier suppressed on breakeven failure"
+            );
+            // The tier hits were reverted → state persists the revert.
+            let state = mgr.active_targets.read().await;
+            assert!(state.get("sup-uuid").unwrap().targets_hit.is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_momentum_exit_takes_priority() {
+            let db = fresh_db();
+            let cache = cache_with_price(dec!(1));
+            let momentum = Arc::new(crate::engine::momentum_exit::MomentumExit::new(
+                db.clone(),
+                cache.clone(),
+                0,
+            ));
+            let mgr = ProfitTargetManager::with_momentum_exit(
+                db.clone(),
+                no_ramp_config(),
+                cache.clone(),
+                momentum,
+            );
+            mgr.register_position("mom2", dec!(1), dec!(1), TOKEN, entry_time())
+                .await;
+            // A -10% drop triggers the momentum exit (5% base threshold, no
+            // wick protection).
+            cache.set_price(TOKEN, dec!(0.90), PriceSource::Jupiter, Some(9));
+            let action = mgr.check_targets("mom2", WALLET, TOKEN, "SHIELD").await;
+            assert!(matches!(action, ProfitTargetAction::FullExit));
+        }
+
+        #[tokio::test]
+        async fn test_regime_multiplier_scales_targets() {
+            let db = fresh_db();
+            let cache = cache_with_price(dec!(1));
+            let regime = Arc::new(crate::engine::market_regime::MarketRegimeDetector::new(
+                cache.clone(),
+            ));
+            let mgr = ProfitTargetManager::with_market_regime(
+                db.clone(),
+                no_ramp_config(),
+                cache.clone(),
+                regime,
+            );
+            mgr.register_position("reg-uuid", dec!(1), dec!(1), TOKEN, entry_time())
+                .await;
+            cache.set_price(TOKEN, dec!(1.05), PriceSource::Jupiter, Some(9));
+            let action = mgr.check_targets("reg-uuid", WALLET, TOKEN, "SHIELD").await;
+            assert!(matches!(action, ProfitTargetAction::None));
+        }
+
+        #[tokio::test]
+        async fn test_zero_entry_price_no_false_tier() {
+            let db = fresh_db();
+            let cache = cache_with_price(dec!(1));
+            let mgr = manager(db, cache.clone());
+            mgr.register_position("zero-uuid", dec!(0), dec!(1), TOKEN, entry_time())
+                .await;
+            let action = mgr
+                .check_targets("zero-uuid", WALLET, TOKEN, "SHIELD")
+                .await;
+            assert!(matches!(action, ProfitTargetAction::None));
+        }
+
+        #[tokio::test]
+        async fn test_high_volatility_widens_trailing() {
+            let db = fresh_db();
+            let cfg = Arc::new(ProfitManagementConfig {
+                target_vol_scale_threshold: Decimal::ZERO,
+                targets: vec![],
+                trailing_stop_activation: dec!(5),
+                trailing_stop_distance: dec!(10),
+                ..ProfitManagementConfig::default()
+            });
+            let cache = Arc::new(PriceCache::new().unwrap());
+            // Wild swings → volatility well above 50 → 1.5x trailing distance.
+            cache.set_price(TOKEN, dec!(1), PriceSource::Jupiter, Some(9));
+            cache.set_price(TOKEN, dec!(3), PriceSource::Jupiter, Some(9));
+            cache.set_price(TOKEN, dec!(1), PriceSource::Jupiter, Some(9));
+            cache.set_price(TOKEN, dec!(4), PriceSource::Jupiter, Some(9));
+            cache.set_price(TOKEN, dec!(1.2), PriceSource::Jupiter, Some(9));
+            let mgr = ProfitTargetManager::new(db, cfg, cache.clone());
+            mgr.register_position("hv-uuid", dec!(1), dec!(1), TOKEN, entry_time())
+                .await;
+            let action = mgr.check_targets("hv-uuid", WALLET, TOKEN, "SHIELD").await;
+            assert!(matches!(action, ProfitTargetAction::None));
+            let state = mgr.active_targets.read().await;
+            let s = state.get("hv-uuid").unwrap();
+            assert!(s.trailing_stop_active);
+        }
+
+        #[tokio::test]
+        async fn test_remove_position_delete_error_logged() {
+            let db = fresh_db();
+            db.exit_target_delete_error.store(true, Ordering::Relaxed);
+            let mgr = manager(db.clone(), cache_with_price(dec!(1)));
+            mgr.register_position("rm-err", dec!(1), dec!(1), TOKEN, entry_time())
+                .await;
+            // Delete fails → logged; in-memory state still removed.
+            mgr.remove_position("rm-err").await;
+            assert!(!mgr.active_targets.read().await.contains_key("rm-err"));
+        }
+
+        #[tokio::test]
+        async fn test_remove_position_deletes_state() {
+            let db = fresh_db();
+            let mgr = manager(db.clone(), cache_with_price(dec!(1)));
+            mgr.register_position("rm", dec!(1), dec!(1), TOKEN, entry_time())
+                .await;
+            mgr.remove_position("rm").await;
+            assert!(!mgr.active_targets.read().await.contains_key("rm"));
+            assert_eq!(
+                *db.exit_target_deletes.lock().unwrap(),
+                vec!["rm".to_string()]
+            );
+
+            // Removing a missing uuid still deletes via DB (no panic).
+            mgr.remove_position("missing").await;
+        }
     }
 }

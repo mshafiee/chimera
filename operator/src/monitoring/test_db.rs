@@ -27,6 +27,31 @@ pub struct MockDb {
     pub signature_error: Arc<AtomicBool>,
     pub speculative_error: Arc<AtomicBool>,
     pub uuid_error: Arc<AtomicBool>,
+    pub circuit_breaker_state: Arc<Mutex<Option<CircuitBreakerState>>>,
+    pub evaluation_data: Arc<
+        Mutex<
+            Option<(
+                rust_decimal::Decimal,
+                rust_decimal::Decimal,
+                rust_decimal::Decimal,
+                rust_decimal::Decimal,
+            )>,
+        >,
+    >,
+    pub consecutive_losses: Arc<Mutex<Option<u32>>>,
+    pub drawdown: Arc<Mutex<Option<(rust_decimal::Decimal, rust_decimal::Decimal)>>>,
+    pub evaluation_error: Arc<AtomicBool>,
+    pub consecutive_error: Arc<AtomicBool>,
+    pub drawdown_error: Arc<AtomicBool>,
+    pub cb_state_error: Arc<AtomicBool>,
+    pub cb_update_error: Arc<AtomicBool>,
+    pub exit_targets: Arc<Mutex<HashMap<String, ExitTargetData>>>,
+    pub exit_target_upserts: Arc<Mutex<Vec<String>>>,
+    pub exit_target_deletes: Arc<Mutex<Vec<String>>>,
+    pub active_positions: Arc<Mutex<Vec<Position>>>,
+    pub exit_target_error: Arc<AtomicBool>,
+    pub exit_target_delete_error: Arc<AtomicBool>,
+    pub active_positions_error: Arc<AtomicBool>,
 }
 
 impl MockDb {
@@ -35,11 +60,17 @@ impl MockDb {
     }
 
     pub fn add_wallet(&self, wallet: Wallet) {
-        self.wallets.lock().unwrap().insert(wallet.address.clone(), wallet);
+        self.wallets
+            .lock()
+            .unwrap()
+            .insert(wallet.address.clone(), wallet);
     }
 
     pub fn add_wallet_monitoring(&self, wm: WalletMonitoring) {
-        self.wallet_monitoring.lock().unwrap().insert(wm.wallet_address.clone(), wm);
+        self.wallet_monitoring
+            .lock()
+            .unwrap()
+            .insert(wm.wallet_address.clone(), wm);
     }
 
     pub fn add_trade_uuid(&self, uuid: &str) {
@@ -49,7 +80,6 @@ impl MockDb {
 
 #[async_trait::async_trait]
 impl Database for MockDb {
-
     fn pool(&self) -> DbPool {
         unimplemented!("MockDb::pool not implemented")
     }
@@ -72,9 +102,15 @@ impl Database for MockDb {
 
     async fn trade_uuid_exists(&self, trade_uuid: &str) -> AppResult<bool> {
         if self.uuid_error.load(Ordering::Relaxed) {
-            return Err(AppError::Internal("injected trade_uuid_exists error".to_string()));
+            return Err(AppError::Internal(
+                "injected trade_uuid_exists error".to_string(),
+            ));
         }
-        Ok(self.trade_uuids.lock().unwrap().contains(&trade_uuid.to_string()))
+        Ok(self
+            .trade_uuids
+            .lock()
+            .unwrap()
+            .contains(&trade_uuid.to_string()))
     }
 
     async fn insert_trade(&self, trade: &InsertTrade) -> AppResult<i64> {
@@ -106,7 +142,12 @@ impl Database for MockDb {
     }
 
     async fn get_active_positions(&self) -> AppResult<Vec<Position>> {
-        unimplemented!("MockDb::get_active_positions not implemented")
+        if self.active_positions_error.load(Ordering::Relaxed) {
+            return Err(AppError::Internal(
+                "injected active positions error".to_string(),
+            ));
+        }
+        Ok(self.active_positions.lock().unwrap().clone())
     }
 
     async fn get_position_by_trade_uuid(&self, trade_uuid: &str) -> AppResult<Option<Position>> {
@@ -165,9 +206,18 @@ impl Database for MockDb {
 
     async fn get_wallets_by_status(&self, status: &str) -> AppResult<Vec<Wallet>> {
         if self.wallets_by_status_error.load(Ordering::Relaxed) {
-            return Err(AppError::Internal("injected get_wallets_by_status error".to_string()));
+            return Err(AppError::Internal(
+                "injected get_wallets_by_status error".to_string(),
+            ));
         }
-        Ok(self.wallets.lock().unwrap().values().filter(|w| w.status == status).cloned().collect())
+        Ok(self
+            .wallets
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|w| w.status == status)
+            .cloned()
+            .collect())
     }
 
     async fn get_wallets_by_conviction_tier(
@@ -219,7 +269,21 @@ impl Database for MockDb {
     }
 
     async fn get_circuit_breaker_state(&self) -> AppResult<CircuitBreakerState> {
-        unimplemented!("MockDb::get_circuit_breaker_state not implemented")
+        if self.cb_state_error.load(Ordering::Relaxed) {
+            return Err(AppError::Internal("injected cb state error".to_string()));
+        }
+        let state = self
+            .circuit_breaker_state
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(CircuitBreakerState {
+                state: "Active".to_string(),
+                tripped_at: None,
+                trip_reason: None,
+                updated_at: String::new(),
+            });
+        Ok(state)
     }
 
     async fn update_circuit_breaker_state(
@@ -228,7 +292,19 @@ impl Database for MockDb {
         tripped_at: Option<chrono::DateTime<chrono::Utc>>,
         trip_reason: Option<&str>,
     ) -> AppResult<()> {
-        unimplemented!("MockDb::update_circuit_breaker_state not implemented")
+        if self.cb_update_error.load(Ordering::Relaxed) {
+            return Err(AppError::Internal("injected cb update error".to_string()));
+        }
+        self.circuit_breaker_state
+            .lock()
+            .unwrap()
+            .replace(CircuitBreakerState {
+                state: state.to_string(),
+                tripped_at: tripped_at.map(|t| t.to_rfc3339()),
+                trip_reason: trip_reason.map(|r| r.to_string()),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+            });
+        Ok(())
     }
 
     async fn get_kill_switch_state(&self) -> AppResult<KillSwitchState> {
@@ -361,20 +437,6 @@ impl Database for MockDb {
 
     async fn get_consecutive_losses(&self) -> AppResult<u32> {
         unimplemented!("MockDb::get_consecutive_losses not implemented")
-    }
-
-    async fn get_consecutive_losses_since(
-        &self,
-        since: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> AppResult<u32> {
-        unimplemented!("MockDb::get_consecutive_losses_since not implemented")
-    }
-
-    async fn get_max_drawdown_percent(
-        &self,
-        total_capital_sol: rust_decimal::Decimal,
-    ) -> AppResult<(rust_decimal::Decimal, rust_decimal::Decimal)> {
-        unimplemented!("MockDb::get_max_drawdown_percent not implemented")
     }
 
     async fn activate_trade_and_open_position(
@@ -511,9 +573,16 @@ impl Database for MockDb {
         wallet_address: &str,
     ) -> AppResult<Option<WalletMonitoring>> {
         if self.monitoring_error.load(Ordering::Relaxed) {
-            return Err(AppError::Internal("injected get_wallet_monitoring error".to_string()));
+            return Err(AppError::Internal(
+                "injected get_wallet_monitoring error".to_string(),
+            ));
         }
-        Ok(self.wallet_monitoring.lock().unwrap().get(wallet_address).cloned())
+        Ok(self
+            .wallet_monitoring
+            .lock()
+            .unwrap()
+            .get(wallet_address)
+            .cloned())
     }
 
     async fn find_webhook_with_capacity(&self, max_wallets: i64) -> AppResult<Option<String>> {
@@ -539,9 +608,16 @@ impl Database for MockDb {
         signature: &str,
     ) -> AppResult<()> {
         if self.signature_error.load(Ordering::Relaxed) {
-            return Err(AppError::Internal("injected signature update error".to_string()));
+            return Err(AppError::Internal(
+                "injected signature update error".to_string(),
+            ));
         }
-        if let Some(wm) = self.wallet_monitoring.lock().unwrap().get_mut(wallet_address) {
+        if let Some(wm) = self
+            .wallet_monitoring
+            .lock()
+            .unwrap()
+            .get_mut(wallet_address)
+        {
             wm.last_transaction_signature = Some(signature.to_string());
         }
         Ok(())
@@ -565,9 +641,17 @@ impl Database for MockDb {
 
     async fn get_all_wallet_monitoring(&self) -> AppResult<Vec<WalletMonitoring>> {
         if self.monitoring_all_error.load(Ordering::Relaxed) {
-            return Err(AppError::Internal("injected monitoring query error".to_string()));
+            return Err(AppError::Internal(
+                "injected monitoring query error".to_string(),
+            ));
         }
-        Ok(self.wallet_monitoring.lock().unwrap().values().cloned().collect())
+        Ok(self
+            .wallet_monitoring
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect())
     }
 
     async fn update_webhook_health_status(
@@ -593,9 +677,14 @@ impl Database for MockDb {
         timestamp: chrono::DateTime<chrono::Utc>,
     ) -> AppResult<()> {
         if self.speculative_error.load(Ordering::Relaxed) {
-            return Err(AppError::Internal("injected speculative update error".to_string()));
+            return Err(AppError::Internal(
+                "injected speculative update error".to_string(),
+            ));
         }
-        self.last_speculative_timestamps.lock().unwrap().insert(wallet_address.to_string(), timestamp);
+        self.last_speculative_timestamps
+            .lock()
+            .unwrap()
+            .insert(wallet_address.to_string(), timestamp);
         Ok(())
     }
 
@@ -661,15 +750,45 @@ impl Database for MockDb {
         trailing_stop_price: rust_decimal::Decimal,
         remaining_fraction: rust_decimal::Decimal,
     ) -> AppResult<()> {
-        unimplemented!("MockDb::upsert_exit_target not implemented")
+        self.exit_target_upserts
+            .lock()
+            .unwrap()
+            .push(trade_uuid.to_string());
+        self.exit_targets.lock().unwrap().insert(
+            trade_uuid.to_string(),
+            ExitTargetData {
+                entry_price,
+                entry_amount_sol,
+                peak_price,
+                peak_profit_percent,
+                targets_hit: targets_hit_json.to_string(),
+                trailing_stop_active,
+                trailing_stop_price,
+                remaining_fraction,
+            },
+        );
+        Ok(())
     }
 
     async fn load_exit_target(&self, trade_uuid: &str) -> AppResult<Option<ExitTargetData>> {
-        unimplemented!("MockDb::load_exit_target not implemented")
+        if self.exit_target_error.load(Ordering::Relaxed) {
+            return Err(AppError::Internal("injected exit target error".to_string()));
+        }
+        Ok(self.exit_targets.lock().unwrap().get(trade_uuid).cloned())
     }
 
     async fn delete_exit_target(&self, trade_uuid: &str) -> AppResult<()> {
-        unimplemented!("MockDb::delete_exit_target not implemented")
+        if self.exit_target_delete_error.load(Ordering::Relaxed) {
+            return Err(AppError::Internal(
+                "injected exit target delete error".to_string(),
+            ));
+        }
+        self.exit_target_deletes
+            .lock()
+            .unwrap()
+            .push(trade_uuid.to_string());
+        self.exit_targets.lock().unwrap().remove(trade_uuid);
+        Ok(())
     }
 
     async fn insert_reconciliation_log(
@@ -757,13 +876,13 @@ impl Database for MockDb {
 
     async fn log_config_change(
         &self,
-        key: &str,
-        old_value: Option<&str>,
-        new_value: &str,
-        changed_by: &str,
-        reason: Option<&str>,
+        _key: &str,
+        _old_value: Option<&str>,
+        _new_value: &str,
+        _changed_by: &str,
+        _reason: Option<&str>,
     ) -> AppResult<()> {
-        unimplemented!("MockDb::log_config_change not implemented")
+        Ok(())
     }
 
     async fn get_dead_letter_entries(
@@ -932,7 +1051,38 @@ impl Database for MockDb {
         rust_decimal::Decimal,
         rust_decimal::Decimal,
     )> {
-        unimplemented!("MockDb::get_evaluation_data not implemented")
+        if self.evaluation_error.load(Ordering::Relaxed) {
+            return Err(AppError::Internal("injected evaluation error".to_string()));
+        }
+        Ok(self.evaluation_data.lock().unwrap().unwrap_or((
+            rust_decimal::Decimal::ZERO,
+            rust_decimal::Decimal::ZERO,
+            rust_decimal::Decimal::ZERO,
+            rust_decimal::Decimal::ZERO,
+        )))
     }
 
+    async fn get_consecutive_losses_since(
+        &self,
+        _since: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> AppResult<u32> {
+        if self.consecutive_error.load(Ordering::Relaxed) {
+            return Err(AppError::Internal("injected consecutive error".to_string()));
+        }
+        Ok(self.consecutive_losses.lock().unwrap().unwrap_or(0))
+    }
+
+    async fn get_max_drawdown_percent(
+        &self,
+        _total_capital_sol: rust_decimal::Decimal,
+    ) -> AppResult<(rust_decimal::Decimal, rust_decimal::Decimal)> {
+        if self.drawdown_error.load(Ordering::Relaxed) {
+            return Err(AppError::Internal("injected drawdown error".to_string()));
+        }
+        Ok(self
+            .drawdown
+            .lock()
+            .unwrap()
+            .unwrap_or((rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)))
+    }
 }

@@ -190,7 +190,12 @@ pub async fn ws_handler(
             if state.allow_anonymous_readonly {
                 tracing::info!("WebSocket connection allowed (anonymous readonly)");
                 let response = ws.on_upgrade(move |socket| {
-                    handle_socket(socket, state, Some("anonymous".to_string()), crate::middleware::Role::Readonly)
+                    handle_socket(
+                        socket,
+                        state,
+                        Some("anonymous".to_string()),
+                        crate::middleware::Role::Readonly,
+                    )
                 });
                 tracing::info!("WebSocket upgrade successful (anonymous)");
                 return response;
@@ -400,5 +405,351 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("alert"));
         assert!(json.contains("critical"));
+    }
+
+    // ==========================================================================
+    // ADDITIONAL COVERAGE
+    // ==========================================================================
+
+    fn test_state(anonymous: bool) -> Arc<WsState> {
+        Arc::new(WsState::new(
+            HashMap::from([
+                ("api-key-1".to_string(), crate::middleware::Role::Operator),
+                ("api-key-ro".to_string(), crate::middleware::Role::Readonly),
+            ]),
+            "jwt-secret".to_string(),
+            anonymous,
+        ))
+    }
+
+    #[test]
+    fn test_ws_state_broadcast() {
+        let state = test_state(false);
+        // No receivers: send must not panic or error.
+        state.broadcast(WsEvent::Alert(AlertData {
+            severity: "info".to_string(),
+            component: "test".to_string(),
+            message: "hello".to_string(),
+        }));
+
+        let mut rx = state.tx.subscribe();
+        state.broadcast(WsEvent::Alert(AlertData {
+            severity: "info".to_string(),
+            component: "test".to_string(),
+            message: "hello".to_string(),
+        }));
+        let received = rx.try_recv().expect("event delivered");
+        assert!(matches!(received, WsEvent::Alert(_)));
+    }
+
+    #[test]
+    fn test_authenticate_api_key() {
+        use futures_util::FutureExt;
+        let state = test_state(false);
+        let user = state
+            .authenticate("api-key-1")
+            .now_or_never()
+            .expect("sync path resolves");
+        let user = user.expect("api key authenticates");
+        assert_eq!(user.role, crate::middleware::Role::Operator);
+        // The identifier must be a hash, never the raw key.
+        assert!(user.identifier.starts_with("api_key:"));
+        assert!(!user.identifier.contains("api-key-1"));
+
+        let ro = state
+            .authenticate("api-key-ro")
+            .now_or_never()
+            .unwrap()
+            .unwrap();
+        assert_eq!(ro.role, crate::middleware::Role::Readonly);
+    }
+
+    #[test]
+    fn test_authenticate_jwt() {
+        use futures_util::FutureExt;
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+        let state = test_state(false);
+
+        // Valid JWT with an operator role claim.
+        let exp = chrono::Utc::now().timestamp() + 3600;
+        let claims = serde_json::json!({ "sub": "user-42", "role": "Operator", "exp": exp });
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(b"jwt-secret"),
+        )
+        .expect("encode");
+        let user = state
+            .authenticate(&token)
+            .now_or_never()
+            .unwrap()
+            .expect("jwt authenticates");
+        assert_eq!(user.identifier, "user-42");
+        assert_eq!(user.role, crate::middleware::Role::Operator);
+
+        // Valid JWT whose role claim does not parse → rejected.
+        let bad_role = serde_json::json!({ "sub": "u", "role": "NotARole", "exp": exp });
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &bad_role,
+            &EncodingKey::from_secret(b"jwt-secret"),
+        )
+        .unwrap();
+        assert!(
+            state.authenticate(&token).now_or_never().unwrap().is_none(),
+            "unparseable role must reject"
+        );
+
+        // Wrong secret / garbage → rejected.
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(b"wrong-secret"),
+        )
+        .unwrap();
+        assert!(state.authenticate(&token).now_or_never().unwrap().is_none());
+
+        assert!(state
+            .authenticate("garbage")
+            .now_or_never()
+            .unwrap()
+            .is_none());
+        assert!(state.authenticate("").now_or_never().unwrap().is_none());
+    }
+
+    // ----------------------------------------------------------------------
+    // End-to-end WebSocket tests: real axum server + tokio-tungstenite client.
+    // ----------------------------------------------------------------------
+
+    /// Spawn the ws router on a random port and return its base URL.
+    fn spawn_ws_server(state: Arc<WsState>) -> String {
+        use axum::routing::get;
+        use axum::Router;
+        use tokio::net::TcpListener;
+        let app = Router::new()
+            .route("/ws", get(ws_handler))
+            .with_state(state);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("rt");
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let handle = rt.spawn(async move {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let _ = tx.send(format!("ws://{addr}"));
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let url = rx.recv().expect("url");
+        std::mem::forget(rt);
+        std::mem::forget(handle);
+        url
+    }
+
+    async fn ws_connect(
+        url: &str,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        use futures_util::StreamExt;
+        let (ws, _resp) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("websocket handshake");
+        ws
+    }
+
+    async fn read_text_with_timeout(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> String {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+        tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+            .await
+            .expect("message within timeout")
+            .expect("stream alive")
+            .expect("no error")
+            .into_text()
+            .expect("text message")
+    }
+
+    #[tokio::test]
+    async fn test_ws_end_to_end_operator_receives_all_events() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let state = test_state(false);
+        let url = spawn_ws_server(state.clone());
+        let mut ws = ws_connect(&format!("{url}/ws?token=api-key-1")).await;
+        // Let the handler task subscribe to the broadcast channel.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        state.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
+            trade_uuid: "t-1".to_string(),
+            status: "OPEN".to_string(),
+            token_symbol: Some("SOL".to_string()),
+            strategy: "SHIELD".to_string(),
+        }));
+        let msg = read_text_with_timeout(&mut ws).await;
+        assert!(msg.contains("trade_update"), "msg: {msg}");
+
+        state.broadcast(WsEvent::Alert(AlertData {
+            severity: "warning".to_string(),
+            component: "x".to_string(),
+            message: "boom".to_string(),
+        }));
+        let msg = read_text_with_timeout(&mut ws).await;
+        assert!(msg.contains("alert"), "msg: {msg}");
+
+        // Client → server messages hit the receive task.
+        ws.send(Message::Text("hello server".into())).await.unwrap();
+        ws.send(Message::Ping(vec![5, 6].into())).await.unwrap();
+        ws.send(Message::Pong(vec![1, 2, 3].into())).await.unwrap();
+        ws.send(Message::Binary(vec![9, 9].into())).await.unwrap();
+
+        // Close: recv task ends, send task aborts, handler completes.
+        ws.send(Message::Close(None)).await.unwrap();
+        // Give the handler a moment to finish cleanup.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ws_readonly_receives_only_operational_events() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let state = test_state(false);
+        let url = spawn_ws_server(state.clone());
+        let mut ws = ws_connect(&format!("{url}/ws?token=api-key-ro")).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // A position update must be filtered out for readonly clients.
+        state.broadcast(WsEvent::PositionUpdate(PositionUpdateData {
+            trade_uuid: "secret".to_string(),
+            state: "OPEN".to_string(),
+            unrealized_pnl_percent: Some(Decimal::from_str("99").unwrap()),
+        }));
+        // Health updates are allowed for readonly clients.
+        state.broadcast(WsEvent::HealthUpdate(HealthUpdateData {
+            status: "ok".to_string(),
+            queue_depth: 3,
+            trading_allowed: true,
+        }));
+        let msg = read_text_with_timeout(&mut ws).await;
+        assert!(
+            msg.contains("health_update"),
+            "first received must be health: {msg}"
+        );
+
+        // No further message may arrive (the position update was filtered).
+        let extra = tokio::time::timeout(std::time::Duration::from_millis(400), ws.next()).await;
+        assert!(
+            extra.is_err(),
+            "readonly client must not receive position data"
+        );
+
+        ws.send(Message::Close(None)).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ws_anonymous_allowed() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let state = test_state(true); // anonymous readonly allowed
+        let url = spawn_ws_server(state.clone());
+        let mut ws = ws_connect(&format!("{url}/ws")).await; // no token
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        state.broadcast(WsEvent::Alert(AlertData {
+            severity: "info".to_string(),
+            component: "anon".to_string(),
+            message: "hi".to_string(),
+        }));
+        let msg = read_text_with_timeout(&mut ws).await;
+        assert!(msg.contains("alert"), "msg: {msg}");
+
+        ws.send(Message::Close(None)).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ws_rejects_missing_and_invalid_tokens() {
+        // Anonymous access not allowed → no-token handshake must fail.
+        let state = test_state(false);
+        let url = spawn_ws_server(state.clone());
+        let result = tokio_tungstenite::connect_async(&url).await;
+        assert!(result.is_err(), "no-token connection must be rejected");
+
+        // Invalid token → 401.
+        let result = tokio_tungstenite::connect_async(format!("{url}/ws?token=bogus")).await;
+        assert!(result.is_err(), "bogus token connection must be rejected");
+
+        // Empty token parameter is treated as missing.
+        let result = tokio_tungstenite::connect_async(format!("{url}/ws?token=")).await;
+        assert!(result.is_err(), "empty token connection must be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_ws_send_failure_ends_send_task() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let state = test_state(false);
+        let url = spawn_ws_server(state.clone());
+        let ws = ws_connect(&format!("{url}/ws?token=api-key-1")).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Abruptly drop the socket WITHOUT a Close frame: the server's recv
+        // task hits a connection error while the send task fails on the next
+        // broadcast → whichever task ends first aborts the other.
+        drop(ws);
+
+        state.broadcast(WsEvent::HealthUpdate(HealthUpdateData {
+            status: "ok".to_string(),
+            queue_depth: 1,
+            trading_allowed: true,
+        }));
+        state.broadcast(WsEvent::HealthUpdate(HealthUpdateData {
+            status: "ok".to_string(),
+            queue_depth: 2,
+            trading_allowed: true,
+        }));
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ws_jwt_authentication() {
+        use futures_util::SinkExt;
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let exp = chrono::Utc::now().timestamp() + 3600;
+        let claims = serde_json::json!({ "sub": "jwt-user", "role": "Operator", "exp": exp });
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(b"jwt-secret"),
+        )
+        .unwrap();
+
+        let state = test_state(false);
+        let url = spawn_ws_server(state.clone());
+        let mut ws = ws_connect(&format!("{url}/ws?token={token}")).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        state.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
+            trade_uuid: "jwt-trade".to_string(),
+            status: "OPEN".to_string(),
+            token_symbol: None,
+            strategy: "SPEAR".to_string(),
+        }));
+        let msg = read_text_with_timeout(&mut ws).await;
+        assert!(msg.contains("jwt-trade"), "msg: {msg}");
+
+        ws.send(Message::Close(None)).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
 }

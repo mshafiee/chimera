@@ -41,17 +41,26 @@ async fn persist_cb_state(
 /// treated as "no persisted state".
 async fn load_cb_state(
     db: &dyn Database,
-) -> AppResult<Option<(String, Option<String>, Option<String>, Option<DateTime<Utc>>)>> {
+) -> AppResult<
+    Option<(
+        String,
+        Option<String>,
+        Option<String>,
+        Option<DateTime<Utc>>,
+    )>,
+> {
     let state = db.get_circuit_breaker_state().await?;
     let updated_at = state
         .updated_at
         .parse::<DateTime<Utc>>()
-        .or_else(|_| {
-            DateTime::parse_from_rfc3339(&state.updated_at)
-                .map(|d| d.with_timezone(&Utc))
-        })
+        .or_else(|_| DateTime::parse_from_rfc3339(&state.updated_at).map(|d| d.with_timezone(&Utc)))
         .ok();
-    Ok(Some((state.state, state.tripped_at, state.trip_reason, updated_at)))
+    Ok(Some((
+        state.state,
+        state.tripped_at,
+        state.trip_reason,
+        updated_at,
+    )))
 }
 
 /// RAII guard that clears the `evaluation_in_progress` flag on drop.
@@ -71,7 +80,10 @@ impl<'a> EvaluationGuard<'a> {
         {
             let mut s = state.write();
             if s.evaluation_in_progress {
-                return Self { state, armed: false };
+                return Self {
+                    state,
+                    armed: false,
+                };
             }
             s.evaluation_in_progress = true;
         }
@@ -699,7 +711,10 @@ impl CircuitBreaker {
                     "Circuit breaker: trading halted (is_trading_allowed=false)"
                 );
             }
-            Some(TripReason::MaxDrawdown { drawdown, threshold }) => {
+            Some(TripReason::MaxDrawdown {
+                drawdown,
+                threshold,
+            }) => {
                 tracing::error!(
                     drawdown_percent = %drawdown,
                     drawdown_threshold_percent = %threshold,
@@ -714,7 +729,10 @@ impl CircuitBreaker {
                     "Circuit breaker: trading halted (is_trading_allowed=false)"
                 );
             }
-            Some(TripReason::PortfolioStop24h { loss_pct, threshold }) => {
+            Some(TripReason::PortfolioStop24h {
+                loss_pct,
+                threshold,
+            }) => {
                 tracing::error!(
                     loss_percent = %loss_pct,
                     loss_threshold_percent = %threshold,
@@ -869,7 +887,12 @@ impl CircuitBreaker {
             return Ok(());
         }
 
-        let cleared_trip_reason = self.state.read().trip_reason.as_ref().map(ToString::to_string);
+        let cleared_trip_reason = self
+            .state
+            .read()
+            .trip_reason
+            .as_ref()
+            .map(ToString::to_string);
         {
             let mut state = self.state.write();
             state.state = CircuitBreakerState::Active;
@@ -1306,4 +1329,699 @@ mod tests {
         let copied = state;
         assert_eq!(state, copied, "CircuitBreakerState should be Copy");
     }
+
+    // ==========================================================================
+    // ADDITIONAL COVERAGE: full state machine against the in-memory MockDb
+    // ==========================================================================
+
+    use crate::monitoring::test_db::MockDb;
+    use rust_decimal::Decimal;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    fn cfg() -> CircuitBreakerConfig {
+        CircuitBreakerConfig {
+            max_loss_24h_usd: Decimal::from(500),
+            max_consecutive_losses: 3,
+            max_drawdown_percent: Decimal::from(15),
+            portfolio_stop_loss_percent: Decimal::from(-5),
+            cooldown_minutes: 30,
+            max_jupiter_failures: 3,
+        }
+    }
+
+    fn make_cb(db: Arc<MockDb>) -> CircuitBreaker {
+        CircuitBreaker::new(cfg(), db.clone(), Decimal::from(1000))
+    }
+
+    /// Force-evaluate without the 5s check-interval gate.
+    async fn evaluate_now(cb: &CircuitBreaker) {
+        cb.state.write().last_check = Some(Utc::now() - Duration::seconds(60));
+        cb.evaluate().await.unwrap();
+    }
+
+    // ── basic accessors ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_accessors_and_capital() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db);
+        assert!(cb.is_trading_allowed());
+        assert_eq!(cb.current_state(), CircuitBreakerState::Active);
+        assert!(cb.trip_reason().is_none());
+
+        cb.update_capital(Decimal::from(2000));
+        assert_eq!(*cb.total_capital_sol.read(), Decimal::from(2000));
+
+        let status = cb.status();
+        assert_eq!(status.state, CircuitBreakerState::Active);
+        assert!(status.cooldown_remaining_secs.is_none());
+    }
+
+    #[test]
+    fn test_set_metrics_and_notifier() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db);
+        let gauge = prometheus::IntGauge::new("cb_test_gauge", "h").unwrap();
+        let counter = prometheus::IntCounter::new("cb_test_counter", "h").unwrap();
+        cb.set_metrics(gauge, counter);
+        cb.circuit_breaker_state.get().unwrap().set(9);
+        assert_eq!(cb.circuit_breaker_state.get().unwrap().get(), 9);
+        let _ = cb.trips_total.get().unwrap().get();
+
+        let notifier = Arc::new(crate::notifications::CompositeNotifier::new());
+        cb.set_notifier(notifier);
+        assert!(cb.notifier.get().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_with_price_cache_builder() {
+        let db = Arc::new(MockDb::new());
+        let cache = Arc::new(crate::price_cache::PriceCache::new().unwrap());
+        let cb = make_cb(db).with_price_cache(cache.clone());
+        assert!(cb.price_cache.is_some());
+    }
+
+    #[test]
+    fn test_new_with_ws_sets_ws_state() {
+        let db = Arc::new(MockDb::new());
+        let ws = Arc::new(crate::handlers::WsState::new(
+            std::collections::HashMap::new(),
+            "secret".to_string(),
+            false,
+        ));
+        let cb = CircuitBreaker::new_with_ws(cfg(), db.clone(), Some(ws), Decimal::from(100));
+        assert!(cb.ws_state.is_some());
+    }
+
+    // ── evaluation guard ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_evaluation_guard_prevents_concurrent() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db);
+        let guard1 = EvaluationGuard::new(&cb.state);
+        assert!(guard1.armed());
+        let guard2 = EvaluationGuard::new(&cb.state);
+        assert!(!guard2.armed(), "second guard must not arm");
+        drop(guard1);
+        let guard3 = EvaluationGuard::new(&cb.state);
+        assert!(guard3.armed(), "flag cleared on drop");
+    }
+
+    // ── evaluate() state machine ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_evaluate_skips_when_in_progress() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db);
+        cb.state.write().evaluation_in_progress = true;
+        cb.evaluate().await.unwrap();
+        // still active, nothing ran
+        assert_eq!(cb.current_state(), CircuitBreakerState::Active);
+        cb.state.write().evaluation_in_progress = false;
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_rate_limited_within_interval() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db.clone());
+        cb.state.write().last_check = Some(Utc::now());
+        // Evaluation data would trip, but the interval gate skips it.
+        db.evaluation_data.lock().unwrap().replace((
+            Decimal::ZERO,
+            Decimal::from(-1000),
+            Decimal::from(-1000),
+            Decimal::ZERO,
+        ));
+        cb.evaluate().await.unwrap();
+        assert_eq!(cb.current_state(), CircuitBreakerState::Active);
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_trips_on_each_condition() {
+        // Portfolio stop (needs total_capital > 1 and daily loss below -5%).
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db.clone());
+        db.evaluation_data.lock().unwrap().replace((
+            Decimal::from(-10),  // unrealized
+            Decimal::from(-100), // realized
+            Decimal::ZERO,
+            Decimal::ZERO,
+        ));
+        evaluate_now(&cb).await;
+        assert_eq!(cb.current_state(), CircuitBreakerState::Tripped);
+        assert!(matches!(
+            cb.trip_reason(),
+            Some(TripReason::PortfolioStop24h { .. })
+        ));
+
+        // Reset and trip on max loss (USD) — requires a SOL price.
+        cb.reset("t").await.unwrap();
+        let cache = Arc::new(crate::price_cache::PriceCache::new().unwrap());
+        cache.set_price(
+            crate::constants::mints::SOL,
+            Decimal::ONE,
+            crate::price_cache::PriceSource::Jupiter,
+            Some(9),
+        );
+        let cb2 = make_cb(db.clone()).with_price_cache(cache.clone());
+        cb2.update_capital(Decimal::from(100000));
+        db.evaluation_data.lock().unwrap().replace((
+            Decimal::from(-600),
+            Decimal::ZERO,
+            Decimal::ZERO,
+            Decimal::ZERO,
+        ));
+        evaluate_now(&cb2).await;
+        assert!(matches!(
+            cb2.trip_reason(),
+            Some(TripReason::MaxLoss24h { .. })
+        ));
+        cb2.reset("t").await.unwrap();
+
+        // Consecutive losses (clear the prior evaluation data first so the
+        // portfolio stop cannot pre-empt the consecutive check).
+        db.evaluation_data.lock().unwrap().replace((
+            Decimal::ZERO,
+            Decimal::ZERO,
+            Decimal::ZERO,
+            Decimal::ZERO,
+        ));
+        let cb3 = make_cb(db.clone());
+        db.consecutive_losses.lock().unwrap().replace(5);
+        evaluate_now(&cb3).await;
+        assert!(matches!(
+            cb3.trip_reason(),
+            Some(TripReason::ConsecutiveLosses { count: 5, .. })
+        ));
+        cb3.reset("t").await.unwrap();
+
+        // Drawdown (clear the consecutive-loss counter first).
+        db.consecutive_losses.lock().unwrap().replace(0);
+        let cb4 = make_cb(db.clone());
+        db.drawdown
+            .lock()
+            .unwrap()
+            .replace((Decimal::from(20), Decimal::from(50)));
+        evaluate_now(&cb4).await;
+        assert!(matches!(
+            cb4.trip_reason(),
+            Some(TripReason::MaxDrawdown { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_no_breach_updates_last_check() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db);
+        cb.state.write().last_check = Some(Utc::now() - Duration::seconds(60));
+        cb.evaluate().await.unwrap();
+        assert_eq!(cb.current_state(), CircuitBreakerState::Active);
+        assert!(cb.state.read().last_check.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_portfolio_stop_inactive_low_capital() {
+        let db = Arc::new(MockDb::new());
+        // total_capital = 0.5 SOL → portfolio stop check disabled.
+        let cb = CircuitBreaker::new(cfg(), db.clone(), Decimal::from_str("0.5").unwrap());
+        db.evaluation_data.lock().unwrap().replace((
+            Decimal::from(-10),
+            Decimal::from(-100),
+            Decimal::ZERO,
+            Decimal::ZERO,
+        ));
+        evaluate_now(&cb).await;
+        assert_eq!(cb.current_state(), CircuitBreakerState::Active);
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_error_paths_skip_tick() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db.clone());
+        db.evaluation_error.store(true, Ordering::Relaxed);
+        let result = cb.evaluate().await;
+        assert!(result.is_err(), "evaluation errors propagate");
+        assert!(
+            !cb.state.read().evaluation_in_progress,
+            "guard cleared after error"
+        );
+
+        db.evaluation_error.store(false, Ordering::Relaxed);
+        db.consecutive_error.store(true, Ordering::Relaxed);
+        let result = cb.evaluate().await;
+        assert!(result.is_err());
+        assert!(!cb.state.read().evaluation_in_progress);
+
+        db.consecutive_error.store(false, Ordering::Relaxed);
+        db.drawdown_error.store(true, Ordering::Relaxed);
+        let result = cb.evaluate().await;
+        assert!(result.is_err());
+        assert!(!cb.state.read().evaluation_in_progress);
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_sol_price_variants() {
+        // No price cache → USD checks skipped, no trip. (Capital is large so
+        // the -600 SOL loss stays far above the -5% portfolio stop.)
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db.clone());
+        cb.update_capital(Decimal::from(100000));
+        db.evaluation_data.lock().unwrap().replace((
+            Decimal::from(-600),
+            Decimal::ZERO,
+            Decimal::ZERO,
+            Decimal::ZERO,
+        ));
+        evaluate_now(&cb).await;
+        assert_eq!(cb.current_state(), CircuitBreakerState::Active);
+
+        // Price cache with ZERO price → warn path.
+        let cache = Arc::new(crate::price_cache::PriceCache::new().unwrap());
+        cache.set_price(
+            crate::constants::mints::SOL,
+            Decimal::ZERO,
+            crate::price_cache::PriceSource::Jupiter,
+            Some(9),
+        );
+        let cb2 = make_cb(db.clone()).with_price_cache(cache.clone());
+        cb2.update_capital(Decimal::from(100000));
+        evaluate_now(&cb2).await;
+        assert_eq!(cb2.current_state(), CircuitBreakerState::Active);
+
+        // Null-price PnL estimation path with a real price.
+        let db3 = Arc::new(MockDb::new());
+        let cache3 = Arc::new(crate::price_cache::PriceCache::new().unwrap());
+        cache3.set_price(
+            crate::constants::mints::SOL,
+            Decimal::from(2),
+            crate::price_cache::PriceSource::Jupiter,
+            Some(9),
+        );
+        let cb3 = make_cb(db3.clone()).with_price_cache(cache3.clone());
+        db3.evaluation_data.lock().unwrap().replace((
+            Decimal::ZERO,
+            Decimal::ZERO,
+            Decimal::from(-700), // realized USD
+            Decimal::from(50),   // null-price SOL pnl → estimated 100 USD
+        ));
+        evaluate_now(&cb3).await;
+        // realized 500 total → trips MaxLoss24h (>= 500).
+        assert!(matches!(
+            cb3.trip_reason(),
+            Some(TripReason::MaxLoss24h { .. })
+        ));
+    }
+
+    // ── trip() ─────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_trip_ignores_duplicate_when_already_tripped() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db.clone());
+        cb.manual_trip("admin", "first".into()).await.unwrap();
+        let trips_before = cb.trips_total.get().map(|c| c.get()).unwrap_or(0);
+
+        cb.trip(TripReason::Manual {
+            reason: "second".into(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            cb.trips_total.get().map(|c| c.get()).unwrap_or(0),
+            trips_before,
+            "duplicate trip must not re-increment"
+        );
+        assert_eq!(cb.trip_reason().unwrap().to_string(), "Manual: first");
+    }
+
+    #[tokio::test]
+    async fn test_trip_all_reason_logging_branches() {
+        for reason in [
+            TripReason::MaxLoss24h {
+                loss: dec!(100),
+                threshold: dec!(500),
+            },
+            TripReason::ConsecutiveLosses {
+                count: 4,
+                threshold: 3,
+            },
+            TripReason::MaxDrawdown {
+                drawdown: dec!(20),
+                threshold: dec!(15),
+            },
+            TripReason::PortfolioStop24h {
+                loss_pct: dec!(6),
+                threshold: dec!(-5),
+            },
+            TripReason::JupiterApiFailures {
+                consecutive_failures: 4,
+                threshold: 3,
+                error_type: "http".into(),
+            },
+            TripReason::Manual {
+                reason: "manual".into(),
+            },
+            TripReason::Restored {
+                reason: "restored".into(),
+            },
+        ] {
+            let db = Arc::new(MockDb::new());
+            let cb = make_cb(db.clone());
+            let gauge = prometheus::IntGauge::new("cb_trip_gauge", "h").unwrap();
+            let counter = prometheus::IntCounter::new("cb_trip_counter", "h").unwrap();
+            cb.set_metrics(gauge.clone(), counter.clone());
+            cb.trip(reason.clone()).await.unwrap();
+            assert_eq!(cb.current_state(), CircuitBreakerState::Tripped);
+            assert_eq!(cb.trip_reason().unwrap().to_string(), reason.to_string());
+            assert_eq!(gauge.get(), 0, "gauge set to Tripped");
+            assert_eq!(counter.get(), 1);
+            // Persisted to MockDb.
+            let persisted = db.circuit_breaker_state.lock().unwrap().clone();
+            assert_eq!(persisted.unwrap().state, "Tripped");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_trip_with_ws_and_notifier() {
+        let db = Arc::new(MockDb::new());
+        let ws = Arc::new(crate::handlers::WsState::new(
+            std::collections::HashMap::new(),
+            "secret".to_string(),
+            false,
+        ));
+        let cb = CircuitBreaker::new_with_ws(cfg(), db.clone(), Some(ws.clone()), dec!(1000));
+        let mut rx = ws.tx.subscribe();
+        cb.set_notifier(Arc::new(crate::notifications::CompositeNotifier::new()));
+        cb.trip(TripReason::Manual {
+            reason: "ws".into(),
+        })
+        .await
+        .unwrap();
+        let event = rx.try_recv().expect("ws broadcast");
+        assert!(matches!(event, crate::handlers::WsEvent::Alert(_)));
+    }
+
+    #[tokio::test]
+    async fn test_trip_persist_failure_is_non_fatal() {
+        let db = Arc::new(MockDb::new());
+        db.cb_state_error.store(true, Ordering::Relaxed);
+        let cb = make_cb(db);
+        cb.trip(TripReason::Manual { reason: "x".into() })
+            .await
+            .unwrap();
+        assert_eq!(cb.current_state(), CircuitBreakerState::Tripped);
+    }
+
+    // ── cooldown / exit ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_enter_cooldown_requires_tripped_state() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db);
+        // No-op while Active.
+        cb.enter_cooldown().await.unwrap();
+        assert_eq!(cb.current_state(), CircuitBreakerState::Active);
+
+        // Tripped → Cooldown.
+        cb.trip(TripReason::Manual { reason: "x".into() })
+            .await
+            .unwrap();
+        cb.enter_cooldown().await.unwrap();
+        assert_eq!(cb.current_state(), CircuitBreakerState::Cooldown);
+        let status = cb.status();
+        assert_eq!(status.state, CircuitBreakerState::Cooldown);
+        assert!(status.cooldown_remaining_secs.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_exit_cooldown_retrips_when_breach_persists() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db.clone());
+        db.evaluation_data.lock().unwrap().replace((
+            Decimal::ZERO,
+            Decimal::from(-1000),
+            Decimal::ZERO,
+            Decimal::ZERO,
+        ));
+        cb.trip(TripReason::Manual { reason: "x".into() })
+            .await
+            .unwrap();
+        cb.enter_cooldown().await.unwrap();
+
+        // Cooldown expired → exit_cooldown re-checks → re-trips.
+        cb.state.write().tripped_at = Some(Utc::now() - Duration::hours(1));
+        cb.evaluate().await.unwrap();
+        assert_eq!(cb.current_state(), CircuitBreakerState::Tripped);
+    }
+
+    #[tokio::test]
+    async fn test_exit_cooldown_resumes_when_cleared() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db.clone());
+        let gauge = prometheus::IntGauge::new("cb_exit_gauge", "h").unwrap();
+        let counter = prometheus::IntCounter::new("cb_exit_counter", "h").unwrap();
+        cb.set_metrics(gauge.clone(), counter.clone());
+
+        cb.trip(TripReason::Manual { reason: "x".into() })
+            .await
+            .unwrap();
+        cb.enter_cooldown().await.unwrap();
+        cb.state.write().tripped_at = Some(Utc::now() - Duration::hours(1));
+
+        // No breach data → cooldown exits to Active.
+        cb.evaluate().await.unwrap();
+        assert_eq!(cb.current_state(), CircuitBreakerState::Active);
+        assert_eq!(gauge.get(), 2, "gauge set to Active");
+        assert_eq!(cb.get_jupiter_failure_count(), 0);
+        let persisted = db.circuit_breaker_state.lock().unwrap().clone();
+        assert_eq!(persisted.unwrap().state, "Active");
+    }
+
+    #[tokio::test]
+    async fn test_cooldown_not_expired_stays_in_cooldown() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db);
+        cb.trip(TripReason::Manual { reason: "x".into() })
+            .await
+            .unwrap();
+        cb.enter_cooldown().await.unwrap();
+        // tripped_at is "now" → cooldown not expired → stays Cooldown.
+        cb.evaluate().await.unwrap();
+        assert_eq!(cb.current_state(), CircuitBreakerState::Cooldown);
+    }
+
+    // ── reset / manual trip / jupiter failures ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_reset_clears_everything() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db.clone());
+        cb.record_jupiter_failure("http".into()).await.unwrap();
+        cb.trip(TripReason::Manual { reason: "x".into() })
+            .await
+            .unwrap();
+        let gauge = prometheus::IntGauge::new("cb_reset_gauge", "h").unwrap();
+        let counter = prometheus::IntCounter::new("cb_reset_counter", "h").unwrap();
+        cb.set_metrics(gauge.clone(), counter.clone());
+
+        cb.reset("admin").await.unwrap();
+        assert_eq!(cb.current_state(), CircuitBreakerState::Active);
+        assert!(cb.trip_reason().is_none());
+        assert_eq!(cb.get_jupiter_failure_count(), 0);
+        assert_eq!(gauge.get(), 2);
+        assert!(cb.state.read().last_reset_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_manual_trip_logs_config_change() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db.clone());
+        cb.manual_trip("admin", "because".into()).await.unwrap();
+        assert_eq!(cb.current_state(), CircuitBreakerState::Tripped);
+        assert!(
+            matches!(cb.trip_reason(), Some(TripReason::Manual { reason }) if reason == "because")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_record_jupiter_failure_below_threshold() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db);
+        assert!(!cb.record_jupiter_failure("http".into()).await.unwrap());
+        assert!(!cb.record_jupiter_failure("http".into()).await.unwrap());
+        assert_eq!(cb.get_jupiter_failure_count(), 2);
+        assert_eq!(cb.current_state(), CircuitBreakerState::Active);
+        assert_eq!(cb.state.read().last_jupiter_error.as_deref(), Some("http"));
+    }
+
+    #[tokio::test]
+    async fn test_record_jupiter_failure_trips_at_threshold() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db);
+        assert!(!cb.record_jupiter_failure("timeout".into()).await.unwrap());
+        assert!(!cb.record_jupiter_failure("timeout".into()).await.unwrap());
+        let tripped = cb.record_jupiter_failure("timeout".into()).await.unwrap();
+        assert!(tripped, "third failure at threshold=3 trips");
+        assert_eq!(cb.current_state(), CircuitBreakerState::Tripped);
+        assert!(matches!(
+            cb.trip_reason(),
+            Some(TripReason::JupiterApiFailures {
+                consecutive_failures: 3,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_reset_jupiter_failures() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db);
+        {
+            let mut state = cb.state.write();
+            state.jupiter_failure_count = 4;
+            state.last_jupiter_error = Some("http".into());
+        }
+        cb.reset_jupiter_failures();
+        assert_eq!(cb.get_jupiter_failure_count(), 0);
+        assert!(cb.state.read().last_jupiter_error.is_none());
+    }
+
+    // ── restore_from_db ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_restore_from_db_no_persisted_state() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db);
+        cb.restore_from_db().await.unwrap();
+        assert_eq!(cb.current_state(), CircuitBreakerState::Active);
+    }
+
+    #[tokio::test]
+    async fn test_restore_from_db_active_state_sets_baseline() {
+        let db = Arc::new(MockDb::new());
+        db.update_circuit_breaker_state("Active", None, None)
+            .await
+            .unwrap();
+        // Ensure updated_at is parseable (rfc3339 from MockDb).
+        let cb = make_cb(db);
+        cb.restore_from_db().await.unwrap();
+        assert_eq!(cb.current_state(), CircuitBreakerState::Active);
+        assert!(cb.state.read().last_reset_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_restore_from_db_tripped_state_with_reason() {
+        let db = Arc::new(MockDb::new());
+        db.update_circuit_breaker_state(
+            "Tripped",
+            Some(Utc::now() - Duration::hours(2)),
+            Some("crash".into()),
+        )
+        .await
+        .unwrap();
+        let cb = make_cb(db);
+        cb.restore_from_db().await.unwrap();
+        assert_eq!(cb.current_state(), CircuitBreakerState::Cooldown);
+        assert!(matches!(
+            cb.trip_reason(),
+            Some(TripReason::Restored { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_restore_from_db_tripped_unparseable_timestamp() {
+        let db = Arc::new(MockDb::new());
+        db.circuit_breaker_state.lock().unwrap().replace(
+            crate::db_abstraction::CircuitBreakerState {
+                state: "Cooldown".to_string(),
+                tripped_at: Some("not-a-date".to_string()),
+                trip_reason: None,
+                updated_at: "also-not-a-date".to_string(),
+            },
+        );
+        let cb = make_cb(db);
+        cb.restore_from_db().await.unwrap();
+        // Unparseable timestamp falls back to now; still Tripped/Cooldown path.
+        assert!(matches!(
+            cb.current_state(),
+            CircuitBreakerState::Cooldown | CircuitBreakerState::Tripped
+        ));
+        assert!(cb.state.read().tripped_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_restore_from_db_load_error_propagates() {
+        let db = Arc::new(MockDb::new());
+        db.cb_state_error.store(true, Ordering::Relaxed);
+        let cb = make_cb(db);
+        let result = cb.restore_from_db().await;
+        assert!(result.is_err(), "fail-closed on unreadable state");
+    }
+
+    #[test]
+    fn test_trip_reason_display_remaining_variants() {
+        let portfolio = TripReason::PortfolioStop24h {
+            loss_pct: dec!(6.5),
+            threshold: dec!(-5),
+        };
+        assert!(portfolio.to_string().contains("6.5"));
+        assert!(portfolio.to_string().contains("portfolio stop"));
+
+        let jup = TripReason::JupiterApiFailures {
+            consecutive_failures: 4,
+            threshold: 3,
+            error_type: "timeout".into(),
+        };
+        assert!(jup.to_string().contains("4"));
+        assert!(jup.to_string().contains("timeout"));
+
+        let restored = TripReason::Restored {
+            reason: "from db".into(),
+        };
+        assert!(restored.to_string().contains("Restored: from db"));
+    }
+
+    #[test]
+    fn test_set_metrics_cooldown_state() {
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db);
+        cb.state.write().state = CircuitBreakerState::Cooldown;
+        let gauge = prometheus::IntGauge::new("cb_cd_gauge", "h").unwrap();
+        let counter = prometheus::IntCounter::new("cb_cd_counter", "h").unwrap();
+        cb.set_metrics(gauge.clone(), counter.clone());
+        assert_eq!(gauge.get(), 1, "Cooldown maps to gauge value 1");
+    }
+
+    #[tokio::test]
+    async fn test_exit_cooldown_persist_failure_is_non_fatal() {
+        let db = Arc::new(MockDb::new());
+        db.cb_update_error.store(true, Ordering::Relaxed);
+        let cb = make_cb(db.clone());
+        cb.trip(TripReason::Manual { reason: "x".into() })
+            .await
+            .unwrap();
+        cb.enter_cooldown().await.unwrap();
+        cb.state.write().tripped_at = Some(Utc::now() - Duration::hours(1));
+        // Exit succeeds in memory even though the persist write fails.
+        cb.evaluate().await.unwrap();
+        assert_eq!(cb.current_state(), CircuitBreakerState::Active);
+    }
+
+    #[tokio::test]
+    async fn test_reset_persist_failure_is_non_fatal() {
+        let db = Arc::new(MockDb::new());
+        db.cb_update_error.store(true, Ordering::Relaxed);
+        let cb = make_cb(db.clone());
+        cb.trip(TripReason::Manual { reason: "x".into() })
+            .await
+            .unwrap();
+        cb.reset("admin").await.unwrap();
+        assert_eq!(cb.current_state(), CircuitBreakerState::Active);
+    }
+
+    // The `persist_cb_state` helper is exercised through every trip/reset path
+    // above (Tripped + Active strings; the Cooldown arm is unreachable because
+    // enter_cooldown never persists).
 }

@@ -10,7 +10,7 @@ pub mod polling_task;
 pub use chimera_infra::monitoring::rate_limiter;
 pub mod rpc_polling;
 #[cfg(test)]
-mod test_db;
+pub(crate) mod test_db;
 
 pub use helius::HeliusClient;
 pub use helius_wss::{ConnectionState, LaserStreamClient, LaserStreamConfig, ReconnectConfig};

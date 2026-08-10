@@ -594,4 +594,181 @@ mod tests {
         // Should not panic; output goes to stdout and is discarded by the test.
         print_plan(std::path::Path::new("/tmp/x"), &secrets, "pubkey", true);
     }
+
+    // ==========================================================================
+    // ADDITIONAL COVERAGE
+    // ==========================================================================
+
+    #[test]
+    fn print_plan_all_field_states() {
+        let secrets = VaultSecrets {
+            webhook_secret: "wh-secret".to_string(),
+            webhook_secret_previous: Some("old-secret".to_string()),
+            wallet_private_key: Some("ab12cd".to_string()),
+            rpc_api_key: Some("rpc-key".to_string()),
+            fallback_rpc_api_key: Some("fb-key".to_string()),
+        };
+        // Dry-run header + full fields.
+        print_plan(
+            std::path::Path::new("/tmp/plan-a"),
+            &secrets,
+            "pubkey1",
+            true,
+        );
+        // Real-run header.
+        print_plan(
+            std::path::Path::new("/tmp/plan-b"),
+            &secrets,
+            "pubkey2",
+            false,
+        );
+    }
+
+    #[test]
+    fn fresh_secrets_builds_empty_bundle() {
+        let secrets = fresh_secrets("wh");
+        assert_eq!(secrets.webhook_secret, "wh");
+        assert!(secrets.webhook_secret_previous.is_none());
+        assert!(secrets.wallet_private_key.is_none());
+        assert!(secrets.rpc_api_key.is_none());
+        assert!(secrets.fallback_rpc_api_key.is_none());
+    }
+
+    #[test]
+    fn read_keypair_input_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kp.json");
+        std::fs::write(&path, b"[1,2,3]").unwrap();
+        let contents = read_keypair_input(Some(&path)).unwrap();
+        assert_eq!(contents, "[1,2,3]");
+    }
+
+    #[test]
+    fn read_keypair_input_missing_file_errors() {
+        let result = read_keypair_input(Some(std::path::Path::new(
+            "/nonexistent/definitely-missing-kp.json",
+        )));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn preflight_roundtrip_ok_and_bad_keypair() {
+        let key = Vault::generate_key().unwrap();
+        let vault = Vault::new(&key).unwrap();
+        let kp = Keypair::new();
+        let secrets = VaultSecrets {
+            webhook_secret: "wh".to_string(),
+            webhook_secret_previous: None,
+            wallet_private_key: Some(hex::encode(kp.to_bytes())),
+            rpc_api_key: None,
+            fallback_rpc_api_key: None,
+        };
+        preflight_roundtrip(&vault, &secrets).unwrap();
+
+        // A garbage keypair must fail the preflight (no disk touched).
+        let bad = VaultSecrets {
+            webhook_secret: secrets.webhook_secret.clone(),
+            webhook_secret_previous: None,
+            wallet_private_key: Some("not-a-keypair".to_string()),
+            rpc_api_key: None,
+            fallback_rpc_api_key: None,
+        };
+        assert!(preflight_roundtrip(&vault, &bad).is_err());
+    }
+
+    #[test]
+    fn roundtrip_validate_success_and_mismatch() {
+        let key = Vault::generate_key().unwrap();
+        let vault = Vault::new(&key).unwrap();
+        let kp = Keypair::new();
+        let secrets = VaultSecrets {
+            webhook_secret: "wh".to_string(),
+            webhook_secret_previous: None,
+            wallet_private_key: Some(hex::encode(kp.to_bytes())),
+            rpc_api_key: None,
+            fallback_rpc_api_key: None,
+        };
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        vault.save_secrets(&secrets, tmp.path()).unwrap();
+
+        let expected = bs58::encode(kp.pubkey().as_ref()).into_string();
+        roundtrip_validate(&vault, tmp.path(), &expected).unwrap();
+
+        assert!(roundtrip_validate(&vault, tmp.path(), "wrong-pubkey").is_err());
+        // Corrupt file → re-open fails.
+        std::fs::write(tmp.path(), b"garbage").unwrap();
+        assert!(roundtrip_validate(&vault, tmp.path(), &expected).is_err());
+    }
+
+    #[test]
+    fn copy_file_0600_creates_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        std::fs::write(&src, b"secret-bytes").unwrap();
+        copy_file_0600(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"secret-bytes");
+        // Overwrite path also works.
+        copy_file_0600(&src, &dst).unwrap();
+    }
+
+    #[test]
+    fn restore_backup_no_prior_removes_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup = dir.path().join("secrets.enc.bak");
+        let target = dir.path().join("secrets.enc");
+        std::fs::write(&target, b"corrupt").unwrap();
+        std::fs::write(&backup, b"old").unwrap();
+        let outcome = restore_backup(&backup, &target, false);
+        assert!(matches!(outcome, RestoreOutcome::NoPrior));
+        assert!(!target.exists());
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn restore_backup_renames_when_prior_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup = dir.path().join("secrets.enc.bak");
+        let target = dir.path().join("secrets.enc");
+        std::fs::write(&backup, b"good-old-vault").unwrap();
+        std::fs::write(&target, b"corrupt-new").unwrap();
+        let outcome = restore_backup(&backup, &target, true);
+        assert!(matches!(outcome, RestoreOutcome::Restored));
+        assert_eq!(std::fs::read(&target).unwrap(), b"good-old-vault");
+        assert!(!backup.exists(), "backup consumed by rename");
+    }
+
+    #[test]
+    fn restore_backup_copy_fallback_when_rename_fails() {
+        // Make rename fail by turning the target into a non-empty directory
+        // (rename over a directory fails on POSIX).
+        let dir = tempfile::tempdir().unwrap();
+        let backup = dir.path().join("secrets.enc.bak");
+        let target = dir.path().join("secrets.enc");
+        std::fs::write(&backup, b"good-old-vault").unwrap();
+        std::fs::create_dir(&target).unwrap();
+        let outcome = restore_backup(&backup, &target, true);
+        // Either the copy fallback restored (directory copy fails → FailedBackupIntact)
+        // — assert we never panic and return one of the two handled outcomes.
+        assert!(
+            matches!(
+                outcome,
+                RestoreOutcome::Restored | RestoreOutcome::FailedBackupIntact
+            ),
+            "must not panic on rename failure"
+        );
+    }
+
+    #[test]
+    fn restore_backup_both_fail_keeps_backup_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup = dir.path().join("secrets.enc.bak");
+        let target = dir.path().join("secrets.enc");
+        // Back up path is a DIRECTORY → rename (dir over file) fails and the
+        // copy fallback's read fails → FailedBackupIntact.
+        std::fs::create_dir(&backup).unwrap();
+        std::fs::write(&target, b"corrupt").unwrap();
+        let outcome = restore_backup(&backup, &target, true);
+        assert!(matches!(outcome, RestoreOutcome::FailedBackupIntact));
+    }
 }

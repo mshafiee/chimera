@@ -38,6 +38,28 @@ mod stop_loss_tests;
 #[path = "unit/profit_target_tests.rs"]
 mod profit_target_tests;
 
+#[path = "unit/decision_recorder_tests.rs"]
+mod decision_recorder_tests;
+
+#[path = "unit/dune_monitor_tests.rs"]
+mod dune_monitor_tests;
+
+#[path = "unit/engine_handle_tests.rs"]
+mod engine_handle_tests;
+
+#[path = "unit/rent_scavenger_tests.rs"]
+mod rent_scavenger_tests;
+
+#[path = "unit/selection_coverage_tests.rs"]
+mod selection_coverage_tests;
+
+#[path = "unit/shadow_fill_tests.rs"]
+mod shadow_fill_tests;
+
+#[path = "unit/shadow_trader_tests.rs"]
+mod shadow_trader_tests;
+
+
 #[path = "unit/db_integrity_tests.rs"]
 mod db_integrity_tests;
 

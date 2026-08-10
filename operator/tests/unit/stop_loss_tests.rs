@@ -17,6 +17,7 @@ use chimera_operator::config::ProfitManagementConfig;
 use chimera_operator::db_abstraction::{Database, DbPool};
 use chimera_operator::engine::stop_loss::{StopLossAction, StopLossManager};
 use chimera_operator::price_cache::{PriceCache, PriceSource};
+use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use sqlx::Pool;
 use sqlx::Postgres;
@@ -614,4 +615,841 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
         StopLossAction::Exit,
         "-15% must trigger exit for medium-WQS wallet"
     );
+}
+// =============================================================================
+// ADDITIONAL COVERAGE: recovery gate, ATR, wick protection, stop-mark refresh
+// =============================================================================
+
+const WALLET_A: &str = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+const WALLET_B: &str = "5xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+
+fn pool_of(db: &Arc<dyn Database>) -> Pool<Postgres> {
+    match db.pool() {
+        DbPool::PostgreSQL(p) => p.clone(),
+    }
+}
+
+#[tokio::test]
+async fn test_recovery_gate_exits_stale_losers() {
+    let (db, _tmp) = create_test_db().await;
+    let cfg = ProfitManagementConfig {
+        recovery_gate_secs: 30,
+        recovery_gate_threshold: Decimal::from_str("-1.0").unwrap(),
+        ..ProfitManagementConfig::default()
+    };
+    let pc = Arc::new(PriceCache::new().unwrap());
+    let mgr = StopLossManager::new(db, Arc::new(cfg), pc.clone());
+    pc.set_price(
+        "tok-gate",
+        Decimal::from_str("0.97").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+
+    // Entry 60s ago (past recovery gate), still -3% → recovery gate exits.
+    let action = mgr
+        .check_stop_loss("g1", WALLET_A, Decimal::ONE, "tok-gate", past_entry())
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::Exit,
+        "recovery gate must exit stale losers"
+    );
+
+    // Fresh entry (0s): recovery gate not yet triggered; loss small → hold.
+    let action = mgr
+        .check_stop_loss("g2", WALLET_A, Decimal::ONE, "tok-gate", chrono::Utc::now())
+        .await;
+    assert_eq!(action, StopLossAction::None);
+}
+
+#[tokio::test]
+async fn test_wallet_missing_or_error_falls_back_to_default_wqs() {
+    let (db, _tmp) = create_test_db().await;
+    let pc = Arc::new(PriceCache::new().unwrap());
+    let cfg = Arc::new(ProfitManagementConfig {
+        max_stop_loss_distance: Decimal::from_str("-100.0").unwrap(),
+        ..ProfitManagementConfig::default()
+    });
+    let mgr = StopLossManager::new(db.clone(), cfg.clone(), pc.clone());
+    pc.set_price(
+        "tok-w",
+        Decimal::from_str("0.90").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+    let action = mgr
+        .check_stop_loss("w1", "no-such-wallet", Decimal::ONE, "tok-w", past_entry())
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::None,
+        "missing wallet uses default WQS 50"
+    );
+
+    // Wallet query error (drop the table) → same default.
+    sqlx::query("DROP TABLE wallets CASCADE")
+        .execute(&pool_of(&db))
+        .await
+        .unwrap();
+    let pc2 = Arc::new(PriceCache::new().unwrap());
+    pc2.set_price(
+        "tok-w2",
+        Decimal::from_str("0.90").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+    let mgr2 = StopLossManager::new(db.clone(), cfg.clone(), pc2.clone());
+    let action = mgr2
+        .check_stop_loss("w2", "any-wallet", Decimal::ONE, "tok-w2", past_entry())
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::None,
+        "wallet query error uses default WQS 50"
+    );
+}
+
+#[tokio::test]
+async fn test_atr_based_stop_override() {
+    let (db, _tmp) = create_test_db().await;
+    insert_wallet(&pool_of(&db), WALLET_A, 80.0).await;
+
+    let pc = Arc::new(PriceCache::new().unwrap());
+    let mut price = 1.0f64;
+    for i in 0..10 {
+        price = if i % 2 == 0 { price * 1.2 } else { price / 1.2 };
+        pc.set_price(
+            "tok-atr",
+            Decimal::from_str(&format!("{price:.4}")).unwrap(),
+            PriceSource::Jupiter,
+            Some(9),
+        );
+    }
+    pc.set_price(
+        "tok-atr",
+        Decimal::from_str("0.92").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+    pc.track_token("tok-atr");
+
+    let cfg = Arc::new(ProfitManagementConfig {
+        atr_stop_loss_enabled: true,
+        atr_multiplier: Decimal::from_str("10.0").unwrap(),
+        market_regime: "VOLATILE".to_string(),
+        max_stop_loss_distance: Decimal::from_str("-100.0").unwrap(),
+        ..ProfitManagementConfig::default()
+    });
+    let mgr = StopLossManager::new(db, cfg, pc.clone());
+    let action = mgr
+        .check_stop_loss("atr-1", WALLET_A, Decimal::ONE, "tok-atr", past_entry())
+        .await;
+    // With vol > 0 and a 10x multiplier the ATR stop is very wide (negative
+    // threshold) — the -8% mark does NOT breach it → hold.
+    assert_eq!(action, StopLossAction::None, "wide ATR stop holds at -8%");
+}
+
+#[tokio::test]
+async fn test_adaptive_volatility_tightens_low_vol_stops() {
+    let (db, _tmp) = create_test_db().await;
+    insert_wallet(&pool_of(&db), WALLET_A, 50.0).await;
+
+    let pc = Arc::new(PriceCache::new().unwrap());
+    // Very low volatility history (flat prices) → 0.9x multiplier.
+    for _ in 0..10 {
+        pc.set_price(
+            "tok-lowvol",
+            Decimal::from_str("1.0001").unwrap(),
+            PriceSource::Jupiter,
+            Some(9),
+        );
+    }
+    pc.track_token("tok-lowvol");
+
+    let cfg = Arc::new(ProfitManagementConfig {
+        max_stop_loss_distance: Decimal::from_str("-100.0").unwrap(),
+        ..ProfitManagementConfig::default()
+    });
+    let mgr = StopLossManager::new(db, cfg, pc.clone());
+    // Medium WQS: -15% base; 0.9x → -13.5%; -12% mark holds.
+    pc.set_price(
+        "tok-lowvol",
+        Decimal::from_str("0.88").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+    let action = mgr
+        .check_stop_loss("lv-1", WALLET_A, Decimal::ONE, "tok-lowvol", past_entry())
+        .await;
+    assert_eq!(action, StopLossAction::None);
+    // -15% mark exits.
+    pc.set_price(
+        "tok-lowvol",
+        Decimal::from_str("0.85").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+    let action = mgr
+        .check_stop_loss("lv-2", WALLET_A, Decimal::ONE, "tok-lowvol", past_entry())
+        .await;
+    assert_eq!(action, StopLossAction::Exit);
+}
+
+/// Mock Jupiter price API: returns `price` for ANY requested token id.
+async fn spawn_price_mock(price: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let price = price.to_string();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 16384];
+            let Ok(n) = sock.read(&mut buf).await else {
+                continue;
+            };
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            // Extract the requested token id from `?ids=<token>`.
+            let id = req
+                .split("ids=")
+                .nth(1)
+                .and_then(|s| s.split(['&', ' ']).next())
+                .unwrap_or("tok-mark")
+                .to_string();
+            let body = serde_json::json!({
+                id: {"usdPrice": price.parse::<f64>().unwrap(), "decimals": 9}
+            })
+            .to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn test_stop_mark_refresh_rejects_bad_cache_mark() {
+    // Refresh returns 1.0 while the cache holds a stale 0.88 → the fresh mark
+    // no longer breaches → hold.
+    let (db, _tmp) = create_test_db().await;
+    insert_wallet(&pool_of(&db), WALLET_A, 50.0).await;
+
+    let base = spawn_price_mock("1.0").await;
+    let pc = Arc::new(PriceCache::with_jupiter_price_api(base).unwrap());
+    pc.set_price(
+        "tok-mark",
+        Decimal::from_str("0.80").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+    pc.track_token("tok-mark");
+
+    let cfg = Arc::new(ProfitManagementConfig {
+        max_stop_loss_distance: Decimal::from_str("-100.0").unwrap(),
+        ..ProfitManagementConfig::default()
+    });
+    let mgr = StopLossManager::new(db, cfg, pc.clone());
+    let action = mgr
+        .check_stop_loss("mk-1", WALLET_A, Decimal::ONE, "tok-mark", past_entry())
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::None,
+        "fresh quote no longer breaching must hold the position"
+    );
+}
+
+#[tokio::test]
+async fn test_stop_mark_refresh_confirms_exit_on_divergent_mark() {
+    // Refresh returns 0.85 (still breaching, worse than cache 0.88) → exit on
+    // the fresh mark.
+    let (db, _tmp) = create_test_db().await;
+    insert_wallet(&pool_of(&db), WALLET_A, 50.0).await;
+
+    let base = spawn_price_mock("0.85").await;
+    let pc = Arc::new(PriceCache::with_jupiter_price_api(base).unwrap());
+    pc.set_price(
+        "tok-mark2",
+        Decimal::from_str("0.80").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+    pc.track_token("tok-mark2");
+
+    let cfg = Arc::new(ProfitManagementConfig {
+        max_stop_loss_distance: Decimal::from_str("-100.0").unwrap(),
+        ..ProfitManagementConfig::default()
+    });
+    let mgr = StopLossManager::new(db, cfg, pc.clone());
+    let action = mgr
+        .check_stop_loss("mk-2", WALLET_A, Decimal::ONE, "tok-mark2", past_entry())
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::Exit,
+        "fresh mark still breaches → exit"
+    );
+}
+
+#[tokio::test]
+async fn test_wick_protection_grace_and_overrides() {
+    let (db, _tmp) = create_test_db().await;
+    insert_wallet(&pool_of(&db), WALLET_A, 50.0).await;
+
+    let cfg = Arc::new(ProfitManagementConfig {
+        max_stop_loss_distance: Decimal::from_str("-100.0").unwrap(),
+        wick_protection_secs: 600,
+        wick_protection_max_loss_percent: Decimal::from_str("-20.0").unwrap(),
+        ..ProfitManagementConfig::default()
+    });
+    let pc = Arc::new(PriceCache::new().unwrap());
+    let mgr = StopLossManager::new(db, cfg, pc.clone());
+
+    // -10% within the wick window (not hard stop, not large loss) → hold.
+    pc.set_price(
+        "tok-wick",
+        Decimal::from_str("0.90").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+    let action = mgr
+        .check_stop_loss(
+            "wk-1",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-wick",
+            chrono::Utc::now(),
+        )
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::None,
+        "wick protection holds normal dips"
+    );
+
+    // -25% within the wick window → hard stop bypasses grace.
+    pc.set_price(
+        "tok-wick",
+        Decimal::from_str("0.75").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+    let action = mgr
+        .check_stop_loss(
+            "wk-2",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-wick",
+            chrono::Utc::now(),
+        )
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::Exit,
+        "hard stop bypasses wick protection"
+    );
+
+    // -25% beyond the wick window → normal exit.
+    let action = mgr
+        .check_stop_loss("wk-3", WALLET_A, Decimal::ONE, "tok-wick", past_entry())
+        .await;
+    assert_eq!(action, StopLossAction::Exit);
+}
+
+#[tokio::test]
+async fn test_consensus_db_fallback_and_query_error() {
+    let (db, _tmp) = create_test_db().await;
+    insert_wallet(&pool_of(&db), WALLET_A, 50.0).await;
+    insert_wallet(&pool_of(&db), WALLET_B, 50.0).await;
+    insert_consensus_signal(&pool_of(&db), "tok-cons", WALLET_A).await;
+    insert_consensus_signal(&pool_of(&db), "tok-cons", WALLET_B).await;
+
+    let pc = Arc::new(PriceCache::new().unwrap());
+    pc.set_price(
+        "tok-cons",
+        Decimal::from_str("0.80").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+    let cfg = Arc::new(ProfitManagementConfig {
+        max_stop_loss_distance: Decimal::from_str("-100.0").unwrap(),
+        ..ProfitManagementConfig::default()
+    });
+    let mgr = StopLossManager::new(db.clone(), cfg.clone(), pc.clone());
+    let action = mgr
+        .check_stop_loss("cs-1", WALLET_A, Decimal::ONE, "tok-cons", past_entry())
+        .await;
+    // -15% base × 1.25 consensus = -18.75% → a -20% mark exits.
+    assert_eq!(
+        action,
+        StopLossAction::Exit,
+        "consensus-widened stop exits at -20%"
+    );
+
+    // Consensus query failure → no widening; -15% still exits for medium WQS.
+    sqlx::query("DROP TABLE signal_aggregation CASCADE")
+        .execute(&pool_of(&db))
+        .await
+        .unwrap();
+    let pc2 = Arc::new(PriceCache::new().unwrap());
+    pc2.set_price(
+        "tok-cons2",
+        Decimal::from_str("0.85").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+    let mgr2 = StopLossManager::new(db.clone(), cfg.clone(), pc2);
+    let action = mgr2
+        .check_stop_loss("cs-2", WALLET_A, Decimal::ONE, "tok-cons2", past_entry())
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::Exit,
+        "query error must not widen (still exits)"
+    );
+}
+
+#[tokio::test]
+async fn test_max_stop_loss_distance_override_warns() {
+    let (db, _tmp) = create_test_db().await;
+    insert_wallet(&pool_of(&db), WALLET_A, 50.0).await;
+
+    let pc = Arc::new(PriceCache::new().unwrap());
+    // High volatility → adaptive threshold -30% (2.0x of -15%), but
+    // max_stop_loss_distance = -5 clamps it.
+    let mut price = 1.0f64;
+    for i in 0..12 {
+        price = if i % 2 == 0 { price * 1.5 } else { price / 1.5 };
+        pc.set_price(
+            "tok-clamp",
+            Decimal::from_str(&format!("{price:.4}")).unwrap(),
+            PriceSource::Jupiter,
+            Some(9),
+        );
+    }
+    pc.track_token("tok-clamp");
+    pc.set_price(
+        "tok-clamp",
+        Decimal::from_str("0.95").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+
+    let cfg = Arc::new(ProfitManagementConfig {
+        max_stop_loss_distance: Decimal::from_str("-5.0").unwrap(),
+        ..ProfitManagementConfig::default()
+    });
+    let mgr = StopLossManager::new(db, cfg, pc.clone());
+    // -6% breaches the clamped -5% threshold → exit (the max-distance warn fires).
+    let action = mgr
+        .check_stop_loss("cl-1", WALLET_A, Decimal::ONE, "tok-clamp", past_entry())
+        .await;
+    assert_eq!(action, StopLossAction::Exit);
+}
+
+#[tokio::test]
+async fn test_pre_graduation_exit_rails() {
+    let (db, _tmp) = create_test_db().await;
+    let cache = Arc::new(PriceCache::new().unwrap());
+    let cfg = Arc::new(ProfitManagementConfig {
+        pre_graduation_exit_enabled: true,
+        ..ProfitManagementConfig::default()
+    });
+    let mgr = StopLossManager::new(db.clone(), cfg.clone(), cache.clone());
+
+    // Parser wired to a dead RPC URL → curve fetch fails → fail-open None.
+    let token_cache = Arc::new(chimera_operator::token::TokenCache::new(100, 100));
+    let fetcher = Arc::new(
+        chimera_operator::token::TokenMetadataFetcher::new_with_rate_limiter_and_jupiter(
+            "http://127.0.0.1:1",
+            None,
+            "http://127.0.0.1:1".to_string(),
+        ),
+    );
+    let parser = Arc::new(chimera_operator::TokenParser::new(
+        chimera_operator::token::TokenSafetyConfig {
+            freeze_authority_whitelist: std::collections::HashSet::new(),
+            mint_authority_whitelist: std::collections::HashSet::new(),
+            min_liquidity_shield_usd: Decimal::from_str("0").unwrap(),
+            min_liquidity_spear_usd: Decimal::from_str("0").unwrap(),
+            honeypot_detection_enabled: false,
+            holder_concentration_check_enabled: false,
+            max_holder_concentration_pct: 100.0,
+        },
+        token_cache,
+        fetcher,
+    ));
+    mgr.set_token_parser(parser.clone()).await;
+    let action = mgr
+        .check_pre_graduation("pg-1", "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R")
+        .await;
+    assert_eq!(action, StopLossAction::None);
+
+    // Parser with an RPC mock returning a null account → Ok(None) → None.
+    let base = spawn_rpc_null_account().await;
+    let token_cache2 = Arc::new(chimera_operator::token::TokenCache::new(100, 100));
+    let fetcher2 = Arc::new(
+        chimera_operator::token::TokenMetadataFetcher::new_with_rate_limiter_and_jupiter(
+            &base,
+            None,
+            "http://127.0.0.1:1".to_string(),
+        ),
+    );
+    let parser2 = Arc::new(chimera_operator::TokenParser::new(
+        chimera_operator::token::TokenSafetyConfig {
+            freeze_authority_whitelist: std::collections::HashSet::new(),
+            mint_authority_whitelist: std::collections::HashSet::new(),
+            min_liquidity_shield_usd: Decimal::from_str("0").unwrap(),
+            min_liquidity_spear_usd: Decimal::from_str("0").unwrap(),
+            honeypot_detection_enabled: false,
+            holder_concentration_check_enabled: false,
+            max_holder_concentration_pct: 100.0,
+        },
+        token_cache2,
+        fetcher2,
+    ));
+    let mgr2 = StopLossManager::new(db.clone(), cfg.clone(), cache.clone());
+    mgr2.set_token_parser(parser2).await;
+    let action = mgr2
+        .check_pre_graduation("pg-2", "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R")
+        .await;
+    assert_eq!(action, StopLossAction::None);
+}
+
+/// Mock JSON-RPC server answering getAccountInfo with a null account (the
+/// standard "account does not exist" for non-curve tokens).
+async fn spawn_rpc_null_account() -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 16384];
+            let Ok(n) = sock.read(&mut buf).await else {
+                continue;
+            };
+            let body = String::from_utf8_lossy(&buf[..n]).to_string();
+            let response = if body.contains("getAccountInfo") {
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"value": null}})
+                    .to_string()
+            } else {
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "x"}}).to_string()
+            };
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(), response
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn test_aggregator_consensus_path() {
+    // With a wired SignalAggregator, consensus reads the in-memory cache
+    // (no signals → no consensus → base stop behavior).
+    let (db, _tmp) = create_test_db().await;
+    insert_wallet(&pool_of(&db), WALLET_A, 50.0).await;
+
+    let agg = Arc::new(chimera_operator::monitoring::SignalAggregator::new(
+        db.clone(),
+    ));
+    let pc = Arc::new(PriceCache::new().unwrap());
+    pc.set_price(
+        "tok-agg",
+        Decimal::from_str("0.85").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+    let mgr = StopLossManager::new(
+        db,
+        Arc::new(ProfitManagementConfig {
+            max_stop_loss_distance: Decimal::from_str("-100.0").unwrap(),
+            ..ProfitManagementConfig::default()
+        }),
+        pc.clone(),
+    );
+    mgr.set_signal_aggregator(agg).await;
+    let action = mgr
+        .check_stop_loss("ag-1", WALLET_A, Decimal::ONE, "tok-agg", past_entry())
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::Exit,
+        "no consensus → base -15% stop exits at -15%"
+    );
+}
+
+// =============================================================================
+// ATR OVERRIDE + VOLATILITY MULTIPLIER BANDS + WICK LARGE-LOSS + CURVE EXITS
+// =============================================================================
+
+#[tokio::test]
+async fn test_atr_override_applies_tighter_threshold() {
+    // Low volatility + small ATR multiplier → ATR stop (-5%) is TIGHTER than
+    // the WQS threshold (-15%) → the ATR threshold overrides it.
+    let (db, _tmp) = create_test_db().await;
+    insert_wallet(&pool_of(&db), WALLET_A, 50.0).await;
+
+    let pc = Arc::new(PriceCache::new().unwrap());
+    // Very flat history → tiny volatility.
+    for _ in 0..10 {
+        pc.set_price(
+            "tok-atr2",
+            Decimal::from_str("1.0001").unwrap(),
+            PriceSource::Jupiter,
+            Some(9),
+        );
+    }
+    pc.track_token("tok-atr2");
+    pc.set_price(
+        "tok-atr2",
+        Decimal::from_str("0.95").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+
+    let cfg = Arc::new(ProfitManagementConfig {
+        atr_stop_loss_enabled: true,
+        atr_multiplier: Decimal::from_str("1.0").unwrap(),
+        market_regime: "BEAR".to_string(),
+        max_stop_loss_distance: Decimal::from_str("-100.0").unwrap(),
+        ..ProfitManagementConfig::default()
+    });
+    let mgr = StopLossManager::new(db, cfg, pc.clone());
+    // -5% mark: breaches the ATR-overridden threshold → exit.
+    let action = mgr
+        .check_stop_loss("ao-1", WALLET_A, Decimal::ONE, "tok-atr2", past_entry())
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::Exit,
+        "ATR-overridden threshold exits at -5%"
+    );
+}
+
+#[tokio::test]
+async fn test_volatility_multiplier_mid_bands() {
+    // Moderate volatility (20-30% band → 1.5x) and the 10-20% band (1.0x).
+    let (db, _tmp) = create_test_db().await;
+    insert_wallet(&pool_of(&db), WALLET_A, 50.0).await;
+
+    let pc = Arc::new(PriceCache::new().unwrap());
+    // Alternating 1.25x swings → per-step change ~25% → vol in the 20-30 band.
+    let mut price = 1.0f64;
+    for i in 0..14 {
+        price = if i % 2 == 0 {
+            price * 1.25
+        } else {
+            price / 1.25
+        };
+        pc.set_price(
+            "tok-mid",
+            Decimal::from_str(&format!("{price:.4}")).unwrap(),
+            PriceSource::Jupiter,
+            Some(9),
+        );
+    }
+    pc.track_token("tok-mid");
+    pc.set_price(
+        "tok-mid",
+        Decimal::from_str("0.90").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+
+    let cfg = Arc::new(ProfitManagementConfig {
+        max_stop_loss_distance: Decimal::from_str("-100.0").unwrap(),
+        ..ProfitManagementConfig::default()
+    });
+    let mgr = StopLossManager::new(db.clone(), cfg.clone(), pc.clone());
+    // Medium WQS -15% × 1.5 = -22.5% → -10% mark holds.
+    let action = mgr
+        .check_stop_loss("mb-1", WALLET_A, Decimal::ONE, "tok-mid", past_entry())
+        .await;
+    assert_eq!(action, StopLossAction::None);
+
+    // Gentle swings (~5%) → 1.0x multiplier → base -15%.
+    let pc2 = Arc::new(PriceCache::new().unwrap());
+    let mut price = 1.0f64;
+    for i in 0..14 {
+        price = if i % 2 == 0 {
+            price * 1.05
+        } else {
+            price / 1.05
+        };
+        pc2.set_price(
+            "tok-gentle",
+            Decimal::from_str(&format!("{price:.4}")).unwrap(),
+            PriceSource::Jupiter,
+            Some(9),
+        );
+    }
+    pc2.track_token("tok-gentle");
+    pc2.set_price(
+        "tok-gentle",
+        Decimal::from_str("0.85").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+    let mgr2 = StopLossManager::new(db.clone(), cfg.clone(), pc2.clone());
+    let action = mgr2
+        .check_stop_loss("mb-2", WALLET_A, Decimal::ONE, "tok-gentle", past_entry())
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::Exit,
+        "-15% mark exits at the 1.0x threshold"
+    );
+}
+
+#[tokio::test]
+async fn test_wick_large_loss_override() {
+    // -22% within the wick window: beyond wick_protection_max_loss_percent
+    // (-20%) but below the -25% hard stop → large-loss override exits.
+    let (db, _tmp) = create_test_db().await;
+    insert_wallet(&pool_of(&db), WALLET_A, 50.0).await;
+
+    let cfg = Arc::new(ProfitManagementConfig {
+        max_stop_loss_distance: Decimal::from_str("-100.0").unwrap(),
+        wick_protection_secs: 600,
+        wick_protection_max_loss_percent: Decimal::from_str("-20.0").unwrap(),
+        ..ProfitManagementConfig::default()
+    });
+    let pc = Arc::new(PriceCache::new().unwrap());
+    let mgr = StopLossManager::new(db, cfg, pc.clone());
+    pc.set_price(
+        "tok-ll",
+        Decimal::from_str("0.78").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+    let action = mgr
+        .check_stop_loss("ll-1", WALLET_A, Decimal::ONE, "tok-ll", chrono::Utc::now())
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::Exit,
+        "large loss overrides wick grace"
+    );
+}
+
+/// 49-byte pump.fun curve account (anchor discriminator + 5 u64s + complete).
+fn curve_bytes(real_sol_lamports: u64, complete: bool) -> String {
+    let mut data = vec![0u8; 49];
+    data[32..40].copy_from_slice(&real_sol_lamports.to_le_bytes());
+    data[48] = if complete { 1 } else { 0 };
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+/// Mock JSON-RPC answering getAccountInfo with curve account data.
+async fn spawn_rpc_curve(real_sol_lamports: u64, complete: bool) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let b64 = curve_bytes(real_sol_lamports, complete);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 16384];
+            let Ok(n) = sock.read(&mut buf).await else {
+                continue;
+            };
+            let body = String::from_utf8_lossy(&buf[..n]).to_string();
+            let response = if body.contains("getAccountInfo") {
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": {"context": {"slot": 1}, "value": {
+                        "data": [b64, "base64"],
+                        "executable": false,
+                        "lamports": 100,
+                        "owner": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+                        "rentEpoch": 0,
+                        "space": 49
+                    }}
+                })
+                .to_string()
+            } else {
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "x"}}).to_string()
+            };
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(), response
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    format!("http://{addr}")
+}
+
+fn curve_parser(rpc_url: &str) -> Arc<chimera_operator::TokenParser> {
+    let cache = Arc::new(chimera_operator::token::TokenCache::new(100, 100));
+    let fetcher = Arc::new(
+        chimera_operator::token::TokenMetadataFetcher::new_with_rate_limiter_and_jupiter(
+            rpc_url,
+            None,
+            "http://127.0.0.1:1".to_string(),
+        ),
+    );
+    Arc::new(chimera_operator::TokenParser::new(
+        chimera_operator::token::TokenSafetyConfig {
+            freeze_authority_whitelist: std::collections::HashSet::new(),
+            mint_authority_whitelist: std::collections::HashSet::new(),
+            min_liquidity_shield_usd: Decimal::from_str("0").unwrap(),
+            min_liquidity_spear_usd: Decimal::from_str("0").unwrap(),
+            honeypot_detection_enabled: false,
+            holder_concentration_check_enabled: false,
+            max_holder_concentration_pct: 100.0,
+        },
+        cache,
+        fetcher,
+    ))
+}
+
+#[tokio::test]
+async fn test_pre_graduation_curve_states() {
+    let (db, _tmp) = create_test_db().await;
+    let cache = Arc::new(PriceCache::new().unwrap());
+    let cfg = Arc::new(ProfitManagementConfig {
+        pre_graduation_exit_enabled: true,
+        pre_graduation_exit_threshold: Decimal::from_str("0.85").unwrap(),
+        ..ProfitManagementConfig::default()
+    });
+
+    // Already-graduated curve → None (no dump zone left).
+    let mgr = StopLossManager::new(db.clone(), cfg.clone(), cache.clone());
+    mgr.set_token_parser(curve_parser(&spawn_rpc_curve(85_000_000_000, true).await))
+        .await;
+    let action = mgr
+        .check_pre_graduation("pg-g", "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R")
+        .await;
+    assert_eq!(action, StopLossAction::None);
+
+    // Late-curve dump zone (94% complete, not graduated) → Exit.
+    let mgr = StopLossManager::new(db.clone(), cfg.clone(), cache.clone());
+    mgr.set_token_parser(curve_parser(&spawn_rpc_curve(80_000_000_000, false).await))
+        .await;
+    let action = mgr
+        .check_pre_graduation("pg-l", "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R")
+        .await;
+    assert_eq!(action, StopLossAction::Exit, "late-curve dump zone exits");
+
+    // Early curve (35% complete) → None.
+    let mgr = StopLossManager::new(db.clone(), cfg, cache.clone());
+    mgr.set_token_parser(curve_parser(&spawn_rpc_curve(30_000_000_000, false).await))
+        .await;
+    let action = mgr
+        .check_pre_graduation("pg-e", "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R")
+        .await;
+    assert_eq!(action, StopLossAction::None);
 }

@@ -9,8 +9,8 @@
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Router};
 use prometheus::{
-    Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, Opts, Registry,
-    TextEncoder,
+    Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    Opts, Registry, TextEncoder,
 };
 use std::sync::Arc;
 
@@ -194,10 +194,7 @@ impl ExecutionLockMetrics {
                 "chimera_execution_lock_acquire_disabled",
                 "Disabled lock acquisitions",
             ),
-            released: Self::counter(
-                "chimera_execution_lock_released",
-                "Lock releases",
-            ),
+            released: Self::counter("chimera_execution_lock_released", "Lock releases"),
             force_released: Self::counter(
                 "chimera_execution_lock_force_released",
                 "Force lock releases",
@@ -507,7 +504,9 @@ impl MetricsState {
                 "chimera_db_query_latency_ms",
                 "Database query execution latency in milliseconds",
             )
-            .buckets(vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]),
+            .buckets(vec![
+                1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0,
+            ]),
         )
         .map_err(|e| format!("Failed to create db_query_latency histogram: {}", e))?;
         registry
@@ -653,7 +652,11 @@ impl MetricsState {
         }
 
         // Average from the sample sum/count (percentiles come from the buckets above)
-        let avg_ms = if sample_count > 0 { sum_ms / sample_count as f64 } else { 0.0 };
+        let avg_ms = if sample_count > 0 {
+            sum_ms / sample_count as f64
+        } else {
+            0.0
+        };
 
         QueryLatencyStats {
             avg_ms,
@@ -713,8 +716,9 @@ pub fn metrics_router() -> Router<Arc<MetricsState>> {
 
 /// Bucket bounds (ms) for the RPC latency histogram. RPC calls range from a few
 /// milliseconds (blockhash) to seconds (getTransaction), so bounds span 1ms..10s.
-const RPC_LATENCY_BUCKETS_MS: &[f64] =
-    &[1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0];
+const RPC_LATENCY_BUCKETS_MS: &[f64] = &[
+    1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0,
+];
 
 // Process-global metrics so RPC call sites can observe latency without holding a
 // MetricsState handle. MetricsState registers clones of these for /metrics scraping.
@@ -775,7 +779,9 @@ where
         .with_label_values(&[endpoint, method])
         .observe(elapsed_ms);
     if result.is_err() {
-        rpc_errors_metric().with_label_values(&[endpoint, method]).inc();
+        rpc_errors_metric()
+            .with_label_values(&[endpoint, method])
+            .inc();
     }
     result
 }
@@ -818,8 +824,8 @@ pub fn quantile_from_buckets(bounds: &[f64], cum: &[u64], total_count: u64, q: f
             if bucket_count == 0 {
                 return *upper;
             }
-            return prev_bound + (*upper - prev_bound) * (target - prev_count as f64)
-                / bucket_count as f64;
+            return prev_bound
+                + (*upper - prev_bound) * (target - prev_count as f64) / bucket_count as f64;
         }
         prev_count = cum_i;
         if upper.is_finite() {
@@ -895,7 +901,8 @@ mod tests {
 
         let ok: Result<u32, String> = timed_rpc(endpoint, method, async { Ok(42) }).await;
         assert_eq!(ok.unwrap(), 42);
-        let err: Result<u32, String> = timed_rpc(endpoint, method, async { Err("boom".into()) }).await;
+        let err: Result<u32, String> =
+            timed_rpc(endpoint, method, async { Err("boom".into()) }).await;
         assert!(err.is_err());
 
         let mut latency_count = 0u64;
@@ -926,5 +933,187 @@ mod tests {
         m.get_label()
             .iter()
             .any(|l| l.name() == name && l.value() == value)
+    }
+
+    // ==========================================================================
+    // ADDITIONAL COVERAGE
+    // ==========================================================================
+
+    #[test]
+    fn test_rent_scavenger_metrics() {
+        let registry = Registry::new();
+        let m = RentScavengerMetrics::new(&registry);
+        m.increment_rent_reclaimed(1_000_000);
+        m.increment_accounts_closed(3);
+        m.increment_errors();
+        m.record_run_duration(std::time::Duration::from_millis(250));
+
+        // Registered → values are scraped.
+        let families = registry.gather();
+        let fam = families
+            .iter()
+            .find(|f| f.name() == "chimera_rent_scavenger_reclaimed_lamports")
+            .expect("metric registered");
+        assert_eq!(fam.get_metric()[0].get_counter().value(), 1_000_000.0);
+
+        // A second registration of the same names fails (name collision) and
+        // must be logged, not panicked.
+        let _dup = RentScavengerMetrics::new(&registry);
+    }
+
+    #[test]
+    fn test_execution_lock_metrics() {
+        let registry = Registry::new();
+        let m = ExecutionLockMetrics::new(&registry);
+        m.increment_lock_acquire_success();
+        m.increment_lock_acquire_failed();
+        m.increment_lock_acquire_disabled();
+        m.increment_lock_released();
+        m.increment_lock_force_released();
+        m.increment_lock_expired_reclaimed();
+        m.increment_lock_expired_cleaned();
+        m.record_lock_held_duration(std::time::Duration::from_secs(2));
+
+        let families = registry.gather();
+        let fam = families
+            .iter()
+            .find(|f| f.name() == "chimera_execution_lock_acquire_success")
+            .expect("metric registered");
+        assert_eq!(fam.get_metric()[0].get_counter().value(), 1.0);
+        let fam = families
+            .iter()
+            .find(|f| f.name() == "chimera_execution_lock_held_duration_seconds")
+            .expect("histogram registered");
+        assert_eq!(fam.get_metric()[0].get_histogram().get_sample_count(), 1);
+
+        // Duplicate registration (name collision) must be tolerated.
+        let _dup = ExecutionLockMetrics::new(&registry);
+    }
+
+    #[test]
+    fn test_db_query_stats_empty() {
+        let state = MetricsState::new().expect("metrics");
+        let stats = state.get_db_query_stats();
+        assert_eq!(stats.total_queries_count, 0);
+        assert_eq!(stats.slow_queries_count, 0);
+        assert_eq!(stats.avg_ms, 0.0);
+        assert_eq!(stats.p95_ms, 0.0);
+        assert_eq!(stats.p99_ms, 0.0);
+    }
+
+    #[test]
+    fn test_db_query_stats_with_observations() {
+        let state = MetricsState::new().expect("metrics");
+        // 8 fast queries (1ms), 2 slow (200ms, 950ms).
+        for _ in 0..8 {
+            state.db_query_latency.observe(1.0);
+        }
+        state.db_query_latency.observe(200.0);
+        state.db_query_latency.observe(950.0);
+
+        let stats = state.get_db_query_stats();
+        assert_eq!(stats.total_queries_count, 10);
+        assert_eq!(stats.slow_queries_count, 2, "queries > 100ms are slow");
+        assert!((stats.avg_ms - 115.8).abs() < 1e-9);
+        // p95: target 9.5 → bucket [500,1000) cumulative 10, prev 9 →
+        // 500 + 500*(9.5-9)/1 = 750
+        assert!((stats.p95_ms - 750.0).abs() < 1e-6, "p95={}", stats.p95_ms);
+        // p99: target 9.9 → 500 + 500*(0.9) = 950
+        assert!((stats.p99_ms - 950.0).abs() < 1e-6, "p99={}", stats.p99_ms);
+    }
+
+    #[test]
+    fn test_metrics_router_serves_metrics() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let state = Arc::new(MetricsState::new().expect("metrics"));
+        state.queue_depth.set(7);
+        state.total_trades.set(3);
+
+        let app = metrics_router().with_state(state);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let response = rt.block_on(
+            app.oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        );
+        let response = response.expect("metrics endpoint responds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = rt.block_on(axum::body::to_bytes(response.into_body(), usize::MAX));
+        let body = String::from_utf8(bytes.unwrap().to_vec()).unwrap();
+        assert!(body.contains("chimera_queue_depth 7"), "body: {body}");
+        assert!(body.contains("chimera_total_trades 3"), "body: {body}");
+    }
+
+    #[test]
+    fn test_quantile_bucket_edge_cases() {
+        // Empty buckets with a nonzero total: first bucket cumulative 0 with
+        // target 0 → zero-count bucket returns the upper bound.
+        let bounds = vec![10.0, 20.0];
+        let cum = vec![0u64, 5];
+        assert_eq!(quantile_from_buckets(&bounds, &cum, 5, 0.0), 10.0);
+
+        // Zero total with non-empty bounds → early return 0.0.
+        assert_eq!(quantile_from_buckets(&bounds, &cum, 0, 0.5), 0.0);
+
+        // Target beyond every finite bucket (only +Inf) → previous finite bound.
+        let bounds = vec![f64::INFINITY];
+        let cum = vec![5u64];
+        assert_eq!(quantile_from_buckets(&bounds, &cum, 5, 1.0), 0.0);
+
+        // +Inf with zero bucket count: returns prev_bound (0.0 since no finite
+        // bounds precede it).
+        let bounds = vec![f64::INFINITY];
+        let cum = vec![0u64];
+        assert_eq!(quantile_from_buckets(&bounds, &cum, 1, 0.5), 0.0);
+    }
+
+    #[test]
+    fn test_metrics_global_metrics_idempotent() {
+        // The process-global OnceLock metrics are shared: repeated calls return
+        // the same underlying collector.
+        let a = rpc_latency_metric();
+        let b = rpc_latency_metric();
+        a.with_label_values(&["e", "m"]).observe(1.0);
+        // Observing through either handle is visible through the other.
+        assert_eq!(b.with_label_values(&["e", "m"]).get_sample_count(), 1);
+        let _c = rpc_errors_metric();
+        let _d = rpc_errors_metric();
+    }
+
+    #[test]
+    fn test_position_update_serialization_paths() {
+        use crate::handlers::PositionUpdateData;
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+        let with_pnl = crate::handlers::WsEvent::PositionUpdate(PositionUpdateData {
+            trade_uuid: "t1".to_string(),
+            state: "OPEN".to_string(),
+            unrealized_pnl_percent: Some(Decimal::from_str("12.50").unwrap()),
+        });
+        let json = serde_json::to_string(&with_pnl).unwrap();
+        assert!(
+            json.contains("\"12.50\""),
+            "decimal serialized as string: {json}"
+        );
+
+        let without_pnl = crate::handlers::WsEvent::PositionUpdate(PositionUpdateData {
+            trade_uuid: "t2".to_string(),
+            state: "CLOSED".to_string(),
+            unrealized_pnl_percent: None,
+        });
+        let json = serde_json::to_string(&without_pnl).unwrap();
+        assert!(
+            !json.contains("unrealized_pnl_percent"),
+            "None field omitted: {json}"
+        );
     }
 }

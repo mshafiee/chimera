@@ -38,8 +38,15 @@ impl ToxicFlowDetector {
         }
     }
 
-    pub async fn register_wallet_promotion(&self, wallet: String, selection_roi: f64) -> AppResult<()> {
-        debug!("Registering wallet promotion: {} with ROI: {}", wallet, selection_roi);
+    pub async fn register_wallet_promotion(
+        &self,
+        wallet: String,
+        selection_roi: f64,
+    ) -> AppResult<()> {
+        debug!(
+            "Registering wallet promotion: {} with ROI: {}",
+            wallet, selection_roi
+        );
 
         let mut wallets = self.wallets.write().await;
         // Preserve existing state on re-promotion: refresh ROI baselines but
@@ -72,15 +79,15 @@ impl ToxicFlowDetector {
         current_roi: f64,
     ) -> AppResult<Option<ToxicReason>> {
         let mut wallets = self.wallets.write().await;
-        
+
         if let Some(w) = wallets.get_mut(&wallet) {
             w.total_entries += 1;
             w.post_promotion_roi = current_roi;
-            
+
             if is_local_top {
                 w.local_top_entries += 1;
             }
-            
+
             // Check toxic conditions
             if self.should_flag_as_toxic(w) {
                 let reason = self.determine_toxic_reason(w);
@@ -109,7 +116,7 @@ impl ToxicFlowDetector {
                 );
             }
         }
-        
+
         Ok(None)
     }
 
@@ -119,26 +126,26 @@ impl ToxicFlowDetector {
         if roi_deterioration > (self.config.toxic_threshold_percent as f64) / 100.0 {
             return true;
         }
-        
+
         // Check local-top squeeze (multiple entries at local top)
         if wallet.local_top_entries >= 3 && wallet.local_top_entries * 2 >= wallet.total_entries {
             return true;
         }
-        
+
         false
     }
 
     fn determine_toxic_reason(&self, wallet: &ToxicWallet) -> ToxicReason {
         let roi_deterioration = wallet.selection_roi - wallet.post_promotion_roi;
-        
+
         if roi_deterioration > (self.config.toxic_threshold_percent as f64) / 100.0 {
             return ToxicReason::RoiDrop;
         }
-        
+
         if wallet.local_top_entries >= 3 && wallet.local_top_entries * 2 >= wallet.total_entries {
             return ToxicReason::LocalTopSqueeze;
         }
-        
+
         ToxicReason::RoiDrop
     }
 
@@ -153,10 +160,7 @@ impl ToxicFlowDetector {
 
     pub async fn is_wallet_toxic(&self, wallet: &str) -> bool {
         let wallets = self.wallets.read().await;
-        wallets
-            .get(wallet)
-            .map(|w| w.is_toxic)
-            .unwrap_or(false)
+        wallets.get(wallet).map(|w| w.is_toxic).unwrap_or(false)
     }
 
     pub async fn get_toxic_rate(&self) -> f64 {
@@ -165,12 +169,16 @@ impl ToxicFlowDetector {
         if total == 0 {
             return 0.0;
         }
-        
+
         let toxic = wallets.values().filter(|w| w.is_toxic).count();
         toxic as f64 / total as f64
     }
 
-    pub async fn persist_to_database(&self, pool: &sqlx::Pool<sqlx::Postgres>, run_id: &str) -> AppResult<()> {
+    pub async fn persist_to_database(
+        &self,
+        pool: &sqlx::Pool<sqlx::Postgres>,
+        run_id: &str,
+    ) -> AppResult<()> {
         // Snapshot under a short read lock, then perform the DB I/O without
         // holding the write guard — otherwise every detector operation blocks
         // for the whole batch of network round-trips.
@@ -203,7 +211,7 @@ impl ToxicFlowDetector {
                     detected_at = excluded.detected_at,
                     run_id = excluded.run_id,
                     updated_at = CURRENT_TIMESTAMP
-                "#
+                "#,
             )
             .bind(&wallet.address)
             .bind(wallet.selection_roi)
@@ -218,7 +226,10 @@ impl ToxicFlowDetector {
             .await?;
         }
 
-        info!("Persisted {} toxic wallet records to database", wallets.len());
+        info!(
+            "Persisted {} toxic wallet records to database",
+            wallets.len()
+        );
         Ok(())
     }
 
@@ -272,10 +283,7 @@ impl ToxicFlowDetector {
                 continue;
             }
 
-            wallets.insert(
-                row.wallet_address.clone(),
-                candidate,
-            );
+            wallets.insert(row.wallet_address.clone(), candidate);
         }
 
         if count > 0 {
@@ -287,12 +295,12 @@ impl ToxicFlowDetector {
 
     pub async fn get_statistics(&self) -> ToxicStatistics {
         let wallets = self.wallets.read().await;
-        
+
         let total_wallets = wallets.len();
         let toxic_wallets = wallets.values().filter(|w| w.is_toxic).count();
         let total_entries: u32 = wallets.values().map(|w| w.total_entries).sum();
         let local_top_entries: u32 = wallets.values().map(|w| w.local_top_entries).sum();
-        
+
         ToxicStatistics {
             total_wallets,
             toxic_wallets,
@@ -358,5 +366,436 @@ impl std::fmt::Display for ToxicStatistics {
             self.local_top_entries,
             self.total_entries
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ExperimentConfig;
+
+    fn config(threshold_percent: u32) -> ExperimentConfig {
+        ExperimentConfig {
+            toxic_threshold_percent: threshold_percent,
+            ..ExperimentConfig::default()
+        }
+    }
+
+    // ==========================================================================
+    // PROMOTION REGISTRATION
+    // ==========================================================================
+
+    #[tokio::test]
+    async fn register_new_wallet_creates_baseline() {
+        let detector = ToxicFlowDetector::new(config(30));
+        detector
+            .register_wallet_promotion("wallet-a".to_string(), 0.5)
+            .await
+            .unwrap();
+
+        assert!(!detector.is_wallet_toxic("wallet-a").await);
+        let stats = detector.get_statistics().await;
+        assert_eq!(stats.total_wallets, 1);
+        assert_eq!(stats.total_entries, 0);
+        assert_eq!(stats.local_top_entries, 0);
+        assert_eq!(stats.toxic_wallets, 0);
+        assert_eq!(stats.toxic_rate, 0.0);
+    }
+
+    #[tokio::test]
+    async fn re_promotion_updates_roi_preserves_counters() {
+        let detector = ToxicFlowDetector::new(config(30));
+        detector
+            .register_wallet_promotion("wallet-a".to_string(), 0.5)
+            .await
+            .unwrap();
+        // Accumulate some entries first.
+        detector
+            .record_entry("wallet-a".to_string(), false, 0.4)
+            .await
+            .unwrap();
+        detector
+            .record_entry("wallet-a".to_string(), true, 0.45)
+            .await
+            .unwrap();
+
+        // Re-promotion refreshes both ROI baselines but must NOT clear counters.
+        detector
+            .register_wallet_promotion("wallet-a".to_string(), 0.9)
+            .await
+            .unwrap();
+
+        let stats = detector.get_statistics().await;
+        assert_eq!(stats.total_entries, 2);
+        assert_eq!(stats.local_top_entries, 1);
+        assert_eq!(stats.toxic_rate, 0.0);
+
+        // A flag set before re-promotion must survive it.
+        detector
+            .register_wallet_promotion("wallet-b".to_string(), 0.5)
+            .await
+            .unwrap();
+        detector
+            .record_entry("wallet-b".to_string(), false, 0.0)
+            .await
+            .unwrap();
+        assert!(detector.is_wallet_toxic("wallet-b").await);
+        detector
+            .register_wallet_promotion("wallet-b".to_string(), 0.1)
+            .await
+            .unwrap();
+        assert!(
+            detector.is_wallet_toxic("wallet-b").await,
+            "re-promotion must not clear an existing toxic flag"
+        );
+    }
+
+    // ==========================================================================
+    // TOXIC DETECTION
+    // ==========================================================================
+
+    #[tokio::test]
+    async fn roi_drop_flags_wallet_with_reason() {
+        let detector = ToxicFlowDetector::new(config(30)); // 30% threshold
+        detector
+            .register_wallet_promotion("wallet-a".to_string(), 0.50)
+            .await
+            .unwrap();
+
+        // Deterioration 0.50 - 0.10 = 0.40 > 0.30 → toxic.
+        let reason = detector
+            .record_entry("wallet-a".to_string(), false, 0.10)
+            .await
+            .unwrap();
+        assert!(matches!(reason, Some(ToxicReason::RoiDrop)));
+        assert!(detector.is_wallet_toxic("wallet-a").await);
+
+        let wallets = detector.get_toxic_wallets().await;
+        assert_eq!(wallets, vec!["wallet-a".to_string()]);
+        assert_eq!(detector.get_toxic_rate().await, 1.0);
+    }
+
+    #[tokio::test]
+    async fn local_top_squeeze_flags_wallet() {
+        let detector = ToxicFlowDetector::new(config(30));
+        detector
+            .register_wallet_promotion("wallet-squeeze".to_string(), 0.5)
+            .await
+            .unwrap();
+
+        // 3 entries, all at local top: 3 >= 3 and 3*2 >= 3 → squeeze.
+        for i in 0..3 {
+            let reason = detector
+                .record_entry("wallet-squeeze".to_string(), true, 0.4)
+                .await
+                .unwrap();
+            if i == 2 {
+                assert!(matches!(reason, Some(ToxicReason::LocalTopSqueeze)));
+            } else {
+                assert!(reason.is_none());
+            }
+        }
+        assert!(detector.is_wallet_toxic("wallet-squeeze").await);
+    }
+
+    #[tokio::test]
+    async fn no_flag_on_mild_deterioration() {
+        let detector = ToxicFlowDetector::new(config(30));
+        detector
+            .register_wallet_promotion("wallet-a".to_string(), 0.50)
+            .await
+            .unwrap();
+        // Deterioration 0.10 < 0.30 and only 2 local-top of 4 entries (2*2 >= 4? no).
+        let reason = detector
+            .record_entry("wallet-a".to_string(), true, 0.40)
+            .await
+            .unwrap();
+        assert!(reason.is_none());
+        let reason = detector
+            .record_entry("wallet-a".to_string(), true, 0.40)
+            .await
+            .unwrap();
+        assert!(reason.is_none());
+        assert!(!detector.is_wallet_toxic("wallet-a").await);
+    }
+
+    #[tokio::test]
+    async fn already_toxic_does_not_re_flag() {
+        let detector = ToxicFlowDetector::new(config(30));
+        detector
+            .register_wallet_promotion("wallet-a".to_string(), 0.5)
+            .await
+            .unwrap();
+        detector
+            .record_entry("wallet-a".to_string(), false, 0.05)
+            .await
+            .unwrap();
+        assert!(detector.is_wallet_toxic("wallet-a").await);
+
+        // Another bad entry while already toxic: no new reason is returned.
+        let reason = detector
+            .record_entry("wallet-a".to_string(), false, 0.0)
+            .await
+            .unwrap();
+        assert!(reason.is_none());
+        assert!(detector.is_wallet_toxic("wallet-a").await);
+    }
+
+    #[tokio::test]
+    async fn wallet_recovers_after_roi_improves() {
+        let detector = ToxicFlowDetector::new(config(30));
+        detector
+            .register_wallet_promotion("wallet-a".to_string(), 0.5)
+            .await
+            .unwrap();
+        detector
+            .record_entry("wallet-a".to_string(), false, 0.05)
+            .await
+            .unwrap();
+        assert!(detector.is_wallet_toxic("wallet-a").await);
+
+        // ROI recovers above the threshold → flag cleared.
+        let reason = detector
+            .record_entry("wallet-a".to_string(), false, 0.45)
+            .await
+            .unwrap();
+        assert!(reason.is_none());
+        assert!(!detector.is_wallet_toxic("wallet-a").await);
+        assert!(detector.get_toxic_wallets().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn record_entry_unknown_wallet_is_noop() {
+        let detector = ToxicFlowDetector::new(config(30));
+        let reason = detector
+            .record_entry("nobody".to_string(), true, 0.0)
+            .await
+            .unwrap();
+        assert!(reason.is_none());
+        assert_eq!(detector.get_statistics().await.total_wallets, 0);
+        assert!(!detector.is_wallet_toxic("nobody").await);
+    }
+
+    #[tokio::test]
+    async fn toxic_rate_empty_and_mixed() {
+        let detector = ToxicFlowDetector::new(config(30));
+        assert_eq!(detector.get_toxic_rate().await, 0.0);
+
+        detector
+            .register_wallet_promotion("w1".to_string(), 0.5)
+            .await
+            .unwrap();
+        detector
+            .register_wallet_promotion("w2".to_string(), 0.5)
+            .await
+            .unwrap();
+        detector
+            .record_entry("w1".to_string(), false, 0.0)
+            .await
+            .unwrap();
+        assert!((detector.get_toxic_rate().await - 0.5).abs() < 1e-9);
+    }
+
+    // ==========================================================================
+    // STATISTICS + DISPLAY
+    // ==========================================================================
+
+    #[tokio::test]
+    async fn statistics_aggregate_counts() {
+        let detector = ToxicFlowDetector::new(config(30));
+        detector
+            .register_wallet_promotion("w1".to_string(), 0.5)
+            .await
+            .unwrap();
+        detector
+            .register_wallet_promotion("w2".to_string(), 0.5)
+            .await
+            .unwrap();
+        detector
+            .record_entry("w1".to_string(), true, 0.0)
+            .await
+            .unwrap();
+        detector
+            .record_entry("w2".to_string(), false, 0.4)
+            .await
+            .unwrap();
+
+        let stats = detector.get_statistics().await;
+        assert_eq!(stats.total_wallets, 2);
+        assert_eq!(stats.toxic_wallets, 1);
+        assert_eq!(stats.total_entries, 2);
+        assert_eq!(stats.local_top_entries, 1);
+        assert!((stats.toxic_rate - 0.5).abs() < 1e-9);
+
+        let text = stats.to_string();
+        assert!(text.contains("1/2 wallets toxic"));
+        assert!(text.contains("1/2 local-top entries"));
+    }
+
+    #[tokio::test]
+    async fn empty_statistics_display() {
+        let detector = ToxicFlowDetector::new(config(30));
+        let text = detector.get_statistics().await.to_string();
+        assert!(text.contains("0/0 wallets toxic"));
+    }
+
+    // ==========================================================================
+    // DATABASE ROUND-TRIP (requires TEST_DATABASE_URL)
+    // ==========================================================================
+
+    async fn test_pool() -> Option<sqlx::Pool<sqlx::Postgres>> {
+        let url = std::env::var("TEST_DATABASE_URL").ok()?;
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .ok()
+    }
+
+    /// Collision-resistant unique suffix for rows in the shared test database.
+    fn unique_id(prefix: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("{}-{}-{}", prefix, std::process::id(), nanos)
+    }
+
+    #[tokio::test]
+    async fn persist_and_load_round_trip() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("TEST_DATABASE_URL not set — skipping DB round-trip test");
+            return;
+        };
+
+        let run_id = unique_id("toxic-test");
+        let addr_a = unique_id("toxic-a");
+        let addr_b = unique_id("toxic-b");
+        sqlx::query("DELETE FROM toxic_wallets WHERE run_id = $1 OR wallet_address = ANY($2)")
+            .bind(&run_id)
+            .bind(&[addr_a.clone(), addr_b.clone()])
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let detector = ToxicFlowDetector::new(config(30));
+        // RoiDrop wallet.
+        detector
+            .register_wallet_promotion(addr_a.clone(), 0.6)
+            .await
+            .unwrap();
+        detector
+            .record_entry(addr_a.clone(), false, 0.1)
+            .await
+            .unwrap();
+        // LocalTopSqueeze wallet.
+        detector
+            .register_wallet_promotion(addr_b.clone(), 0.5)
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            detector
+                .record_entry(addr_b.clone(), true, 0.4)
+                .await
+                .unwrap();
+        }
+        // Healthy wallet (must also be persisted, non-toxic).
+        detector
+            .register_wallet_promotion("healthy".to_string(), 0.5)
+            .await
+            .unwrap();
+
+        detector.persist_to_database(&pool, &run_id).await.unwrap();
+
+        // Reload from DB in a fresh detector: only the toxic wallets load.
+        let reloaded = ToxicFlowDetector::new(config(30));
+        reloaded.load_from_database(&pool).await.unwrap();
+        assert!(reloaded.is_wallet_toxic(&addr_a).await);
+        assert!(reloaded.is_wallet_toxic(&addr_b).await);
+        assert!(!reloaded.is_wallet_toxic("healthy").await);
+
+        // Row-level verification: reasons were serialized correctly.
+        let rows: Vec<(String, Option<String>, bool)> = sqlx::query_as(
+            "SELECT wallet_address, toxic_reason, is_toxic FROM toxic_wallets \
+             WHERE wallet_address = ANY($1) ORDER BY wallet_address",
+        )
+        .bind(&[addr_a.clone(), addr_b.clone()])
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        for (addr, reason, toxic) in rows {
+            assert!(toxic);
+            if addr == addr_a {
+                assert_eq!(reason.as_deref(), Some("roi_drop"));
+            } else {
+                assert_eq!(reason.as_deref(), Some("local_top_squeeze"));
+            }
+        }
+
+        sqlx::query("DELETE FROM toxic_wallets WHERE run_id = $1")
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn load_skips_stale_or_unknown_reason_rows() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("TEST_DATABASE_URL not set — skipping DB test");
+            return;
+        };
+
+        let run_id = unique_id("toxic-stale");
+        let stale_addr = unique_id("toxic-stale");
+        let unknown_addr = unique_id("toxic-unknown");
+        // Clean rows that may exist from prior runs of this test.
+        sqlx::query("DELETE FROM toxic_wallets WHERE run_id = $1 OR wallet_address = ANY($2)")
+            .bind(&run_id)
+            .bind(&[stale_addr.clone(), unknown_addr.clone()])
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Stale row: previously toxic but no longer qualifies (ROI recovered).
+        sqlx::query(
+            "INSERT INTO toxic_wallets \
+             (wallet_address, selection_roi, post_promotion_roi, local_top_entries, \
+              total_entries, is_toxic, toxic_reason, detected_at, run_id) \
+             VALUES ($1, 0.5, 0.5, 1, 3, TRUE, 'roi_drop', NOW(), $2)",
+        )
+        .bind(&stale_addr)
+        .bind(&run_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Row with an unknown reason string → defaults to RoiDrop, still toxic.
+        sqlx::query(
+            "INSERT INTO toxic_wallets \
+             (wallet_address, selection_roi, post_promotion_roi, local_top_entries, \
+              total_entries, is_toxic, toxic_reason, detected_at, run_id) \
+             VALUES ($1, 0.6, 0.0, 0, 1, TRUE, 'some_future_reason', NOW(), $2)",
+        )
+        .bind(&unknown_addr)
+        .bind(&run_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let detector = ToxicFlowDetector::new(config(30));
+        detector.load_from_database(&pool).await.unwrap();
+
+        // The stale wallet must NOT be resurrected.
+        assert!(!detector.is_wallet_toxic(&stale_addr).await);
+        // The unknown-reason wallet qualifies (deterioration 0.6 > 0.3) and loads.
+        assert!(detector.is_wallet_toxic(&unknown_addr).await);
+
+        sqlx::query("DELETE FROM toxic_wallets WHERE run_id = $1")
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }
