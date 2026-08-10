@@ -78,3 +78,26 @@ mod helius_rpc_verify_tests;
 
 #[path = "unit/webhook_restoration_tests.rs"]
 mod webhook_restoration_tests;
+
+// ── HTTP handler test suites (real router + real test DB) ──────────────────
+
+#[path = "unit/handlers_api_tests.rs"]
+mod handlers_api_tests;
+
+#[path = "unit/handlers_risk_tests.rs"]
+mod handlers_risk_tests;
+
+#[path = "unit/handlers_scout_tests.rs"]
+mod handlers_scout_tests;
+
+#[path = "unit/handlers_signals_tests.rs"]
+mod handlers_signals_tests;
+
+#[path = "unit/handlers_operations_tests.rs"]
+mod handlers_operations_tests;
+
+#[path = "unit/handlers_webhook_lifecycle_tests.rs"]
+mod handlers_webhook_lifecycle_tests;
+
+#[path = "unit/handlers_monitoring_tests.rs"]
+mod handlers_monitoring_tests;
