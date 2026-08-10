@@ -4,7 +4,7 @@
 
 use crate::monitoring::rate_limiter::RateLimiter;
 use crate::monitoring::rate_limiter::RequestPriority;
-use chimera_core::retry::{extract_status, retry_with_backoff};
+use chimera_core::retry::{extract_status, retry_with_backoff, HttpStatusError};
 use anyhow::{anyhow, Context, Result};
 use parking_lot::RwLock;
 use reqwest::Client;
@@ -480,11 +480,17 @@ impl HeliusClient {
                             error = %error_text,
                             "Failed to fetch token creation time"
                         );
-                        // Return error with status so retry logic can determine if retryable
-                        return Err(anyhow!("HTTP error: {}", status).context(format!(
-                            "Failed to fetch token creation time: {}",
-                            error_text
-                        )));
+                        // Return an error carrying the HTTP status so the
+                        // retry layer's `extract_status` can classify it: 404/422
+                        // are non-retryable (token not found/invalid) and 5xx are
+                        // retryable. An opaque anyhow error has no status and would
+                        // silently bypass both the retry AND the non-retryable
+                        // short-circuit below.
+                        return Err(anyhow::Error::new(HttpStatusError::new(status))
+                            .context(format!(
+                                "Failed to fetch token creation time: {}",
+                                error_text
+                            )));
                     }
 
                     let transactions: Vec<serde_json::Value> = response
@@ -998,6 +1004,141 @@ pub async fn validate_webhook_reachability(webhook_url: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+    use std::thread;
+
+    /// Serialize env-var-dependent tests (HELIUS_API_BASE_URL /
+    /// HELIUS_RPC_BASE_URL are process-global).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Tiny synchronous HTTP/1.1 mock server for Helius API/RPC endpoints.
+    /// The handler receives (method, path) and returns (status, body).
+    struct MockServer {
+        url: String,
+        stop: Arc<AtomicBool>,
+    }
+
+    impl MockServer {
+        fn spawn<H>(handler: H) -> Self
+        where
+            H: Fn(&str, &str) -> (u16, String) + Send + Sync + 'static,
+        {
+            let handler = Arc::new(handler);
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
+            let addr = listener.local_addr().expect("local addr");
+            let stop = Arc::new(AtomicBool::new(false));
+            let stop_clone = Arc::clone(&stop);
+
+            thread::spawn(move || {
+                listener.set_nonblocking(true).ok();
+                while !stop_clone.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            let handler = Arc::clone(&handler);
+                            thread::spawn(move || handle_conn(stream, handler));
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            Self {
+                url: format!("http://{addr}"),
+                stop,
+            }
+        }
+
+        async fn with_env<F, Fut, T>(&self, key: &str, f: F) -> T
+        where
+            F: FnOnce() -> Fut,
+            Fut: std::future::Future<Output = T>,
+        {
+            // Poison-tolerant: a test assertion failure inside the closure
+            // must not take down every later env-dependent test.
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            std::env::set_var(key, &self.url);
+            let result = f().await;
+            std::env::remove_var(key);
+            result
+        }
+    }
+
+    impl Drop for MockServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn handle_conn<H>(mut stream: TcpStream, handler: Arc<H>)
+    where
+        H: Fn(&str, &str) -> (u16, String) + Send + Sync + 'static,
+    {
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+        let mut request_line = String::new();
+        if reader.read_line(&mut request_line).is_err() {
+            return;
+        }
+        let parts: Vec<&str> = request_line.split_whitespace().collect();
+        if parts.len() < 2 {
+            return;
+        }
+        let method = parts[0].to_string();
+        // Strip query string: handlers match on the path only.
+        let path = parts[1].split('?').next().unwrap_or("").to_string();
+
+        // Read headers
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() || line == "\r\n" || line == "\n" {
+                break;
+            }
+            let lower = line.to_ascii_lowercase();
+            if let Some(v) = lower.strip_prefix("content-length:") {
+                content_length = v.trim().parse().unwrap_or(0);
+            }
+        }
+        // Drain body
+        if content_length > 0 {
+            let mut buf = vec![0u8; content_length];
+            let _ = reader.read_exact(&mut buf);
+        }
+
+        let (status, body) = handler(&method, &path);
+        let reason = if status == 200 { "OK" } else { "Error" };
+        let response = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
+    }
+
+    fn test_client_with_cache(
+        cache: Arc<RwLock<HashMap<String, crate::token::TokenMetadata>>>,
+    ) -> HeliusClient {
+        HeliusClient::new("test-key".to_string(), cache).expect("client")
+    }
+
+    fn test_client() -> HeliusClient {
+        test_client_with_cache(Arc::new(RwLock::new(HashMap::new())))
+    }
+
+    /// Mint account transaction list (with a `timestamp` field).
+    fn tx_json(ts: i64, signature: &str) -> serde_json::Value {
+        serde_json::json!({"timestamp": ts, "signature": signature})
+    }
+
+    // =============================================================================
+    // Payload serde
+    // =============================================================================
 
     #[test]
     fn test_webhook_payload_deserialize() {
@@ -1014,5 +1155,801 @@ mod tests {
 
         let payload: Result<HeliusWebhookPayload, _> = serde_json::from_str(json);
         assert!(payload.is_ok());
+    }
+
+    #[test]
+    fn test_webhook_payload_full_roundtrip() {
+        let json = r#"{
+            "accountData": [{
+                "account": "acct1",
+                "nativeBalanceChange": -1000000000,
+                "tokenBalanceChanges": [{
+                    "mint": "mint1",
+                    "rawTokenAmount": {"tokenAmount": "1000", "decimals": 9},
+                    "tokenAccount": "ta1",
+                    "userAccount": "u1"
+                }]
+            }],
+            "nativeTransfers": [{
+                "amount": 500000000,
+                "fromUserAccount": "f1",
+                "toUserAccount": "t1"
+            }],
+            "signature": "sig1",
+            "slot": 10,
+            "timestamp": 20,
+            "transactionError": {"error": "fail"},
+            "type": "SWAP",
+            "events": {
+                "swap": {
+                    "swapper": "swapper1",
+                    "nativeInput": {"account": "a", "amount": "100"},
+                    "native_output": {"account": "b", "amount": "200"},
+                    "tokenInputs": [{"userAccount": "u", "mint": "m", "rawTokenAmount": {"tokenAmount": "1"}}],
+                    "token_outputs": [{"user_account": "u2", "mint": "m2", "raw_token_amount": {"tokenAmount": "2"}}]
+                }
+            }
+        }"#;
+        let payload: HeliusWebhookPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.transaction_type, "SWAP");
+        assert!(payload.transaction_error.is_some());
+        let swap = payload.events.swap.clone().expect("swap event");
+        assert_eq!(swap.swapper.as_deref(), Some("swapper1"));
+        assert_eq!(swap.native_input.as_ref().unwrap().amount, "100");
+        assert_eq!(swap.native_output.as_ref().unwrap().amount, "200");
+        assert_eq!(swap.token_inputs.len(), 1);
+        assert_eq!(swap.token_outputs[0].user_account, "u2");
+        assert_eq!(
+            swap.token_outputs[0].raw_token_amount.as_ref().unwrap().token_amount,
+            "2"
+        );
+
+        // Round-trips back out
+        let re = serde_json::to_string(&payload).unwrap();
+        assert!(re.contains("\"nativeInput\""));
+        assert!(re.contains("\"type\":\"SWAP\""));
+    }
+
+    #[test]
+    fn test_webhook_events_default_empty() {
+        let payload: HeliusWebhookPayload = serde_json::from_str(
+            r#"{"accountData":[],"nativeTransfers":[],"signature":"s","slot":1,"timestamp":1,"type":"SWAP"}"#,
+        )
+        .unwrap();
+        assert!(payload.events.swap.is_none());
+        let events = WebhookEvents::default();
+        assert!(events.swap.is_none());
+    }
+
+    #[test]
+    fn test_webhook_update_serialization_skips_none() {
+        let update = WebhookUpdate {
+            webhook_url: None,
+            transaction_types: None,
+            account_addresses: None,
+            auth_header: None,
+            webhook_type: None,
+        };
+        let json = serde_json::to_string(&update).unwrap();
+        assert_eq!(json, "{}");
+
+        let update = WebhookUpdate {
+            webhook_url: Some("https://x/webhook".to_string()),
+            transaction_types: Some(vec!["SWAP".to_string()]),
+            account_addresses: Some(vec!["w1".to_string()]),
+            auth_header: Some(serde_json::Value::String("secret".to_string())),
+            webhook_type: Some("enhanced".to_string()),
+        };
+        let json = serde_json::to_string(&update).unwrap();
+        assert!(json.contains("\"webhookURL\":\"https://x/webhook\""));
+        assert!(json.contains("\"authHeader\":\"secret\""));
+        assert!(json.contains("\"webhookType\":\"enhanced\""));
+    }
+
+    #[test]
+    fn test_webhook_toggle_serialization() {
+        let toggle = WebhookToggle { is_active: true };
+        assert_eq!(serde_json::to_string(&toggle).unwrap(), "{\"isActive\":true}");
+    }
+
+    #[test]
+    fn test_helius_webhook_serde() {
+        let webhook: HeliusWebhook = serde_json::from_str(
+            r#"{
+                "webhookID": "wh-1",
+                "webhookURL": "https://x/webhook",
+                "accountAddresses": ["w1", "w2"],
+                "transactionTypes": ["SWAP"]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(webhook.webhook_id, "wh-1");
+        assert_eq!(webhook.wallet_addresses, vec!["w1", "w2"]);
+        assert_eq!(webhook.transaction_types, vec!["SWAP"]);
+
+        // accountAddresses defaults to empty
+        let webhook: HeliusWebhook = serde_json::from_str(
+            r#"{"webhookID":"wh-2","webhookURL":"https://x","transactionTypes":[]}"#,
+        )
+        .unwrap();
+        assert!(webhook.wallet_addresses.is_empty());
+    }
+
+    #[test]
+    fn test_webhook_registration_serialization() {
+        let reg = WebhookRegistration {
+            webhook_url: "https://x/webhook".to_string(),
+            transaction_types: vec!["SWAP".to_string()],
+            account_addresses: vec!["w1".to_string()],
+            webhook_type: "enhanced".to_string(),
+            auth_header: Some("auth".to_string()),
+        };
+        let json = serde_json::to_string(&reg).unwrap();
+        assert!(json.contains("\"authHeader\":\"auth\""));
+        assert!(json.contains("\"webhookType\":\"enhanced\""));
+
+        let reg = WebhookRegistration {
+            auth_header: None,
+            ..reg
+        };
+        let json = serde_json::to_string(&reg).unwrap();
+        assert!(!json.contains("authHeader"), "None auth_header must be skipped");
+    }
+
+    #[test]
+    fn test_webhook_response_serde() {
+        let resp: WebhookResponse = serde_json::from_str(r#"{"webhookID":"wh-9"}"#).unwrap();
+        assert_eq!(resp.webhook_id, "wh-9");
+    }
+
+    #[test]
+    fn test_metrics_and_cache_stats() {
+        let client = test_client();
+        let metrics = client.get_metrics();
+        assert_eq!(metrics.cache_hits, 0);
+        assert_eq!(metrics.cache_misses, 0);
+        assert_eq!(metrics.successful_requests, 0);
+        assert_eq!(metrics.retried_requests, 0);
+        assert_eq!(metrics.failed_requests, 0);
+
+        let (hits, misses, size) = client.get_cache_stats();
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 0);
+        assert_eq!(size, 0);
+    }
+
+    // =============================================================================
+    // verify_signature_exists (RPC)
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_verify_signature_exists_found() {
+        let mock = MockServer::spawn(|method, path| {
+            assert_eq!(method, "POST");
+            assert_eq!(path, "/");
+            (
+                200,
+                r#"{"jsonrpc":"2.0","id":1,"result":{"slot":1}}"#.to_string(),
+            )
+        });
+        mock.with_env("HELIUS_RPC_BASE_URL", || async {
+            let client = test_client();
+            assert!(client.verify_signature_exists("abc123").await.unwrap());
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_verify_signature_exists_not_found() {
+        let mock = MockServer::spawn(|_, _| {
+            (200, r#"{"jsonrpc":"2.0","id":1,"result":null}"#.to_string())
+        });
+        mock.with_env("HELIUS_RPC_BASE_URL", || async {
+            let client = test_client();
+            assert!(!client.verify_signature_exists("abc123").await.unwrap());
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_verify_signature_exists_http_error() {
+        let mock = MockServer::spawn(|_, _| (404, "nope".to_string()));
+        mock.with_env("HELIUS_RPC_BASE_URL", || async {
+            let client = test_client();
+            assert!(client.verify_signature_exists("abc123").await.is_err());
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_verify_signature_exists_bad_json() {
+        let mock = MockServer::spawn(|_, _| (200, "not-json".to_string()));
+        mock.with_env("HELIUS_RPC_BASE_URL", || async {
+            let client = test_client();
+            assert!(client.verify_signature_exists("abc123").await.is_err());
+        }).await;
+    }
+
+    // =============================================================================
+    // fetch_wallet_swaps
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_fetch_wallet_swaps_single_page() {
+        let mock = MockServer::spawn(|_, path| {
+            assert!(path.starts_with("/addresses/wallet-1/transactions"));
+            (
+                200,
+                serde_json::json!([
+                    {"signature": "sig1"},
+                    {"signature": "sig2"}
+                ])
+                .to_string(),
+            )
+        });
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            // target 2: one page of 2 items satisfies the target
+            let txs = client.fetch_wallet_swaps("wallet-1", 2).await.unwrap();
+            assert_eq!(txs.len(), 2);
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_wallet_swaps_paginates_and_truncates() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_clone = Arc::clone(&calls);
+        let mock = MockServer::spawn(move |_, path| {
+            calls_clone.fetch_add(1, Ordering::Relaxed);
+            assert!(path.starts_with("/addresses/wallet-1/transactions"));
+            let page: Vec<serde_json::Value> = (0..100)
+                .map(|i| serde_json::json!({"signature": format!("sig-{}-{i}", path.contains("before"))}))
+                .collect();
+            (200, serde_json::json!(page).to_string())
+        });
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            // target 150 -> two 100-item pages, truncated to 150
+            let txs = client.fetch_wallet_swaps("wallet-1", 150).await.unwrap();
+            assert_eq!(txs.len(), 150);
+            assert!(calls.load(Ordering::Relaxed) >= 2, "must paginate");
+            assert!(calls.load(Ordering::Relaxed) <= 3, "loop must stop once target reached");
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_wallet_swaps_stops_on_empty_batch() {
+        let mock = MockServer::spawn(|_, _| (200, "[]".to_string()));
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            let txs = client.fetch_wallet_swaps("wallet-1", 500).await.unwrap();
+            assert!(txs.is_empty());
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_wallet_swaps_http_error() {
+        let mock = MockServer::spawn(|_, _| (500, "boom".to_string()));
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            assert!(client.fetch_wallet_swaps("wallet-1", 10).await.is_err());
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_wallet_swaps_bad_json() {
+        let mock = MockServer::spawn(|_, _| (200, "not-json".to_string()));
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            assert!(client.fetch_wallet_swaps("wallet-1", 10).await.is_err());
+        }).await;
+    }
+
+    // =============================================================================
+    // get_token_age_hours / get_token_creation_time
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_token_age_cache_hit() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let cache = Arc::new(RwLock::new(HashMap::from([(
+            "mint1".to_string(),
+            crate::token::TokenMetadata {
+                mint: "mint1".to_string(),
+                freeze_authority: None,
+                mint_authority: None,
+                decimals: 6,
+                supply: 1000,
+                is_token_2022: false,
+                has_transfer_hook: false,
+                has_permanent_delegate: false,
+                creation_timestamp: Some(now - 3600), // 1 hour ago
+                age_hours: None,
+            },
+        )])));
+        let client = test_client_with_cache(cache);
+        let age = client.get_token_age_hours("mint1").await.unwrap().unwrap();
+        assert!(age > 0.9 && age < 1.1, "age ~1h, got {age}");
+
+        let metrics = client.get_metrics();
+        assert_eq!(metrics.cache_hits, 1);
+        let (hits, _, size) = client.get_cache_stats();
+        assert_eq!(hits, 1);
+        assert_eq!(size, 1);
+    }
+
+    #[tokio::test]
+    async fn test_token_age_cache_hit_without_timestamp_falls_through() {
+        let cache = Arc::new(RwLock::new(HashMap::from([(
+            "mint1".to_string(),
+            crate::token::TokenMetadata {
+                mint: "mint1".to_string(),
+                freeze_authority: None,
+                mint_authority: None,
+                decimals: 6,
+                supply: 1000,
+                is_token_2022: false,
+                has_transfer_hook: false,
+                has_permanent_delegate: false,
+                creation_timestamp: None,
+                age_hours: None,
+            },
+        )])));
+        let mock = MockServer::spawn(|_, path| {
+            assert!(path.starts_with("/addresses/mint1/transactions"));
+            (
+                200,
+                serde_json::json!([tx_json(1_700_000_000, "s1"), tx_json(1_700_000_100, "s2")])
+                    .to_string(),
+            )
+        });
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client_with_cache(cache);
+            let age = client.get_token_age_hours("mint1").await.unwrap();
+            assert!(age.is_some());
+            // Cache updated with age info
+            let cache = client.metadata_cache.read();
+            let meta = cache.get("mint1").unwrap();
+            assert!(meta.age_hours.is_some());
+            assert!(meta.creation_timestamp.is_some());
+            assert_eq!(client.get_metrics().cache_misses, 1);
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_token_age_cache_miss_fetches_oldest() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let now_clone = now;
+        let mock = MockServer::spawn(move |_, path| {
+            // The mock strips the query string, so assert on the path only.
+            assert!(path.starts_with("/addresses/mint1/transactions"));
+            (
+                200,
+                serde_json::json!([
+                    tx_json(now_clone - 7200, "newer"),   // 2h ago
+                    tx_json(now_clone - 10800, "oldest"), // 3h ago
+                ])
+                .to_string(),
+            )
+        });
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            let age = client.get_token_age_hours("mint1").await.unwrap().unwrap();
+            assert!(age > 2.9 && age < 3.1, "oldest tx wins (3h), got {age}");
+            let metrics = client.get_metrics();
+            assert_eq!(metrics.cache_misses, 1);
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_token_age_no_timestamps() {
+        let mock = MockServer::spawn(|_, _| (200, "[]".to_string()));
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            assert!(client.get_token_age_hours("mint1").await.unwrap().is_none());
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_token_age_404_non_retryable() {
+        let mock = MockServer::spawn(|_, _| (404, "not found".to_string()));
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            assert!(client.get_token_age_hours("mint1").await.unwrap().is_none());
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_token_age_unparseable_timestamps() {
+        let mock = MockServer::spawn(|_, _| {
+            (
+                200,
+                serde_json::json!([{"signature": "s1", "timestamp": "not-a-number"}]).to_string(),
+            )
+        });
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            assert!(client.get_token_age_hours("mint1").await.unwrap().is_none());
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_token_age_500_retries_then_fails() {
+        // 5xx is retryable: exercise the backoff-retry loop and the
+        // after-all-retries error path (slow by design: ~15-20s).
+        let mock = MockServer::spawn(|_, _| (500, "server error".to_string()));
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            assert!(client.get_token_age_hours("mint1").await.is_err());
+        }).await;
+    }
+
+    // =============================================================================
+    // register_webhook / register_wallets_batch
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_register_webhook_success() {
+        let mock = MockServer::spawn(|method, path| {
+            assert_eq!(method, "POST");
+            assert_eq!(path, "/webhooks");
+            (200, r#"{"webhookID":"wh-new-1"}"#.to_string())
+        });
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            let id = client
+                .register_webhook(&["w1".to_string(), "w2".to_string()], "https://x/webhook", Some("auth"))
+                .await
+                .unwrap();
+            assert_eq!(id, "wh-new-1");
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_register_webhook_http_error() {
+        let mock = MockServer::spawn(|_, _| (400, "bad request".to_string()));
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            let err = client
+                .register_webhook(&["w1".to_string()], "https://x/webhook", None)
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("Webhook registration failed"));
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_register_webhook_unparseable_response() {
+        let mock = MockServer::spawn(|_, _| (200, "not-json".to_string()));
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            assert!(client
+                .register_webhook(&["w1".to_string()], "https://x/webhook", None)
+                .await
+                .is_err());
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_register_wallets_batch_chunking() {
+        let register_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = Arc::clone(&register_calls);
+        let mock = MockServer::spawn(move |method, path| {
+            assert_eq!(method, "POST");
+            assert_eq!(path, "/webhooks");
+            calls.fetch_add(1, Ordering::Relaxed);
+            (200, format!(r#"{{"webhookID":"wh-batch-{}"}}"#, calls.load(Ordering::Relaxed)))
+        });
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            let limiter = Arc::new(RateLimiter::new(100, 1));
+            let results = client
+                .register_wallets_batch(
+                    vec!["w1".to_string(), "w2".to_string(), "w3".to_string()],
+                    "https://x/webhook",
+                    None,
+                    limiter,
+                    2,
+                    1,
+                )
+                .await
+                .unwrap();
+            assert_eq!(results.len(), 3);
+            assert_eq!(register_calls.load(Ordering::Relaxed), 2, "3 wallets / batch 2 = 2 calls");
+            assert_eq!(results[0].1, results[1].1, "same webhook within batch");
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_register_wallets_batch_error() {
+        let mock = MockServer::spawn(|_, _| (400, "fail".to_string()));
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            let limiter = Arc::new(RateLimiter::new(100, 1));
+            assert!(client
+                .register_wallets_batch(
+                    vec!["w1".to_string()],
+                    "https://x/webhook",
+                    None,
+                    limiter,
+                    2,
+                    1,
+                )
+                .await
+                .is_err());
+        }).await;
+    }
+
+    // =============================================================================
+    // delete_webhook
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_delete_webhook_success_and_404() {
+        let mock = MockServer::spawn(|method, path| {
+            assert_eq!(method, "DELETE");
+            assert_eq!(path, "/webhooks/wh-1");
+            (200, "{}".to_string())
+        });
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            client.delete_webhook("wh-1").await.unwrap();
+        }).await;
+
+        let mock = MockServer::spawn(|_, _| (404, "gone".to_string()));
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            client.delete_webhook("wh-1").await.unwrap(); // 404 treated as success
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_delete_webhook_error() {
+        let mock = MockServer::spawn(|_, _| (400, "bad".to_string()));
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            assert!(client.delete_webhook("wh-1").await.is_err());
+        }).await;
+    }
+
+    // =============================================================================
+    // list / get webhooks
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_list_webhooks() {
+        let mock = MockServer::spawn(|method, path| {
+            assert_eq!(method, "GET");
+            assert_eq!(path, "/webhooks");
+            (
+                200,
+                serde_json::json!([{"webhookID": "wh-1"}, {"webhookID": "wh-2"}]).to_string(),
+            )
+        });
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            let webhooks = client.list_webhooks().await.unwrap();
+            assert_eq!(webhooks.len(), 2);
+            assert_eq!(webhooks[0]["webhookID"], "wh-1");
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_webhooks_error() {
+        let mock = MockServer::spawn(|_, _| (400, "bad".to_string()));
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            assert!(client.list_webhooks().await.is_err());
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_get_webhook() {
+        let mock = MockServer::spawn(|_, path| {
+            assert_eq!(path, "/webhooks/wh-1");
+            (
+                200,
+                serde_json::json!({"webhookID": "wh-1", "active": true, "webhookURL": "https://x"}).to_string(),
+            )
+        });
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            let wh = client.get_webhook("wh-1").await.unwrap();
+            assert_eq!(wh["active"], true);
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_get_webhook_typed() {
+        let mock = MockServer::spawn(|_, path| {
+            assert_eq!(path, "/webhooks/wh-1");
+            (
+                200,
+                serde_json::json!({
+                    "webhookID": "wh-1",
+                    "webhookURL": "https://x/webhook",
+                    "accountAddresses": ["w1", "w2"],
+                    "transactionTypes": ["SWAP"]
+                })
+                .to_string(),
+            )
+        });
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            let wh = client.get_webhook_typed("wh-1").await.unwrap();
+            assert_eq!(wh.webhook_id, "wh-1");
+            assert_eq!(wh.wallet_addresses.len(), 2);
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_webhooks_typed() {
+        let mock = MockServer::spawn(|_, _| {
+            (
+                200,
+                serde_json::json!([{
+                    "webhookID": "wh-1",
+                    "webhookURL": "https://x",
+                    "accountAddresses": ["w1"],
+                    "transactionTypes": ["SWAP"]
+                }])
+                .to_string(),
+            )
+        });
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            let webhooks = client.list_webhooks_typed().await.unwrap();
+            assert_eq!(webhooks.len(), 1);
+            assert_eq!(webhooks[0].webhook_id, "wh-1");
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_webhooks_typed_error() {
+        let mock = MockServer::spawn(|_, _| (400, "bad".to_string()));
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            assert!(client.list_webhooks_typed().await.is_err());
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_get_webhook_typed_error() {
+        let mock = MockServer::spawn(|_, _| (404, "missing".to_string()));
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            assert!(client.get_webhook_typed("wh-x").await.is_err());
+        }).await;
+    }
+
+    // =============================================================================
+    // update / toggle / bulk update
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_update_webhook_success_and_error() {
+        let mock = MockServer::spawn(|method, path| {
+            assert_eq!(method, "PUT");
+            assert_eq!(path, "/webhooks/wh-1");
+            (200, "{}".to_string())
+        });
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            client
+                .update_webhook(
+                    "wh-1",
+                    WebhookUpdate {
+                        webhook_url: Some("https://new".to_string()),
+                        transaction_types: None,
+                        account_addresses: None,
+                        auth_header: None,
+                        webhook_type: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }).await;
+
+        let mock = MockServer::spawn(|_, _| (400, "bad".to_string()));
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            let err = client
+                .update_webhook(
+                    "wh-1",
+                    WebhookUpdate {
+                        webhook_url: Some("https://new".to_string()),
+                        transaction_types: None,
+                        account_addresses: None,
+                        auth_header: None,
+                        webhook_type: None,
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("Webhook update failed"));
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_toggle_webhook_success_and_error() {
+        let mock = MockServer::spawn(|method, path| {
+            assert_eq!(method, "PATCH");
+            assert_eq!(path, "/webhooks/wh-1/toggle");
+            (200, "{}".to_string())
+        });
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            client.toggle_webhook("wh-1", true).await.unwrap();
+        }).await;
+
+        let mock = MockServer::spawn(|_, _| (400, "bad".to_string()));
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            assert!(client.toggle_webhook("wh-1", false).await.is_err());
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_bulk_update_webhook_urls() {
+        let mock = MockServer::spawn(|method, path| {
+            assert_eq!(method, "PUT");
+            (200, "{}".to_string())
+        });
+        mock.with_env("HELIUS_API_BASE_URL", || async {
+            let client = test_client();
+            let limiter = Arc::new(RateLimiter::new(100, 1));
+            let results = client
+                .bulk_update_webhook_urls(
+                    vec![
+                        ("wh-1".to_string(), "https://a".to_string()),
+                        ("wh-2".to_string(), "https://b".to_string()),
+                    ],
+                    limiter,
+                )
+                .await
+                .unwrap();
+            assert_eq!(results.len(), 2);
+            assert!(results[0].1.is_ok());
+            assert!(results[1].1.is_ok());
+        }).await;
+    }
+
+    // =============================================================================
+    // validate_webhook_reachability
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_validate_webhook_reachability_ok() {
+        let mock = MockServer::spawn(|_, _| (404, "no route here".to_string()));
+        let client = reqwest::Client::new();
+        let resp = client.get(&mock.url).send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 404);
+        // validate_webhook_reachability: any status means reachable
+        validate_webhook_reachability(&mock.url).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_reachability_unreachable() {
+        // Point at a port with no listener -> connect error
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener); // closed port
+        let url = format!("http://{addr}");
+        assert!(validate_webhook_reachability(&url).await.is_err());
+    }
+
+    #[test]
+    fn test_webhook_metrics_default() {
+        let metrics = HeliusMetrics::default();
+        assert_eq!(metrics.cache_hits, 0);
+        assert_eq!(metrics.cache_misses, 0);
+        assert_eq!(metrics.successful_requests, 0);
+        assert_eq!(metrics.retried_requests, 0);
+        assert_eq!(metrics.failed_requests, 0);
+        let json = serde_json::to_string(&metrics).unwrap();
+        assert!(json.contains("cache_hits"));
     }
 }

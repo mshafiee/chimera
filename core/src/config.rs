@@ -432,6 +432,11 @@ impl SecurityConfig {
                 secrets.push(prev.clone());
             }
         }
+        // API keys are credentials too — collect them so redaction/scrubbing
+        // covers every secret on the struct (2026-08-10 coverage test).
+        for key in &self.api_keys {
+            secrets.push(key.key.clone());
+        }
         secrets
     }
 }
@@ -1556,6 +1561,7 @@ impl MonitoringConfig {
                     h.to_string()
                 }
             })
+            .map(|h| h.trim().to_string())
             .filter(|h| !h.is_empty())
     }
 }
@@ -3434,5 +3440,575 @@ mod vol_target_config_tests {
         assert_eq!(config.target_vol_scale_threshold, dec!(25.0));
         assert_eq!(config.min_target_pct, dec!(6.0));
         assert_eq!(config.targets, vec![dec!(10), dec!(20), dec!(40), dec!(80)]);
+    }
+}
+
+#[cfg(test)]
+mod full_coverage_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    /// Serialize env-touching tests (load_config / resolve_env_placeholder /
+    /// resolved_helius_auth_header read process-wide env vars).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn dec(input: &str) -> Decimal {
+        Decimal::from_str(input).unwrap()
+    }
+
+    fn clear_chimera_env() {
+        for var in [
+            "CHIMERA_SECURITY__WEBHOOK_SECRET",
+            "CHIMERA_SECURITY__WEBHOOK_SECRET_PREVIOUS",
+            "CHIMERA_RPC__PRIMARY_URL",
+            "CHIMERA_RPC__FALLBACK_URL",
+            "CHIMERA_TRADE_MODE",
+            "HELIUS_API_KEY",
+            "HELIUS_WEBHOOK_AUTH",
+        ] {
+            std::env::remove_var(var);
+        }
+    }
+
+    // =========================================================================
+    // SERDE DEFAULT FNS
+    // =========================================================================
+
+    #[test]
+    fn rpc_rate_limit_defaults() {
+        assert!(default_weighted_limiting_enabled());
+        assert_eq!(default_max_weighted_rate(), None);
+        assert!(default_priority_wait_reduction());
+    }
+
+    #[test]
+    fn inactivity_rotation_defaults() {
+        let config = InactivityRotationConfig::default();
+        assert_eq!(config.high_conviction_threshold_secs, default_inactivity_high_conviction_threshold());
+        assert_eq!(config.regular_conviction_threshold_secs, default_inactivity_regular_conviction_threshold());
+        assert_eq!(config.low_conviction_threshold_secs, default_inactivity_low_conviction_threshold());
+        assert_eq!(config.high_conviction_wqs_threshold, default_inactivity_high_conviction_wqs_threshold());
+        assert_eq!(config.regular_conviction_wqs_threshold, default_inactivity_regular_conviction_wqs_threshold());
+        assert_eq!(config.max_oscillation_cycles, default_inactivity_max_oscillation_cycles());
+    }
+
+    #[test]
+    fn degradation_ws_defaults() {
+        // WebSocket settings live on MonitoringConfig (not DegradationConfig).
+        let m = MonitoringConfig::default();
+        assert_eq!(m.websocket_health_timeout_secs, default_websocket_health_timeout());
+        assert_eq!(m.websocket_commitment, default_websocket_commitment());
+        assert!(m.websocket_reconnect.is_none());
+        let r = WebSocketReconnectConfig {
+            initial_backoff_secs: default_ws_initial_backoff(),
+            max_backoff_secs: default_ws_max_backoff(),
+            backoff_multiplier: default_ws_backoff_multiplier(),
+            max_attempts: default_ws_max_attempts(),
+        };
+        assert_eq!(r.initial_backoff_secs, default_ws_initial_backoff());
+        assert_eq!(r.max_backoff_secs, default_ws_max_backoff());
+        assert_eq!(r.backoff_multiplier, default_ws_backoff_multiplier());
+        assert_eq!(r.max_attempts, default_ws_max_attempts());
+    }
+
+    // =========================================================================
+    // DEBUG REDACTION
+    // =========================================================================
+
+    #[test]
+    fn security_config_debug_redacts_secrets() {
+        let mut s = SecurityConfig::default();
+        s.webhook_secret = "top-secret-webhook".to_string();
+        s.webhook_secret_previous = Some("prev-secret".to_string());
+        s.api_keys = vec![ApiKeyConfig {
+            key: "sk-secret-admin".to_string(),
+            role: "admin".to_string(),
+        }];
+        let out = format!("{s:?}");
+        assert!(!out.contains("top-secret-webhook"), "{out}");
+        assert!(!out.contains("prev-secret"), "{out}");
+        assert!(!out.contains("sk-secret-admin"), "{out}");
+        assert!(out.contains("REDACTED"), "{out}");
+    }
+
+    #[test]
+    fn jupiter_config_debug_redacts_api_key() {
+        let mut j = JupiterConfig::default();
+        j.api_key = Some("jup-secret-key".to_string());
+        let out = format!("{j:?}");
+        assert!(!out.contains("jup-secret-key"), "{out}");
+        assert!(out.contains("[REDACTED]"), "{out}");
+    }
+
+    #[test]
+    fn telegram_config_debug_redacts_token() {
+        let t = TelegramNotificationConfig {
+            enabled: true,
+            bot_token: "tg-secret-token".to_string(),
+            chat_id: "-100123".to_string(),
+            rate_limit_seconds: 5,
+        };
+        let out = format!("{t:?}");
+        assert!(!out.contains("tg-secret-token"), "{out}");
+        assert!(out.contains("[REDACTED]"), "{out}");
+    }
+
+    #[test]
+    fn monitoring_config_debug_redacts_keys() {
+        let m = MonitoringConfig {
+            helius_api_key: Some("sk-helius-secret".to_string()),
+            helius_webhook_auth_header: Some("Bearer wh-secret".to_string()),
+            ..MonitoringConfig::default()
+        };
+        let out = format!("{m:?}");
+        assert!(out.contains("[REDACTED]"), "{out}");
+        assert!(!out.contains("sk-helius-secret"), "{out}");
+        assert!(!out.contains("wh-secret"), "{out}");
+        assert!(out.contains("helius_api_key"), "{out}");
+        assert!(out.contains("helius_webhook_auth_header"), "{out}");
+    }
+
+    // =========================================================================
+    // SECRETS ACCESSOR
+    // =========================================================================
+
+    #[test]
+    fn get_all_secrets_collects_every_secret() {
+        let mut s = SecurityConfig::default();
+        s.webhook_secret = "wh-1".to_string();
+        s.webhook_secret_previous = Some("wh-0".to_string());
+        s.api_keys = vec![
+            ApiKeyConfig {
+                key: "key-a".to_string(),
+                role: "admin".to_string(),
+            },
+            ApiKeyConfig {
+                key: "key-b".to_string(),
+                role: "operator".to_string(),
+            },
+        ];
+        let secrets = s.get_all_secrets();
+        for expected in ["wh-1", "wh-0", "key-a", "key-b"] {
+            assert!(secrets.iter().any(|s| s.contains(expected)), "{secrets:?}");
+        }
+        assert_eq!(secrets.len(), 4, "{secrets:?}");
+    }
+
+    // =========================================================================
+    // MONITORING AUTH HEADER
+    // =========================================================================
+
+    #[test]
+    fn resolved_helius_auth_header_variants() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        clear_chimera_env();
+
+        let m = MonitoringConfig {
+            helius_webhook_auth_header: None,
+            ..MonitoringConfig::default()
+        };
+        assert_eq!(m.resolved_helius_auth_header(), None);
+
+        let m = MonitoringConfig {
+            helius_webhook_auth_header: Some("Bearer fixed".to_string()),
+            ..MonitoringConfig::default()
+        };
+        assert_eq!(m.resolved_helius_auth_header(), Some("Bearer fixed".to_string()));
+
+        // Empty header → None.
+        let m = MonitoringConfig {
+            helius_webhook_auth_header: Some("   ".to_string()),
+            ..MonitoringConfig::default()
+        };
+        assert_eq!(m.resolved_helius_auth_header(), None);
+
+        // ${VAR} placeholder resolves from the environment.
+        std::env::set_var("HELIUS_WEBHOOK_AUTH", "Bearer env-token");
+        let m = MonitoringConfig {
+            helius_webhook_auth_header: Some("${HELIUS_WEBHOOK_AUTH}".to_string()),
+            ..MonitoringConfig::default()
+        };
+        assert_eq!(
+            m.resolved_helius_auth_header(),
+            Some("Bearer env-token".to_string())
+        );
+
+        // Unset env var → empty → None.
+        std::env::remove_var("HELIUS_WEBHOOK_AUTH");
+        assert_eq!(m.resolved_helius_auth_header(), None);
+    }
+
+    // =========================================================================
+    // LOAD_CONFIG + ENV PLACEHOLDER RESOLUTION
+    // =========================================================================
+
+    #[test]
+    fn load_config_defaults_without_file_fail_closed_on_secret() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        clear_chimera_env();
+        // No config file in the test cwd (required(false)). config 0.15 does
+        // NOT apply CHIMERA_* env overrides (the file is the source of truth;
+        // placeholders are resolved by load_config), so the webhook secret
+        // stays empty and validate() rejects it — the fail-closed path.
+        let config = AppConfig::load_config().unwrap();
+        assert_eq!(config.security.webhook_secret, "");
+        assert!(config.security.webhook_secret_previous.is_none());
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn load_config_default_rpc_urls_without_file() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        clear_chimera_env();
+        let config = AppConfig::load_config().unwrap();
+        // RPC URLs come from the yaml/defaults, not env overrides.
+        assert_eq!(config.rpc.primary_url, "https://api.mainnet-beta.solana.com");
+        assert!(config.rpc.fallback_url.is_none());
+    }
+
+    #[test]
+    fn resolve_env_placeholder_direct() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        clear_chimera_env();
+        assert_eq!(
+            AppConfig::resolve_env_placeholder("literal", "CHIMERA_SECURITY__WEBHOOK_SECRET"),
+            "literal"
+        );
+        std::env::set_var("CHIMERA_SECURITY__WEBHOOK_SECRET", "from-env");
+        assert_eq!(
+            AppConfig::resolve_env_placeholder("${CHIMERA_SECURITY__WEBHOOK_SECRET}", "CHIMERA_SECURITY__WEBHOOK_SECRET"),
+            "from-env"
+        );
+        // Unset env var → empty string (fail-closed).
+        std::env::remove_var("CHIMERA_SECURITY__WEBHOOK_SECRET");
+        assert_eq!(
+            AppConfig::resolve_env_placeholder("${CHIMERA_SECURITY__WEBHOOK_SECRET}", "CHIMERA_SECURITY__WEBHOOK_SECRET"),
+            ""
+        );
+    }
+
+    // =========================================================================
+    // VALIDATE()
+    // =========================================================================
+
+    /// A config that passes every `validate()` check; tests mutate one field
+    /// to hit each failure branch.
+    fn valid_config() -> AppConfig {
+        let mut config = AppConfig::default();
+        config.security.webhook_secret = "0123456789abcdef0123456789abcdef".to_string();
+        config
+    }
+
+    #[test]
+    fn validate_accepts_defaults_with_secret() {
+        valid_config().validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_strategy_allocation_mismatch() {
+        let mut c = valid_config();
+        c.strategy.shield_percent = 60;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("must equal 100"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_empty_webhook_secret() {
+        let mut c = valid_config();
+        c.security.webhook_secret = "".to_string();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("Webhook secret must be set"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_unresolved_placeholder_secret() {
+        let mut c = valid_config();
+        c.security.webhook_secret = "${CHIMERA_SECURITY__WEBHOOK_SECRET}".to_string();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("unresolved"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_short_webhook_secret() {
+        let mut c = valid_config();
+        c.security.webhook_secret = "short".to_string();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("at least 32 characters"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_empty_rpc_url() {
+        let mut c = valid_config();
+        c.rpc.primary_url = "".to_string();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("RPC primary URL must be set"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_jito_tip_bounds() {
+        let mut c = valid_config();
+        c.jito.tip_floor_sol = dec("0.005");
+        c.jito.tip_ceiling_sol = dec("0.0005");
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("tip floor must be less than ceiling"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_strategy_position_bounds() {
+        let mut c = valid_config();
+        c.strategy.max_position_sol = dec("0.005");
+        c.strategy.min_position_sol = dec("0.01");
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("Max position size must be greater"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_sizing_position_bounds() {
+        let mut c = valid_config();
+        c.position_sizing.max_size_sol = dec("0.001");
+        c.position_sizing.min_size_sol = dec("0.05");
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("Max position size must be greater"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_summary_hour_and_minute() {
+        let mut c = valid_config();
+        c.notifications.daily_summary.hour_utc = 24;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("0–23"), "{err}");
+
+        let mut c = valid_config();
+        c.notifications.daily_summary.minute = 60;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("0–59"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_zero_capital() {
+        let mut c = valid_config();
+        c.position_sizing.total_capital_sol = Decimal::ZERO;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("total_capital_sol must be greater than zero"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_zero_worker_threads() {
+        let mut c = valid_config();
+        c.server.worker_threads = 0;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("worker_threads must be > 0"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_rpc_timeout_out_of_bounds() {
+        let mut c = valid_config();
+        c.rpc.timeout_ms = 999;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("between 1000 and 60000"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_circuit_breaker_invariants() {
+        let mut c = valid_config();
+        c.circuit_breakers.cooldown_minutes = 0;
+        assert!(c.validate().unwrap_err().to_string().contains("cooldown_minutes"));
+
+        let mut c = valid_config();
+        c.circuit_breakers.max_loss_24h_usd = Decimal::ZERO;
+        assert!(c.validate().unwrap_err().to_string().contains("max_loss_24h_usd"));
+
+        let mut c = valid_config();
+        c.circuit_breakers.max_consecutive_losses = 0;
+        assert!(c.validate().unwrap_err().to_string().contains("max_consecutive_losses"));
+
+        let mut c = valid_config();
+        c.circuit_breakers.portfolio_stop_loss_percent = Decimal::ZERO;
+        assert!(c.validate().unwrap_err().to_string().contains("must be negative"));
+    }
+
+    #[test]
+    fn validate_rejects_db_connections_out_of_bounds() {
+        let mut c = valid_config();
+        c.database.max_connections = 1;
+        assert!(c.validate().unwrap_err().to_string().contains("max_connections"));
+        let mut c = valid_config();
+        c.database.max_connections = 101;
+        assert!(c.validate().unwrap_err().to_string().contains("max_connections"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_queue_capacity() {
+        let mut c = valid_config();
+        c.queue.capacity = 0;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("queue.capacity must be > 0"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_admin_wallet() {
+        let mut c = valid_config();
+        c.security.admin_wallets = vec![AdminWalletConfig {
+            address: "not-a-pubkey".to_string(),
+            role: "admin".to_string(),
+        }];
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("Invalid admin wallet address"), "{err}");
+    }
+
+    #[test]
+    fn validate_accepts_valid_admin_wallet() {
+        let mut c = valid_config();
+        c.security.admin_wallets = vec![AdminWalletConfig {
+            address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+            role: "admin".to_string(),
+        }];
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_kelly_fraction_out_of_range() {
+        let mut c = valid_config();
+        c.position_sizing.kelly_fraction = dec("1.5");
+        assert!(c.validate().unwrap_err().to_string().contains("kelly_fraction"));
+        let mut c = valid_config();
+        c.position_sizing.kelly_fraction = Decimal::ZERO;
+        assert!(c.validate().unwrap_err().to_string().contains("kelly_fraction"));
+    }
+
+    #[test]
+    fn validate_rejects_profit_management_invariants() {
+        let mut c = valid_config();
+        c.profit_management.tiered_exit_percent = dec("101.0");
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("tiered_exit_percent"));
+
+        let mut c = valid_config();
+        c.profit_management.trailing_stop_distance = Decimal::ZERO;
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("trailing_stop_distance"));
+
+        let mut c = valid_config();
+        c.profit_management.trailing_stop_activation = dec("-1.0");
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("trailing_stop_activation"));
+
+        let mut c = valid_config();
+        c.profit_management.max_stop_loss_distance = dec("1.0");
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("max_stop_loss_distance"));
+    }
+
+    #[test]
+    fn validate_monitoring_url_checks() {
+        // Enabled monitoring with no API key → error.
+        let mut c = valid_config();
+        c.monitoring = Some(MonitoringConfig {
+            enabled: true,
+            helius_api_key: None,
+            ..MonitoringConfig::default()
+        });
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("helius_api_key"));
+
+        // Bad scheme → error.
+        let mut c = valid_config();
+        c.monitoring = Some(MonitoringConfig {
+            enabled: true,
+            helius_api_key: Some("k".to_string()),
+            helius_webhook_url: Some("ftp://x".to_string()),
+            ..MonitoringConfig::default()
+        });
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("must start with http:// or https://"));
+
+        // Too-short URL → error.
+        let mut c = valid_config();
+        c.monitoring = Some(MonitoringConfig {
+            enabled: true,
+            helius_api_key: Some("k".to_string()),
+            helius_webhook_url: Some("http://a".to_string()),
+            ..MonitoringConfig::default()
+        });
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("format is invalid"));
+
+        // Valid URL + key → passes.
+        let mut c = valid_config();
+        c.monitoring = Some(MonitoringConfig {
+            enabled: true,
+            helius_api_key: Some("k".to_string()),
+            helius_webhook_url: Some("https://example.invalid/webhook".to_string()),
+            ..MonitoringConfig::default()
+        });
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_telegram_checks() {
+        let mut c = valid_config();
+        c.notifications.telegram.enabled = true;
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("bot_token"));
+
+        let mut c = valid_config();
+        c.notifications.telegram.enabled = true;
+        c.notifications.telegram.bot_token = "tok".to_string();
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("chat_id"));
+
+        let mut c = valid_config();
+        c.notifications.telegram.enabled = true;
+        c.notifications.telegram.bot_token = "tok".to_string();
+        c.notifications.telegram.chat_id = "-100".to_string();
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_requires_jupiter_key_in_live_mode() {
+        let mut c = valid_config();
+        c.trade_mode = TradeMode::Live;
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("jupiter.api_key is required in Live"));
+
+        let mut c = valid_config();
+        c.trade_mode = TradeMode::Live;
+        c.jupiter.api_key = Some("   ".to_string());
+        assert!(c.validate().unwrap_err().to_string().contains("jupiter.api_key"));
+
+        let mut c = valid_config();
+        c.trade_mode = TradeMode::Live;
+        c.jupiter.api_key = Some("jk-1".to_string());
+        c.validate().unwrap();
     }
 }

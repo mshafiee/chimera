@@ -496,7 +496,7 @@ impl TransactionBuilder {
 
     #[allow(dead_code)]
     /// Build a simulated transaction for devnet testing
-    async fn build_simulated_transaction(
+    pub async fn build_simulated_transaction(
         &self,
         _signal: &Signal,
         wallet_keypair: &Keypair,
@@ -530,7 +530,7 @@ impl TransactionBuilder {
     /// multiple accounts (main ATA + PDA/auxiliary), and a full-exit sell
     /// would otherwise under-sell by the amounts in the other accounts.
     /// Returns `None` if the RPC call fails or no accounts exist.
-    async fn fetch_token_balance(
+    pub async fn fetch_token_balance(
         &self,
         wallet_pubkey: &Pubkey,
         token_mint: &Pubkey,
@@ -577,7 +577,7 @@ impl TransactionBuilder {
     ///
     /// For v1 fallback: Performs multi-DEX route comparison and posts winning quote
     /// to `/swap` (v1 Metis).
-    async fn get_jupiter_swap(
+    pub async fn get_jupiter_swap(
         &self,
         input_mint: Pubkey,
         output_mint: Pubkey,
@@ -599,7 +599,7 @@ impl TransactionBuilder {
     /// This provides the best price as all routers compete (Metis, JupiterZ RFQ, Dflow, OKX).
     /// Includes RTSE (Real-Time Slippage Estimation), Jupiter Beam for MEV protection,
     /// and automatic gasless support.
-    async fn get_jupiter_v2_order(
+    pub async fn get_jupiter_v2_order(
         &self,
         input_mint: Pubkey,
         output_mint: Pubkey,
@@ -776,7 +776,7 @@ impl TransactionBuilder {
     }
 
     /// Get swap transaction using Jupiter v1 fallback (multi-DEX comparison + swap).
-    async fn get_jupiter_v1_swap(
+    pub async fn get_jupiter_v1_swap(
         &self,
         input_mint: Pubkey,
         output_mint: Pubkey,

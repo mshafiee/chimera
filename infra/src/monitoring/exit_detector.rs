@@ -254,3 +254,201 @@ impl Default for ExitDetector {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal::Decimal;
+
+    fn sell_swap(token: &str, amount_in: Decimal, amount_out: Decimal) -> ParsedSwap {
+        ParsedSwap {
+            token_in: token.to_string(),
+            token_out: "So11111111111111111111111111111111111111112".to_string(),
+            amount_in,
+            amount_out,
+            direction: SwapDirection::Sell,
+            dex: "Jupiter".to_string(),
+            slippage: None,
+        }
+    }
+
+    fn buy_swap(token: &str) -> ParsedSwap {
+        ParsedSwap {
+            token_in: "So11111111111111111111111111111111111111112".to_string(),
+            token_out: token.to_string(),
+            amount_in: Decimal::new(1, 0),
+            amount_out: Decimal::new(100, 0),
+            direction: SwapDirection::Buy,
+            dex: "Jupiter".to_string(),
+            slippage: None,
+        }
+    }
+
+    fn signal(wallet: &str, token: &str, delay: u64) -> ExitSignal {
+        ExitSignal {
+            wallet_address: wallet.to_string(),
+            token_address: token.to_string(),
+            exit_type: ExitType::Partial,
+            delay_secs: delay,
+            amount_sol: Decimal::new(1, 0),
+        }
+    }
+
+    #[tokio::test]
+    async fn buy_swap_does_not_detect_exit() {
+        let detector = ExitDetector::new();
+        let result = detector
+            .detect_exit("wallet-1", &buy_swap("token-1"), 5)
+            .await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn sell_swap_detects_exit_with_capped_delay() {
+        let detector = ExitDetector::new();
+        let swap = sell_swap("token-1", Decimal::new(50, 0), Decimal::new(1, 0));
+        let result = detector
+            .detect_exit("wallet-1", &swap, 120) // delay capped at 60
+            .await
+            .unwrap();
+        assert_eq!(result.wallet_address, "wallet-1");
+        assert_eq!(result.token_address, "token-1");
+        assert_eq!(result.exit_type, ExitType::Partial); // no DB -> Partial
+        assert_eq!(result.delay_secs, 60);
+        assert_eq!(result.amount_sol, Decimal::new(1, 0));
+    }
+
+    #[tokio::test]
+    async fn take_ready_exit_not_due() {
+        let detector = ExitDetector::new();
+        let swap = sell_swap("token-1", Decimal::new(50, 0), Decimal::new(1, 0));
+        detector.detect_exit("wallet-1", &swap, 60).await;
+
+        // Not due yet (delay 60s, just inserted)
+        let sig = signal("wallet-1", "token-1", 60);
+        assert!(!detector.take_ready_exit(&sig).await);
+
+        // Missing wallet/token
+        assert!(!detector
+            .take_ready_exit(&signal("nobody", "token-1", 0))
+            .await);
+        assert!(!detector
+            .take_ready_exit(&signal("wallet-1", "nothing", 0))
+            .await);
+    }
+
+    #[tokio::test]
+    async fn take_ready_exit_due_with_zero_delay() {
+        let detector = ExitDetector::new();
+        let swap = sell_swap("token-1", Decimal::new(50, 0), Decimal::new(1, 0));
+        detector.detect_exit("wallet-1", &swap, 0).await;
+
+        let sig = signal("wallet-1", "token-1", 0);
+        assert!(detector.take_ready_exit(&sig).await);
+        // Second take fails — entry consumed
+        assert!(!detector.take_ready_exit(&sig).await);
+    }
+
+    #[tokio::test]
+    async fn take_ready_exit_with_clock_error_treated_as_due() {
+        let detector = ExitDetector::new();
+        // Insert a FUTURE exit time -> elapsed() errors -> treated as due
+        {
+            let mut pending = detector.pending_exits.write().await;
+            let mut inner = HashMap::new();
+            let mut queue = VecDeque::new();
+            queue.push_back(SystemTime::now() + Duration::from_secs(3600));
+            inner.insert("token-1".to_string(), queue);
+            pending.insert("wallet-1".to_string(), inner);
+        }
+        let sig = signal("wallet-1", "token-1", 0);
+        assert!(detector.take_ready_exit(&sig).await);
+    }
+
+    #[tokio::test]
+    async fn ttl_sweep_removes_stale_pending_entries() {
+        let detector = ExitDetector::new();
+        // Insert an entry older than PENDING_TTL
+        {
+            let mut pending = detector.pending_exits.write().await;
+            let mut inner = HashMap::new();
+            let mut queue = VecDeque::new();
+            queue.push_back(SystemTime::now() - Duration::from_secs(PENDING_TTL.as_secs() + 60));
+            inner.insert("token-1".to_string(), queue);
+            pending.insert("wallet-1".to_string(), inner);
+        }
+
+        // A new detect_exit triggers the opportunistic sweep
+        let swap = sell_swap("token-1", Decimal::new(50, 0), Decimal::new(1, 0));
+        detector.detect_exit("wallet-2", &swap, 0).await;
+
+        let pending = detector.pending_exits.read().await;
+        assert!(!pending.contains_key("wallet-1"), "stale entries must be swept");
+        assert!(pending.contains_key("wallet-2"));
+    }
+
+    #[tokio::test]
+    async fn mark_exit_processed_removes_entries() {
+        let detector = ExitDetector::new();
+        let swap = sell_swap("token-1", Decimal::new(50, 0), Decimal::new(1, 0));
+        detector.detect_exit("wallet-1", &swap, 0).await;
+        detector.detect_exit("wallet-1", &swap, 0).await; // second pending entry
+
+        let mut pending = detector.pending_exits.write().await;
+        pending
+            .entry("wallet-2".to_string())
+            .or_insert_with(HashMap::new)
+            .insert("token-2".to_string(), VecDeque::new());
+        drop(pending);
+
+        detector
+            .mark_exit_processed(&signal("wallet-1", "token-1", 0))
+            .await;
+        let pending = detector.pending_exits.read().await;
+        assert!(!pending.contains_key("wallet-1"), "wallet entry fully removed");
+        assert!(pending.contains_key("wallet-2"), "other wallets untouched");
+    }
+
+    #[tokio::test]
+    async fn mark_exit_processed_full_exit_clears_cumulative() {
+        let detector = ExitDetector::new();
+        detector
+            .cumulative_sold
+            .write()
+            .await
+            .insert(("wallet-1".to_string(), "token-1".to_string()), Decimal::new(9, 0));
+
+        let mut full = signal("wallet-1", "token-1", 0);
+        full.exit_type = ExitType::Full;
+        detector.mark_exit_processed(&full).await;
+        assert!(detector
+            .cumulative_sold
+            .read()
+            .await
+            .get(&("wallet-1".to_string(), "token-1".to_string()))
+            .is_none());
+
+        // Partial exit keeps cumulative
+        let detector2 = ExitDetector::new();
+        detector2
+            .cumulative_sold
+            .write()
+            .await
+            .insert(("wallet-1".to_string(), "token-1".to_string()), Decimal::new(9, 0));
+        detector2
+            .mark_exit_processed(&signal("wallet-1", "token-1", 0))
+            .await;
+        assert!(detector2
+            .cumulative_sold
+            .read()
+            .await
+            .get(&("wallet-1".to_string(), "token-1".to_string()))
+            .is_some());
+    }
+
+    #[test]
+    fn exit_types_are_partial_eq() {
+        assert_eq!(ExitType::Full, ExitType::Full);
+        assert_ne!(ExitType::Full, ExitType::Partial);
+    }
+}

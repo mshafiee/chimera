@@ -399,24 +399,8 @@ impl SignalProcessor {
             let hour_utc = now_time.hour();
             let minute_utc = now_time.minute();
             let mins_since_midnight = (hour_utc * 60 + minute_utc) as i64;
-            const RAMP_DOWN_START: i64 = 60;
-            const FULL_REDUCTION_START: i64 = 120;
-            const FULL_REDUCTION_END: i64 = 300;
-            const RAMP_UP_END: i64 = 360;
             let base_mult = self.config.position_sizing.off_hours_size_multiplier;
-            let off_hours_mult = if !(RAMP_DOWN_START..RAMP_UP_END).contains(&mins_since_midnight) {
-                rust_decimal::Decimal::ONE
-            } else if mins_since_midnight < FULL_REDUCTION_START {
-                let t = rust_decimal::Decimal::from(mins_since_midnight - RAMP_DOWN_START)
-                    / rust_decimal::Decimal::from(60);
-                rust_decimal::Decimal::ONE - t * (rust_decimal::Decimal::ONE - base_mult)
-            } else if mins_since_midnight < FULL_REDUCTION_END {
-                base_mult
-            } else {
-                let t = rust_decimal::Decimal::from(mins_since_midnight - FULL_REDUCTION_END)
-                    / rust_decimal::Decimal::from(60);
-                base_mult + t * (rust_decimal::Decimal::ONE - base_mult)
-            };
+            let off_hours_mult = off_hours_multiplier(mins_since_midnight, base_mult);
             if off_hours_mult < rust_decimal::Decimal::ONE {
                 let original_amount_sol = signal.payload.amount_sol;
                 signal.payload.amount_sol *= off_hours_mult;
@@ -1745,20 +1729,43 @@ impl SignalProcessor {
     }
 }
 
+/// Off-hours BUY size multiplier (01:00–06:00 UTC ramp down/up).
+///
+/// Pure function extracted from `process_signal` so the ramp arithmetic is
+/// unit-testable at any wall-clock time; the caller computes
+/// `mins_since_midnight` from `Utc::now()`.
+pub fn off_hours_multiplier(mins_since_midnight: i64, base_mult: Decimal) -> Decimal {
+    const RAMP_DOWN_START: i64 = 60;
+    const FULL_REDUCTION_START: i64 = 120;
+    const FULL_REDUCTION_END: i64 = 300;
+    const RAMP_UP_END: i64 = 360;
+    if !(RAMP_DOWN_START..RAMP_UP_END).contains(&mins_since_midnight) {
+        Decimal::ONE
+    } else if mins_since_midnight < FULL_REDUCTION_START {
+        let t = Decimal::from(mins_since_midnight - RAMP_DOWN_START) / Decimal::from(60);
+        Decimal::ONE - t * (Decimal::ONE - base_mult)
+    } else if mins_since_midnight < FULL_REDUCTION_END {
+        base_mult
+    } else {
+        let t = Decimal::from(mins_since_midnight - FULL_REDUCTION_END) / Decimal::from(60);
+        base_mult + t * (Decimal::ONE - base_mult)
+    }
+}
+
 /// RAII guard for the per-token BUY admission lock.
 ///
 /// Also bounds `admission_locks` growth: when the guard drops and no other
 /// worker holds or waits on the token's mutex (the map entry is then the only
 /// remaining reference besides the caller's), the entry is removed so memory
 /// does not grow with the number of distinct tokens ever traded.
-struct AdmissionGuard<'a> {
+pub struct AdmissionGuard<'a> {
     locks: &'a dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>,
     key: String,
     _guard: Option<tokio::sync::MutexGuard<'a, ()>>,
 }
 
 impl<'a> AdmissionGuard<'a> {
-    fn new(
+    pub fn new(
         locks: &'a dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>,
         key: String,
         guard: tokio::sync::MutexGuard<'a, ()>,

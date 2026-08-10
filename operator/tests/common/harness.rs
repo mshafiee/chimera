@@ -228,6 +228,17 @@ pub struct Harness {
 
 /// Build a full test harness: real DB + real router with all handler routes.
 pub async fn build(config: AppConfig) -> Harness {
+    build_with_market_regime(config, None).await
+}
+
+/// Like [`build`] but with an optional market-regime detector wired into
+/// `ApiState` (the default is `None` — the handlers' "not initialized" 500
+/// path). The detector is constructed with the same `price_cache` the
+/// harness uses, so seeded prices are visible to it.
+pub async fn build_with_market_regime(
+    config: AppConfig,
+    market_regime_detector: Option<Arc<chimera_operator::engine::MarketRegimeDetector>>,
+) -> Harness {
     let (db, guard) = common::create_test_pg_db().await;
     let pool = match db.pool() {
         DbPool::PostgreSQL(p) => p.clone(),
@@ -338,7 +349,7 @@ pub async fn build(config: AppConfig) -> Harness {
         engine: Some(Arc::new(engine_handle.clone())),
         metrics: metrics.clone(),
         signal_aggregator: None,
-        market_regime_detector: None,
+        market_regime_detector,
         helius_client: Some(helius_client.clone()),
         webhook_rate_limiter: Some(webhook_rate_limiter.clone()),
         price_cache: price_cache.clone(),

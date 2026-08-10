@@ -123,3 +123,12 @@ mod handlers_webhook_lifecycle_tests;
 
 #[path = "unit/handlers_monitoring_tests.rs"]
 mod handlers_monitoring_tests;
+
+#[path = "unit/handlers_market_tests.rs"]
+mod handlers_market_tests;
+
+#[path = "unit/entry_confirmation_tests.rs"]
+mod entry_confirmation_tests;
+
+#[path = "unit/executor_tests.rs"]
+mod executor_tests;

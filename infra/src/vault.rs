@@ -248,26 +248,14 @@ impl Vault {
             // OpenOptions with create_new(true) = O_CREAT|O_EXCL: fails if the
             // path already exists (including a symlink), so a local attacker
             // cannot redirect the write or pre-create a world-readable file.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                let mut opts = std::fs::OpenOptions::new();
-                opts.write(true).create_new(true).mode(0o600);
-                let mut f = opts.open(&tmp_path)?;
-                f.write_all(encrypted.as_bytes())?;
-                // Flush the ciphertext to disk before the atomic rename so a
-                // crash after rename cannot leave an empty/partial vault file.
-                f.sync_all()?;
-            }
-            #[cfg(not(unix))]
-            {
-                let mut f = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&tmp_path)?;
-                f.write_all(encrypted.as_bytes())?;
-                f.sync_all()?;
-            }
+            // On unix the temp file is additionally created with mode 0600
+            // (owner read/write only) so the encrypted keypair is never
+            // visible to other local users even transiently.
+            let mut f = open_vault_tmp(&tmp_path)?;
+            f.write_all(encrypted.as_bytes())?;
+            // Flush the ciphertext to disk before the atomic rename so a
+            // crash after rename cannot leave an empty/partial vault file.
+            f.sync_all()?;
 
             std::fs::rename(&tmp_path, path)?;
             Ok(())
@@ -294,9 +282,9 @@ impl Vault {
         let cipher = Aes256Gcm::new_from_slice(&self.key)
             .map_err(|e| VaultError::InvalidKey(format!("Failed to create cipher: {}", e)))?;
 
-        let ciphertext = cipher.encrypt(nonce, plaintext.as_slice()).map_err(|e| {
-            VaultError::EncryptionFailed(format!("AES-GCM encryption failed: {}", e))
-        })?;
+        let ciphertext = cipher
+            .encrypt(nonce, plaintext.as_slice())
+            .map_err(encryption_failed)?;
 
         // Combine nonce + ciphertext and encode as base64
         let mut combined = Vec::with_capacity(12 + ciphertext.len());
@@ -316,11 +304,36 @@ impl Vault {
 /// Generate random bytes using getrandom (cryptographically secure)
 fn rand_bytes<const N: usize>() -> Result<[u8; N], VaultError> {
     let mut bytes = [0u8; N];
-    getrandom::getrandom(&mut bytes).map_err(|e| {
-        tracing::error!("Cryptographic random number generation failed: {}", e);
-        VaultError::KeyGeneration(format!("getrandom failed: {}", e))
-    })?;
+    getrandom::getrandom(&mut bytes).map_err(key_generation_failed)?;
     Ok(bytes)
+}
+
+/// Map a getrandom failure onto the vault error type.
+fn key_generation_failed(e: getrandom::Error) -> VaultError {
+    tracing::error!("Cryptographic random number generation failed: {}", e);
+    VaultError::KeyGeneration(format!("getrandom failed: {}", e))
+}
+
+/// Map an AES-GCM encryption failure onto the vault error type.
+fn encryption_failed(e: aes_gcm::Error) -> VaultError {
+    VaultError::EncryptionFailed(format!("AES-GCM encryption failed: {}", e))
+}
+
+/// Open the temp vault file with `O_CREAT|O_EXCL` semantics. On unix the file
+/// is created with mode 0600 (owner read/write only) so the encrypted keypair
+/// is never visible to other local users even transiently.
+#[cfg(unix)]
+fn open_vault_tmp(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true).mode(0o600);
+    opts.open(path)
+}
+
+/// Non-unix variant of [`open_vault_tmp`] (no mode bit support).
+#[cfg(not(unix))]
+fn open_vault_tmp(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 /// Generate random nonce for AES-GCM
@@ -436,6 +449,27 @@ impl std::fmt::Debug for VaultSecrets {
 mod tests {
     use super::*;
 
+    /// Serialize env-var-dependent tests: env is process-global and tests run
+    /// in parallel threads, so all tests that set/remove CHIMERA_* vars must
+    /// hold this lock for their whole body.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn make_secrets() -> VaultSecrets {
+        VaultSecrets {
+            webhook_secret: "test-secret-123".to_string(),
+            webhook_secret_previous: Some("old-secret".to_string()),
+            wallet_private_key: Some(
+                "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20".repeat(2),
+            ),
+            rpc_api_key: Some("rpc-key".to_string()),
+            fallback_rpc_api_key: None,
+        }
+    }
+
+    fn test_vault() -> Vault {
+        Vault::new(&Vault::generate_key().unwrap()).unwrap()
+    }
+
     #[test]
     fn test_generate_key() {
         let key = Vault::generate_key().expect("Key generation failed");
@@ -447,15 +481,7 @@ mod tests {
         let key = Vault::generate_key().expect("Key generation failed");
         let vault = Vault::new(&key).unwrap();
 
-        let secrets = VaultSecrets {
-            webhook_secret: "test-secret-123".to_string(),
-            webhook_secret_previous: Some("old-secret".to_string()),
-            wallet_private_key: Some(
-                "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20".repeat(2),
-            ), // 64 bytes hex
-            rpc_api_key: Some("rpc-key".to_string()),
-            fallback_rpc_api_key: None,
-        };
+        let secrets = make_secrets();
 
         let encrypted = vault.encrypt_secrets(&secrets).unwrap();
         let decrypted = vault.decrypt_secrets(&encrypted).unwrap();
@@ -473,11 +499,333 @@ mod tests {
     fn test_invalid_key_length() {
         let result = Vault::new("tooshort");
         assert!(result.is_err());
+        // Valid hex but wrong byte length (40 hex chars = 20 bytes)
+        let result = Vault::new(&"ab".repeat(20));
+        assert!(matches!(result, Err(VaultError::InvalidKey(_))));
     }
 
     #[test]
     fn test_invalid_key_hex() {
         let result = Vault::new("not-valid-hex-string-definitely-not-64-chars-of-hex-here-nope!");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_key_entropy_rejects_all_zeros() {
+        let key = "00".repeat(32);
+        let result = Vault::new(&key);
+        assert!(matches!(result, Err(VaultError::InvalidKey(_))));
+    }
+
+    #[test]
+    fn test_key_entropy_rejects_repeating_pattern() {
+        // "0102" repeated 16 times: 64 hex chars, repeating with period 4
+        let key = "0102".repeat(16);
+        let result = Vault::new(&key);
+        assert!(matches!(result, Err(VaultError::InvalidKey(_))));
+
+        // Single repeating byte (period 1)
+        let key = "ab".repeat(32);
+        assert!(matches!(Vault::new(&key), Err(VaultError::InvalidKey(_))));
+    }
+
+    #[test]
+    fn test_key_entropy_accepts_strong_key() {
+        // A CSPRNG-generated key must pass the entropy gate
+        let key = Vault::generate_key().unwrap();
+        assert!(Vault::new(&key).is_ok());
+    }
+
+    #[test]
+    fn test_from_env_missing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CHIMERA_VAULT_KEY");
+        assert!(Vault::from_env().is_err());
+    }
+
+    #[test]
+    fn test_from_env_set() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let key = Vault::generate_key().unwrap();
+        std::env::set_var("CHIMERA_VAULT_KEY", &key);
+        assert!(Vault::from_env().is_ok());
+        std::env::remove_var("CHIMERA_VAULT_KEY");
+    }
+
+    #[test]
+    fn test_decrypt_bad_base64() {
+        let vault = test_vault();
+        let err = vault.decrypt_secrets("###not-base64###").unwrap_err();
+        assert!(matches!(err, VaultError::Base64Error(_)));
+    }
+
+    #[test]
+    fn test_decrypt_too_short() {
+        let vault = test_vault();
+        // 8 bytes base64-decoded — below the 12+16 minimum
+        let short = BASE64.encode([0u8; 8]);
+        let err = vault.decrypt_secrets(&short).unwrap_err();
+        assert!(matches!(err, VaultError::DecryptionFailed(_)));
+    }
+
+    #[test]
+    fn test_decrypt_wrong_key() {
+        let vault = test_vault();
+        let other = test_vault();
+        let encrypted = vault.encrypt_secrets(&make_secrets()).unwrap();
+        assert!(matches!(
+            other.decrypt_secrets(&encrypted),
+            Err(VaultError::DecryptionFailed(_))
+        ));
+    }
+
+    #[test]
+    fn test_decrypt_empty_webhook_secret_rejected() {
+        let vault = test_vault();
+        let secrets = VaultSecrets {
+            webhook_secret: String::new(),
+            webhook_secret_previous: None,
+            wallet_private_key: None,
+            rpc_api_key: None,
+            fallback_rpc_api_key: None,
+        };
+        let encrypted = vault.encrypt_secrets(&secrets).unwrap();
+        assert!(matches!(
+            vault.decrypt_secrets(&encrypted),
+            Err(VaultError::CorruptVault(_))
+        ));
+    }
+
+    #[test]
+    fn test_decrypt_normalizes_empty_optionals() {
+        let vault = test_vault();
+        let secrets = VaultSecrets {
+            webhook_secret: "s".to_string(),
+            webhook_secret_previous: Some(String::new()),
+            wallet_private_key: Some(String::new()),
+            rpc_api_key: Some(String::new()),
+            fallback_rpc_api_key: Some(String::new()),
+        };
+        let encrypted = vault.encrypt_secrets(&secrets).unwrap();
+        let decrypted = vault.decrypt_secrets(&encrypted).unwrap();
+        assert_eq!(decrypted.webhook_secret, "s");
+        assert!(decrypted.webhook_secret_previous.is_none());
+        assert!(decrypted.wallet_private_key.is_none());
+        assert!(decrypted.rpc_api_key.is_none());
+        assert!(decrypted.fallback_rpc_api_key.is_none());
+    }
+
+    #[test]
+    fn test_decrypt_with_whitespace() {
+        let vault = test_vault();
+        let encrypted = vault.encrypt_secrets(&make_secrets()).unwrap();
+        // trim() handles surrounding whitespace
+        let padded = format!("  {}\n", encrypted);
+        let decrypted = vault.decrypt_secrets(&padded).unwrap();
+        assert_eq!(decrypted.webhook_secret, "test-secret-123");
+    }
+
+    #[test]
+    fn test_save_load_secrets_roundtrip() {
+        let vault = test_vault();
+        let dir = std::env::temp_dir().join(format!("vault-test-{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secrets.enc");
+
+        vault.save_secrets(&make_secrets(), &path).unwrap();
+        let loaded = vault.load_secrets(&path).unwrap();
+        assert_eq!(loaded.webhook_secret, "test-secret-123");
+        assert_eq!(loaded.wallet_private_key.as_deref(), Some("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20".repeat(2).as_str()));
+
+        // No leftover .tmp files
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "no tmp files may remain");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_save_secrets_error_cleans_temp() {
+        let vault = test_vault();
+        // Path in a nonexistent directory -> open fails -> temp file cleaned up
+        let dir = std::env::temp_dir().join(format!(
+            "vault-missing-{}",
+            rand::random::<u32>()
+        ));
+        let path = dir.join("secrets.enc");
+        assert!(vault.save_secrets(&make_secrets(), &path).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_load_secrets_missing_file() {
+        let vault = test_vault();
+        let err = vault
+            .load_secrets("/nonexistent/path/secrets.enc")
+            .unwrap_err();
+        assert!(matches!(err, VaultError::FileError(_)));
+    }
+
+    #[test]
+    fn test_vault_secrets_debug_redacted() {
+        let debug = format!("{:?}", make_secrets());
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("test-secret-123"));
+        assert!(!debug.contains("rpc-key"));
+    }
+
+    #[test]
+    fn test_load_secrets_with_fallback_vault_file() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("vault-fb-{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secrets.enc");
+
+        let key = Vault::generate_key().unwrap();
+        let vault = Vault::new(&key).unwrap();
+        vault.save_secrets(&make_secrets(), &path).unwrap();
+
+        std::env::set_var("CHIMERA_VAULT_KEY", &key);
+        std::env::set_var("CHIMERA_VAULT_PATH", &path);
+        let secrets = load_secrets_with_fallback().unwrap();
+        assert_eq!(secrets.webhook_secret, "test-secret-123");
+        assert_eq!(secrets.rpc_api_key.as_deref(), Some("rpc-key"));
+
+        std::env::remove_var("CHIMERA_VAULT_KEY");
+        std::env::remove_var("CHIMERA_VAULT_PATH");
+        std::env::remove_var("CHIMERA_SECURITY__WEBHOOK_SECRET");
+        std::env::remove_var("CHIMERA_SECURITY__WEBHOOK_SECRET_PREVIOUS");
+        std::env::remove_var("CHIMERA_WALLET__PRIVATE_KEY");
+        std::env::remove_var("CHIMERA_RPC__API_KEY");
+        std::env::remove_var("CHIMERA_RPC__FALLBACK_API_KEY");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_load_secrets_with_fallback_wrong_key_fails_hard() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("vault-badkey-{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secrets.enc");
+
+        let vault = test_vault();
+        vault.save_secrets(&make_secrets(), &path).unwrap();
+
+        std::env::set_var("CHIMERA_VAULT_KEY", Vault::generate_key().unwrap());
+        std::env::set_var("CHIMERA_VAULT_PATH", &path);
+        let err = load_secrets_with_fallback().unwrap_err();
+        assert!(matches!(err, VaultError::InvalidKey(_)));
+
+        std::env::remove_var("CHIMERA_VAULT_KEY");
+        std::env::remove_var("CHIMERA_VAULT_PATH");
+        std::env::remove_var("CHIMERA_SECURITY__WEBHOOK_SECRET");
+        std::env::remove_var("CHIMERA_SECURITY__WEBHOOK_SECRET_PREVIOUS");
+        std::env::remove_var("CHIMERA_WALLET__PRIVATE_KEY");
+        std::env::remove_var("CHIMERA_RPC__API_KEY");
+        std::env::remove_var("CHIMERA_RPC__FALLBACK_API_KEY");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_load_secrets_with_fallback_missing_file_warns_and_env_fallback() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let key = Vault::generate_key().unwrap();
+        std::env::set_var("CHIMERA_VAULT_KEY", &key);
+        std::env::set_var(
+            "CHIMERA_VAULT_PATH",
+            "/nonexistent/vault/file/secrets.enc",
+        );
+        std::env::set_var(
+            "CHIMERA_SECURITY__WEBHOOK_SECRET",
+            "env-webhook-secret",
+        );
+        std::env::set_var("CHIMERA_SECURITY__WEBHOOK_SECRET_PREVIOUS", "env-old");
+        std::env::set_var(
+            "CHIMERA_WALLET__PRIVATE_KEY",
+            "  env-wallet-key  ", // trimmed
+        );
+        std::env::set_var("CHIMERA_RPC__API_KEY", "env-rpc");
+        std::env::set_var("CHIMERA_RPC__FALLBACK_API_KEY", "env-fallback-rpc");
+
+        let secrets = load_secrets_with_fallback().unwrap();
+        assert_eq!(secrets.webhook_secret, "env-webhook-secret");
+        assert_eq!(secrets.webhook_secret_previous.as_deref(), Some("env-old"));
+        assert_eq!(secrets.wallet_private_key.as_deref(), Some("env-wallet-key"));
+        assert_eq!(secrets.rpc_api_key.as_deref(), Some("env-rpc"));
+        assert_eq!(secrets.fallback_rpc_api_key.as_deref(), Some("env-fallback-rpc"));
+
+        std::env::remove_var("CHIMERA_VAULT_KEY");
+        std::env::remove_var("CHIMERA_VAULT_PATH");
+        std::env::remove_var("CHIMERA_SECURITY__WEBHOOK_SECRET");
+        std::env::remove_var("CHIMERA_SECURITY__WEBHOOK_SECRET_PREVIOUS");
+        std::env::remove_var("CHIMERA_WALLET__PRIVATE_KEY");
+        std::env::remove_var("CHIMERA_RPC__API_KEY");
+        std::env::remove_var("CHIMERA_RPC__FALLBACK_API_KEY");
+    }
+
+    #[test]
+    fn test_load_secrets_with_fallback_empty_env_values_filtered() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("CHIMERA_SECURITY__WEBHOOK_SECRET", "only-this");
+        std::env::set_var("CHIMERA_SECURITY__WEBHOOK_SECRET_PREVIOUS", "");
+        std::env::set_var("CHIMERA_WALLET__PRIVATE_KEY", "");
+        std::env::set_var("CHIMERA_RPC__API_KEY", "");
+        std::env::set_var("CHIMERA_RPC__FALLBACK_API_KEY", "");
+
+        let secrets = load_secrets_with_fallback().unwrap();
+        assert_eq!(secrets.webhook_secret, "only-this");
+        assert!(secrets.webhook_secret_previous.is_none());
+        assert!(secrets.wallet_private_key.is_none());
+        assert!(secrets.rpc_api_key.is_none());
+        assert!(secrets.fallback_rpc_api_key.is_none());
+
+        std::env::remove_var("CHIMERA_SECURITY__WEBHOOK_SECRET");
+        std::env::remove_var("CHIMERA_SECURITY__WEBHOOK_SECRET_PREVIOUS");
+        std::env::remove_var("CHIMERA_WALLET__PRIVATE_KEY");
+        std::env::remove_var("CHIMERA_RPC__API_KEY");
+        std::env::remove_var("CHIMERA_RPC__FALLBACK_API_KEY");
+    }
+
+    #[test]
+    fn test_load_secrets_with_fallback_no_webhook_secret_fails() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CHIMERA_VAULT_KEY");
+        std::env::remove_var("CHIMERA_VAULT_PATH");
+        std::env::remove_var("CHIMERA_SECURITY__WEBHOOK_SECRET");
+        assert!(load_secrets_with_fallback().is_err());
+    }
+
+    #[test]
+    fn test_load_secrets_with_fallback_invalid_key_fails() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("CHIMERA_VAULT_KEY", "not-a-valid-hex-key-here");
+        let err = load_secrets_with_fallback().unwrap_err();
+        assert!(matches!(err, VaultError::InvalidKey(_)));
+        std::env::remove_var("CHIMERA_VAULT_KEY");
+    }
+
+    #[test]
+    fn test_encrypt_produces_distinct_ciphertexts() {
+        let vault = test_vault();
+        let a = vault.encrypt_secrets(&make_secrets()).unwrap();
+        let b = vault.encrypt_secrets(&make_secrets()).unwrap();
+        assert_ne!(a, b, "random nonce must produce distinct ciphertexts");
+    }
+
+    #[test]
+    fn test_error_mapping_helpers() {
+        // The defensive error arms of encrypt/getrandom are unreachable with a
+        // valid 32-byte key on a healthy OS RNG; exercise the mapping fns
+        // directly to cover them.
+        let err = encryption_failed(aes_gcm::Error); // unit struct
+        assert!(matches!(err, VaultError::EncryptionFailed(_)));
+        assert!(err.to_string().contains("Encryption failed"));
+
+        let err = key_generation_failed(getrandom::Error::UNSUPPORTED);
+        assert!(matches!(err, VaultError::KeyGeneration(_)));
     }
 }

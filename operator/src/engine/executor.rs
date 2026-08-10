@@ -45,7 +45,7 @@ const MAX_TX_SIZE_ENCODED: usize = 1644;
 /// only; EXIT/SELL signals are exempt so stop-losses can always close positions.
 ///
 /// Defined as a fn because `rust_decimal::Decimal` is not `const`-constructible.
-fn max_price_impact_pct() -> Decimal {
+pub fn max_price_impact_pct() -> Decimal {
     // Was 5%: on a near-zero gross-edge strategy, accepting a 5% entry slippage
     // guarantees a net-negative round trip (entry slippage + exit slippage +
     // fees ≈ 6-7%). Live win rate was 17.5% vs shadow 68% — the ~50pt gap is
@@ -60,7 +60,7 @@ fn max_price_impact_pct() -> Decimal {
 /// the tokens are already in the wallet — the cap must run at quote time.
 /// BUY entries only; EXIT/SELL signals are exempt so protective exits always
 /// proceed.
-fn enforce_price_impact_cap(
+pub fn enforce_price_impact_cap(
     signal: &Signal,
     price_impact_pct: Option<Decimal>,
 ) -> Result<(), ExecutorError> {
@@ -174,7 +174,7 @@ pub struct ExecutionOutcome {
 }
 
 impl ExecutionOutcome {
-    fn live(
+    pub fn live(
         signature: String,
         confirmed: bool,
         fill_price_sol_per_token: Option<Decimal>,
@@ -265,7 +265,7 @@ pub fn derive_token_amount(
 /// (`outAmount / 1e9` — for a SELL the output side is SOL). `None` for BUY or
 /// when the quote lacked output info (A1: exit-side cost attribution must use
 /// this executed notional, never the copied wallet's signal amount).
-fn executed_output_sol_for(
+pub fn executed_output_sol_for(
     built_tx: &crate::engine::transaction_builder::BuiltTransaction,
     signal: &Signal,
 ) -> Option<Decimal> {
@@ -282,17 +282,17 @@ fn executed_output_sol_for(
 /// Mutable execution state — wrapped in a Mutex so `execute` can take `&self`,
 /// allowing the RwLock in Engine to be held as a read lock during the 60 s RPC call
 /// instead of a write lock that would serialise all concurrent executions.
-struct ExecutorMutableState {
-    rpc_mode: RpcMode,
-    failure_count: u32,
-    fallback_since: Option<DateTime<Utc>>,
-    last_recovery_attempt: Option<DateTime<Utc>>,
+pub struct ExecutorMutableState {
+    pub rpc_mode: RpcMode,
+    pub failure_count: u32,
+    pub fallback_since: Option<DateTime<Utc>>,
+    pub last_recovery_attempt: Option<DateTime<Utc>>,
     /// Jito health tracking
-    jito_health: Option<JitoHealth>,
+    pub jito_health: Option<JitoHealth>,
     /// Jito bundle submission metrics
-    jito_submissions: std::sync::atomic::AtomicU64,
-    jito_resolutions_success: std::sync::atomic::AtomicU64,
-    jito_resolutions_failed: std::sync::atomic::AtomicU64,
+    pub jito_submissions: std::sync::atomic::AtomicU64,
+    pub jito_resolutions_success: std::sync::atomic::AtomicU64,
+    pub jito_resolutions_failed: std::sync::atomic::AtomicU64,
 }
 
 /// Trade executor
@@ -302,9 +302,9 @@ pub struct Executor {
     /// Database
     db: Arc<dyn Database>,
     /// Interior-mutable RPC state (see ExecutorMutableState)
-    mutable: parking_lot::Mutex<ExecutorMutableState>,
+    pub mutable: parking_lot::Mutex<ExecutorMutableState>,
     /// Recovery check interval (default 5 minutes)
-    recovery_interval: Duration,
+    pub recovery_interval: Duration,
     /// Notification service
     notifier: Option<Arc<CompositeNotifier>>,
     /// Latest RPC health status (cached)
@@ -459,7 +459,7 @@ impl Executor {
     /// - Base backoff: 2^attempt seconds (1s, 2s, 4s, 8s, 16s for attempts 0-4)
     /// - ±25% random jitter to prevent synchronized retries
     /// - Maximum capped at 30 seconds
-    fn calculate_retry_backoff(attempt: u32) -> Duration {
+    pub fn calculate_retry_backoff(attempt: u32) -> Duration {
         let base = 2u64.pow(attempt.min(4)); // Cap at 16s base (2^4)
         let jitter = rand::rng().random_range(-0.25..0.25); // ±25%
         let millis = ((base as f64) * (1.0 + jitter) * 1000.0) as u64;
@@ -467,7 +467,7 @@ impl Executor {
     }
 
     /// Detect if an error message indicates RPC rate limiting
-    fn is_rate_limit_error(error: &str) -> bool {
+    pub fn is_rate_limit_error(error: &str) -> bool {
         let error_lower = error.to_lowercase();
         error_lower.contains("rate limit") ||
         error_lower.contains("429") ||
@@ -477,7 +477,7 @@ impl Executor {
     }
 
     /// Send notification if notifier is configured and rules allow it
-    async fn notify(&self, event: NotificationEvent) {
+    pub async fn notify(&self, event: NotificationEvent) {
         if let Some(ref notifier) = self.notifier {
             // Check notification rules before sending
             let rules = &self.config.notifications.rules;
@@ -957,7 +957,7 @@ impl Executor {
 
     /// Check market conditions before executing trades
     /// Returns Ok(()) if conditions are favorable, Err with reason otherwise
-    async fn check_market_conditions(
+    pub async fn check_market_conditions(
         &self,
         signal: &Signal,
     ) -> Result<(), String> {
@@ -1116,7 +1116,7 @@ impl Executor {
     }
 
     /// Check if we should attempt recovery to primary RPC
-    fn should_attempt_recovery(&self) -> bool {
+    pub fn should_attempt_recovery(&self) -> bool {
         let state = self.mutable.lock();
 
         // Only attempt recovery if we're in fallback mode
@@ -1151,7 +1151,7 @@ impl Executor {
     }
 
     /// Attempt to recover to primary RPC
-    async fn try_recover_to_primary(&self) {
+    pub async fn try_recover_to_primary(&self) {
         self.mutable.lock().last_recovery_attempt = Some(Utc::now());
 
         tracing::info!("Attempting to recover to primary RPC (Jito)");
@@ -1205,20 +1205,20 @@ impl Executor {
     }
 
     /// Check health of primary RPC
-    async fn check_primary_health(&self) -> Result<RpcHealth, ExecutorError> {
+    pub async fn check_primary_health(&self) -> Result<RpcHealth, ExecutorError> {
         self.check_health_impl(&self.config.rpc.primary_url, false)
             .await
     }
 
     /// Check health of active RPC
-    async fn check_active_health(&self) -> Result<RpcHealth, ExecutorError> {
+    pub async fn check_active_health(&self) -> Result<RpcHealth, ExecutorError> {
         // active_rpc_url() returns a &str from a lock, we must drop it before await
         let active_url = self.active_rpc_url().to_string();
         self.check_health_impl(&active_url, true).await
     }
 
     /// Internal health check implementation
-    async fn check_health_impl(
+    pub async fn check_health_impl(
         &self,
         url: &str,
         update_cache: bool,
@@ -1506,18 +1506,18 @@ impl Executor {
     }
 
     /// Record a Jito bundle submission (for health tracking)
-    fn record_jito_submission(&self) {
+    pub fn record_jito_submission(&self) {
         self.mutable.lock().jito_submissions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Record a successful Jito bundle resolution
-    fn record_jito_resolution_success(&self) {
+    pub fn record_jito_resolution_success(&self) {
         self.mutable.lock().jito_resolutions_success.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.record_jito_resolution_metrics("success");
     }
 
     /// Record a failed Jito bundle resolution
-    fn record_jito_resolution_failure(&self) {
+    pub fn record_jito_resolution_failure(&self) {
         self.mutable.lock().jito_resolutions_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.record_jito_resolution_metrics("failed");
     }
@@ -1533,7 +1533,7 @@ impl Executor {
     }
 
     /// Record Jito bundle submission to Prometheus metrics
-    fn record_jito_submission_metrics(&self, mode: &str) {
+    pub fn record_jito_submission_metrics(&self, mode: &str) {
         if let Some(ref metrics) = self.metrics {
             metrics
                 .jito_submissions
@@ -1543,7 +1543,7 @@ impl Executor {
     }
 
     /// Record Jito bundle resolution to Prometheus metrics
-    fn record_jito_resolution_metrics(&self, status: &str) {
+    pub fn record_jito_resolution_metrics(&self, status: &str) {
         if let Some(ref metrics) = self.metrics {
             metrics
                 .jito_resolutions
@@ -1553,7 +1553,7 @@ impl Executor {
     }
 
     /// Record Jito retry to Prometheus metrics
-    fn record_jito_retry_metrics(&self, attempt: u32) {
+    pub fn record_jito_retry_metrics(&self, attempt: u32) {
         if let Some(ref metrics) = self.metrics {
             metrics
                 .jito_retry_total
@@ -1563,7 +1563,7 @@ impl Executor {
     }
 
     /// Update Jito health gauge from health check
-    fn update_jito_health_metrics(&self, health: &JitoHealth) {
+    pub fn update_jito_health_metrics(&self, health: &JitoHealth) {
         if let Some(ref metrics) = self.metrics {
             metrics
                 .jito_health
@@ -1572,7 +1572,7 @@ impl Executor {
     }
 
     /// Execute via Jito bundle
-    async fn execute_jito_with_tip(
+    pub async fn execute_jito_with_tip(
         &self,
         signal: &Signal,
         tip_override: Option<Decimal>,
@@ -1948,7 +1948,7 @@ impl Executor {
     /// Shared by the direct-Jito and Helius legacy submission paths so they
     /// cannot diverge on the inline→sign→serialize sequence. Returns signed
     /// bytes ready for a single-tx bundle.
-    fn inline_and_serialize_tip(
+    pub fn inline_and_serialize_tip(
         &self,
         transaction: &Transaction,
         wallet_keypair: &solana_sdk::signature::Keypair,
@@ -1982,7 +1982,7 @@ impl Executor {
     /// one-element bundle — one signature, atomic at the transaction level.
     /// Returns a `bundle:<uuid>` ref the caller resolves via
     /// [`Self::resolve_helius_bundle_signature`] before polling (F12).
-    async fn submit_via_helius_single_bundle(
+    pub async fn submit_via_helius_single_bundle(
         &self,
         tipped_tx_bytes: &[u8],
         api_key: &str,
@@ -2045,7 +2045,7 @@ impl Executor {
     /// Resolve a Helius bundle UUID to its real landed SWAP transaction signature
     /// via the shared `getBundleStatuses` resolver. Returns `None` if unresolved
     /// (caller marks unconfirmed for recovery — never polls the UUID as a signature).
-    async fn resolve_helius_bundle_signature(
+    pub async fn resolve_helius_bundle_signature(
         &self,
         bundle_id: &str,
         api_key: &str,
@@ -2057,7 +2057,7 @@ impl Executor {
     }
 
     /// Execute via Helius RPC with Staked Connections (high landing rate for exits)
-    async fn execute_via_helius_staked(
+    pub async fn execute_via_helius_staked(
         &self,
         signal: &Signal,
     ) -> Result<ExecutionOutcome, ExecutorError> {
@@ -2164,7 +2164,7 @@ impl Executor {
     }
 
     /// Submit transaction via Helius RPC with staked connection prioritization
-    async fn submit_transaction_helius_staked(
+    pub async fn submit_transaction_helius_staked(
         &self,
         transaction: &Transaction,
         _keypair: &solana_sdk::signature::Keypair,
@@ -2240,7 +2240,7 @@ impl Executor {
     }
 
     /// Submit versioned transaction via Helius RPC with staked connection prioritization
-    async fn submit_versioned_transaction_helius_staked(
+    pub async fn submit_versioned_transaction_helius_staked(
         &self,
         transaction_bytes: &[u8],
         wallet_keypair: &solana_sdk::signature::Keypair,
@@ -2378,7 +2378,7 @@ impl Executor {
     }
 
     /// Execute via standard TPU
-    async fn execute_standard(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
+    pub async fn execute_standard(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
         tracing::info!(
             trade_uuid = %signal.trade_uuid,
             "Executing trade via standard TPU"
@@ -2472,7 +2472,7 @@ impl Executor {
     }
 
     /// Validate transaction size before submission
-    fn validate_transaction_size(&self, tx_bytes: &[u8]) -> Result<(), ExecutorError> {
+    pub fn validate_transaction_size(&self, tx_bytes: &[u8]) -> Result<(), ExecutorError> {
         if tx_bytes.len() > MAX_TX_SIZE_RAW {
             tracing::error!(
                 actual_size = tx_bytes.len(),
@@ -2488,7 +2488,7 @@ impl Executor {
     }
 
     /// Submit a signed transaction to the RPC
-    async fn submit_transaction(
+    pub async fn submit_transaction(
         &self,
         transaction: &Transaction,
         _keypair: &solana_sdk::signature::Keypair,
@@ -2537,7 +2537,7 @@ impl Executor {
     /// here instead of issuing extra `getLatestBlockhash` / `is_blockhash_valid`
     /// RPCs per swap. A hard blockhash expiry is still caught after submission
     /// (RPC error -32004 → `BlockhashExpired`).
-    async fn submit_versioned_transaction(
+    pub async fn submit_versioned_transaction(
         &self,
         transaction_bytes: &[u8],
         wallet_keypair: &solana_sdk::signature::Keypair,
@@ -2821,7 +2821,7 @@ impl Executor {
     /// when available, falls back to the liquidity-aware sqrt model, then the
     /// config size-tier. Returns both the expected-impact fraction (for cost
     /// bookkeeping) and the strategy-clamped Jupiter tolerance (`slippageBps`).
-    fn slippage_estimate(
+    pub fn slippage_estimate(
         &self,
         signal: &Signal,
         jupiter_impact_pct: Option<Decimal>,
@@ -2884,7 +2884,7 @@ impl Executor {
     }
 
     /// Classify an ExecutorError into Jito-specific categories for retry strategy
-    fn classify_jito_error(&self, error: &ExecutorError) -> JitoError {
+    pub fn classify_jito_error(&self, error: &ExecutorError) -> JitoError {
         match error {
             // Fatal errors - should NOT retry
             ExecutorError::AmountTooSmall(_, _)
@@ -2958,7 +2958,7 @@ impl Executor {
     }
 
     /// Calculate adaptive Jito tip with increase on retry attempts
-    async fn calculate_adaptive_jito_tip(&self, signal: &Signal, attempt: u32) -> u64 {
+    pub async fn calculate_adaptive_jito_tip(&self, signal: &Signal, attempt: u32) -> u64 {
         let base_tip_sol = self.calculate_jito_tip(signal).await;
 
         if attempt > 1 {
@@ -2989,7 +2989,7 @@ impl Executor {
     }
 
     /// Calculate retry backoff duration with exponential backoff + jitter
-    fn calculate_jito_backoff(&self, attempt: u32) -> Duration {
+    pub fn calculate_jito_backoff(&self, attempt: u32) -> Duration {
         // Exponential backoff: 200ms * 2^(attempt-1), with ±25% jitter
         let base_ms = 200u64;
         let exponential = base_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
@@ -3008,7 +3008,7 @@ impl Executor {
     /// - Retryable errors (insufficient tip, timeout): retry with increased tip
     /// - Fatal errors (insufficient balance, invalid tx): fail immediately
     /// - Network errors: may trigger fallback consideration
-    async fn execute_jito_with_retry(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
+    pub async fn execute_jito_with_retry(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
         let mut attempts = 0;
         let max_attempts = self.config.jito.max_retries;
 
@@ -3096,7 +3096,7 @@ impl Executor {
     }
 
     /// Check if the total execution costs (tip + fee + slippage) exceed the configured limit
-    async fn check_execution_costs(
+    pub async fn check_execution_costs(
         &self,
         signal: &Signal,
         price_impact_pct: Option<Decimal>,
@@ -3310,7 +3310,7 @@ impl Executor {
     }
 
     /// Switch to fallback RPC mode
-    async fn switch_to_fallback(&self) {
+    pub async fn switch_to_fallback(&self) {
         // Check if Jito fallback is disabled by configuration
         if self.config.jito.disable_fallback {
             tracing::warn!(
@@ -3418,7 +3418,7 @@ impl Executor {
     ///
     /// Approximation: base fee (5000 lamports) + median priority fee × estimated CU / 1e6,
     /// then convert lamports to SOL (÷ 1e9).
-    async fn estimate_network_fee(&self) -> Decimal {
+    pub async fn estimate_network_fee(&self) -> Decimal {
         let client = self.active_rpc_client();
         let base_fee_lamports: u64 = 5000;
 
@@ -3451,7 +3451,7 @@ impl Executor {
     /// (P2-17/F22 parity) instead of the flat `amount × dex_fee_rate` estimate.
     /// `executed_output_sol` is the SELL gross SOL proceeds (A1 attribution
     /// basis); `None` for BUY.
-    async fn get_paper_prices(
+    pub async fn get_paper_prices(
         &self,
         signal: &Signal,
     ) -> Result<(Option<Decimal>, Option<Decimal>, Option<u64>, Option<Decimal>, Option<Decimal>), ExecutorError> {
@@ -3597,7 +3597,7 @@ impl Executor {
         }
     }
 
-    async fn execute_paper(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
+    pub async fn execute_paper(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
         tracing::info!(
             trade_uuid = %signal.trade_uuid,
             action = %signal.payload.action,
@@ -3632,7 +3632,7 @@ impl Executor {
         })
     }
 
-    async fn execute_devnet(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
+    pub async fn execute_devnet(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
         tracing::info!(
             trade_uuid = %signal.trade_uuid,
             "Devnet mode: real Jupiter quote + minimal tx on devnet"
@@ -3718,7 +3718,7 @@ impl Executor {
     /// Get the active RPC client based on current mode
     /// In STANDARD mode with fallback configured, returns fallback client
     /// Otherwise returns primary client
-    fn active_rpc_client(&self) -> Arc<RpcClient> {
+    pub fn active_rpc_client(&self) -> Arc<RpcClient> {
         if self.mutable.lock().rpc_mode == RpcMode::Standard {
             if let Some(ref fallback_client) = self.fallback_rpc_client {
                 return fallback_client.clone();
@@ -3735,7 +3735,7 @@ impl Executor {
     /// Get the active RPC URL based on current mode
     /// In STANDARD mode with fallback configured, returns fallback URL
     /// Otherwise returns primary URL
-    fn active_rpc_url(&self) -> &str {
+    pub fn active_rpc_url(&self) -> &str {
         if self.mutable.lock().rpc_mode == RpcMode::Standard {
             if let Some(ref fallback_url) = self.config.rpc.fallback_url {
                 return fallback_url;
@@ -3756,7 +3756,7 @@ impl Executor {
     /// fallback mode the primary endpoint is typically the unhealthy one that
     /// triggered the failover, and polling it would error on every attempt,
     /// reporting a landed transaction as unconfirmed.
-    async fn poll_signature_confirmation(
+    pub async fn poll_signature_confirmation(
         &self,
         signature: &str,
         trade_uuid: &str,

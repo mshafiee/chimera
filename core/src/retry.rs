@@ -34,10 +34,35 @@ pub fn is_network_error(err: &anyhow::Error) -> bool {
     }
 }
 
+/// An error carrying an HTTP status code, for callers that must turn a
+/// non-2xx response into an error but have no `reqwest::Error` at hand
+/// (e.g. raw response handling). `extract_status` recognizes it, so retry
+/// classification (404/422 non-retryable, 5xx retryable) still works.
+#[derive(Debug, Clone)]
+pub struct HttpStatusError {
+    pub status: u16,
+}
+
+impl HttpStatusError {
+    pub fn new(status: u16) -> Self {
+        Self { status }
+    }
+}
+
+impl std::fmt::Display for HttpStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP status error: {}", self.status)
+    }
+}
+
+impl std::error::Error for HttpStatusError {}
+
 /// Extract HTTP status code from an error if available.
 pub fn extract_status(err: &anyhow::Error) -> u16 {
     if let Some(e) = err.downcast_ref::<reqwest::Error>() {
         e.status().map(|s| s.as_u16()).unwrap_or(0)
+    } else if let Some(e) = err.downcast_ref::<HttpStatusError>() {
+        e.status
     } else {
         0
     }

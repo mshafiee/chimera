@@ -826,6 +826,7 @@ mod tests {
     use super::*;
     use crate::monitoring::helius::{
         AccountData, HeliusWebhookPayload, NativeTransfer, RawTokenAmount, TokenBalanceChange,
+        WebhookEvents, WebhookSwapEvent, WebhookSwapNativeLeg, WebhookSwapTokenLeg,
     };
 
     const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
@@ -1141,5 +1142,597 @@ mod tests {
         );
 
         assert!(parse_helius_webhook(&payload, Some(wallet)).unwrap().is_none());
+    }
+
+    // ==========================================================================
+    // parse_transaction (Jupiter / Raydium / Orca / Pump.fun / no-swap)
+    // ==========================================================================
+
+    const JUP: &str = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
+    const RAYDIUM: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
+    const ORCA: &str = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc";
+    const PUMPFUN: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+    const TOK: &str = "TokA111111111111111111111111111111111111111";
+
+    fn balance(account_index: u64, mint: &str, ui_amount: f64) -> serde_json::Value {
+        serde_json::json!({
+            "accountIndex": account_index,
+            "mint": mint,
+            "uiTokenAmount": {"uiAmount": ui_amount}
+        })
+    }
+
+    fn tx_with_program(program_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "transaction": {
+                "signatures": ["sig123"],
+                "message": {"instructions": [{"programId": program_id}]}
+            },
+            "meta": {
+                "preTokenBalances": [
+                    balance(0, SOL_MINT, 10.0),
+                    balance(1, TOK, 0.0)
+                ],
+                "postTokenBalances": [
+                    balance(0, SOL_MINT, 9.0),
+                    balance(1, TOK, 100.0)
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn test_parse_transaction_jupiter_buy() {
+        let tx = tx_with_program(JUP);
+        let info = parse_transaction(&tx, "Wallet111111111111111111111111111111111111").unwrap();
+        assert_eq!(info.signature, "sig123");
+        let swap = info.parsed_swap.expect("jupiter swap");
+        assert_eq!(swap.dex, "Jupiter");
+        assert_eq!(swap.direction, SwapDirection::Buy);
+        assert_eq!(swap.token_in, SOL_MINT);
+        assert_eq!(swap.token_out, TOK);
+        assert_eq!(swap.amount_in, Decimal::new(1, 0));
+        assert_eq!(swap.amount_out, Decimal::new(100, 0));
+    }
+
+    #[test]
+    fn test_parse_transaction_raydium_orca_pumpfun() {
+        for (program, dex) in [
+            (RAYDIUM, "Raydium"),
+            (ORCA, "Orca"),
+            (PUMPFUN, "Pump.fun"),
+        ] {
+            let tx = tx_with_program(program);
+            let info = parse_transaction(&tx, "wallet").unwrap();
+            let swap = info.parsed_swap.expect(dex);
+            assert_eq!(swap.dex, dex);
+            assert_eq!(swap.direction, SwapDirection::Buy);
+        }
+    }
+
+    #[test]
+    fn test_parse_transaction_no_swap() {
+        let tx = serde_json::json!({
+            "transaction": {
+                "signatures": ["sig123"],
+                "message": {"instructions": [{"programId": "UnknownProg"}]}
+            },
+            "meta": {"preTokenBalances": [], "postTokenBalances": []}
+        });
+        let info = parse_transaction(&tx, "wallet").unwrap();
+        assert!(info.parsed_swap.is_none());
+    }
+
+    #[test]
+    fn test_parse_transaction_missing_signature() {
+        let tx = serde_json::json!({"transaction": {"message": {"instructions": []}}});
+        assert!(parse_transaction(&tx, "wallet").is_err());
+    }
+
+    #[test]
+    fn test_parse_transaction_program_in_inner_instructions() {
+        // Raydium program only present in inner instructions (CPI)
+        let tx = serde_json::json!({
+            "transaction": {
+                "signatures": ["sig123"],
+                "message": {"instructions": [{"programId": "Router1111111111111111111111111111111111"}]}
+            },
+            "meta": {
+                "innerInstructions": [{"instructions": [{"programId": RAYDIUM}]}],
+                "preTokenBalances": [balance(0, TOK, 100.0), balance(1, SOL_MINT, 1.0)],
+                "postTokenBalances": [balance(0, TOK, 0.0), balance(1, SOL_MINT, 2.0)]
+            }
+        });
+        let info = parse_transaction(&tx, "wallet").unwrap();
+        let swap = info.parsed_swap.expect("raydium via inner instructions");
+        assert_eq!(swap.dex, "Raydium");
+        assert_eq!(swap.direction, SwapDirection::Sell);
+    }
+
+    #[test]
+    fn test_parse_transaction_missing_instructions() {
+        let tx = serde_json::json!({
+            "transaction": {"signatures": ["sig123"], "message": {}}
+        });
+        // Missing instructions -> every DEX parser errors -> no swap detected
+        let info = parse_transaction(&tx, "wallet").unwrap();
+        assert!(info.parsed_swap.is_none());
+    }
+
+    // ==========================================================================
+    // parse_balance_changes
+    // ==========================================================================
+
+    #[test]
+    fn test_parse_balance_changes_buy() {
+        let pre = vec![balance(0, SOL_MINT, 10.0), balance(1, TOK, 0.0)];
+        let post = vec![balance(0, SOL_MINT, 9.0), balance(1, TOK, 100.0)];
+        let (token_in, token_out, amount_in, amount_out, direction) =
+            parse_balance_changes(Some(&pre), Some(&post), "wallet").unwrap();
+        assert_eq!(direction, SwapDirection::Buy);
+        assert_eq!(token_in, SOL_MINT);
+        assert_eq!(token_out, TOK);
+        assert_eq!(amount_in, Decimal::new(1, 0));
+        assert_eq!(amount_out, Decimal::new(100, 0));
+    }
+
+    #[test]
+    fn test_parse_balance_changes_sell() {
+        let pre = vec![balance(0, TOK, 100.0), balance(1, SOL_MINT, 1.0)];
+        let post = vec![balance(0, TOK, 50.0), balance(1, SOL_MINT, 2.0)];
+        let (token_in, token_out, amount_in, amount_out, direction) =
+            parse_balance_changes(Some(&pre), Some(&post), "wallet").unwrap();
+        assert_eq!(direction, SwapDirection::Sell);
+        assert_eq!(token_in, TOK);
+        assert_eq!(token_out, SOL_MINT);
+        assert_eq!(amount_in, Decimal::new(50, 0));
+        assert_eq!(amount_out, Decimal::new(1, 0));
+    }
+
+    #[test]
+    fn test_parse_balance_changes_sol_only() {
+        // No token change -> fallback with empty token_out
+        let pre = vec![balance(0, SOL_MINT, 10.0)];
+        let post = vec![balance(0, SOL_MINT, 9.0)];
+        let (token_in, token_out, amount_in, amount_out, direction) =
+            parse_balance_changes(Some(&pre), Some(&post), "wallet").unwrap();
+        assert_eq!(direction, SwapDirection::Buy);
+        assert_eq!(token_in, SOL_MINT);
+        assert_eq!(token_out, "");
+        assert_eq!(amount_in, Decimal::new(1, 0));
+        assert_eq!(amount_out, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_parse_balance_changes_account_only_in_one_side() {
+        // Token account created in post only
+        let pre = vec![balance(0, SOL_MINT, 10.0)];
+        let post = vec![balance(0, SOL_MINT, 9.0), balance(1, TOK, 100.0)];
+        let (token_in, token_out, amount_in, amount_out, direction) =
+            parse_balance_changes(Some(&pre), Some(&post), "wallet").unwrap();
+        assert_eq!(direction, SwapDirection::Buy);
+        assert_eq!(token_in, SOL_MINT);
+        assert_eq!(token_out, TOK);
+        assert_eq!(amount_in, Decimal::new(1, 0));
+        assert_eq!(amount_out, Decimal::new(100, 0));
+    }
+
+    #[test]
+    fn test_parse_balance_changes_missing_balances() {
+        let (token_in, token_out, amount_in, amount_out, direction) =
+            parse_balance_changes(None, None, "wallet").unwrap();
+        assert_eq!(direction, SwapDirection::Sell); // sol_change = 0 -> Sell
+        assert_eq!(token_in, SOL_MINT);
+        assert_eq!(token_out, "");
+        assert_eq!(amount_in, Decimal::ZERO);
+        assert_eq!(amount_out, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_parse_balance_changes_dust_ignored() {
+        let pre = vec![balance(0, SOL_MINT, 10.0)];
+        let post = vec![balance(0, SOL_MINT, 9.99999)]; // change < 0.0001
+        let (_, _, amount_in, _, _) =
+            parse_balance_changes(Some(&pre), Some(&post), "wallet").unwrap();
+        assert_eq!(amount_in, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_parse_balance_changes_invalid_entries_skipped() {
+        let pre = vec![
+            serde_json::json!({"mint": SOL_MINT, "uiTokenAmount": {"uiAmount": 10.0}}), // no accountIndex
+            balance(0, SOL_MINT, 10.0),
+        ];
+        let post = vec![balance(0, SOL_MINT, 9.0)];
+        let (token_in, _, _, _, _) = parse_balance_changes(Some(&pre), Some(&post), "wallet").unwrap();
+        assert_eq!(token_in, SOL_MINT);
+    }
+
+    // ==========================================================================
+    // parse_laserstream_message
+    // ==========================================================================
+
+    fn laser_transfer(from: Option<&str>, to: Option<&str>, mint: &str, amount: &str) -> serde_json::Value {
+        serde_json::json!({
+            "fromUserAccount": from,
+            "toUserAccount": to,
+            "mint": mint,
+            "tokenAmount": amount
+        })
+    }
+
+    #[test]
+    fn test_laserstream_buy() {
+        let wallet = "wallet-1";
+        let payload = serde_json::json!({
+            "tokenTransfers": [
+                laser_transfer(Some(wallet), Some("dex"), SOL_MINT, "1.0"),
+                laser_transfer(Some("dex"), Some(wallet), TOK, "100.0")
+            ]
+        });
+        let swap = parse_laserstream_message(&payload, wallet).unwrap().expect("swap");
+        assert_eq!(swap.direction, SwapDirection::Buy);
+        assert_eq!(swap.token_in, SOL_MINT);
+        assert_eq!(swap.token_out, TOK);
+        assert_eq!(swap.amount_in, Decimal::new(1, 0));
+        assert_eq!(swap.amount_out, Decimal::new(100, 0));
+    }
+
+    #[test]
+    fn test_laserstream_sell() {
+        let wallet = "wallet-1";
+        let payload = serde_json::json!({
+            "tokenTransfers": [
+                laser_transfer(Some(wallet), Some("dex"), TOK, "50.0"),
+                laser_transfer(Some("dex"), Some(wallet), SOL_MINT, "0.5")
+            ]
+        });
+        let swap = parse_laserstream_message(&payload, wallet).unwrap().expect("swap");
+        assert_eq!(swap.direction, SwapDirection::Sell);
+        assert_eq!(swap.token_in, TOK);
+        assert_eq!(swap.token_out, SOL_MINT);
+    }
+
+    #[test]
+    fn test_laserstream_incomplete_returns_none() {
+        let wallet = "wallet-1";
+        let payload = serde_json::json!({
+            "tokenTransfers": [laser_transfer(Some(wallet), Some("dex"), TOK, "50.0")]
+        });
+        assert!(parse_laserstream_message(&payload, wallet).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_laserstream_missing_transfers() {
+        let payload = serde_json::json!({});
+        assert!(parse_laserstream_message(&payload, "wallet").is_err());
+    }
+
+    #[test]
+    fn test_laserstream_missing_mint_or_amount() {
+        let wallet = "wallet-1";
+        let payload = serde_json::json!({
+            "tokenTransfers": [
+                {"fromUserAccount": wallet, "toUserAccount": "dex"}
+            ]
+        });
+        assert!(parse_laserstream_message(&payload, wallet).is_err());
+    }
+
+    #[test]
+    fn test_laserstream_zero_amount_ignored() {
+        let wallet = "wallet-1";
+        let payload = serde_json::json!({
+            "tokenTransfers": [
+                laser_transfer(Some(wallet), Some("dex"), TOK, "0.0"),
+                laser_transfer(Some("dex"), Some(wallet), SOL_MINT, "0.5")
+            ]
+        });
+        assert!(parse_laserstream_message(&payload, wallet).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_laserstream_dex_detection() {
+        let wallet = "wallet-1";
+        for (program, expected) in [
+            (JUP, "Jupiter"),
+            (RAYDIUM, "Raydium"),
+            (ORCA, "Orca"),
+            (PUMPFUN, "Pump.fun"),
+        ] {
+            let payload = serde_json::json!({
+                "logs": ["some log", program],
+                "tokenTransfers": [
+                    laser_transfer(Some(wallet), Some("dex"), TOK, "50.0"),
+                    laser_transfer(Some("dex"), Some(wallet), SOL_MINT, "0.5")
+                ]
+            });
+            let swap = parse_laserstream_message(&payload, wallet).unwrap().expect("swap");
+            assert_eq!(swap.dex, expected);
+        }
+
+        // Unknown DEX
+        let payload = serde_json::json!({
+            "logs": ["nothing recognizable"],
+            "tokenTransfers": [
+                laser_transfer(Some(wallet), Some("dex"), TOK, "50.0"),
+                laser_transfer(Some("dex"), Some(wallet), SOL_MINT, "0.5")
+            ]
+        });
+        let swap = parse_laserstream_message(&payload, wallet).unwrap().expect("swap");
+        assert_eq!(swap.dex, "Unknown");
+
+        // No logs at all
+        let payload = serde_json::json!({
+            "tokenTransfers": [
+                laser_transfer(Some(wallet), Some("dex"), TOK, "50.0"),
+                laser_transfer(Some("dex"), Some(wallet), SOL_MINT, "0.5")
+            ]
+        });
+        let swap = parse_laserstream_message(&payload, wallet).unwrap().expect("swap");
+        assert_eq!(swap.dex, "Unknown");
+    }
+
+    // ==========================================================================
+    // parse_from_swap_event (events.swap path)
+    // ==========================================================================
+
+    fn swap_event_payload(
+        event: Option<WebhookSwapEvent>,
+        account_data: Vec<AccountData>,
+    ) -> HeliusWebhookPayload {
+        HeliusWebhookPayload {
+            account_data,
+            native_transfers: vec![],
+            signature: "sig_swap_event".to_string(),
+            slot: 1,
+            timestamp: 1,
+            transaction_error: None,
+            transaction_type: "SWAP".to_string(),
+            events: WebhookEvents { swap: event },
+        }
+    }
+
+    fn token_leg(mint: &str, amount: &str) -> WebhookSwapTokenLeg {
+        WebhookSwapTokenLeg {
+            user_account: "user".to_string(),
+            mint: mint.to_string(),
+            raw_token_amount: Some(RawTokenAmount {
+                token_amount: amount.to_string(),
+                decimals: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn test_swap_event_buy_with_native_input() {
+        let event = WebhookSwapEvent {
+            swapper: Some("wallet-1".to_string()),
+            native_input: Some(WebhookSwapNativeLeg {
+                account: "wallet-1".to_string(),
+                amount: "1000000000".to_string(), // 1 SOL
+            }),
+            native_output: None,
+            token_inputs: vec![],
+            token_outputs: vec![token_leg(TOK, "1000000000000")],
+        };
+        let payload = swap_event_payload(Some(event), vec![]);
+        let swap = parse_helius_webhook(&payload, Some("wallet-1")).unwrap().expect("swap");
+        assert_eq!(swap.direction, SwapDirection::Buy);
+        assert_eq!(swap.token_in, SOL_MINT);
+        assert_eq!(swap.token_out, TOK);
+        assert_eq!(swap.amount_in, Decimal::new(1, 0));
+        assert_eq!(swap.amount_out, Decimal::new(1, 0)); // approximate
+    }
+
+    #[test]
+    fn test_swap_event_sell_with_native_output() {
+        let event = WebhookSwapEvent {
+            swapper: Some("wallet-1".to_string()),
+            native_input: None,
+            native_output: Some(WebhookSwapNativeLeg {
+                account: "wallet-1".to_string(),
+                amount: "500000000".to_string(), // 0.5 SOL
+            }),
+            token_inputs: vec![token_leg(TOK, "50000000000000")],
+            token_outputs: vec![],
+        };
+        let payload = swap_event_payload(Some(event), vec![]);
+        let swap = parse_helius_webhook(&payload, Some("wallet-1")).unwrap().expect("swap");
+        assert_eq!(swap.direction, SwapDirection::Sell);
+        assert_eq!(swap.token_in, TOK);
+        assert_eq!(swap.token_out, SOL_MINT);
+    }
+
+    #[test]
+    fn test_swap_event_stablecoin_quoted_buy() {
+        let usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+        let event = WebhookSwapEvent {
+            swapper: Some("wallet-1".to_string()),
+            native_input: None,
+            native_output: None,
+            token_inputs: vec![token_leg(usdc, "1000000")], // 1 USDC
+            token_outputs: vec![token_leg(TOK, "5000000000000")],
+        };
+        let payload = swap_event_payload(Some(event), vec![]);
+        let swap = parse_helius_webhook(&payload, Some("wallet-1")).unwrap().expect("swap");
+        assert_eq!(swap.direction, SwapDirection::Buy);
+        assert_eq!(swap.token_in, usdc);
+        assert_eq!(swap.token_out, TOK);
+    }
+
+    #[test]
+    fn test_swap_event_stablecoin_quoted_sell() {
+        let usdt = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+        let event = WebhookSwapEvent {
+            swapper: Some("wallet-1".to_string()),
+            native_input: None,
+            native_output: None,
+            token_inputs: vec![token_leg(TOK, "5000000000000")],
+            token_outputs: vec![token_leg(usdt, "2000000")],
+        };
+        let payload = swap_event_payload(Some(event), vec![]);
+        let swap = parse_helius_webhook(&payload, Some("wallet-1")).unwrap().expect("swap");
+        assert_eq!(swap.direction, SwapDirection::Sell);
+        assert_eq!(swap.token_in, TOK);
+        assert_eq!(swap.token_out, usdt);
+    }
+
+    #[test]
+    fn test_swap_event_no_speculative_token() {
+        let usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+        // SOL -> USDC: no speculative token
+        let event = WebhookSwapEvent {
+            swapper: Some("wallet-1".to_string()),
+            native_input: Some(WebhookSwapNativeLeg {
+                account: "wallet-1".to_string(),
+                amount: "1000000000".to_string(),
+            }),
+            native_output: None,
+            token_inputs: vec![],
+            token_outputs: vec![token_leg(usdc, "1000000")],
+        };
+        let payload = swap_event_payload(Some(event), vec![]);
+        // Falls through to balance-change fallback (no account data -> None)
+        assert!(parse_helius_webhook(&payload, Some("wallet-1")).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_swap_event_picks_larger_spec_token() {
+        let event = WebhookSwapEvent {
+            swapper: Some("wallet-1".to_string()),
+            native_input: Some(WebhookSwapNativeLeg {
+                account: "wallet-1".to_string(),
+                amount: "1000000000".to_string(),
+            }),
+            native_output: None,
+            token_inputs: vec![],
+            token_outputs: vec![
+                token_leg("SmallToken1111111111111111111111111111111", "10"),
+                token_leg(TOK, "1000000000000"),
+            ],
+        };
+        let payload = swap_event_payload(Some(event), vec![]);
+        let swap = parse_helius_webhook(&payload, Some("wallet-1")).unwrap().expect("swap");
+        assert_eq!(swap.token_out, TOK);
+    }
+
+    #[test]
+    fn test_swap_event_dust_and_invalid_amounts_skipped() {
+        let event = WebhookSwapEvent {
+            swapper: Some("wallet-1".to_string()),
+            native_input: Some(WebhookSwapNativeLeg {
+                account: "wallet-1".to_string(),
+                amount: "not-a-number".to_string(), // parse failure -> sol_in stays 0
+            }),
+            native_output: None,
+            token_inputs: vec![token_leg(TOK, "0.0000001")], // <= 1e-6 threshold
+            token_outputs: vec![WebhookSwapTokenLeg {
+                user_account: "u".to_string(),
+                mint: TOK.to_string(),
+                raw_token_amount: None, // skipped
+            }],
+        };
+        let payload = swap_event_payload(Some(event), vec![]);
+        // No usable legs -> falls to balance fallback -> None
+        assert!(parse_helius_webhook(&payload, Some("wallet-1")).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_swap_event_sole_sol_legs_no_tokens() {
+        // native in + native out only, zero token legs
+        let event = WebhookSwapEvent {
+            swapper: Some("wallet-1".to_string()),
+            native_input: Some(WebhookSwapNativeLeg {
+                account: "wallet-1".to_string(),
+                amount: "1000000000".to_string(),
+            }),
+            native_output: Some(WebhookSwapNativeLeg {
+                account: "wallet-1".to_string(),
+                amount: "500000000".to_string(),
+            }),
+            token_inputs: vec![],
+            token_outputs: vec![],
+        };
+        let payload = swap_event_payload(Some(event), vec![]);
+        assert!(parse_helius_webhook(&payload, Some("wallet-1")).unwrap().is_none());
+    }
+
+    // ==========================================================================
+    // detect_dex_from_payload
+    // ==========================================================================
+
+    #[test]
+    fn test_detect_dex_from_payload_heuristics() {
+        // >2 token changes or >4 native transfers -> Jupiter
+        let wallet = "Wallet111111111111111111111111111111111111";
+        let payload = make_payload(
+            vec![AccountData {
+                account: wallet.to_string(),
+                native_balance_change: None,
+                token_balance_changes: Some(vec![
+                    token_change("m1", "1", wallet),
+                    token_change("m2", "1", wallet),
+                    token_change("m3", "1", wallet),
+                ]),
+            }],
+            vec![
+                NativeTransfer { amount: 1, from_user_account: "a".into(), to_user_account: "b".into() },
+                NativeTransfer { amount: 1, from_user_account: "a".into(), to_user_account: "b".into() },
+                NativeTransfer { amount: 1, from_user_account: "a".into(), to_user_account: "b".into() },
+                NativeTransfer { amount: 1, from_user_account: "a".into(), to_user_account: "b".into() },
+                NativeTransfer { amount: 1, from_user_account: "a".into(), to_user_account: "b".into() },
+            ],
+        );
+        assert_eq!(detect_dex_from_payload(&payload), "Jupiter");
+
+        // Simple direct swap -> Unknown
+        let payload = make_payload(vec![], vec![]);
+        assert_eq!(detect_dex_from_payload(&payload), "Unknown");
+    }
+
+    #[test]
+    fn test_webhook_sol_amount_fallback_paths() {
+        // No native_transfers and no native_balance_change: sol_amount falls
+        // back to token delta magnitude.
+        let wallet = "Wallet111111111111111111111111111111111111";
+        let payload = make_payload(
+            vec![AccountData {
+                account: wallet.to_string(),
+                native_balance_change: None,
+                token_balance_changes: Some(vec![token_change(TOK, "-1000", wallet)]),
+            }],
+            vec![],
+        );
+        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("swap");
+        assert_eq!(swap.direction, SwapDirection::Sell);
+        assert_eq!(swap.amount_in, Decimal::new(1000, 0));
+        assert_eq!(swap.amount_out, Decimal::new(1000, 0));
+    }
+
+    #[test]
+    fn test_webhook_usdc_quoted_delta_magnitudes() {
+        // USDC-quoted SELL with native balance change: quote_amount = USDC
+        // delta, not the SOL leg.
+        let wallet = "Wallet111111111111111111111111111111111111";
+        let usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+        let payload = make_payload(
+            vec![AccountData {
+                account: wallet.to_string(),
+                native_balance_change: Some(500_000_000), // 0.5 SOL
+                token_balance_changes: Some(vec![
+                    token_change(usdc, "2000000", wallet),
+                    token_change(TOK, "-1000000000000", wallet),
+                ]),
+            }],
+            vec![],
+        );
+        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("swap");
+        assert_eq!(swap.direction, SwapDirection::Sell);
+        assert_eq!(swap.token_in, TOK);
+        assert_eq!(swap.token_out, usdc);
+        // Raw token amounts (USDC has 6 decimals): 2000000 base units
+        assert_eq!(swap.amount_out, Decimal::new(2000000, 0), "USDC delta is the quote");
+        assert_eq!(swap.amount_in, Decimal::new(1000000000000, 0));
     }
 }
