@@ -90,3 +90,6 @@ backups/
 *.backup
 evaluation/
 # Evaluation runtime data directory
+/.repowise
+.mcp.json
+scout/.coverage
