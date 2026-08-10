@@ -39,13 +39,14 @@ class _FakeRequestInfo:
 class _AioResp:
     """aiohttp-style response supporting `async with` + raise_for_status."""
 
-    def __init__(self, status=200, payload=None, headers=None, raise_exc=None):
+    def __init__(self, status=200, payload=None, headers=None, raise_exc=None, text_body=None):
         self.status = status
         self._payload = payload
         self.headers = headers or {}
         self.request_info = _FakeRequestInfo()
         self.history = None
         self._raise_exc = raise_exc
+        self._text_body = text_body or ""
 
     async def __aenter__(self):
         return self
@@ -55,6 +56,9 @@ class _AioResp:
 
     async def json(self):
         return self._payload
+
+    async def text(self):
+        return self._text_body
 
     def raise_for_status(self):
         if self._raise_exc:
@@ -81,8 +85,8 @@ class _RaiseResp:
         return False
 
 
-def _resp(status=200, payload=None, headers=None, raise_exc=None):
-    return _AioResp(status=status, payload=payload, headers=headers, raise_exc=raise_exc)
+def _resp(status=200, payload=None, headers=None, raise_exc=None, text_body=None):
+    return _AioResp(status=status, payload=payload, headers=headers, raise_exc=raise_exc, text_body=text_body)
 
 
 class _FakeSession:
@@ -884,6 +888,18 @@ class TestMakeRequest:
     async def test_429_exhausted(self, client):
         await _attach(client, [_resp(429, headers={"Retry-After": "1"})] * 5)
         assert await client._make_request("/endpoint", {}) is None
+
+    @pytest.mark.asyncio
+    async def test_429_quota_exhausted_triggers_long_breaker(self, client):
+        """Quota-exhausted 429 ('max usage reached') opens breaker until midnight."""
+        await _attach(client, [
+            _resp(429, text_body="max usage reached"),
+        ])
+        assert await client._make_request("/endpoint", {}) is None
+        assert client._quota_exhausted is True
+        # Breaker is now open — subsequent requests return None WITHOUT hitting the API
+        assert await client._make_request("/endpoint", {}) is None
+        assert client._check_circuit_breaker() is False
 
     @pytest.mark.asyncio
     async def test_non_retryable_404(self, client):

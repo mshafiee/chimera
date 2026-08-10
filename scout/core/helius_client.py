@@ -174,6 +174,12 @@ class HeliusClient:
         self._circuit_breaker_reset_time: Optional[float] = None
         if ScoutConfig:
             self._circuit_breaker_threshold = ScoutConfig.get_circuit_breaker_threshold()
+
+        # Quota-exhaustion circuit breaker (2026-08-10): when Helius returns
+        # "max usage reached" (daily credit limit hit), retrying is futile —
+        # the quota doesn't refill until midnight UTC. This flag keeps the
+        # breaker OPEN until then, preventing thousands of wasted 429s.
+        self._quota_exhausted = False
         
         # API call tracking
         self._api_calls_made = 0
@@ -620,12 +626,52 @@ class HeliusClient:
                 time.sleep(self.rate_limit_delay - time_since_last)
             self.last_request_time = time.time()
     
+    def _trigger_quota_exhaustion(self, detail: str = ""):
+        """Set a long circuit breaker when the daily Helius credit quota is exhausted.
+
+        Helius daily credits reset at 00:00 UTC. Until then, every request will
+        return 429 "max usage reached". This method keeps the circuit breaker
+        OPEN until midnight so the scout stops hammering the API (2026-08-10:
+        the scout burned the entire daily quota in 6h then generated thousands
+        of futile 429s via 5× retries × 60s-breaker-reset pulses).
+        """
+        import datetime as _dt
+        now = _dt.datetime.utcnow()
+        midnight = (now + _dt.timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        secs_until_midnight = (midnight - now).total_seconds()
+        self._quota_exhausted = True
+        self._circuit_breaker_failures = self._circuit_breaker_threshold
+        self._circuit_breaker_reset_time = time.time() + secs_until_midnight
+        logger = logging.getLogger(__name__)
+        logger.error(
+            f"[Circuit Breaker] QUOTA EXHAUSTED ({detail}). "
+            f"All Helius API requests paused until midnight UTC "
+            f"({secs_until_midnight / 3600:.1f}h remaining)."
+        )
+
     def _check_circuit_breaker(self) -> bool:
         """Check if circuit breaker should prevent requests.
 
         Returns True (closed) if requests are allowed, False (open) otherwise.
         Automatically resets the breaker if the cooldown period has elapsed.
         """
+        # Quota-exhaustion breaker stays open until midnight UTC (2026-08-10):
+        # Helius daily credits don't refill mid-day, so retrying is futile.
+        if self._quota_exhausted:
+            if self._circuit_breaker_reset_time and time.time() > self._circuit_breaker_reset_time:
+                logger = logging.getLogger(__name__)
+                logger.info(
+                    "[Circuit Breaker] Quota-exhaustion cooldown elapsed — "
+                    "resuming requests (daily credits should have reset)"
+                )
+                self._quota_exhausted = False
+                self._circuit_breaker_failures = 0
+                self._circuit_breaker_reset_time = None
+            else:
+                return False
+
         if self._circuit_breaker_reset_time and time.time() > self._circuit_breaker_reset_time:
             logger = logging.getLogger(__name__)
             logger.info(
@@ -641,6 +687,9 @@ class HeliusClient:
     
     def _record_failure_sync(self):
         """Synchronous version of _record_failure for testing/sync contexts."""
+        # Don't overwrite a quota-exhaustion reset time with the short 60s default.
+        if self._quota_exhausted:
+            return
         self._circuit_breaker_failures += 1
         self._failure_count += 1
 
@@ -659,6 +708,9 @@ class HeliusClient:
     async def _record_failure(self):
         """Record a failure for circuit breaker (async with lock for thread safety)."""
         async with self._lock:
+            # Don't overwrite a quota-exhaustion reset time with the short 60s default.
+            if self._quota_exhausted:
+                return
             self._circuit_breaker_failures += 1
             self._failure_count += 1
 
@@ -871,6 +923,14 @@ class HeliusClient:
         if status_code in (400, 401, 403, 404, 409, 422):
             return False
 
+        # Quota-exhaustion 429 (daily credit limit) — NOT retryable. The body
+        # says "max usage reached" and credits don't refill until midnight UTC.
+        # Retrying just burns futile requests (2026-08-10).
+        if status_code == 429 and error is not None:
+            msg = str(error).lower()
+            if "quota" in msg or "max usage" in msg or "exhausted" in msg:
+                return False
+
         # Retryable errors
         if status_code in (408, 429, 500, 502, 503, 504):
             return True
@@ -922,6 +982,23 @@ class HeliusClient:
 
                 # Handle rate limiting
                 if response.status == 429:
+                    # Distinguish quota-exhaustion from transient rate-limiting.
+                    # Helius returns "max usage reached" when the daily credit
+                    # budget is spent — retrying is futile (credits reset at
+                    # midnight UTC). Without this check, the client retries 5×
+                    # per request and the circuit breaker resets every 60s,
+                    # burning thousands of futile 429s per hour (2026-08-10).
+                    body_text = await response.text()
+                    body_lower = body_text.lower()
+                    if "max usage" in body_lower or "quota" in body_lower or "exhausted" in body_lower:
+                        self._trigger_quota_exhaustion(body_text[:120])
+                        raise aiohttp.ClientResponseError(
+                            request_info=response.request_info,
+                            history=response.history,
+                            status=429,
+                            message=f"Quota exhausted: {body_text[:80]}"
+                        )
+
                     retry_after = int(response.headers.get("Retry-After", 5))
                     print(f"[Helius] Rate limited, waiting {retry_after}s (per Retry-After header)")
                     await asyncio.sleep(retry_after)
