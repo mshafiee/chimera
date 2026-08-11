@@ -151,6 +151,8 @@ fn build_selection_service(
         stop_loss_cooldown_loss_pct: rust_decimal::Decimal::new(5, 0),
         pump_since_whale_guard_enabled: true,
         max_pump_since_whale_pct: rust_decimal::Decimal::new(15, 0),
+        repeat_signal_gate_enabled: true,
+        repeat_signal_min_prior: 1,
     };
     let service = SelectionService::new(
         db,

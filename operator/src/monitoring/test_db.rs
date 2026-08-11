@@ -501,6 +501,10 @@ impl Database for MockDb {
         unimplemented!("MockDb::get_stuck_positions not implemented")
     }
 
+    async fn count_shadow_positions_by_token(&self, _token_address: &str) -> AppResult<i64> {
+        Ok(0)
+    }
+
     async fn update_position_state(&self, trade_uuid: &str, new_state: &str) -> AppResult<()> {
         unimplemented!("MockDb::update_position_state not implemented")
     }

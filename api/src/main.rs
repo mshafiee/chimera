@@ -670,6 +670,14 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(rust_decimal::Decimal::new(15, 0)), // 15%
+        repeat_signal_gate_enabled: std::env::var("CHIMERA_SELECTION__REPEAT_SIGNAL_GATE_ENABLED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(true),
+        repeat_signal_min_prior: std::env::var("CHIMERA_SELECTION__REPEAT_SIGNAL_MIN_PRIOR")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1),
     };
     let roster_addresses: Vec<String> = db_pool
         .get_active_wallets()

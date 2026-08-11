@@ -2256,6 +2256,14 @@ impl Database for PostgresBackend {
         Ok(())
     }
 
+    async fn count_shadow_positions_by_token(&self, token_address: &str) -> AppResult<i64> {
+        let row = sqlx::query("SELECT COUNT(*)::bigint AS count FROM shadow_positions WHERE token_address = $1")
+            .bind(token_address)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.get::<i64, _>("count"))
+    }
+
     async fn get_stuck_positions(&self, stuck_seconds: i64) -> AppResult<Vec<PositionRecord>> {
         #[allow(clippy::type_complexity)]
         let rows: Vec<(

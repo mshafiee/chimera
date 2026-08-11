@@ -813,6 +813,10 @@ pub(crate) mod tests {
             unimplemented!()
         }
 
+        async fn count_shadow_positions_by_token(&self, _token_address: &str) -> AppResult<i64> {
+            Ok(0)
+        }
+
         async fn update_position_state(&self, _trade_uuid: &str, _new_state: &str) -> AppResult<()> {
             unimplemented!()
         }

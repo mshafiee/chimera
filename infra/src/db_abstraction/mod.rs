@@ -433,6 +433,10 @@ pub trait Database: Send + Sync {
     /// Get positions stuck in EXITING state for too long
     async fn get_stuck_positions(&self, stuck_seconds: i64) -> AppResult<Vec<PositionRecord>>;
 
+    /// Count prior signals (shadow positions) for a token — used by the
+    /// repeat-signal gate to reject one-shot tokens (2026-08-11).
+    async fn count_shadow_positions_by_token(&self, token_address: &str) -> AppResult<i64>;
+
     /// Update position state
     async fn update_position_state(&self, trade_uuid: &str, new_state: &str) -> AppResult<()>;
 

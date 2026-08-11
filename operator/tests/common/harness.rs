@@ -308,6 +308,8 @@ pub async fn build_with_market_regime(
         stop_loss_cooldown_loss_pct: dec!(5.0),
         pump_since_whale_guard_enabled: true,
         max_pump_since_whale_pct: rust_decimal::Decimal::new(15, 0),
+        repeat_signal_gate_enabled: true,
+        repeat_signal_min_prior: 1,
     };
     let token_cache = Arc::new(TokenCache::new(1000, 300));
     let token_fetcher = Arc::new(
@@ -1027,6 +1029,8 @@ pub fn make_selection_service_with_parser(
         stop_loss_cooldown_loss_pct: dec("5.0"),
         pump_since_whale_guard_enabled: true,
         max_pump_since_whale_pct: rust_decimal::Decimal::new(15, 0),
+        repeat_signal_gate_enabled: true,
+        repeat_signal_min_prior: 1,
     };
     Arc::new(chimera_operator::engine::SelectionService::new(
         db,

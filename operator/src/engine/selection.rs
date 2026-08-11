@@ -189,6 +189,13 @@ pub struct SelectionConfig {
     /// happened between the whale's trade and the webhook delivery.
     pub pump_since_whale_guard_enabled: bool,
     pub max_pump_since_whale_pct: Decimal,
+    /// Repeat-signal gate (2026-08-11): require at least this many prior
+    /// signals on a token before admitting a live trade. One-shot tokens
+    /// (single signal, never traded again) have an 8% win rate and generate
+    /// 59% of all losses. Repeat tokens (2+) have 18% win rate and +18.4%
+    /// avg win move.
+    pub repeat_signal_gate_enabled: bool,
+    pub repeat_signal_min_prior: i64,
 }
 
 impl SelectionConfig {
@@ -241,6 +248,8 @@ impl SelectionConfig {
         hasher.update(self.stop_loss_cooldown_loss_pct.to_string().as_bytes());
         hasher.update(u8::from(self.pump_since_whale_guard_enabled).to_le_bytes());
         hasher.update(self.max_pump_since_whale_pct.to_string().as_bytes());
+        hasher.update(u8::from(self.repeat_signal_gate_enabled).to_le_bytes());
+        hasher.update(self.repeat_signal_min_prior.to_le_bytes());
         hex::encode(&hasher.finalize()[..8])
     }
 }
@@ -1586,6 +1595,52 @@ impl SelectionService {
             }
         }
 
+        // ── 7i. Repeat-signal gate (2026-08-11) ───────────────────────────────
+        // One-shot tokens (single BUY signal, never traded again) have an 8%
+        // win rate and generate 59% of all losses (-0.44 SOL). Repeat tokens
+        // (2+ signals) have 18% win rate and +18.4% avg win move. Require at
+        // least `repeat_signal_min_prior` prior shadow signals on the token.
+        // Fails OPEN on DB errors (don't block trading on infra issues).
+        if self.config.repeat_signal_gate_enabled && !is_consensus && !is_smart_money_cluster {
+            match self.db.count_shadow_positions_by_token(&req.token_address).await {
+                Ok(prior) if prior < self.config.repeat_signal_min_prior => {
+                    let reason = format!(
+                        "First signal on this token ({} prior shadow signals, need {}) — shadow-trading only; wait for repeat signal to confirm genuine interest",
+                        prior, self.config.repeat_signal_min_prior
+                    );
+                    tracing::info!(
+                        ingress = ?req.ingress,
+                        decision = "BUY",
+                        token = %req.token_address,
+                        wallet = %req.wallet_address,
+                        rejection_code = "FIRST_SIGNAL_SHADOW_ONLY",
+                        reason = %reason,
+                        prior_shadow_count = prior,
+                        "selection: BUY rejected by gate"
+                    );
+                    return BuyDecision::rejected(
+                        req,
+                        &self.config_hash,
+                        "FIRST_SIGNAL_SHADOW_ONLY",
+                        reason,
+                    );
+                }
+                Ok(_) => {
+                    tracing::debug!(
+                        token = %req.token_address,
+                        "Repeat-signal gate passed — token has prior shadow signals"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        token = %req.token_address,
+                        error = %e,
+                        "Repeat-signal gate DB query failed — failing open"
+                    );
+                }
+            }
+        }
+
         // ── 8. Signal-quality score ─────────────────────────────────────────
         let quality = SignalQuality::calculate(
             wallet_wqs,
@@ -2185,6 +2240,8 @@ mod tests {
             stop_loss_cooldown_loss_pct: Decimal::new(5, 0),
             pump_since_whale_guard_enabled: true,
             max_pump_since_whale_pct: rust_decimal::Decimal::new(15, 0),
+            repeat_signal_gate_enabled: true,
+            repeat_signal_min_prior: 1,
         };
 
         let mut config2 = config1.clone();
