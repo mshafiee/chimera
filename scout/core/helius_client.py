@@ -83,6 +83,11 @@ class HeliusClient:
 
     logger = logging.getLogger(__name__)
 
+    # Account used by the quota re-probe (2026-08-11): wSOL mint always
+    # exists on-chain, so a 200 from /account/<this> proves credits are
+    # available again at minimum cost (1 credit).
+    _QUOTA_PROBE_ACCOUNT = "So11111111111111111111111111111111111111112"
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -179,7 +184,18 @@ class HeliusClient:
         # "max usage reached" (daily credit limit hit), retrying is futile —
         # the quota doesn't refill until midnight UTC. This flag keeps the
         # breaker OPEN until then, preventing thousands of wasted 429s.
+        # Since 2026-08-11 the breaker re-probes the quota periodically (see
+        # `_probe_quota_once`) so a mid-day credit top-up or plan upgrade
+        # resumes traffic before the midnight-UTC reset.
         self._quota_exhausted = False
+        self._quota_probe_interval = 600
+        self._quota_last_probe_time = 0.0
+        if ScoutConfig:
+            self._quota_probe_interval = ScoutConfig.get_quota_probe_interval_seconds()
+        else:
+            self._quota_probe_interval = int(
+                os.getenv("SCOUT_QUOTA_PROBE_INTERVAL_SECONDS", "600")
+            )
         
         # API call tracking
         self._api_calls_made = 0
@@ -651,6 +667,71 @@ class HeliusClient:
             f"({secs_until_midnight / 3600:.1f}h remaining)."
         )
 
+    def is_quota_exhausted(self) -> bool:
+        """Return True while the quota-exhaustion circuit breaker is open.
+
+        Used by the scout's continuous loop to shorten its sleep so the next
+        run re-probes the quota early (2026-08-11).
+        """
+        return self._quota_exhausted
+
+    def _quota_probe_due(self) -> bool:
+        """True when the quota re-probe cadence has elapsed."""
+        return time.time() - self._quota_last_probe_time >= self._quota_probe_interval
+
+    async def _probe_quota_once(self) -> bool:
+        """Send one cheap request to test whether Helius credits are available again.
+
+        The quota-exhaustion breaker pauses ALL requests until the midnight-UTC
+        daily reset. If the account is topped up mid-day (credits purchased or
+        plan upgraded), that hard pause wastes the rest of the day. This probe
+        re-tests the quota and clears the breaker as soon as a request succeeds;
+        a 429 keeps it open and the next probe fires after the interval
+        (2026-08-11).
+
+        Returns:
+            True if the quota recovered (breaker cleared), False otherwise.
+        """
+        logger = logging.getLogger(__name__)
+        self._quota_last_probe_time = time.time()
+        if not self.api_key:
+            return False
+        try:
+            session = await self._get_session()
+            url = f"{self.base_url}/account/{self._QUOTA_PROBE_ACCOUNT}"
+            params = {"api-key": self.api_key}
+            async with session.get(
+                url, params=params, timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                if response.status == 200:
+                    logger.info(
+                        "[Circuit Breaker] Quota probe OK — Helius credits available "
+                        "again, resuming requests (was paused after quota exhaustion)"
+                    )
+                    self._quota_exhausted = False
+                    self._circuit_breaker_failures = 0
+                    self._circuit_breaker_reset_time = None
+                    return True
+                if response.status == 429:
+                    body = (await response.text()).lower()
+                    if "max usage" in body or "quota" in body or "exhausted" in body:
+                        logger.info(
+                            f"[Circuit Breaker] Quota probe: still exhausted — "
+                            f"next probe in {self._quota_probe_interval}s"
+                        )
+                        return False
+                logger.warning(
+                    f"[Circuit Breaker] Quota probe returned status {response.status} — "
+                    f"staying paused (next probe in {self._quota_probe_interval}s)"
+                )
+                return False
+        except Exception as e:
+            logger.warning(
+                f"[Circuit Breaker] Quota probe failed: {e} — staying paused "
+                f"(next probe in {self._quota_probe_interval}s)"
+            )
+            return False
+
     def _check_circuit_breaker(self) -> bool:
         """Check if circuit breaker should prevent requests.
 
@@ -958,8 +1039,17 @@ class HeliusClient:
             return None
         
         if not self._check_circuit_breaker():
-            print("[Helius] Circuit breaker is open, skipping request")
-            return None
+            # Quota-exhaustion pause: re-probe the quota at a cadence instead
+            # of waiting for the midnight-UTC reset — a mid-day top-up or
+            # plan upgrade resumes traffic immediately (2026-08-11).
+            if self._quota_exhausted and self._quota_probe_due():
+                recovered = await self._probe_quota_once()
+                if not recovered:
+                    print("[Helius] Circuit breaker is open (quota exhausted), skipping request")
+                    return None
+            else:
+                print("[Helius] Circuit breaker is open, skipping request")
+                return None
         
         if self._api_calls_made >= self._max_api_calls:
             print(f"[Helius] Max API calls ({self._max_api_calls}) reached")

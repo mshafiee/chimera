@@ -512,6 +512,19 @@ class ScoutConfig:
         """Get circuit breaker reset time in seconds."""
         return int(os.getenv("SCOUT_CIRCUIT_BREAKER_RESET_SECONDS", "60"))
 
+    @staticmethod
+    def get_quota_probe_interval_seconds() -> int:
+        """Get interval (seconds) between Helius quota re-probes while the
+        quota-exhaustion circuit breaker is open.
+
+        A mid-day credit top-up or plan upgrade restores quota before the
+        midnight-UTC daily reset; without periodic probing the scout stays
+        paused until midnight (2026-08-11). The scout wakes early (min of
+        this interval and the continuous-run interval) and each blocked
+        request re-probes at this cadence.
+        """
+        return int(os.getenv("SCOUT_QUOTA_PROBE_INTERVAL_SECONDS", "600"))
+
     # ========================================================================
     # Database Configuration
     # ========================================================================

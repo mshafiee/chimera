@@ -290,6 +290,12 @@ except ImportError:
     CONFIG_AVAILABLE = False
     ScoutConfig = None
 
+# Quota-exhaustion state shared between main_async() and the continuous
+# loop (2026-08-11): when the last run ended with the Helius quota circuit
+# breaker open, the loop sleeps at the probe cadence instead of the full
+# interval so the next run re-probes credits early after a mid-day top-up.
+_quota_state = {"exhausted": False}
+
 
 # Default configuration (tuned defaults; can be overridden by env/flags)
 # Note: WQS thresholds aligned with rescaled 0-100 range (see wqs.py)
@@ -2856,6 +2862,15 @@ async def main_async():
                 await analyzer.helius_client.close()
             except Exception:
                 pass  # Non-critical
+            # Report quota-exhaustion state to the continuous loop so it
+            # sleeps at the probe cadence instead of the full interval
+            # (2026-08-11).
+            try:
+                _quota_state["exhausted"] = bool(
+                    analyzer.helius_client.is_quota_exhausted()
+                )
+            except Exception:
+                pass
         if analyzer and hasattr(analyzer, 'rugcheck_client') and analyzer.rugcheck_client:
             try:
                 await analyzer.rugcheck_client.close()
@@ -2923,8 +2938,18 @@ def main():
                 print(f"[Scout] Run failed: {e}")
                 import traceback
                 traceback.print_exc()
-            print(f"[Scout] Sleeping {args.continuous_interval}s before next run...")
-            time.sleep(args.continuous_interval)
+            sleep_seconds = args.continuous_interval
+            if _quota_state["exhausted"]:
+                probe_seconds = 600
+                if ScoutConfig:
+                    probe_seconds = ScoutConfig.get_quota_probe_interval_seconds()
+                sleep_seconds = min(args.continuous_interval, probe_seconds)
+                print(
+                    f"[Scout] Helius quota exhausted — sleeping {sleep_seconds}s "
+                    f"(probe cadence) to re-test credits before next run"
+                )
+            print(f"[Scout] Sleeping {sleep_seconds}s before next run...")
+            time.sleep(sleep_seconds)
     else:
         try:
             exit_code = asyncio.run(main_async())
