@@ -353,6 +353,7 @@ async fn build_real_webhook_app() -> (Router, Arc<dyn Database>, crate::common::
         max_pump_since_whale_pct: rust_decimal::Decimal::new(15, 0),
         repeat_signal_gate_enabled: true,
         repeat_signal_min_prior: 1,
+        momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
     };
     let selection = Arc::new(SelectionService::new(
         db.clone(),

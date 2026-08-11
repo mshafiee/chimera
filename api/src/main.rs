@@ -555,11 +555,15 @@ async fn main() -> anyhow::Result<()> {
         mirror_gate_min_samples: std::env::var("CHIMERA_SELECTION__MIRROR_GATE_MIN_SAMPLES")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(10),
+            .unwrap_or(3),
         mirror_gate_window_hours: std::env::var("CHIMERA_SELECTION__MIRROR_GATE_WINDOW_HOURS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(48),
+        momentum_bypass_min_pct: std::env::var("CHIMERA_SELECTION__MOMENTUM_BYPASS_MIN_PCT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(rust_decimal::Decimal::new(3, 0)), // 3%
         // Wallet profitability gate: only wallets with statistically
         // significant shadow mirror_main PnL (t-stat > 1.645, >= 10 samples,
         // 30d window) are proven signal sources. Research-backed

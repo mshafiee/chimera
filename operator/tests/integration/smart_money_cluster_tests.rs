@@ -162,6 +162,7 @@ fn build_selection_service(
         max_pump_since_whale_pct: rust_decimal::Decimal::new(15, 0),
         repeat_signal_gate_enabled: true,
         repeat_signal_min_prior: 1,
+        momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
     };
     let service = SelectionService::new(
         db,

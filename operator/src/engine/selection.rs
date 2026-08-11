@@ -131,6 +131,11 @@ pub struct SelectionConfig {
     pub mirror_gate_min_avg_pct: Decimal,
     pub mirror_gate_min_samples: i32,
     pub mirror_gate_window_hours: i32,
+    /// Momentum bypass for the shadow-mirror gate (2026-08-11): if the token's
+    /// price_cache shows momentum above this percentage (positive trend),
+    /// bypass the shadow-mirror sample requirement. Tokens with sustained
+    /// upward momentum have proven themselves without needing 10 shadow exits.
+    pub momentum_bypass_min_pct: Decimal,
     /// Wallet profitability gate (2026-08-07): only admit wallets whose
     /// shadow mirror_main PnL is statistically significant (t-statistic >
     /// threshold). Research: wallet selection is the dominant factor in
@@ -228,6 +233,7 @@ impl SelectionConfig {
         hasher.update(self.mirror_gate_min_avg_pct.to_string().as_bytes());
         hasher.update(self.mirror_gate_min_samples.to_le_bytes());
         hasher.update(self.mirror_gate_window_hours.to_le_bytes());
+        hasher.update(self.momentum_bypass_min_pct.to_string().as_bytes());
         hasher.update(u8::from(self.wallet_tstat_enabled).to_le_bytes());
         hasher.update(self.wallet_tstat_threshold.to_le_bytes());
         hasher.update(self.wallet_tstat_min_samples.to_le_bytes());
@@ -1260,25 +1266,59 @@ impl SelectionService {
                 }
                 Some(_) => {}
                 None => {
-                    let reason = format!(
-                        "Token has <{} shadow-mirror samples in {}h — insufficient evidence",
-                        self.config.mirror_gate_min_samples, self.config.mirror_gate_window_hours
-                    );
-                    tracing::info!(
-                        ingress = ?req.ingress,
-                        decision = "BUY",
-                        token = %req.token_address,
-                        wallet = %req.wallet_address,
-                        rejection_code = "SHADOW_MIRROR_INSUFFICIENT",
-                        reason = %reason,
-                        "selection: BUY rejected by gate"
-                    );
-                    return BuyDecision::rejected(
-                        req,
-                        &self.config_hash,
-                        "SHADOW_MIRROR_INSUFFICIENT",
-                        reason,
-                    );
+                    // Momentum bypass (2026-08-11): if the token's price_cache
+                    // shows positive momentum, bypass the shadow-mirror sample
+                    // requirement. Tokens with sustained upward price trend have
+                    // proven themselves — the momentum IS the evidence.
+                    let mut momentum_bypassed = false;
+                    if let Some(ref price_cache) = self.price_cache {
+                        let history = price_cache.price_history_read();
+                        if let Some(token_history) = history.get(&req.token_address) {
+                            if token_history.len() >= 3 {
+                                let latest = token_history.back().map(|(_, p)| *p);
+                                let oldest = token_history.front().map(|(_, p)| *p);
+                                if let (Some(latest), Some(oldest)) = (latest, oldest) {
+                                    if oldest > Decimal::ZERO {
+                                        let momentum_pct =
+                                            ((latest - oldest) / oldest) * Decimal::from(100);
+                                        if momentum_pct >= self.config.momentum_bypass_min_pct {
+                                            momentum_bypassed = true;
+                                            tracing::info!(
+                                                ingress = ?req.ingress,
+                                                decision = "BUY",
+                                                token = %req.token_address,
+                                                wallet = %req.wallet_address,
+                                                momentum_pct = %momentum_pct,
+                                                "Shadow-mirror gate bypassed: token has positive price-cache momentum ({} samples)",
+                                                token_history.len()
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !momentum_bypassed {
+                        let reason = format!(
+                            "Token has <{} shadow-mirror samples in {}h — insufficient evidence",
+                            self.config.mirror_gate_min_samples, self.config.mirror_gate_window_hours
+                        );
+                        tracing::info!(
+                            ingress = ?req.ingress,
+                            decision = "BUY",
+                            token = %req.token_address,
+                            wallet = %req.wallet_address,
+                            rejection_code = "SHADOW_MIRROR_INSUFFICIENT",
+                            reason = %reason,
+                            "selection: BUY rejected by gate"
+                        );
+                        return BuyDecision::rejected(
+                            req,
+                            &self.config_hash,
+                            "SHADOW_MIRROR_INSUFFICIENT",
+                            reason,
+                        );
+                    }
                 }
             }
         }
@@ -2242,6 +2282,7 @@ mod tests {
             max_pump_since_whale_pct: rust_decimal::Decimal::new(15, 0),
             repeat_signal_gate_enabled: true,
             repeat_signal_min_prior: 1,
+            momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
         };
 
         let mut config2 = config1.clone();
