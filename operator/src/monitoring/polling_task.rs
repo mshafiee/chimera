@@ -85,12 +85,13 @@ async fn poll_wallets_by_tier(
     // DB error must never turn into "poll everything" — an empty enabled set
     // means "poll nothing", not "poll all wallets".
     //
-    // Also skip wallets whose webhook is the active (non-broken) signal path:
-    // polling them too doubles Helius consumption through the same credit-
-    // metered RPC and burned the account's entire daily quota in ~6h on
-    // 2026-08-10, which in turn disabled webhook delivery AND scout discovery
-    // for the rest of the day. Wallets with no webhook, or a webhook in an
-    // error/unhealthy/failed state, are still polled as the fallback.
+    // We poll EVERY enabled monitored wallet (no webhook-skip): when polling
+    // runs on a non-Helius RPC (see rpc.primary_url) it consumes no Helius
+    // credits, and any trade a webhook also delivers is deduped by the
+    // seen-signature cache in rpc_polling. Skipping "healthy-webhook"
+    // wallets would silently drop signals while Helius is quota-exhausted
+    // (webhooks stop delivering, yet the wallet stays marked healthy), so we
+    // poll all to guarantee coverage.
     let monitored_wallets: Vec<String> = {
         let wallet_addresses: Vec<String> = wallets.iter().map(|w| w.address.clone()).collect();
         let all_monitoring = match db.get_all_wallet_monitoring().await {
@@ -102,29 +103,14 @@ async fn poll_wallets_by_tier(
         };
 
         let monitoring_enabled_set: std::collections::HashSet<String> = all_monitoring
-            .iter()
+            .into_iter()
             .filter(|wm| wm.monitoring_enabled)
-            .map(|wm| wm.wallet_address.clone())
-            .collect();
-
-        // Webhook present and not known-broken → webhook is the active path.
-        let webhook_active_set: std::collections::HashSet<String> = all_monitoring
-            .iter()
-            .filter(|wm| {
-                wm.monitoring_enabled
-                    && wm.helius_webhook_id.as_deref().map_or(false, |id| !id.is_empty())
-                    && wm.webhook_health_status.as_deref() != Some("unhealthy")
-                    && wm.webhook_health_status.as_deref() != Some("error")
-                    && wm.webhook_status.as_deref() != Some("failed")
-            })
-            .map(|wm| wm.wallet_address.clone())
+            .map(|wm| wm.wallet_address)
             .collect();
 
         wallet_addresses
             .into_iter()
-            .filter(|addr| {
-                monitoring_enabled_set.contains(addr) && !webhook_active_set.contains(addr)
-            })
+            .filter(|addr| monitoring_enabled_set.contains(addr))
             .collect()
     };
 
