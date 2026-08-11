@@ -660,6 +660,16 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(rust_decimal::Decimal::new(5, 0)), // 5%
+        pump_since_whale_guard_enabled: std::env::var(
+            "CHIMERA_SELECTION__PUMP_SINCE_WHALE_GUARD_ENABLED",
+        )
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(true),
+        max_pump_since_whale_pct: std::env::var("CHIMERA_SELECTION__MAX_PUMP_SINCE_WHALE_PCT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(rust_decimal::Decimal::new(15, 0)), // 15%
     };
     let roster_addresses: Vec<String> = db_pool
         .get_active_wallets()

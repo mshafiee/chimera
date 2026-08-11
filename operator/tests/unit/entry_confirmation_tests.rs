@@ -26,7 +26,9 @@ use std::time::Duration;
 #[path = "../common/harness.rs"]
 mod harness;
 
-use harness::{build, make_selection_service_with_parser, seed_wallet, test_config, TOKEN_A, WALLET_A};
+use harness::{
+    build, make_selection_service_with_parser, seed_wallet, test_config, TOKEN_A, WALLET_A,
+};
 
 fn dec(s: &str) -> Decimal {
     Decimal::from_str(s).unwrap()
@@ -126,6 +128,7 @@ fn buy_request() -> SelectionRequest {
         ingress: Ingress::Helius,
         source_slot: Some(1),
         exit_fraction: None,
+        whale_entry_price: None,
     }
 }
 
@@ -136,7 +139,11 @@ async fn manager_with(
     config: EntryConfirmationConfig,
     parser: Option<Arc<TokenParser>>,
     selection: Option<Arc<chimera_operator::engine::SelectionService>>,
-) -> (Arc<EntryConfirmationManager>, harness::Harness, Arc<PriceCache>) {
+) -> (
+    Arc<EntryConfirmationManager>,
+    harness::Harness,
+    Arc<PriceCache>,
+) {
     let h = build(test_config()).await;
     let price_cache = h.price_cache.clone();
     let parser = parser.unwrap_or_else(|| {
@@ -145,9 +152,8 @@ async fn manager_with(
         // and the loop drops before reaching selection.
         make_parser("http://127.0.0.1:1", Arc::new(PriceCache::new().unwrap()))
     });
-    let selection = selection.unwrap_or_else(|| {
-        make_selection_service_with_parser(h.db.clone(), parser.clone(), false)
-    });
+    let selection = selection
+        .unwrap_or_else(|| make_selection_service_with_parser(h.db.clone(), parser.clone(), false));
     let mgr = Arc::new(EntryConfirmationManager::new(
         config,
         h.db.clone(),
@@ -164,12 +170,11 @@ fn pool_of(db: &Arc<dyn Database>) -> sqlx::Pool<sqlx::Postgres> {
 }
 
 async fn count_trades_for(pool: &sqlx::Pool<sqlx::Postgres>, token: &str) -> i64 {
-    let (count,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM trades WHERE token_address = $1")
-            .bind(token)
-            .fetch_one(pool)
-            .await
-            .unwrap();
+    let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM trades WHERE token_address = $1")
+        .bind(token)
+        .fetch_one(pool)
+        .await
+        .unwrap();
     count
 }
 
@@ -276,9 +281,7 @@ async fn evaluate_price_held_but_selection_rejects() {
     let base = mock_quote_server(Some(10_000)).await; // 1e-5 SOL for 1e6 raw → 1e-11 SOL/raw
     let parser = make_parser(&base, pc);
     let (mgr, h, _pc) = manager_with(immediate_config(), Some(parser), None).await;
-    assert!(mgr
-        .register(buy_request(), dec("0.00000000001"))
-        .await);
+    assert!(mgr.register(buy_request(), dec("0.00000000001")).await);
     mgr.clone().spawn();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(count_trades_for(&pool_of(&h.db), TOKEN_A).await, 0);
@@ -302,9 +305,7 @@ async fn evaluate_admits_and_queues_trade() {
         selection,
     ));
 
-    assert!(mgr
-        .register(buy_request(), dec("0.00000000001"))
-        .await);
+    assert!(mgr.register(buy_request(), dec("0.00000000001")).await);
     mgr.clone().spawn();
 
     // Poll for the queued trade row (the loop's first tick is immediate).
@@ -322,7 +323,7 @@ async fn evaluate_admits_and_queues_trade() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    let (status, side, amount,): (String, String, Decimal) = sqlx::query_as(
+    let (status, side, amount): (String, String, Decimal) = sqlx::query_as(
         "SELECT status, side, amount_sol FROM trades WHERE token_address = $1 LIMIT 1",
     )
     .bind(TOKEN_A)

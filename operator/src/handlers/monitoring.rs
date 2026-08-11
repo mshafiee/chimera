@@ -93,7 +93,11 @@ pub async fn helius_webhook_handler(
         // Helius) and confirm it exists. In dry-run mode (`rpc_verify_enforce
         // = false`) we log the result but always accept; in enforce mode we
         // drop events whose signature cannot be confirmed.
-        match state.helius_client.verify_signature_exists(&event.signature).await {
+        match state
+            .helius_client
+            .verify_signature_exists(&event.signature)
+            .await
+        {
             Ok(true) => {
                 tracing::debug!(
                     signature = %event.signature,
@@ -216,10 +220,15 @@ pub async fn helius_webhook_handler(
                     tracked_from_db = tracked_wallet.is_some(),
                     "Parsed swap from webhook"
                 );
-                
+
                 // Record speculative activity for inactivity tracking
-                crate::monitoring::record_speculative_activity(state.db.clone(), &wallet_address, &swap.token_out).await;
-                
+                crate::monitoring::record_speculative_activity(
+                    state.db.clone(),
+                    &wallet_address,
+                    &swap.token_out,
+                )
+                .await;
+
                 // Check if wallet exists in database. A DB error must not be
                 // treated as "wallet not found" — that would make the upsert
                 // below silently overwrite a real wallet's metrics.
@@ -327,6 +336,17 @@ pub async fn helius_webhook_handler(
                         ingress: crate::engine::Ingress::Helius,
                         source_slot: None, // ParsedSwap doesn't carry slot; future: parse from tx
                         exit_fraction: None,
+                        whale_entry_price: {
+                            let sol_mint = crate::constants::mints::SOL;
+                            if direction == Action::Buy
+                                && swap.token_in == sol_mint
+                                && swap.amount_out > rust_decimal::Decimal::ZERO
+                            {
+                                Some(swap.amount_in / swap.amount_out)
+                            } else {
+                                None
+                            }
+                        },
                     };
                     let decision = selection.decide(&req).await;
 
@@ -415,7 +435,12 @@ pub async fn helius_webhook_handler(
             let token_change_count: usize = event
                 .account_data
                 .iter()
-                .map(|a| a.token_balance_changes.as_ref().map(|c| c.len()).unwrap_or(0))
+                .map(|a| {
+                    a.token_balance_changes
+                        .as_ref()
+                        .map(|c| c.len())
+                        .unwrap_or(0)
+                })
                 .sum();
             let native_transfer_count = event.native_transfers.len();
             match parsed {
@@ -573,11 +598,7 @@ pub async fn enable_wallet_monitoring(
         .and_then(|m| m.resolved_helius_auth_header());
     let webhook_id = match state
         .helius_client
-        .register_webhook(
-            &wallets,
-            webhook_url,
-            resolved_auth_header.as_deref(),
-        )
+        .register_webhook(&wallets, webhook_url, resolved_auth_header.as_deref())
         .await
     {
         Ok(id) => id,

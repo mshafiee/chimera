@@ -16,8 +16,8 @@ use crate::middleware::TIMESTAMP_HEADER;
 use crate::models::{Signal, SignalPayload};
 use crate::monitoring::{HeliusClient, SignalAggregator};
 use crate::token::TokenParser;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 
 /// Webhook request - already validated by HMAC middleware
 /// Body is the SignalPayload
@@ -113,10 +113,7 @@ pub async fn webhook_handler(
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.parse::<i64>().ok())
         .ok_or_else(|| {
-            AppError::BadRequest(format!(
-                "Missing or invalid {} header",
-                TIMESTAMP_HEADER
-            ))
+            AppError::BadRequest(format!("Missing or invalid {} header", TIMESTAMP_HEADER))
         })?;
 
     // Compute a correlation id up front so every rejection path (including the
@@ -228,6 +225,7 @@ pub async fn webhook_handler(
         ingress: crate::engine::Ingress::Webhook,
         source_slot: None,
         exit_fraction: signal.payload.exit_fraction,
+        whale_entry_price: None, // webhook path doesn't carry raw swap amounts
     };
     let decision = state.selection.decide(&req).await;
 
@@ -349,7 +347,11 @@ pub async fn webhook_handler(
 
     // Queue for execution — use the real WQS from the decision (not the
     // historically-buggy tuple field that passed wqs_confidence instead).
-    match state.engine.queue_signal(signal.clone(), decision.wqs).await {
+    match state
+        .engine
+        .queue_signal(signal.clone(), decision.wqs)
+        .await
+    {
         Ok(()) => {
             // Update status to QUEUED
             state

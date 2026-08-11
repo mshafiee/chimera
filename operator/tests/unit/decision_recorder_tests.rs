@@ -98,6 +98,7 @@ fn make_request() -> SelectionRequest {
         ingress: Ingress::Helius,
         source_slot: Some(12345),
         exit_fraction: None,
+        whale_entry_price: None,
     }
 }
 

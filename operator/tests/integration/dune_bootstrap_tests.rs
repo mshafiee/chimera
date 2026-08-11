@@ -215,6 +215,8 @@ fn build_selection_service(
         stop_loss_cooldown_enabled: false,
         stop_loss_cooldown_hours: 12,
         stop_loss_cooldown_loss_pct: rust_decimal::Decimal::new(5, 0),
+        pump_since_whale_guard_enabled: true,
+        max_pump_since_whale_pct: rust_decimal::Decimal::new(15, 0),
     };
     let service = SelectionService::new(
         db,
@@ -289,6 +291,7 @@ async fn test_mirror_gate_ignores_dune_wallet_rows() {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     };
     let decision = service.decide(&req).await;
     assert_ne!(
@@ -335,6 +338,7 @@ async fn test_dune_only_wallet_passes_tstat_and_counts_toward_cluster() {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     };
     let decision = service.decide(&req).await;
     assert_ne!(

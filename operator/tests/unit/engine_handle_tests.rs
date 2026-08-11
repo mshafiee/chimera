@@ -132,6 +132,8 @@ fn make_selection_service(
         stop_loss_cooldown_enabled: false,
         stop_loss_cooldown_hours: 12,
         stop_loss_cooldown_loss_pct: dec("5.0"),
+        pump_since_whale_guard_enabled: true,
+        max_pump_since_whale_pct: rust_decimal::Decimal::new(15, 0),
     };
     Arc::new(SelectionService::new(
         db, parser, None, None, None, None, None, config,

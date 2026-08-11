@@ -103,6 +103,7 @@ fn request(action: Action) -> SelectionRequest {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     }
 }
 

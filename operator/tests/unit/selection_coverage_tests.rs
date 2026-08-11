@@ -102,6 +102,8 @@ fn base_config() -> SelectionConfig {
         stop_loss_cooldown_enabled: false,
         stop_loss_cooldown_hours: 12,
         stop_loss_cooldown_loss_pct: dec("5.0"),
+        pump_since_whale_guard_enabled: true,
+        max_pump_since_whale_pct: rust_decimal::Decimal::new(15, 0),
     }
 }
 
@@ -173,6 +175,7 @@ fn request(token: &str, action: Action) -> SelectionRequest {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     }
 }
 

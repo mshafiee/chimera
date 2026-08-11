@@ -349,6 +349,8 @@ async fn build_real_webhook_app() -> (Router, Arc<dyn Database>, crate::common::
         stop_loss_cooldown_enabled: false,
         stop_loss_cooldown_hours: 12,
         stop_loss_cooldown_loss_pct: rust_decimal::Decimal::new(5, 0),
+        pump_since_whale_guard_enabled: true,
+        max_pump_since_whale_pct: rust_decimal::Decimal::new(15, 0),
     };
     let selection = Arc::new(SelectionService::new(
         db.clone(),

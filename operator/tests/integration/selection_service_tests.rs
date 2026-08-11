@@ -149,6 +149,8 @@ fn build_selection_service(
         stop_loss_cooldown_enabled: false,
         stop_loss_cooldown_hours: 12,
         stop_loss_cooldown_loss_pct: rust_decimal::Decimal::new(5, 0),
+        pump_since_whale_guard_enabled: true,
+        max_pump_since_whale_pct: rust_decimal::Decimal::new(15, 0),
     };
     let service = SelectionService::new(
         db,
@@ -181,6 +183,7 @@ async fn test_wqs_below_70_buy_rejected() {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     };
     let decision = service.decide(&req).await;
     assert!(!decision.admitted, "WQS 65 must be rejected");
@@ -203,6 +206,7 @@ async fn test_wqs_boundary_just_below_70_rejected() {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     };
     let decision = service.decide(&req).await;
     assert!(!decision.admitted, "WQS 69.99 must be rejected");
@@ -227,6 +231,7 @@ async fn test_wqs_exactly_70_passes_wqs_gate() {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     };
     let decision = service.decide(&req).await;
     assert!(!decision.admitted);
@@ -252,6 +257,7 @@ async fn test_sell_no_position_rejected() {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     };
     let decision = service.decide(&req).await;
     assert!(!decision.admitted, "SELL with no position must be rejected");
@@ -273,6 +279,7 @@ async fn test_both_ingresses_produce_identical_rejection() {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     };
     let req_helius = SelectionRequest {
         ingress: Ingress::Helius,
@@ -314,6 +321,7 @@ async fn test_single_wallet_unproven_buy_rejected_by_gate() {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     };
     let decision = service.decide(&req).await;
     assert!(!decision.admitted);
@@ -342,6 +350,7 @@ async fn test_proven_wallet_single_signal_passes_gate() {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     };
     let decision = service.decide(&req).await;
     // Must NOT be rejected by the consensus-OR-proven gate. The subsequent
@@ -371,6 +380,7 @@ async fn test_unproven_wallet_with_negative_pnl_rejected_by_gate() {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     };
     let decision = service.decide(&req).await;
     assert_eq!(
@@ -399,6 +409,7 @@ async fn test_consensus_gate_bypass_allows_price_hold_confirmation() {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     };
 
     // Same inputs: the gate rejects when active...
@@ -501,6 +512,7 @@ async fn test_mirror_gate_rejects_negative_token() {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     };
     let decision = service.decide(&req).await;
     assert_eq!(
@@ -535,6 +547,7 @@ async fn test_mirror_gate_passes_positive_token() {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     };
     let decision = service.decide(&req).await;
     assert_ne!(
@@ -565,6 +578,7 @@ async fn test_mirror_gate_insufficient_evidence_rejected() {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     };
     let decision = service.decide(&req).await;
     assert_eq!(
@@ -595,6 +609,7 @@ async fn test_tstat_wallet_with_significant_pnl_passes_wallet_gate() {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     };
     let decision = service.decide(&req).await;
     assert_ne!(
@@ -634,6 +649,7 @@ async fn test_tstat_wallet_with_zero_mean_rejected() {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     };
     let decision = service.decide(&req).await;
     assert_eq!(
@@ -660,6 +676,7 @@ async fn test_tstat_wallet_insufficient_samples_rejected() {
         ingress: Ingress::Webhook,
         source_slot: None,
         exit_fraction: None,
+        whale_entry_price: None,
     };
     let decision = service.decide(&req).await;
     assert_eq!(

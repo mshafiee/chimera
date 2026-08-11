@@ -183,6 +183,12 @@ pub struct SelectionConfig {
     pub stop_loss_cooldown_enabled: bool,
     pub stop_loss_cooldown_hours: i64,
     pub stop_loss_cooldown_loss_pct: Decimal,
+    /// Entry-price guard (2026-08-11): reject BUYs when the current token
+    /// price has pumped more than this percentage above the whale's entry.
+    /// Prevents the copier from buying the top of a pump that already
+    /// happened between the whale's trade and the webhook delivery.
+    pub pump_since_whale_guard_enabled: bool,
+    pub max_pump_since_whale_pct: Decimal,
 }
 
 impl SelectionConfig {
@@ -233,6 +239,8 @@ impl SelectionConfig {
         hasher.update(u8::from(self.stop_loss_cooldown_enabled).to_le_bytes());
         hasher.update(self.stop_loss_cooldown_hours.to_le_bytes());
         hasher.update(self.stop_loss_cooldown_loss_pct.to_string().as_bytes());
+        hasher.update(u8::from(self.pump_since_whale_guard_enabled).to_le_bytes());
+        hasher.update(self.max_pump_since_whale_pct.to_string().as_bytes());
         hex::encode(&hasher.finalize()[..8])
     }
 }
@@ -251,6 +259,11 @@ pub struct SelectionRequest {
     pub source_slot: Option<u64>,
     /// For SELL: the fraction of the position to exit (None = full).
     pub exit_fraction: Option<Decimal>,
+    /// Whale's entry price in SOL per raw token unit (2026-08-11):
+    /// `swap.amount_in / swap.amount_out`. Used by the entry-price guard to
+    /// reject BUYs on tokens that already pumped significantly since the
+    /// whale's entry. None when unavailable (gate fails open).
+    pub whale_entry_price: Option<Decimal>,
 }
 
 /// Typed result of a selection decision. `admitted == true` means the signal
@@ -1517,6 +1530,62 @@ impl SelectionService {
             }
         }
 
+        // ── 7h. Entry-price guard (2026-08-11) ───────────────────────────────
+        // Reject BUYs when the token already pumped significantly since the
+        // whale's entry. The whale's swap gives an exact entry price (amount_in
+        // / amount_out in SOL per raw token unit); comparing it to the current
+        // price-cache price tells us how much the copier would overpay. Fails
+        // open when either price is unavailable (young tokens without cache data).
+        if self.config.pump_since_whale_guard_enabled {
+            if let Some(ref price_cache) = self.price_cache {
+                if let Some(whale_price) = req.whale_entry_price {
+                    if whale_price > Decimal::ZERO {
+                        if let Some(current_entry) = price_cache.get_price(&req.token_address) {
+                            let sol_usd = price_cache.get_sol_price_usd();
+                            let decimals = current_entry.decimals.unwrap_or(6);
+                            if let Some(sol_usd) = sol_usd {
+                                if sol_usd > Decimal::ZERO
+                                    && current_entry.price_usd > Decimal::ZERO
+                                {
+                                    let mult = match 10u64.checked_pow(decimals as u32) {
+                                        Some(m) => Decimal::from(m),
+                                        None => Decimal::from(1_000_000),
+                                    };
+                                    let current_sol_per_raw =
+                                        current_entry.price_usd / (sol_usd * mult);
+                                    let pump_pct = ((current_sol_per_raw - whale_price)
+                                        / whale_price)
+                                        * Decimal::from(100);
+                                    if pump_pct > self.config.max_pump_since_whale_pct {
+                                        let reason = format!(
+                                            "Token already up {:.1}% since whale entry (max {:.0}%) — buying the top",
+                                            pump_pct, self.config.max_pump_since_whale_pct
+                                        );
+                                        tracing::info!(
+                                            ingress = ?req.ingress,
+                                            decision = "BUY",
+                                            token = %req.token_address,
+                                            wallet = %req.wallet_address,
+                                            rejection_code = "ALREADY_PUMPED",
+                                            reason = %reason,
+                                            pump_since_whale_pct = %pump_pct,
+                                            "selection: BUY rejected by gate"
+                                        );
+                                        return BuyDecision::rejected(
+                                            req,
+                                            &self.config_hash,
+                                            "ALREADY_PUMPED",
+                                            reason,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // ── 8. Signal-quality score ─────────────────────────────────────────
         let quality = SignalQuality::calculate(
             wallet_wqs,
@@ -2114,6 +2183,8 @@ mod tests {
             stop_loss_cooldown_enabled: true,
             stop_loss_cooldown_hours: 12,
             stop_loss_cooldown_loss_pct: Decimal::new(5, 0),
+            pump_since_whale_guard_enabled: true,
+            max_pump_since_whale_pct: rust_decimal::Decimal::new(15, 0),
         };
 
         let mut config2 = config1.clone();
