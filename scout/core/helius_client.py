@@ -83,9 +83,11 @@ class HeliusClient:
 
     logger = logging.getLogger(__name__)
 
-    # Account used by the quota re-probe (2026-08-11): wSOL mint always
-    # exists on-chain, so a 200 from /account/<this> proves credits are
-    # available again at minimum cost (1 credit).
+    # Account used by the quota re-probe (2026-08-11): the probe hits
+    # GET /addresses/<this>/transactions?limit=1 — wSOL mint always has
+    # on-chain activity, so a 200 proves credits are available again.
+    # NOTE: the /account/<addr> path does NOT exist on api.helius.xyz/v0
+    # (it 404s); using it would make the probe never recover.
     _QUOTA_PROBE_ACCOUNT = "So11111111111111111111111111111111111111112"
 
     def __init__(
@@ -698,8 +700,8 @@ class HeliusClient:
             return False
         try:
             session = await self._get_session()
-            url = f"{self.base_url}/account/{self._QUOTA_PROBE_ACCOUNT}"
-            params = {"api-key": self.api_key}
+            url = f"{self.base_url}/addresses/{self._QUOTA_PROBE_ACCOUNT}/transactions"
+            params = {"api-key": self.api_key, "limit": 1}
             async with session.get(
                 url, params=params, timeout=aiohttp.ClientTimeout(total=30)
             ) as response:

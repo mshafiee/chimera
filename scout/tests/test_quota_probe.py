@@ -164,6 +164,24 @@ async def test_make_request_does_not_probe_for_regular_breaker():
     probe.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_probe_uses_valid_helius_endpoint():
+    """The probe must hit a real endpoint — /account/{addr} 404s on Helius,
+    which silently broke recovery in the first version of this fix."""
+    client = _make_client()
+    client._quota_exhausted = True
+
+    session = _fake_session(_fake_response(200))
+    with patch.object(client, "_get_session", new=AsyncMock(return_value=session)):
+        await client._probe_quota_once()
+
+    called_url = session.get.call_args[0][0]
+    assert "/addresses/" in called_url
+    assert "/transactions" in called_url
+    assert "/account/" not in called_url, "must not use the non-existent /account/ path"
+    assert session.get.call_args.kwargs["params"]["limit"] == 1
+
+
 def test_is_quota_exhausted_reports_state():
     client = _make_client()
     assert client.is_quota_exhausted() is False
