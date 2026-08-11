@@ -1796,6 +1796,12 @@ async fn main() -> anyhow::Result<()> {
                 volume_cache,
                 config.profit_management.wick_protection_secs,
             )
+            .with_min_hold_secs(
+                std::env::var("CHIMERA_MOMENTUM_MIN_HOLD_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(150),
+            )
             .with_quote_client(token_parser.clone()),
         );
         let profit_target_mgr = Arc::new(

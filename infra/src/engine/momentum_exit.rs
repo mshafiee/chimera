@@ -41,6 +41,14 @@ pub struct MomentumExit {
     /// Grace period matching stop_loss.rs wick_protection_secs — price-drop check is suppressed
     /// during this window to avoid exiting on the entry-candle wick.
     wick_protection_secs: u64,
+    /// Minimum hold time before the momentum exit can fire (2026-08-11).
+    /// Pump.fun tokens routinely wick 5%+ within seconds of entry; the tight
+    /// base-drop threshold (5%) fires on this normal volatility, killing
+    /// positions before they can develop. This grace window is separate from
+    /// wick_protection_secs (which the stop-loss also reads) so the stop-loss
+    /// stays tight while the momentum exit breathes. The hard -25% stop in
+    /// stop_loss.rs still protects against catastrophic dumps during this window.
+    min_hold_secs: u64,
     /// Optional TokenParser for live sell-quote re-validation of profit-side
     /// exits (see `quote_confirms_profit`).
     quote_client: Option<Arc<TokenParser>>,
@@ -58,6 +66,7 @@ impl MomentumExit {
             price_cache,
             volume_cache: None,
             wick_protection_secs,
+            min_hold_secs: 0,
             quote_client: None,
         }
     }
@@ -74,8 +83,20 @@ impl MomentumExit {
             price_cache,
             volume_cache: Some(volume_cache),
             wick_protection_secs,
+            min_hold_secs: 0,
             quote_client: None,
         }
+    }
+
+    /// Set the minimum hold time before the momentum exit can fire. The
+    /// momentum exit's price-drop, volume, and RSI checks are all suppressed
+    /// for this many seconds after entry, giving volatile pump.fun positions
+    /// room to establish a trend before exiting on normal intraday noise.
+    /// The stop-loss (with its own wick protection and -25% hard stop)
+    /// remains active and provides downside protection during this window.
+    pub fn with_min_hold_secs(mut self, min_hold_secs: u64) -> Self {
+        self.min_hold_secs = min_hold_secs;
+        self
     }
 
     /// Attach a TokenParser for live sell-quote re-validation of profit-side
@@ -272,12 +293,14 @@ impl MomentumExit {
         };
         let elapsed_minutes = elapsed.as_secs() / 60;
 
-        // Respect the same wick-protection grace period as stop_loss.rs.
-        // A sharp single-candle wick immediately after entry should not trigger a momentum
-        // exit when stop_loss.rs would ignore it. Volume and RSI checks are likewise
-        // gated behind wick protection — during the first wick_protection_secs after entry,
-        // they are unreliable indicators of structural breakdown.
-        let in_wick_window = elapsed.as_secs() < self.wick_protection_secs;
+        // Respect the same wick-protection grace period as stop_loss.rs, extended
+        // by min_hold_secs (2026-08-11): pump.fun tokens wick 5%+ within seconds,
+        // and the tight base-drop threshold (5%) kills positions before they develop.
+        // The stop-loss (separate system) stays active and provides downside protection.
+        let effective_grace = self
+            .wick_protection_secs
+            .max(self.min_hold_secs);
+        let in_wick_window = elapsed.as_secs() < effective_grace;
 
         if !in_wick_window {
             // RSI requires 16 samples at 30-second intervals (~8 min). Before RSI is

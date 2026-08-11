@@ -245,10 +245,10 @@ profit_management:
   time_exit_hours: 24          # Force-close after 24h (was 4h — losing rail)
   losing_time_exit_hours_shield: 24  # SHIELD losers time out at 24h (was 4h)
   losing_time_exit_hours_spear: 24
-  wick_protection_secs: 30            # Tightened from 60: catch rug pulls faster
-  wick_protection_max_loss_percent: -3.0  # Tightened from -5%: exit if loss reaches -3% in first 30s (catches instant dumps)
-  recovery_gate_secs: 60            # Tightened from 90: identify losers faster
-  recovery_gate_threshold: -2.0     # Exit if PnL below -2% at gate time (was -1.5%)
+  wick_protection_secs: 60            # Widened from 30: give positions breathing room (2026-08-11)
+  wick_protection_max_loss_percent: -5.0  # Widened from -3%: don't kill normal pump.fun volatility during grace
+  recovery_gate_secs: 120           # Widened from 60: don't recovery-gate-exit during the 2-min breathing window
+  recovery_gate_threshold: -5.0     # Widened from -2%: only exit on significant losses (>5%) at gate time
   pre_graduation_exit_enabled: true   # Phase 5: exit pump.fun curve tokens at >85% completion (dump zone)
   pre_graduation_exit_threshold: 0.85 # Before the graduation depth discontinuity
   # Per-wallet exit profiles: derive per-wallet time-exit hours + trailing
@@ -290,9 +290,9 @@ position_sizing:
 # MEV protection configuration
 mev_protection:
   always_use_jito: true
-  exit_tip_sol: 0.002
-  consensus_tip_sol: 0.001
-  standard_tip_sol: 0.0006
+  exit_tip_sol: 0.0005              # Reduced from 0.002: exits don't need high-priority landing (2026-08-11)
+  consensus_tip_sol: 0.0005         # Reduced from 0.001
+  standard_tip_sol: 0.0003          # Reduced from 0.0006
 
 # Execution lock configuration for signal processing idempotency
 execution_lock:

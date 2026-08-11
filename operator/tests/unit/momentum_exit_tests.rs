@@ -131,3 +131,41 @@ async fn test_no_exit_when_no_price_data() {
         "Missing price data should not trigger exit"
     );
 }
+
+#[tokio::test]
+async fn test_min_hold_secs_suppresses_momentum_exit() {
+    // With min_hold_secs=150, a 6% drop on a 60-second-old position should
+    // NOT trigger the momentum exit — the position is still in the breathing
+    // window. Without min_hold (default 0), the same drop WOULD trigger.
+    let (db, _guard) = setup_test_db().await;
+    let price_cache = Arc::new(PriceCache::new().unwrap());
+
+    let token = "So11111111111111111111111111111111111111112";
+    let entry_price = Decimal::from_str("1.0").unwrap();
+    let price_6pct = Decimal::from_str("0.94").unwrap();
+    price_cache.set_price(token, price_6pct, PriceSource::Jupiter, Some(9));
+
+    // 60-second-old position with min_hold_secs=150: suppressed
+    let entry_time = SystemTime::now() - Duration::from_secs(60);
+    let detector = MomentumExit::new(db.clone(), price_cache.clone(), 30)
+        .with_min_hold_secs(150);
+    let action = detector
+        .check_momentum("uuid-minhold", token, entry_price, entry_time)
+        .await;
+    assert_eq!(
+        action,
+        MomentumExitAction::None,
+        "6% drop within min_hold window should not trigger — breathing room"
+    );
+
+    // Same drop with min_hold_secs=0 (default): triggers (past wick protection)
+    let detector_no_hold = MomentumExit::new(db, price_cache, 30);
+    let action_no_hold = detector_no_hold
+        .check_momentum("uuid-no-minhold", token, entry_price, entry_time)
+        .await;
+    assert_eq!(
+        action_no_hold,
+        MomentumExitAction::Exit,
+        "6% drop past wick_protection with no min_hold should trigger exit"
+    );
+}
