@@ -110,8 +110,8 @@ token_safety:
   cache_capacity: 1000
   cache_ttl_seconds: 3600  # 1 hour
   # Minimum token age in hours to allow a BUY signal (0 disables the check)
-  min_token_age_hours: 0.5         # Minimum 30min token age — filters instant rug pulls while still catching early moves (was 0.0 disabled, originally 2h)
-  min_token_age_pumpfun_hours: 0.5 # Same: 30min minimum for pump.fun tokens
+  min_token_age_hours: 0.25        # 15min token age — paper experiment (was 0.5/30min): the shadow data shows the fresh-token edge (TOKEN_TOO_NEW = +239 SOL shadow) that the 30min floor filtered out. Loosened to 15min to measure whether that edge survives real execution. Still filters the <15min instant-rug zone. Revert if realized (post-cost) PnL is negative.
+  min_token_age_pumpfun_hours: 0.25 # Same: 15min minimum for pump.fun tokens
   # Proven-wallet age waiver floor (2026-08-07): wallets with statistically
   # significant shadow PnL (t-stat > 1.645) trade early entries by design —
   # their signals are age-waived to 0.1h (6 min) instead of the 30 min global
