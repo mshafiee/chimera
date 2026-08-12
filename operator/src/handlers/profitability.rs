@@ -358,7 +358,7 @@ pub async fn fetch_outcomes(
           AND dr.action = 'BUY'
           AND t.status = 'CLOSED'
           AND t.pnl_data_valid = TRUE
-          AND t.side = 'SELL'
+          AND t.side = 'BUY'
           AND dr.decided_at > NOW() - INTERVAL '30 days'
           AND ($1 = '' OR dr.run_id = $1)
         "#,
@@ -399,7 +399,7 @@ pub async fn count_missing_outcomes(
 ) -> Result<i64, AppError> {
     // Count EVERY admitted BUY decision without a qualifying closed/valid SELL
     // outcome — a NULL trade_uuid is only one of the ways an outcome can be
-    // missing (an OPEN/CANCELLED trade, a non-SELL close, or NULL pnl_data_valid
+    // missing (an OPEN/CANCELLED trade, a non-BUY close, or NULL pnl_data_valid
     // all leave the decision without a usable outcome).
     let n: i64 = sqlx::query_scalar(
         r#"
@@ -416,7 +416,7 @@ pub async fn count_missing_outcomes(
                 WHERE t.trade_uuid = dr.trade_uuid
                   AND t.status = 'CLOSED'
                   AND t.pnl_data_valid = TRUE
-                  AND t.side = 'SELL'
+                  AND t.side = 'BUY'
             )
           )
         "#,
