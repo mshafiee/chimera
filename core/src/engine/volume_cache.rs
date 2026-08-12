@@ -375,4 +375,20 @@ mod tests {
         cache.set_volume_history("token1", samples);
         assert!(!cache.has_volume_drop("token1", dec!(10)));
     }
+
+    #[test]
+    fn test_record_volume_prunes_old_history() {
+        let cache = VolumeCache::new();
+        let t = now();
+        // Plant [25h-old, fresh] history: the fresh back entry keeps the token
+        // from the idle-eviction, so the 24h-cutoff prune loop pops the old front.
+        cache.set_volume_history(
+            "token1",
+            vec![(t - Duration::hours(25), dec!(1)), (t - Duration::hours(1), dec!(1))],
+        );
+        cache.record_volume("token1", dec!(2));
+        let history = cache.volume_history_snapshot("token1");
+        assert_eq!(history.len(), 2);
+        assert!(history.iter().all(|(_, v)| *v == dec!(1) || *v == dec!(2)));
+    }
 }

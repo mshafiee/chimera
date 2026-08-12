@@ -3517,13 +3517,15 @@ mod full_coverage_tests {
 
     #[test]
     fn security_config_debug_redacts_secrets() {
-        let mut s = SecurityConfig::default();
-        s.webhook_secret = "top-secret-webhook".to_string();
-        s.webhook_secret_previous = Some("prev-secret".to_string());
-        s.api_keys = vec![ApiKeyConfig {
-            key: "sk-secret-admin".to_string(),
-            role: "admin".to_string(),
-        }];
+        let s = SecurityConfig {
+            webhook_secret: "top-secret-webhook".to_string(),
+            webhook_secret_previous: Some("prev-secret".to_string()),
+            api_keys: vec![ApiKeyConfig {
+                key: "sk-secret-admin".to_string(),
+                role: "admin".to_string(),
+            }],
+            ..SecurityConfig::default()
+        };
         let out = format!("{s:?}");
         assert!(!out.contains("top-secret-webhook"), "{out}");
         assert!(!out.contains("prev-secret"), "{out}");
@@ -3533,8 +3535,10 @@ mod full_coverage_tests {
 
     #[test]
     fn jupiter_config_debug_redacts_api_key() {
-        let mut j = JupiterConfig::default();
-        j.api_key = Some("jup-secret-key".to_string());
+        let j = JupiterConfig {
+            api_key: Some("jup-secret-key".to_string()),
+            ..JupiterConfig::default()
+        };
         let out = format!("{j:?}");
         assert!(!out.contains("jup-secret-key"), "{out}");
         assert!(out.contains("[REDACTED]"), "{out}");
@@ -3574,19 +3578,21 @@ mod full_coverage_tests {
 
     #[test]
     fn get_all_secrets_collects_every_secret() {
-        let mut s = SecurityConfig::default();
-        s.webhook_secret = "wh-1".to_string();
-        s.webhook_secret_previous = Some("wh-0".to_string());
-        s.api_keys = vec![
-            ApiKeyConfig {
-                key: "key-a".to_string(),
-                role: "admin".to_string(),
-            },
-            ApiKeyConfig {
-                key: "key-b".to_string(),
-                role: "operator".to_string(),
-            },
-        ];
+        let s = SecurityConfig {
+            webhook_secret: "wh-1".to_string(),
+            webhook_secret_previous: Some("wh-0".to_string()),
+            api_keys: vec![
+                ApiKeyConfig {
+                    key: "key-a".to_string(),
+                    role: "admin".to_string(),
+                },
+                ApiKeyConfig {
+                    key: "key-b".to_string(),
+                    role: "operator".to_string(),
+                },
+            ],
+            ..SecurityConfig::default()
+        };
         let secrets = s.get_all_secrets();
         for expected in ["wh-1", "wh-0", "key-a", "key-b"] {
             assert!(secrets.iter().any(|s| s.contains(expected)), "{secrets:?}");
@@ -4010,5 +4016,154 @@ mod full_coverage_tests {
         c.trade_mode = TradeMode::Live;
         c.jupiter.api_key = Some("jk-1".to_string());
         c.validate().unwrap();
+    }
+
+    // =========================================================================
+    // RESOLVE_TRADE_MODE
+    // =========================================================================
+
+    #[test]
+    fn resolve_trade_mode_explicit_wins() {
+        // An explicit override is returned regardless of config/RPC.
+        assert_eq!(
+            resolve_trade_mode(Some(TradeMode::Paper), TradeMode::Live, "https://api.devnet.solana.com"),
+            TradeMode::Paper
+        );
+        assert_eq!(
+            resolve_trade_mode(Some(TradeMode::Live), TradeMode::Devnet, "https://api.mainnet-beta.solana.com"),
+            TradeMode::Live
+        );
+    }
+
+    #[test]
+    fn resolve_trade_mode_devnet_autodetect() {
+        // Live config + devnet RPC URL → auto-detected Devnet.
+        assert_eq!(
+            resolve_trade_mode(None, TradeMode::Live, "https://api.devnet.solana.com"),
+            TradeMode::Devnet
+        );
+    }
+
+    #[test]
+    fn resolve_trade_mode_config_non_live_returned() {
+        // Paper config is returned unchanged even with a devnet-looking RPC.
+        assert_eq!(
+            resolve_trade_mode(None, TradeMode::Paper, "https://api.devnet.solana.com"),
+            TradeMode::Paper
+        );
+        assert_eq!(
+            resolve_trade_mode(None, TradeMode::Devnet, "https://api.mainnet-beta.solana.com"),
+            TradeMode::Devnet
+        );
+    }
+
+    #[test]
+    fn resolve_trade_mode_live_fallback() {
+        // Live config + non-devnet RPC → Live.
+        assert_eq!(
+            resolve_trade_mode(None, TradeMode::Live, "https://api.mainnet-beta.solana.com"),
+            TradeMode::Live
+        );
+    }
+
+    #[test]
+    fn trade_mode_display() {
+        assert_eq!(TradeMode::Devnet.to_string(), "DEVNET");
+        assert_eq!(TradeMode::Paper.to_string(), "PAPER");
+        assert_eq!(TradeMode::Live.to_string(), "LIVE");
+    }
+
+    // =========================================================================
+    // TIERED POLLING CONFIG DEFAULTS
+    // =========================================================================
+
+    #[test]
+    fn tiered_polling_config_defaults() {
+        let c = TieredPollingConfig::default();
+        assert_eq!(c.high_conviction_interval_secs, 30);
+        assert_eq!(c.regular_conviction_interval_secs, 60);
+        assert_eq!(c.emerging_conviction_interval_secs, 120);
+        assert_eq!(c.high_conviction_wqs_threshold, 80);
+        assert_eq!(c.regular_conviction_wqs_threshold, 60);
+        assert_eq!(default_high_conviction_interval(), 30);
+        assert_eq!(default_regular_conviction_interval(), 60);
+        assert_eq!(default_emerging_conviction_interval(), 120);
+        assert_eq!(default_high_conviction_threshold(), 80);
+        assert_eq!(default_regular_conviction_threshold(), 60);
+    }
+
+    #[test]
+    fn webhook_management_defaults() {
+        assert!(default_auto_webhook_register());
+        assert!(default_auto_webhook_cleanup());
+        assert_eq!(default_webhook_health_interval(), 3600);
+        assert_eq!(default_stale_webhook_threshold(), 7);
+        assert_eq!(default_max_registration_retries(), 3);
+        assert!(default_helius_reconciliation_enabled());
+        assert!(default_helius_dry_run());
+    }
+
+    // =========================================================================
+    // MONITORING POLLING INTERVAL
+    // =========================================================================
+
+    fn tiered_monitoring(config: Option<TieredPollingConfig>, enabled: bool) -> MonitoringConfig {
+        MonitoringConfig {
+            tiered_polling_enabled: enabled,
+            tiered_polling: config,
+            ..MonitoringConfig::default()
+        }
+    }
+
+    #[test]
+    fn polling_interval_disabled_uses_flat_interval() {
+        let m = tiered_monitoring(None, false);
+        assert_eq!(m.get_polling_interval_for_wallet(Some(dec("90")), "ACTIVE"), m.rpc_poll_interval_secs);
+    }
+
+    #[test]
+    fn polling_interval_candidate_uses_emerging() {
+        let m = tiered_monitoring(Some(TieredPollingConfig::default()), true);
+        assert_eq!(m.get_polling_interval_for_wallet(None, "CANDIDATE"), 120);
+    }
+
+    #[test]
+    fn polling_interval_tiered_selection() {
+        let m = tiered_monitoring(Some(TieredPollingConfig::default()), true);
+        // High conviction (>= 80) → high interval (30).
+        assert_eq!(m.get_polling_interval_for_wallet(Some(dec("90")), "ACTIVE"), 30);
+        // Regular conviction (>= 60) → regular interval (60).
+        assert_eq!(m.get_polling_interval_for_wallet(Some(dec("70")), "ACTIVE"), 60);
+        // Below regular threshold → emerging interval (120).
+        assert_eq!(m.get_polling_interval_for_wallet(Some(dec("50")), "ACTIVE"), 120);
+        // No WQS → treated as 0 → emerging.
+        assert_eq!(m.get_polling_interval_for_wallet(None, "ACTIVE"), 120);
+    }
+
+    #[test]
+    fn polling_interval_falls_back_to_default_tiers() {
+        let m = tiered_monitoring(None, true);
+        assert_eq!(m.get_polling_interval_for_wallet(Some(dec("90")), "ACTIVE"), 30);
+        assert_eq!(m.get_polling_interval_for_wallet(Some(dec("70")), "ACTIVE"), 60);
+        assert_eq!(m.get_polling_interval_for_wallet(Some(dec("10")), "ACTIVE"), 120);
+    }
+
+    // =========================================================================
+    // LOAD_CONFIG ENV-PLACEHOLDER RESOLUTION
+    // =========================================================================
+
+    #[test]
+    fn load_config_leaves_plain_rpc_urls_unchanged() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        clear_chimera_env();
+        std::env::set_var(
+            "CHIMERA_SECURITY__WEBHOOK_SECRET",
+            "0123456789abcdef0123456789abcdef",
+        );
+        // Without a config file and with a cleared env, the defaults hold and
+        // there is no fallback URL.
+        let config = AppConfig::load_config().unwrap();
+        assert_eq!(config.rpc.primary_url, "https://api.mainnet-beta.solana.com");
+        assert!(config.rpc.fallback_url.is_none());
     }
 }

@@ -66,3 +66,75 @@ pub fn trades_to_pdf(_trades: &[TradeDetail]) -> AppResult<Vec<u8>> {
         "PDF export not available in this printpdf version".to_string(),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal::Decimal;
+
+    fn trade_detail(uuid: &str, token_symbol: Option<&str>) -> TradeDetail {
+        TradeDetail {
+            id: 1,
+            trade_uuid: uuid.to_string(),
+            wallet_address: "wallet".to_string(),
+            token_address: "token".to_string(),
+            token_symbol: token_symbol.map(|s| s.to_string()),
+            strategy: "SHIELD".to_string(),
+            side: "BUY".to_string(),
+            amount_sol: Decimal::from(10),
+            price_at_signal: None,
+            tx_signature: None,
+            status: "PENDING".to_string(),
+            retry_count: 0,
+            error_message: None,
+            pnl_sol: None,
+            pnl_usd: None,
+            jito_tip_sol: None,
+            dex_fee_sol: None,
+            slippage_cost_sol: None,
+            total_cost_sol: None,
+            net_pnl_sol: None,
+            pnl_data_valid: true,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_csv_escape() {
+        assert_eq!(csv_escape("simple"), "simple");
+        assert_eq!(csv_escape("with,comma"), "\"with,comma\"");
+        assert_eq!(csv_escape("has \"quote\""), "\"has \"\"quote\"\"\"");
+        assert_eq!(csv_escape("line\nbreak"), "\"line\nbreak\"");
+    }
+
+    #[test]
+    fn test_trades_to_csv_header_and_row() {
+        let csv = trades_to_csv(&[trade_detail("t1", Some("TOKEN"))]);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("id,trade_uuid,wallet_address"));
+        assert!(lines[1].contains("t1"));
+        assert!(lines[1].contains("TOKEN"));
+        assert!(lines[1].contains("SHIELD"));
+    }
+
+    #[test]
+    fn test_trades_to_csv_empty() {
+        let csv = trades_to_csv(&[]);
+        // Only the header line.
+        assert_eq!(csv.lines().count(), 1);
+    }
+
+    #[test]
+    fn test_trades_to_csv_escapes_symbol_with_comma() {
+        let csv = trades_to_csv(&[trade_detail("t1", Some("A,B"))]);
+        assert!(csv.contains("\"A,B\""));
+    }
+
+    #[test]
+    fn test_trades_to_pdf_returns_error() {
+        let result = trades_to_pdf(&[trade_detail("t1", None)]);
+        assert!(result.is_err());
+    }
+}

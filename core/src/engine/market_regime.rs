@@ -376,8 +376,9 @@ impl MarketRegimeDetector {
 mod tests {
     use super::*;
     use crate::price_cache::{PriceCache, PriceSource};
-    use chrono::{Duration, Utc};
+    use chrono::{DateTime, Duration, Utc};
     use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -508,5 +509,324 @@ mod tests {
 
         // Span is 3 hours (>= 2 hours) and price went down 10%, so it should detect Bear
         assert_eq!(detector.detect_token_regime(token), MarketRegime::Bear);
+    }
+
+    // ==========================================================================
+    // ADDITIONAL COVERAGE
+    // ==========================================================================
+
+    fn detector() -> MarketRegimeDetector {
+        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600).expect("cache"));
+        MarketRegimeDetector::new(price_cache)
+    }
+
+    #[test]
+    fn test_market_regime_display() {
+        assert_eq!(MarketRegime::Bull.to_string(), "BULL");
+        assert_eq!(MarketRegime::Bear.to_string(), "BEAR");
+        assert_eq!(MarketRegime::Sideways.to_string(), "SIDEWAYS");
+    }
+
+    fn deque(points: &[(DateTime<Utc>, Decimal)]) -> VecDeque<(DateTime<Utc>, Decimal)> {
+        points.iter().copied().collect()
+    }
+
+    #[test]
+    fn test_detect_regime_from_history_branches() {
+        let d = detector();
+        let now = Utc::now();
+
+        // Fewer than 3 points → Sideways.
+        let h = deque(&[(now, Decimal::from(100)), (now, Decimal::from(101))]);
+        assert_eq!(d.detect_regime_from_history(&h), MarketRegime::Sideways);
+
+        // 3 points spanning < 12h → Sideways.
+        let h = deque(&[
+            (now - Duration::hours(1), Decimal::from(100)),
+            (now - Duration::minutes(30), Decimal::from(105)),
+            (now, Decimal::from(110)),
+        ]);
+        assert_eq!(d.detect_regime_from_history(&h), MarketRegime::Sideways);
+
+        // Zero first price → Sideways.
+        let h = deque(&[
+            (now - Duration::hours(13), Decimal::ZERO),
+            (now - Duration::hours(6), Decimal::from(100)),
+            (now, Decimal::from(110)),
+        ]);
+        assert_eq!(d.detect_regime_from_history(&h), MarketRegime::Sideways);
+
+        // Bull: > +5% over 13h.
+        let h = deque(&[
+            (now - Duration::hours(13), Decimal::from(100)),
+            (now - Duration::hours(6), Decimal::from(105)),
+            (now, Decimal::from(110)),
+        ]);
+        assert_eq!(d.detect_regime_from_history(&h), MarketRegime::Bull);
+
+        // Bear: < -5% over 13h.
+        let h = deque(&[
+            (now - Duration::hours(13), Decimal::from(110)),
+            (now - Duration::hours(6), Decimal::from(105)),
+            (now, Decimal::from(100)),
+        ]);
+        assert_eq!(d.detect_regime_from_history(&h), MarketRegime::Bear);
+
+        // Sideways: within ±5%.
+        let h = deque(&[
+            (now - Duration::hours(13), Decimal::from(100)),
+            (now - Duration::hours(6), Decimal::from(102)),
+            (now, Decimal::from(101)),
+        ]);
+        assert_eq!(d.detect_regime_from_history(&h), MarketRegime::Sideways);
+    }
+
+    #[tokio::test]
+    async fn test_update_price_history_skips_not_newer() {
+        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600).unwrap());
+        let d = MarketRegimeDetector::new(price_cache.clone());
+        let sol = "So11111111111111111111111111111111111111112";
+        let now = Utc::now();
+        price_cache.set_price_with_time(sol, Decimal::from(100), PriceSource::Jupiter, now, Some(9));
+        d.update_price_history().await;
+        assert_eq!(d.get_price_history().len(), 1);
+        // Same fetched_at again → not newer → skipped.
+        price_cache.set_price_with_time(sol, Decimal::from(101), PriceSource::Jupiter, now, Some(9));
+        d.update_price_history().await;
+        assert_eq!(d.get_price_history().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_update_price_history_prunes_old_entries() {
+        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600).unwrap());
+        let d = MarketRegimeDetector::new(price_cache.clone());
+        let sol = "So11111111111111111111111111111111111111112";
+        let now = Utc::now();
+        // 25h-ago entry first, then a fresh one → the old one is pruned.
+        price_cache.set_price_with_time(
+            sol,
+            Decimal::from(100),
+            PriceSource::Jupiter,
+            now - Duration::hours(25),
+            Some(9),
+        );
+        d.update_price_history().await;
+        price_cache.set_price_with_time(sol, Decimal::from(110), PriceSource::Jupiter, now, Some(9));
+        d.update_price_history().await;
+        assert_eq!(d.get_price_history().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_detect_token_regime_branches() {
+        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600).unwrap());
+        let d = MarketRegimeDetector::new(price_cache.clone());
+        let now = Utc::now();
+
+        // No history → Sideways.
+        assert_eq!(d.detect_token_regime("Ghost1111111111111111111111111111111"), MarketRegime::Sideways);
+
+        // Fewer than 3 points → Sideways.
+        let t1 = "Token111111111111111111111111111111111111111";
+        price_cache.set_price_with_time(t1, Decimal::from(100), PriceSource::Jupiter, now - Duration::hours(3), Some(9));
+        price_cache.set_price_with_time(t1, Decimal::from(101), PriceSource::Jupiter, now, Some(9));
+        assert_eq!(d.detect_token_regime(t1), MarketRegime::Sideways);
+
+        // 3 points spanning < 2h → Sideways.
+        let t1b = "Token111111111111111111111111111111111111111";
+        price_cache.set_price_with_time(t1b, Decimal::from(102), PriceSource::Jupiter, now - Duration::minutes(30), Some(9));
+        assert_eq!(d.detect_token_regime(t1b), MarketRegime::Sideways);
+
+        // Zero first price → Sideways.
+        let t2 = "Token222222222222222222222222222222222222222";
+        price_cache.set_price_with_time(t2, Decimal::ZERO, PriceSource::Jupiter, now - Duration::hours(3), Some(9));
+        price_cache.set_price_with_time(t2, Decimal::from(100), PriceSource::Jupiter, now - Duration::hours(1), Some(9));
+        price_cache.set_price_with_time(t2, Decimal::from(110), PriceSource::Jupiter, now, Some(9));
+        assert_eq!(d.detect_token_regime(t2), MarketRegime::Sideways);
+
+        // Bear: down > 5% over >= 2h.
+        let t3 = "Token333333333333333333333333333333333333333";
+        price_cache.set_price_with_time(t3, Decimal::from(110), PriceSource::Jupiter, now - Duration::hours(3), Some(9));
+        price_cache.set_price_with_time(t3, Decimal::from(105), PriceSource::Jupiter, now - Duration::hours(1), Some(9));
+        price_cache.set_price_with_time(t3, Decimal::from(100), PriceSource::Jupiter, now, Some(9));
+        assert_eq!(d.detect_token_regime(t3), MarketRegime::Bear);
+
+        // Bull: up > 5%.
+        let t4 = "Token444444444444444444444444444444444444444";
+        price_cache.set_price_with_time(t4, Decimal::from(100), PriceSource::Jupiter, now - Duration::hours(3), Some(9));
+        price_cache.set_price_with_time(t4, Decimal::from(105), PriceSource::Jupiter, now - Duration::hours(1), Some(9));
+        price_cache.set_price_with_time(t4, Decimal::from(110), PriceSource::Jupiter, now, Some(9));
+        assert_eq!(d.detect_token_regime(t4), MarketRegime::Bull);
+
+        // Sideways: within ±5%.
+        let t5 = "Token555555555555555555555555555555555555555";
+        price_cache.set_price_with_time(t5, Decimal::from(100), PriceSource::Jupiter, now - Duration::hours(3), Some(9));
+        price_cache.set_price_with_time(t5, Decimal::from(102), PriceSource::Jupiter, now - Duration::hours(1), Some(9));
+        price_cache.set_price_with_time(t5, Decimal::from(101), PriceSource::Jupiter, now, Some(9));
+        assert_eq!(d.detect_token_regime(t5), MarketRegime::Sideways);
+    }
+
+    async fn set_global(
+        d: &MarketRegimeDetector,
+        price_cache: &Arc<PriceCache>,
+        first: Decimal,
+        mid: Decimal,
+        last: Decimal,
+        now: DateTime<Utc>,
+    ) {
+        let sol = "So11111111111111111111111111111111111111112";
+        // The cache holds one price entry per token, so update_price_history
+        // must be called after EACH set to accumulate the history (a back-to-back
+        // set would only ever yield the final price, which is never "newer").
+        price_cache.set_price_with_time(sol, first, PriceSource::Jupiter, now - Duration::hours(13), Some(9));
+        d.update_price_history().await;
+        price_cache.set_price_with_time(sol, mid, PriceSource::Jupiter, now - Duration::hours(6), Some(9));
+        d.update_price_history().await;
+        price_cache.set_price_with_time(sol, last, PriceSource::Jupiter, now, Some(9));
+        d.update_price_history().await;
+    }
+
+    fn set_token(
+        price_cache: &Arc<PriceCache>,
+        token: &str,
+        first: Decimal,
+        mid: Decimal,
+        last: Decimal,
+        now: DateTime<Utc>,
+    ) {
+        price_cache.set_price_with_time(token, first, PriceSource::Jupiter, now - Duration::hours(3), Some(9));
+        price_cache.set_price_with_time(token, mid, PriceSource::Jupiter, now - Duration::hours(1), Some(9));
+        price_cache.set_price_with_time(token, last, PriceSource::Jupiter, now, Some(9));
+    }
+
+    #[tokio::test]
+    async fn test_detect_effective_regime_bear_wins() {
+        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600).unwrap());
+        let d = MarketRegimeDetector::new(price_cache.clone());
+        let now = Utc::now();
+        set_global(&d, &price_cache, dec!(110), dec!(105), dec!(100), now).await; // global Bear
+        let tok = "TokEff111111111111111111111111111111111111";
+        set_token(&price_cache, tok, dec!(100), dec!(105), dec!(110), now); // token Bull
+        assert_eq!(d.detect_effective_regime(tok), MarketRegime::Bear);
+    }
+
+    #[tokio::test]
+    async fn test_detect_effective_regime_sideways_and_bull() {
+        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600).unwrap());
+        let d = MarketRegimeDetector::new(price_cache.clone());
+        let now = Utc::now();
+        set_global(&d, &price_cache, dec!(100), dec!(105), dec!(110), now).await; // global Bull
+
+        let tok = "TokEff222222222222222222222222222222222222";
+        set_token(&price_cache, tok, dec!(100), dec!(102), dec!(101), now); // token Sideways
+        assert_eq!(d.detect_effective_regime(tok), MarketRegime::Sideways);
+
+        let tok2 = "TokEff333333333333333333333333333333333333";
+        set_token(&price_cache, tok2, dec!(100), dec!(105), dec!(110), now); // token Bull
+        assert_eq!(d.detect_effective_regime(tok2), MarketRegime::Bull);
+    }
+
+    #[tokio::test]
+    async fn test_get_regime_multiplier_bull_and_bear() {
+        // Bull → 1.5 with neutral volume.
+        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600).unwrap());
+        let d = MarketRegimeDetector::new(price_cache.clone());
+        let now = Utc::now();
+        set_global(&d, &price_cache, dec!(100), dec!(105), dec!(110), now).await;
+        let tok = "TokMult11111111111111111111111111111111111";
+        set_token(&price_cache, tok, dec!(100), dec!(105), dec!(110), now);
+        assert_eq!(d.get_regime_multiplier(tok), dec!(1.5));
+
+        // Bear × falling volume (0.7) → 0.35, clamped up to the 0.5 floor.
+        let price_cache2 = Arc::new(PriceCache::with_ttl(24 * 3600).unwrap());
+        let d2 = MarketRegimeDetector::new(price_cache2.clone());
+        let now2 = Utc::now();
+        set_global(&d2, &price_cache2, dec!(110), dec!(105), dec!(100), now2).await;
+        let tok2 = "TokMult22222222222222222222222222222222222";
+        set_token(&price_cache2, tok2, dec!(110), dec!(105), dec!(100), now2);
+        {
+            let mut h = d2.volume_history.write();
+            h.clear();
+            for k in 7..14 {
+                h.push_back((now2 - Duration::days(k), dec!(100)));
+            }
+            for k in 0..7 {
+                h.push_back((now2 - Duration::days(k), dec!(50)));
+            }
+        }
+        assert_eq!(d2.get_regime_multiplier(tok2), dec!(0.5));
+    }
+
+    #[test]
+    fn test_update_volume_history_dedups_same_day() {
+        let d = detector();
+        d.update_volume_history(dec!(100));
+        d.update_volume_history(dec!(200));
+        assert_eq!(d.volume_history.read().len(), 1);
+    }
+
+    #[test]
+    fn test_update_volume_history_prunes_older_than_two_weeks() {
+        let d = detector();
+        let now = Utc::now();
+        {
+            let mut h = d.volume_history.write();
+            // 15d-old entry is pruned; the 13d-old entry sits safely inside the
+            // 14-day cutoff (a 14d-exactly entry can race the current clock).
+            h.push_back((now - Duration::days(15), dec!(10)));
+            h.push_back((now - Duration::days(13), dec!(11)));
+        }
+        d.update_volume_history(dec!(300));
+        // 15-day-old entry pruned; today's + the 13-day-old remain.
+        assert_eq!(d.volume_history.read().len(), 2);
+    }
+
+    fn trend_with(
+        d: &MarketRegimeDetector,
+        now: DateTime<Utc>,
+        last: Decimal,
+        prev: Decimal,
+    ) -> Decimal {
+        {
+            let mut h = d.volume_history.write();
+            h.clear();
+            for k in 7..14 {
+                h.push_back((now - Duration::days(k), prev));
+            }
+            for k in 0..7 {
+                h.push_back((now - Duration::days(k), last));
+            }
+        }
+        d.get_volume_trend_multiplier()
+    }
+
+    #[test]
+    fn test_volume_trend_multiplier_branches() {
+        let d = detector();
+        let now = Utc::now();
+
+        // Insufficient data (< 7) → 1.0.
+        assert_eq!(d.get_volume_trend_multiplier(), dec!(1.0));
+
+        // last_week_count == 0 → 1.0.
+        {
+            let mut h = d.volume_history.write();
+            h.clear();
+            for k in 8..20 {
+                h.push_back((now - Duration::days(k), dec!(100)));
+            }
+        }
+        assert_eq!(d.get_volume_trend_multiplier(), dec!(1.0));
+
+        // previous_week_avg == 0 → 1.0.
+        assert_eq!(trend_with(&d, now, dec!(100), dec!(0)), dec!(1.0));
+
+        // ratio < 0.8 → 0.7.
+        assert_eq!(trend_with(&d, now, dec!(50), dec!(100)), dec!(0.7));
+        // ratio in [0.8, 0.9) → 0.85.
+        assert_eq!(trend_with(&d, now, dec!(85), dec!(100)), dec!(0.85));
+        // ratio > 1.2 → 1.1.
+        assert_eq!(trend_with(&d, now, dec!(150), dec!(100)), dec!(1.1));
+        // otherwise → 1.0.
+        assert_eq!(trend_with(&d, now, dec!(100), dec!(100)), dec!(1.0));
     }
 }

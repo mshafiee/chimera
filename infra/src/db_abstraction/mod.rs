@@ -1204,3 +1204,72 @@ pub fn string_to_datetime(s: &str) -> Result<chrono::DateTime<chrono::Utc>, AppE
         .map(|dt| dt.with_timezone(&chrono::Utc))
         .map_err(|e| AppError::Internal(format!("Invalid datetime format: {}", e)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[tokio::test]
+    async fn test_timed_query_propagates_ok() {
+        let result: AppResult<i32> = timed_query("test", async { Ok(42) }).await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn test_timed_query_propagates_err() {
+        let result: AppResult<i32> =
+            timed_query("test", async { Err(AppError::Internal("boom".into())) }).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_database_mode_from_env() {
+        std::env::set_var("CHIMERA_DB_MODE", "postgres");
+        assert_eq!(DatabaseMode::from_env(), DatabaseMode::PostgreSQLOnly);
+        std::env::set_var("CHIMERA_DB_MODE", "postgresql");
+        assert_eq!(DatabaseMode::from_env(), DatabaseMode::PostgreSQLOnly);
+        std::env::set_var("CHIMERA_DB_MODE", "postgres-only");
+        assert_eq!(DatabaseMode::from_env(), DatabaseMode::PostgreSQLOnly);
+        std::env::remove_var("CHIMERA_DB_MODE");
+        assert_eq!(DatabaseMode::from_env(), DatabaseMode::PostgreSQLOnly);
+        std::env::set_var("CHIMERA_DB_MODE", "mysql");
+        assert_eq!(DatabaseMode::from_env(), DatabaseMode::PostgreSQLOnly);
+    }
+
+    #[test]
+    fn test_text_to_dec_and_back() {
+        use rust_decimal::Decimal;
+        let d = text_to_dec("123.45").unwrap();
+        assert_eq!(d, Decimal::from_str("123.45").unwrap());
+        assert_eq!(dec_to_text(&d), "123.45");
+
+        assert!(text_to_dec("not-a-number").is_err());
+        assert!(text_to_dec("").is_err());
+    }
+
+    #[test]
+    fn test_opt_text_to_dec_and_back() {
+        use rust_decimal::Decimal;
+        let d = Decimal::from_str("7.5").unwrap();
+        assert_eq!(opt_text_to_dec(Some("7.5")), Some(d));
+        assert_eq!(opt_text_to_dec(Some("junk")), None);
+        assert_eq!(opt_text_to_dec(None), None);
+        assert_eq!(opt_dec_to_text(Some(&d)), Some("7.5".to_string()));
+        assert_eq!(opt_dec_to_text(None), None);
+    }
+
+    #[test]
+    fn test_datetime_helpers() {
+        let dt = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let s = datetime_to_string(dt);
+        assert!(s.starts_with("2026-01-01T00:00:00"));
+
+        let parsed = string_to_datetime("2026-01-01T00:00:00Z").unwrap();
+        assert_eq!(parsed, dt);
+
+        assert!(string_to_datetime("not-a-datetime").is_err());
+    }
+}

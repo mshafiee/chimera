@@ -1797,3 +1797,67 @@ impl Drop for AdmissionGuard<'_> {
         }
     }
 }
+
+mod tests {
+    use super::*;
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn off_hours_multiplier_is_one_outside_ramp_window() {
+        // Before 01:00 (min 60) and at/after 06:00 (min 360) → full size.
+        assert_eq!(off_hours_multiplier(0, dec!(0.5)), Decimal::ONE);
+        assert_eq!(off_hours_multiplier(59, dec!(0.5)), Decimal::ONE);
+        assert_eq!(off_hours_multiplier(360, dec!(0.5)), Decimal::ONE);
+        assert_eq!(off_hours_multiplier(1000, dec!(0.5)), Decimal::ONE);
+    }
+
+    #[test]
+    fn off_hours_multiplier_ramps_down_01_02() {
+        // mins in [60,120): linear ramp from 1.0 down to base_mult.
+        assert_eq!(off_hours_multiplier(60, dec!(0.5)), Decimal::ONE);
+        // t = (90-60)/60 = 0.5 → 1 - 0.5*0.5 = 0.75
+        assert_eq!(off_hours_multiplier(90, dec!(0.5)), dec!(0.75));
+        // just before full reduction: t = (119-60)/60 → 1 - (59/60)*0.5
+        let expected = Decimal::ONE - dec!(59) / dec!(60) * dec!(0.5);
+        assert_eq!(off_hours_multiplier(119, dec!(0.5)), expected);
+    }
+
+    #[test]
+    fn off_hours_multiplier_full_reduction_02_05() {
+        // mins in [120,300): fully reduced to base_mult.
+        assert_eq!(off_hours_multiplier(120, dec!(0.5)), dec!(0.5));
+        assert_eq!(off_hours_multiplier(200, dec!(0.5)), dec!(0.5));
+        assert_eq!(off_hours_multiplier(299, dec!(0.5)), dec!(0.5));
+    }
+
+    #[test]
+    fn off_hours_multiplier_ramps_up_05_06() {
+        // mins in [300,360): linear ramp from base_mult back up to 1.0.
+        assert_eq!(off_hours_multiplier(300, dec!(0.5)), dec!(0.5));
+        // t = (330-300)/60 = 0.5 → 0.5 + 0.5*0.5 = 0.75
+        assert_eq!(off_hours_multiplier(330, dec!(0.5)), dec!(0.75));
+        // just before 06:00: t = (359-300)/60 = 59/60
+        let expected = dec!(0.5) + dec!(59) / dec!(60) * dec!(0.5);
+        assert_eq!(off_hours_multiplier(359, dec!(0.5)), expected);
+    }
+
+    #[test]
+    fn off_hours_multiplier_base_mult_is_one_is_noop() {
+        // A base multiplier of 1.0 means no reduction anywhere in the window.
+        assert_eq!(off_hours_multiplier(90, Decimal::ONE), Decimal::ONE);
+        assert_eq!(off_hours_multiplier(180, Decimal::ONE), Decimal::ONE);
+        assert_eq!(off_hours_multiplier(330, Decimal::ONE), Decimal::ONE);
+    }
+
+    #[test]
+    fn off_hours_multiplier_never_exceeds_one() {
+        // The ramp formula interpolates within [base_mult, 1.0]; verify no
+        // input produces a multiplier above 1.0 (which would upsell size).
+        for mins in 0..=400 {
+            let m = off_hours_multiplier(mins, dec!(0.4));
+            assert!(m <= Decimal::ONE, "mins={mins} produced {m}");
+            assert!(m >= dec!(0.4), "mins={mins} produced {m}");
+        }
+    }
+}

@@ -322,6 +322,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_check_memory_pressure_real() {
         // Serialize against test_memory_pressure_flag: MEMORY_PRESSURE is a
         // process-global flag and the real check would race with it.
@@ -358,6 +359,38 @@ mod tests {
         assert!(err.to_string().contains("df exited with status"));
     }
 
+    /// Minimal TRACE subscriber so `tracing::debug!` bodies execute.
+    fn install_trace_subscriber() {
+        use tracing::Subscriber;
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            struct TraceAll;
+            impl Subscriber for TraceAll {
+                fn enabled(&self, _m: &tracing::Metadata<'_>) -> bool {
+                    true
+                }
+                fn new_span(&self, _s: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                    tracing::span::Id::from_u64(1)
+                }
+                fn record(&self, _s: &tracing::span::Id, _v: &tracing::span::Record<'_>) {}
+                fn record_follows_from(&self, _s: &tracing::span::Id, _f: &tracing::span::Id) {}
+                fn event(&self, _e: &tracing::Event<'_>) {}
+                fn enter(&self, _s: &tracing::span::Id) {}
+                fn exit(&self, _s: &tracing::span::Id) {}
+            }
+            let _ = tracing::subscriber::set_global_default(TraceAll);
+        });
+    }
+
+    #[test]
+    fn test_df_free_fraction_runs_debug_logging() {
+        install_trace_subscriber();
+        // With a TRACE subscriber live, the `tracing::debug!` body inside
+        // df_free_fraction actually executes.
+        let frac = df_free_fraction("/").expect("df on /");
+        assert!(frac > 0.0 && frac <= 1.0);
+    }
+
     // The RPC backoff multiplier is a process-global static; parallel tests
     // would race on it. Serialize the tests that touch it.
     static BACKOFF_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -365,6 +398,7 @@ mod tests {
     static PRESSURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_rpc_backoff_doubles_and_caps() {
         let _guard = BACKOFF_LOCK.lock().unwrap();
         reset_rpc_backoff();

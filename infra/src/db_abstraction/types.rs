@@ -657,3 +657,68 @@ pub struct PortfolioSnapshot {
     pub sol_price_usd: Option<rust_decimal::Decimal>,
     pub trade_mode: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_backend_defaults_to_postgres() {
+        std::env::remove_var("CHIMERA_DB_MODE");
+        assert_eq!(DatabaseBackend::from_env(), DatabaseBackend::PostgreSQL);
+    }
+
+    #[test]
+    fn test_backend_parses_known_values() {
+        std::env::set_var("CHIMERA_DB_MODE", "postgres");
+        assert_eq!(DatabaseBackend::from_env(), DatabaseBackend::PostgreSQL);
+        std::env::set_var("CHIMERA_DB_MODE", "postgresql");
+        assert_eq!(DatabaseBackend::from_env(), DatabaseBackend::PostgreSQL);
+        std::env::set_var("CHIMERA_DB_MODE", "POSTGRES");
+        assert_eq!(DatabaseBackend::from_env(), DatabaseBackend::PostgreSQL);
+    }
+
+    #[test]
+    fn test_backend_unknown_value_falls_back_to_postgres() {
+        std::env::set_var("CHIMERA_DB_MODE", "mysql");
+        assert_eq!(DatabaseBackend::from_env(), DatabaseBackend::PostgreSQL);
+    }
+
+    #[test]
+    fn test_backend_port_and_display() {
+        assert_eq!(DatabaseBackend::PostgreSQL.default_port(), 5432);
+        assert_eq!(DatabaseBackend::PostgreSQL.to_string(), "postgresql");
+    }
+
+    #[test]
+    fn test_database_config_default() {
+        std::env::remove_var("DATABASE_URL");
+        std::env::remove_var("CHIMERA_DB_MODE");
+        let config = DatabaseConfig::default();
+        assert_eq!(config.backend, DatabaseBackend::PostgreSQL);
+        assert_eq!(config.max_connections, 10);
+        assert_eq!(config.acquire_timeout_seconds, 30);
+    }
+
+    #[test]
+    fn test_database_config_postgres_helper() {
+        let config = DatabaseConfig::postgres("postgres://localhost:5432/chimera".to_string());
+        assert_eq!(config.backend, DatabaseBackend::PostgreSQL);
+        assert_eq!(config.url.as_deref(), Some("postgres://localhost:5432/chimera"));
+    }
+
+    #[test]
+    fn test_database_config_debug_redacts_url_credentials() {
+        let config = DatabaseConfig::postgres("postgres://user:supersecret@db.example:5432/chimera".to_string());
+        let dbg = format!("{:?}", config);
+        assert!(dbg.contains("user:***@db.example"), "credentials must be redacted");
+        assert!(!dbg.contains("supersecret"), "password must not appear");
+    }
+
+    #[test]
+    fn test_database_config_debug_url_without_credentials() {
+        let config = DatabaseConfig::postgres("postgres://db.example:5432/chimera".to_string());
+        let dbg = format!("{:?}", config);
+        assert!(dbg.contains("postgres://db.example:5432/chimera"));
+    }
+}

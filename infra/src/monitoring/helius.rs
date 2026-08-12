@@ -1037,6 +1037,11 @@ mod tests {
                 while !stop_clone.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((stream, _)) => {
+                            // Accepted sockets inherit the listener's non-blocking
+                            // flag on some platforms; force blocking so the handler's
+                            // read blocks for the request instead of returning
+                            // WouldBlock immediately and dropping the connection.
+                            let _ = stream.set_nonblocking(false);
                             let handler = Arc::clone(&handler);
                             thread::spawn(move || handle_conn(stream, handler));
                         }
@@ -1079,46 +1084,54 @@ mod tests {
     where
         H: Fn(&str, &str) -> (u16, String) + Send + Sync + 'static,
     {
-        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(60)));
         let mut reader = BufReader::new(stream.try_clone().expect("clone"));
-        let mut request_line = String::new();
-        if reader.read_line(&mut request_line).is_err() {
-            return;
-        }
-        let parts: Vec<&str> = request_line.split_whitespace().collect();
-        if parts.len() < 2 {
-            return;
-        }
-        let method = parts[0].to_string();
-        // Strip query string: handlers match on the path only.
-        let path = parts[1].split('?').next().unwrap_or("").to_string();
-
-        // Read headers
-        let mut content_length = 0usize;
+        // Loop over keep-alive requests on the same connection. A real server
+        // keeps the socket open for reused connections; reqwest's connection
+        // pool reuses the socket across paginated requests, so closing after a
+        // single request races with a pooled reuse and drops the connection
+        // mid-response under parallel test load.
         loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line).is_err() || line == "\r\n" || line == "\n" {
-                break;
+            let mut request_line = String::new();
+            if reader.read_line(&mut request_line).is_err() || request_line.trim().is_empty() {
+                return;
             }
-            let lower = line.to_ascii_lowercase();
-            if let Some(v) = lower.strip_prefix("content-length:") {
-                content_length = v.trim().parse().unwrap_or(0);
+            let parts: Vec<&str> = request_line.split_whitespace().collect();
+            if parts.len() < 2 {
+                return;
             }
-        }
-        // Drain body
-        if content_length > 0 {
-            let mut buf = vec![0u8; content_length];
-            let _ = reader.read_exact(&mut buf);
-        }
+            let method = parts[0].to_string();
+            // Strip query string: handlers match on the path only.
+            let path = parts[1].split('?').next().unwrap_or("").to_string();
 
-        let (status, body) = handler(&method, &path);
-        let reason = if status == 200 { "OK" } else { "Error" };
-        let response = format!(
-            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        let _ = stream.write_all(response.as_bytes());
-        let _ = stream.flush();
+            // Read headers
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() || line == "\r\n" || line == "\n" {
+                    break;
+                }
+                let lower = line.to_ascii_lowercase();
+                if let Some(v) = lower.strip_prefix("content-length:") {
+                    content_length = v.trim().parse().unwrap_or(0);
+                }
+            }
+            // Drain body
+            if content_length > 0 {
+                let mut buf = vec![0u8; content_length];
+                let _ = reader.read_exact(&mut buf);
+            }
+
+            let (status, body) = handler(&method, &path);
+            let reason = if status == 200 { "OK" } else { "Error" };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",
+                body.len()
+            );
+            if stream.write_all(response.as_bytes()).is_err() || stream.flush().is_err() {
+                return;
+            }
+        }
     }
 
     fn test_client_with_cache(

@@ -452,8 +452,11 @@ mod tests {
 
     #[test]
     fn test_lock_expiration() {
-        let mut config = ExecutionLockConfig::default();
-        config.lock_timeout_seconds = 1;
+        let config = ExecutionLockConfig {
+            enabled: true,
+            lock_timeout_seconds: 1,
+            cleanup_interval_seconds: 30,
+        };
         let lock = ExecutionLock::new(config, None);
 
         let _guard1 = lock.try_acquire("trade-123", "worker-1");
@@ -468,8 +471,11 @@ mod tests {
 
     #[test]
     fn test_disabled_lock() {
-        let mut config = ExecutionLockConfig::default();
-        config.enabled = false;
+        let config = ExecutionLockConfig {
+            enabled: false,
+            lock_timeout_seconds: 120,
+            cleanup_interval_seconds: 30,
+        };
         let lock = ExecutionLock::new(config, None);
 
         let guard1 = lock.try_acquire("trade-123", "worker-1");
@@ -494,8 +500,11 @@ mod tests {
 
     #[test]
     fn test_cleanup_expired() {
-        let mut config = ExecutionLockConfig::default();
-        config.lock_timeout_seconds = 1;
+        let config = ExecutionLockConfig {
+            enabled: true,
+            lock_timeout_seconds: 1,
+            cleanup_interval_seconds: 30,
+        };
         let lock = ExecutionLock::new(config, None);
 
         let _guard1 = lock.try_acquire("trade-123", "worker-1");
@@ -508,5 +517,209 @@ mod tests {
         let cleaned = lock.cleanup_expired();
         assert_eq!(cleaned, 2, "Should clean up 2 expired locks");
         assert_eq!(lock.active_lock_count(), 0, "Should have no active locks");
+    }
+
+    // ==========================================================================
+    // ADDITIONAL COVERAGE
+    // ==========================================================================
+
+    fn metrics() -> Arc<crate::metrics::ExecutionLockMetrics> {
+        Arc::new(crate::metrics::ExecutionLockMetrics::new(
+            &prometheus::Registry::new(),
+        ))
+    }
+
+    #[test]
+    fn test_renew_returns_true_for_holder_false_for_other() {
+        let config = ExecutionLockConfig::default();
+        let lock = ExecutionLock::new(config, None);
+
+        let _guard = lock.try_acquire("trade-123", "worker-1").unwrap();
+        assert!(lock.renew("trade-123", "worker-1"), "holder can renew");
+        assert!(
+            !lock.renew("trade-123", "worker-2"),
+            "non-holder cannot renew"
+        );
+        assert!(
+            !lock.renew("missing", "worker-1"),
+            "renewing a missing lock returns false"
+        );
+    }
+
+    #[test]
+    fn test_guard_renew_heartbeats_lock() {
+        let config = ExecutionLockConfig::default();
+        let lock = ExecutionLock::new(config, None);
+
+        let guard = lock.try_acquire("trade-123", "worker-1").unwrap();
+        assert!(guard.renew(), "guard heartbeat extends expiry");
+        assert_eq!(guard.trade_uuid(), "trade-123");
+    }
+
+    #[test]
+    fn test_get_lock_info_active_and_missing() {
+        let config = ExecutionLockConfig::default();
+        let lock = ExecutionLock::new(config, None);
+
+        assert!(lock.get_lock_info("missing").is_none());
+
+        let _guard = lock.try_acquire("trade-123", "worker-1").unwrap();
+        let info = lock.get_lock_info("trade-123").expect("active lock");
+        assert_eq!(info.trade_uuid, "trade-123");
+        assert_eq!(info.worker_id, "worker-1");
+    }
+
+    #[test]
+    fn test_get_lock_info_expired_returns_none() {
+        let config = ExecutionLockConfig {
+            enabled: true,
+            lock_timeout_seconds: 1,
+            cleanup_interval_seconds: 30,
+        };
+        let lock = ExecutionLock::new(config, None);
+
+        let _guard = lock.try_acquire("trade-123", "worker-1").unwrap();
+        thread::sleep(Duration::from_secs(2));
+        assert!(
+            lock.get_lock_info("trade-123").is_none(),
+            "expired lock should not be reported"
+        );
+    }
+
+    #[test]
+    fn test_get_all_locks_returns_only_active() {
+        let config = ExecutionLockConfig {
+            enabled: true,
+            lock_timeout_seconds: 1,
+            cleanup_interval_seconds: 30,
+        };
+        let lock = ExecutionLock::new(config, None);
+
+        let _g1 = lock.try_acquire("trade-a", "w1").unwrap();
+        let _g2 = lock.try_acquire("trade-b", "w1").unwrap();
+        assert_eq!(lock.get_all_locks().len(), 2);
+
+        thread::sleep(Duration::from_secs(2));
+        assert_eq!(
+            lock.get_all_locks().len(),
+            0,
+            "expired locks are excluded from all_locks"
+        );
+    }
+
+    #[test]
+    fn test_metrics_acquire_success_and_failed() {
+        let config = ExecutionLockConfig::default();
+        let m = metrics();
+        let lock = ExecutionLock::new(config, Some(m.clone()));
+
+        let g1 = lock.try_acquire("trade-123", "w1");
+        assert!(g1.is_some());
+        assert_eq!(m.acquire_success.get(), 1);
+
+        let g2 = lock.try_acquire("trade-123", "w2");
+        assert!(g2.is_none());
+        assert_eq!(m.acquire_failed.get(), 1);
+    }
+
+    #[test]
+    fn test_metrics_disabled_increments_disabled() {
+        let config = ExecutionLockConfig {
+            enabled: false,
+            lock_timeout_seconds: 120,
+            cleanup_interval_seconds: 30,
+        };
+        let m = metrics();
+        let lock = ExecutionLock::new(config, Some(m.clone()));
+
+        let guard = lock.try_acquire("trade-123", "w1");
+        assert!(guard.is_some());
+        assert_eq!(m.acquire_disabled.get(), 1);
+    }
+
+    #[test]
+    fn test_metrics_release_and_force_release() {
+        let config = ExecutionLockConfig::default();
+        let m = metrics();
+        let lock = ExecutionLock::new(config, Some(m.clone()));
+
+        let guard = lock.try_acquire("trade-123", "w1");
+        drop(guard);
+        assert_eq!(m.released.get(), 1, "guard release increments released");
+
+        let _guard = lock.try_acquire("trade-123", "w1");
+        lock.force_release("trade-123");
+        assert_eq!(m.force_released.get(), 1);
+    }
+
+    #[test]
+    fn test_stale_guard_does_not_release_new_holder() {
+        let config = ExecutionLockConfig::default();
+        let lock = ExecutionLock::new(config, None);
+
+        let guard1 = lock.try_acquire("trade-123", "worker-1").unwrap();
+        // The first holder's lock is force-released while guard1 is still alive.
+        lock.force_release("trade-123");
+        // A second worker re-acquires the same uuid.
+        let _guard2 = lock.try_acquire("trade-123", "worker-2").unwrap();
+        // Dropping the STALE guard must not delete the new holder's lock.
+        drop(guard1);
+        assert!(
+            lock.is_locked("trade-123"),
+            "stale guard must not release the new holder's lock"
+        );
+    }
+
+    #[test]
+    fn test_disabled_guard_is_noop() {
+        let config = ExecutionLockConfig {
+            enabled: false,
+            lock_timeout_seconds: 120,
+            cleanup_interval_seconds: 30,
+        };
+        let lock = ExecutionLock::new(config, None);
+
+        let guard = lock.try_acquire("trade-123", "w1").unwrap();
+        assert_eq!(guard.trade_uuid(), "disabled");
+        assert!(!guard.renew(), "disabled lock renew is a no-op");
+        drop(guard);
+        // Nothing was ever inserted.
+        assert_eq!(lock.active_lock_count(), 0);
+    }
+
+    #[test]
+    fn test_expired_lock_reclaimed_with_metrics() {
+        let config = ExecutionLockConfig {
+            enabled: true,
+            lock_timeout_seconds: 1,
+            cleanup_interval_seconds: 30,
+        };
+        let m = metrics();
+        let lock = ExecutionLock::new(config, Some(m.clone()));
+
+        let _g1 = lock.try_acquire("trade-123", "w1").unwrap();
+        thread::sleep(Duration::from_secs(2));
+
+        // Second acquisition reclaims the expired entry.
+        let g2 = lock.try_acquire("trade-123", "w2");
+        assert!(g2.is_some());
+        assert_eq!(m.expired_reclaimed.get(), 1);
+    }
+
+    #[test]
+    fn test_cleanup_expired_with_metrics() {
+        let config = ExecutionLockConfig {
+            enabled: true,
+            lock_timeout_seconds: 1,
+            cleanup_interval_seconds: 30,
+        };
+        let m = metrics();
+        let lock = ExecutionLock::new(config, Some(m.clone()));
+
+        let _g1 = lock.try_acquire("trade-123", "w1").unwrap();
+        thread::sleep(Duration::from_secs(2));
+
+        assert_eq!(lock.cleanup_expired(), 1);
+        assert_eq!(m.expired_cleaned.get(), 1);
     }
 }

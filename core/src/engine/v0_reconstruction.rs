@@ -137,4 +137,17 @@ mod tests {
         };
         assert!(refresh_v0_blockhash(&tx, hash(&[9u8; 32])).is_err());
     }
+
+    #[test]
+    fn refresh_blockhash_error_display_and_eq() {
+        assert_eq!(
+            RefreshBlockhashError::LegacyMessageNotSupported.to_string(),
+            "Cannot refresh a legacy message via the V0 path"
+        );
+        // Derives PartialEq/Eq/Clone/Copy.
+        assert_eq!(
+            RefreshBlockhashError::LegacyMessageNotSupported,
+            RefreshBlockhashError::LegacyMessageNotSupported
+        );
+    }
 }

@@ -669,4 +669,80 @@ mod tests {
         assert_eq!(pf, expected_pf);
         assert!(pf_lb <= pf);
     }
+
+    #[test]
+    fn test_evaluate_end_precedes_start_is_inconclusive() {
+        let evaluator = VerdictEvaluator::new(50, 21, Decimal::from(20), 30);
+        let result = evaluator.evaluate(
+            &[Decimal::from(10)],
+            &[],
+            &[],
+            &[],
+            0,
+            1,
+            Utc::now(),
+            Utc::now() - chrono::Duration::days(1),
+        );
+        assert_eq!(result.verdict, Verdict::Inconclusive);
+        assert!(result
+            .verdict_reasons
+            .iter()
+            .any(|r| r.contains("invalid time range")));
+    }
+
+    #[test]
+    fn test_evaluate_zero_total_wallets_zero_toxic_rate() {
+        // total_wallets == 0 → the else branch of the toxic-rate computation.
+        let evaluator = VerdictEvaluator::new(50, 21, Decimal::from(20), 30);
+        let pnl_values: Vec<Decimal> = (0..50).map(|_| Decimal::from(10)).collect();
+        let execution_gaps: Vec<Decimal> = (0..50).map(|_| Decimal::from(1)).collect();
+        let control_random: Vec<Decimal> = (0..50).map(|_| Decimal::from(2)).collect();
+        let control_sol: Vec<Decimal> = (0..50).map(|_| Decimal::from(3)).collect();
+        let result = evaluator.evaluate(
+            &pnl_values,
+            &execution_gaps,
+            &control_random,
+            &control_sol,
+            0,
+            0, // no wallets tracked
+            Utc::now() - chrono::Duration::days(21),
+            Utc::now(),
+        );
+        assert_eq!(result.toxic_wallet_rate, 0.0);
+        assert_eq!(result.verdict, Verdict::Go);
+    }
+
+    #[test]
+    fn test_helper_functions_empty_inputs() {
+        let evaluator = VerdictEvaluator::new(50, 21, Decimal::from(20), 30);
+
+        // calculate_bootstrap_ci(&[]) → Ok zeros.
+        assert_eq!(
+            evaluator.calculate_bootstrap_ci(&[]).unwrap(),
+            (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO)
+        );
+
+        // calculate_profit_factor(&[]) → (0, 0).
+        assert_eq!(
+            evaluator.calculate_profit_factor(&[]),
+            (Decimal::ZERO, Decimal::ZERO)
+        );
+
+        // calculate_max_drawdown(&[]) → 0.
+        assert_eq!(evaluator.calculate_max_drawdown(&[]), Decimal::ZERO);
+
+        // calculate_win_rate(&[]) → 0.0.
+        assert_eq!(evaluator.calculate_win_rate(&[]), 0.0);
+
+        // calculate_execution_gap_stats(&[]) → (0, 0).
+        assert_eq!(
+            evaluator.calculate_execution_gap_stats(&[]),
+            (Decimal::ZERO, Decimal::ZERO)
+        );
+
+        // compare_with_control with an empty side → default comparison.
+        let comp = evaluator.compare_with_control(&[], &[]).unwrap();
+        assert!(!comp.beats_control);
+        assert_eq!(comp.p_value, 1.0);
+    }
 }

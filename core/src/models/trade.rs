@@ -697,4 +697,58 @@ mod tests {
         assert!(TradeStatus::Active.can_transition_to(TradeStatus::Exiting));
         assert!(TradeStatus::Exiting.can_transition_to(TradeStatus::Closed));
     }
+
+    // ==========================================================================
+    // DISPLAY + TRANSITION_TO
+    // ==========================================================================
+
+    #[test]
+    fn test_trade_status_display() {
+        assert_eq!(TradeStatus::Pending.to_string(), "PENDING");
+        assert_eq!(TradeStatus::Queued.to_string(), "QUEUED");
+        assert_eq!(TradeStatus::Executing.to_string(), "EXECUTING");
+        assert_eq!(TradeStatus::Active.to_string(), "ACTIVE");
+        assert_eq!(TradeStatus::Exiting.to_string(), "EXITING");
+        assert_eq!(TradeStatus::Closed.to_string(), "CLOSED");
+        assert_eq!(TradeStatus::Failed.to_string(), "FAILED");
+        assert_eq!(TradeStatus::Retry.to_string(), "RETRY");
+        assert_eq!(TradeStatus::DeadLetter.to_string(), "DEAD_LETTER");
+    }
+
+    fn make_trade() -> Trade {
+        Trade::from_signal(&Signal::new(
+            SignalPayload {
+                strategy: crate::models::Strategy::Shield,
+                token: "BONK".to_string(),
+                token_address: None,
+                action: crate::models::Action::Buy,
+                amount_sol: rust_decimal::Decimal::from_str("0.5").unwrap(),
+                wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+                trade_uuid: None,
+                exit_fraction: None,
+            },
+            0,
+            None,
+        ))
+    }
+
+    #[test]
+    fn test_transition_to_valid_updates_status_and_timestamp() {
+        let mut trade = make_trade();
+        assert_eq!(trade.status, TradeStatus::Pending);
+        let before = trade.updated_at;
+        trade.transition_to(TradeStatus::Queued).unwrap();
+        assert_eq!(trade.status, TradeStatus::Queued);
+        assert!(trade.updated_at >= before);
+    }
+
+    #[test]
+    fn test_transition_to_invalid_returns_error() {
+        let mut trade = make_trade();
+        // PENDING -> ACTIVE is not a legal transition.
+        let err = trade.transition_to(TradeStatus::Active).unwrap_err();
+        assert!(err.contains("Invalid state transition"), "{err}");
+        // The status is unchanged.
+        assert_eq!(trade.status, TradeStatus::Pending);
+    }
 }

@@ -348,4 +348,60 @@ mod tests {
         // Unknown control type → Err
         assert!(arms.get_control_stats("bogus").await.is_err());
     }
+
+    #[test]
+    fn test_calculate_unrealized_pnl_branches() {
+        let trade = ControlTrade::new(
+            "random_token".to_string(),
+            "mint".to_string(),
+            Decimal::from_str("2.0").unwrap(),
+            Decimal::from_str("0.1").unwrap(),
+        );
+        // entry > 0 → (current - entry) / entry * size.
+        let pnl = trade.calculate_unrealized_pnl(Decimal::from_str("2.5").unwrap());
+        assert_eq!(pnl, Decimal::from_str("0.025").unwrap());
+
+        // Zero entry → ZERO (no panic).
+        let zero = ControlTrade::new(
+            "random_token".to_string(),
+            "mint".to_string(),
+            Decimal::ZERO,
+            Decimal::from_str("0.1").unwrap(),
+        );
+        assert_eq!(zero.calculate_unrealized_pnl(Decimal::from_str("1.0").unwrap()), Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn test_fire_random_control_with_no_tokens_errors() {
+        let arms = ControlArms::new(vec![]);
+        let err = arms
+            .fire_random_token_control(Decimal::from_str("1.0").unwrap(), Decimal::from_str("0.02").unwrap())
+            .await
+            .unwrap_err();
+        assert!(err.contains("No liquid tokens available"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_close_random_control_no_open_trade_errors() {
+        let arms = ControlArms::new(vec!["mint".to_string()]);
+        let err = arms
+            .close_random_control("mint", Decimal::from_str("1.0").unwrap())
+            .await
+            .unwrap_err();
+        assert!(err.contains("No open random control trade"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_close_sol_benchmark_paths() {
+        let arms = ControlArms::new(vec!["mint".to_string()]);
+        // No open trade → Err.
+        let err = arms.close_sol_benchmark(Decimal::from_str("1.0").unwrap()).await.unwrap_err();
+        assert!(err.contains("No open SOL benchmark trade"), "{err}");
+
+        // Fire a benchmark then close → Ok.
+        arms.fire_sol_benchmark_control(Decimal::from_str("1.0").unwrap(), Decimal::from_str("0.1").unwrap()).await;
+        let pnl = arms.close_sol_benchmark(Decimal::from_str("1.1").unwrap()).await.unwrap();
+        assert!(pnl > Decimal::ZERO);
+        assert_eq!(arms.get_sol_benchmarks().await.len(), 1);
+    }
 }

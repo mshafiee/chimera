@@ -398,4 +398,73 @@ mod tests {
         let s2 = queue.pop().await.unwrap();
         assert_eq!(s2.payload.strategy, Strategy::Spear);
     }
+
+    #[tokio::test]
+    async fn test_is_empty() {
+        let queue = PriorityQueue::new(10, 80);
+        assert!(queue.is_empty());
+        assert_eq!(queue.len(), 0);
+        queue.push(make_signal(Strategy::Shield), None).await.unwrap();
+        assert!(!queue.is_empty());
+        assert_eq!(queue.len(), 1);
+    }
+
+    /// Minimal TRACE subscriber so `tracing::warn!` bodies execute.
+    fn install_trace_subscriber() {
+        use tracing::Subscriber;
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            struct TraceAll;
+            impl Subscriber for TraceAll {
+                fn enabled(&self, _m: &tracing::Metadata<'_>) -> bool {
+                    true
+                }
+                fn new_span(&self, _s: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                    tracing::span::Id::from_u64(1)
+                }
+                fn record(&self, _s: &tracing::span::Id, _v: &tracing::span::Record<'_>) {}
+                fn record_follows_from(&self, _s: &tracing::span::Id, _f: &tracing::span::Id) {}
+                fn event(&self, _e: &tracing::Event<'_>) {}
+                fn enter(&self, _s: &tracing::span::Id) {}
+                fn exit(&self, _s: &tracing::span::Id) {}
+            }
+            let _ = tracing::subscriber::set_global_default(TraceAll);
+        });
+    }
+
+    #[tokio::test]
+    async fn test_high_wqs_spear_shed_when_dedicated_queue_full() {
+        install_trace_subscriber();
+        // capacity=10, threshold=80% => shed at 8 items. spear_high_wqs
+        // capacity = min((10/10).clamp(1,50),10) = 1.
+        let queue = PriorityQueue::new(10, 80);
+        for _ in 0..8 {
+            queue.push(make_signal(Strategy::Shield), None).await.unwrap();
+        }
+        // Fill the dedicated high-WQS queue (capacity 1).
+        assert!(queue.push(make_signal(Strategy::Spear), Some(75.0)).await.is_ok());
+        // Now the dedicated queue is full and load shedding is active → drop.
+        let result = queue.push(make_signal(Strategy::Spear), Some(75.0)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Load shedding"));
+    }
+
+    #[tokio::test]
+    async fn test_pop_wait_returns_after_push() {
+        let queue = std::sync::Arc::new(PriorityQueue::new(10, 80));
+        let q = queue.clone();
+        let worker = tokio::spawn(async move { q.pop_wait().await });
+        // Let the worker reach the empty-queue await on push_notify.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        queue.push(make_signal(Strategy::Exit), None).await.unwrap();
+        let popped = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            worker,
+        )
+        .await
+        .expect("pop_wait must return after a push")
+        .expect("no panic")
+        .expect("a signal");
+        assert_eq!(popped.payload.strategy, Strategy::Exit);
+    }
 }

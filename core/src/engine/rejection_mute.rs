@@ -428,4 +428,110 @@ mod tests {
             "wallet should be unmuted after 0h expiry + new signal"
         );
     }
+
+    #[tokio::test]
+    async fn test_window_evicts_oldest_beyond_capacity() {
+        let det = RejectionMuteDetector::new(test_config()); // window = 10
+        // 11 decisions: the 11th must evict the oldest so the window stays 10.
+        for _ in 0..11 {
+            det.record_decision("walletEvict", true, None).await.unwrap();
+        }
+        let wallets = det.wallets.read().await;
+        let entry = wallets.get("walletEvict").expect("wallet tracked");
+        assert_eq!(entry.window.len(), 10, "window is capped at window_size");
+    }
+
+    #[tokio::test]
+    async fn test_is_wallet_muted_without_expiry_is_true() {
+        // A muted wallet with no muted_until is treated as muted (permanent
+        // until the window resets on the next record_decision).
+        let det = RejectionMuteDetector::new(test_config());
+        {
+            let mut wallets = det.wallets.write().await;
+            wallets.insert(
+                "perm".to_string(),
+                MutedWallet {
+                    address: "perm".to_string(),
+                    window: VecDeque::new(),
+                    is_muted: true,
+                    muted_at: Some(Utc::now()),
+                    muted_until: None,
+                },
+            );
+        }
+        assert!(det.is_wallet_muted("perm").await);
+    }
+
+    #[tokio::test]
+    async fn test_get_muted_wallets_lists_active_mutes() {
+        install_trace_subscriber();
+        let det = RejectionMuteDetector::new(test_config());
+        // Mutate walletM via hard rejections so it becomes muted.
+        for _ in 0..5 {
+            det.record_decision("walletM", false, Some("PUMPFUN_BONDING_CURVE"))
+                .await
+                .unwrap();
+        }
+        // A healthy wallet must not appear.
+        det.record_decision("walletOk", true, None).await.unwrap();
+
+        let muted = det.get_muted_wallets().await;
+        assert!(muted.contains(&"walletM".to_string()));
+        assert!(!muted.contains(&"walletOk".to_string()));
+    }
+
+    /// Minimal TRACE subscriber so `warn!`/`info!` bodies execute.
+    fn install_trace_subscriber() {
+        use tracing::Subscriber;
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            struct TraceAll;
+            impl Subscriber for TraceAll {
+                fn enabled(&self, _m: &tracing::Metadata<'_>) -> bool {
+                    true
+                }
+                fn new_span(&self, _s: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                    tracing::span::Id::from_u64(1)
+                }
+                fn record(&self, _s: &tracing::span::Id, _v: &tracing::span::Record<'_>) {}
+                fn record_follows_from(&self, _s: &tracing::span::Id, _f: &tracing::span::Id) {}
+                fn event(&self, _e: &tracing::Event<'_>) {}
+                fn enter(&self, _s: &tracing::span::Id) {}
+                fn exit(&self, _s: &tracing::span::Id) {}
+            }
+            let _ = tracing::subscriber::set_global_default(TraceAll);
+        });
+    }
+
+    fn dummy_pool() -> sqlx::Pool<sqlx::Postgres> {
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost:5432/does_not_exist")
+            .expect("lazy pool")
+    }
+
+    #[tokio::test]
+    async fn test_persist_to_database_empty_snapshot_is_ok() {
+        install_trace_subscriber();
+        let det = RejectionMuteDetector::new(test_config());
+        // With no tracked wallets the snapshot is empty, the UPSERT loop is
+        // skipped, and the call succeeds without any database connection.
+        let pool = dummy_pool();
+        det.persist_to_database(&pool, "run-1").await.expect("ok");
+    }
+
+    #[tokio::test]
+    async fn test_persist_to_database_with_wallet_builds_binds() {
+        install_trace_subscriber();
+        let det = RejectionMuteDetector::new(test_config());
+        for _ in 0..5 {
+            det.record_decision("walletP", false, Some("PUMPFUN_BONDING_CURVE"))
+                .await
+                .unwrap();
+        }
+        let pool = dummy_pool();
+        // The UPSERT loop runs (each .bind() is built) before the lazy pool
+        // fails to connect, so the query construction path is exercised.
+        assert!(det.persist_to_database(&pool, "run-1").await.is_err());
+    }
 }

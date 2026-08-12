@@ -413,11 +413,204 @@ pub enum CoordinatorError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db_abstraction::types::WalletDetail;
+    use crate::db_abstraction::{Position, Trade};
+    use crate::engine::kelly_sizer::tests::MockDatabase;
+    use crate::state::write_queue::{BatchConfig, RetryConfig};
+
+    fn trade(id: i64, uuid: &str, status: &str) -> Trade {
+        Trade {
+            id,
+            trade_uuid: uuid.to_string(),
+            wallet_address: "wallet".to_string(),
+            token_address: "token".to_string(),
+            token_symbol: None,
+            strategy: "SHIELD".to_string(),
+            side: "BUY".to_string(),
+            amount_sol: Decimal::from(10),
+            price_at_signal: None,
+            tx_signature: None,
+            status: status.to_string(),
+            retry_count: 0,
+            error_message: None,
+            pnl_sol: None,
+            pnl_usd: None,
+            jito_tip_sol: Decimal::ZERO,
+            dex_fee_sol: Decimal::ZERO,
+            slippage_cost_sol: Decimal::ZERO,
+            total_cost_sol: Decimal::ZERO,
+            net_pnl_sol: None,
+            pnl_data_valid: true,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn position(uuid: &str, state: &str, strategy: &str) -> Position {
+        Position {
+            id: 1,
+            trade_uuid: uuid.to_string(),
+            wallet_address: "wallet".to_string(),
+            token_address: "token".to_string(),
+            token_symbol: None,
+            strategy: strategy.to_string(),
+            entry_amount_sol: Decimal::from(5),
+            entry_price: Decimal::ONE,
+            entry_tx_signature: "sig".to_string(),
+            current_price: None,
+            unrealized_pnl_sol: None,
+            unrealized_pnl_percent: None,
+            state: state.to_string(),
+            exit_price: None,
+            exit_tx_signature: None,
+            realized_pnl_sol: None,
+            realized_pnl_usd: None,
+            entry_sol_price_usd: None,
+            opened_at: chrono::Utc::now(),
+            last_updated: chrono::Utc::now(),
+            closed_at: None,
+            token_amount: None,
+        }
+    }
+
+    fn wallet_detail() -> WalletDetail {
+        WalletDetail {
+            id: 1,
+            address: "wallet".to_string(),
+            status: "ACTIVE".to_string(),
+            wqs_score: Some(Decimal::from(80)),
+            roi_7d: None,
+            roi_30d: None,
+            trade_count_30d: None,
+            win_rate: None,
+            max_drawdown_30d: None,
+            avg_trade_size_sol: None,
+            avg_win_sol: None,
+            avg_loss_sol: None,
+            profit_factor: None,
+            realized_pnl_30d_sol: None,
+            last_trade_at: None,
+            promoted_at: None,
+            ttl_expires_at: None,
+            notes: None,
+            archetype: None,
+            avg_entry_delay_seconds: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    fn coordinator(db: Arc<MockDatabase>) -> StateCoordinator {
+        let registry = Arc::new(StateRegistry::new());
+        let wq = Arc::new(AsyncWriteQueue::new(db.clone(), RetryConfig::default(), BatchConfig::default()));
+        StateCoordinator::new(registry, db, wq, Duration::from_secs(60))
+    }
 
     #[test]
     fn test_db_status_to_trade_status() {
         assert_eq!(StateCoordinator::db_status_to_trade_status("PENDING"), TradeStatus::Pending);
+        assert_eq!(StateCoordinator::db_status_to_trade_status("QUEUED"), TradeStatus::Queued);
+        assert_eq!(StateCoordinator::db_status_to_trade_status("EXECUTING"), TradeStatus::Executing);
         assert_eq!(StateCoordinator::db_status_to_trade_status("ACTIVE"), TradeStatus::Active);
+        assert_eq!(StateCoordinator::db_status_to_trade_status("EXITING"), TradeStatus::Exiting);
+        assert_eq!(StateCoordinator::db_status_to_trade_status("CLOSED"), TradeStatus::Closed);
+        assert_eq!(StateCoordinator::db_status_to_trade_status("FAILED"), TradeStatus::Failed);
+        assert_eq!(StateCoordinator::db_status_to_trade_status("DEAD_LETTER"), TradeStatus::DeadLetter);
         assert_eq!(StateCoordinator::db_status_to_trade_status("UNKNOWN"), TradeStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn test_load_initial_state_populates_registry() {
+        let db = Arc::new(MockDatabase::default());
+        db.trades_by_status
+            .write()
+            .insert("PENDING".to_string(), vec![trade(1, "t1", "PENDING")]);
+        db.active_positions.write().push(position("p1", "ACTIVE", "SHIELD"));
+        db.wallet_details.write().push(wallet_detail());
+
+        let registry = Arc::new(StateRegistry::new());
+        let wq = Arc::new(AsyncWriteQueue::new(db.clone(), RetryConfig::default(), BatchConfig::default()));
+        let coordinator = StateCoordinator::new(registry.clone(), db.clone(), wq, Duration::from_secs(60));
+
+        coordinator.load_initial_state().await.unwrap();
+
+        assert!(registry.get_trade("t1").is_some());
+        assert!(registry.get_position_by_trade_uuid("p1").is_some());
+        assert!(registry.get_wallet("wallet").is_some());
+        let heat = registry.get_portfolio_heat();
+        // 1 position (5 SOL) + 1 pending BUY trade (10 SOL)
+        assert_eq!(heat.total_exposure_sol, Decimal::from(15));
+    }
+
+    #[tokio::test]
+    async fn test_sync_active_trades_adds_missing() {
+        let db = Arc::new(MockDatabase::default());
+        db.trades_by_status
+            .write()
+            .insert("ACTIVE".to_string(), vec![trade(1, "t1", "ACTIVE")]);
+        let registry = Arc::new(StateRegistry::new());
+        let db_dyn: Arc<dyn Database> = db.clone();
+
+        StateCoordinator::sync_active_trades(&registry, &db_dyn).await.unwrap();
+        assert!(registry.get_trade("t1").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_sync_active_trades_reconciles_status() {
+        let db = Arc::new(MockDatabase::default());
+        db.trades_by_status
+            .write()
+            .insert("EXITING".to_string(), vec![trade(1, "t1", "EXITING")]);
+        let registry = Arc::new(StateRegistry::new());
+        // Registry has the trade with a different (stale) status.
+        registry
+            .insert_trade(TradeState {
+                trade_uuid: "t1".to_string(),
+                status: TradeStatus::Active,
+                wallet_address: "wallet".to_string(),
+                token_address: "token".to_string(),
+                token_symbol: None,
+                strategy: "SHIELD".to_string(),
+                side: "BUY".to_string(),
+                amount_sol: Decimal::from(10),
+                updated_at: SystemTime::now(),
+                version: 1,
+            })
+            .unwrap();
+        let db_dyn: Arc<dyn Database> = db.clone();
+
+        StateCoordinator::sync_active_trades(&registry, &db_dyn).await.unwrap();
+        assert_eq!(registry.get_trade("t1").unwrap().status, TradeStatus::Exiting);
+    }
+
+    #[tokio::test]
+    async fn test_sync_active_positions_adds_missing() {
+        let db = Arc::new(MockDatabase::default());
+        db.active_positions.write().push(position("p1", "ACTIVE", "SPEAR"));
+        let registry = Arc::new(StateRegistry::new());
+        let db_dyn: Arc<dyn Database> = db.clone();
+
+        StateCoordinator::sync_active_positions(&registry, &db_dyn).await.unwrap();
+        assert!(registry.get_position_by_trade_uuid("p1").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_sync_wallets_adds_missing() {
+        let db = Arc::new(MockDatabase::default());
+        db.wallet_details.write().push(wallet_detail());
+        let registry = Arc::new(StateRegistry::new());
+        let db_dyn: Arc<dyn Database> = db.clone();
+
+        StateCoordinator::sync_wallets(&registry, &db_dyn).await.unwrap();
+        assert!(registry.get_wallet("wallet").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_load_initial_state_skips_when_empty() {
+        let db = Arc::new(MockDatabase::default());
+        let coordinator = coordinator(db.clone());
+        coordinator.load_initial_state().await.unwrap();
+        let heat = coordinator.registry.get_portfolio_heat();
+        assert_eq!(heat.total_exposure_sol, Decimal::ZERO);
     }
 }

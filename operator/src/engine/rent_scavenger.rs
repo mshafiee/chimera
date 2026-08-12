@@ -648,4 +648,139 @@ mod tests {
         assert_eq!(config.max_batch_size, 15);
         assert_eq!(config.max_rent_lamports, 500_000_000);
     }
+
+    // ==========================================================================
+    // is_closable_empty_account
+    // ==========================================================================
+
+    fn owner() -> Pubkey {
+        Pubkey::new_unique()
+    }
+
+    fn info_json(fields: &[(&str, &str)]) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        for (k, v) in fields {
+            obj.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+        }
+        serde_json::Value::Object(obj)
+    }
+
+    fn amount_info(amount: &str) -> serde_json::Value {
+        let mut amount_obj = serde_json::Map::new();
+        amount_obj.insert(
+            "amount".to_string(),
+            serde_json::Value::String(amount.to_string()),
+        );
+        let mut info = serde_json::Map::new();
+        info.insert("tokenAmount".to_string(), serde_json::Value::Object(amount_obj));
+        serde_json::Value::Object(info)
+    }
+
+    /// Build a full parsed account `info` object: `tokenAmount` is the nested
+    /// object the real Helius/jsonParsed payload uses, plus any extra fields.
+    fn full_info(amount: &str, extra: &[(&str, &str)]) -> serde_json::Value {
+        let mut amount_obj = serde_json::Map::new();
+        amount_obj.insert(
+            "amount".to_string(),
+            serde_json::Value::String(amount.to_string()),
+        );
+        let mut info = serde_json::Map::new();
+        info.insert(
+            "tokenAmount".to_string(),
+            serde_json::Value::Object(amount_obj),
+        );
+        for (k, v) in extra {
+            info.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+        }
+        serde_json::Value::Object(info)
+    }
+
+    #[test]
+    fn test_closable_empty_account_with_no_delegate() {
+        let owner = owner();
+        let info = full_info("0", &[("delegate", ""), ("state", "initialized")]);
+        assert!(
+            RentScavenger::is_closable_empty_account(&info, &owner),
+            "empty account with no delegate should be closable"
+        );
+    }
+
+    #[test]
+    fn test_non_zero_balance_not_closable() {
+        let owner = owner();
+        let info = amount_info("12345");
+        assert!(!RentScavenger::is_closable_empty_account(&info, &owner));
+    }
+
+    #[test]
+    fn test_missing_token_amount_not_closable() {
+        let owner = owner();
+        let info = info_json(&[]);
+        assert!(!RentScavenger::is_closable_empty_account(&info, &owner));
+    }
+
+    #[test]
+    fn test_delegate_present_not_closable() {
+        let owner = owner();
+        let info = full_info("0", &[("delegate", "SomeDelegate")]);
+        assert!(!RentScavenger::is_closable_empty_account(&info, &owner));
+    }
+
+    #[test]
+    fn test_system_program_delegate_ignored() {
+        let owner = owner();
+        // 11111111111111111111111111111111 is treated as "no delegate".
+        let info = full_info("0", &[("delegate", "11111111111111111111111111111111")]);
+        assert!(RentScavenger::is_closable_empty_account(&info, &owner));
+    }
+
+    #[test]
+    fn test_frozen_account_not_closable() {
+        let owner = owner();
+        let info = full_info("0", &[("delegate", ""), ("state", "frozen")]);
+        assert!(!RentScavenger::is_closable_empty_account(&info, &owner));
+    }
+
+    #[test]
+    fn test_close_authority_owner_allowed() {
+        let owner = owner();
+        let info = full_info(
+            "0",
+            &[("delegate", ""), ("closeAuthority", &owner.to_string())],
+        );
+        assert!(RentScavenger::is_closable_empty_account(&info, &owner));
+    }
+
+    #[test]
+    fn test_close_authority_system_program_allowed() {
+        let owner = owner();
+        let info = full_info(
+            "0",
+            &[
+                ("delegate", ""),
+                ("closeAuthority", "11111111111111111111111111111111"),
+            ],
+        );
+        assert!(RentScavenger::is_closable_empty_account(&info, &owner));
+    }
+
+    #[test]
+    fn test_foreign_close_authority_not_closable() {
+        let owner = owner();
+        let info = full_info(
+            "0",
+            &[
+                ("delegate", ""),
+                ("closeAuthority", "SomeOtherAuthority"),
+            ],
+        );
+        assert!(!RentScavenger::is_closable_empty_account(&info, &owner));
+    }
+
+    #[test]
+    fn test_default_retry_and_initial_delay_constants() {
+        // Smoke-check the module-level constants referenced by retry_rpc.
+        assert_eq!(MAX_RETRIES, 3);
+        assert_eq!(INITIAL_RETRY_DELAY_MS, 1000);
+    }
 }

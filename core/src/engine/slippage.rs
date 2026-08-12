@@ -354,5 +354,45 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn expected_cost_scales_with_amount() {
+        let est = SlippageEstimate {
+            expected_fraction: dec!(0.015),
+            tolerance_bps: 200,
+        };
+        assert_eq!(est.expected_cost_sol(dec!(1)), dec!(0.015));
+        assert_eq!(est.expected_cost_sol(dec!(10)), dec!(0.15));
+    }
+
+    #[test]
+    fn overflow_in_liquidity_estimate_falls_back_to_tier() {
+        // amount_sol * sol_price overflows Decimal → the checked arithmetic
+        // degrades to the size-tier fallback rather than panicking.
+        let est = expected_fraction(
+            None,
+            Decimal::MAX,
+            Some(Decimal::MAX),
+            Some(Decimal::MAX),
+            fallback(),
+        );
+        // Decimal::MAX > threshold 0.5 → large tier (0.01).
+        assert_eq!(est, dec!(0.01));
+    }
+
+    #[test]
+    fn bps_overflow_falls_back_to_strategy_floor() {
+        // A fallback tier with a huge fraction makes tolerance overflow u16 bps;
+        // the on-chain tolerance must clamp down to the strategy floor, never
+        // the ceiling.
+        let huge = FallbackTiers {
+            small_fraction: dec!(100),
+            large_fraction: dec!(100),
+            threshold_sol: dec!(0.5),
+        };
+        let est = estimate(Strategy::Spear, None, dec!(1), None, None, huge);
+        assert_eq!(est.expected_fraction, dec!(100));
+        assert_eq!(est.tolerance_bps, 30); // Spear floor
+    }
 }
 

@@ -234,4 +234,53 @@ mod tests {
 
         assert!(high_liquidity.score > low_liquidity.score);
     }
+
+    #[test]
+    fn test_consensus_four_wallets_graduated() {
+        // Some(4) → 0.9 consensus (between 3's 0.7 and 5+'s 1.0).
+        let q4 = SignalQuality::calculate(60.0, Some(4), Decimal::from(10000u32), None);
+        let q3 = SignalQuality::calculate(60.0, Some(3), Decimal::from(10000u32), None);
+        let q5 = SignalQuality::calculate(60.0, Some(5), Decimal::from(10000u32), None);
+        assert!(q3.score < q4.score);
+        assert!(q4.score < q5.score);
+        assert_eq!(q4.factors.consensus_strength, 0.9);
+    }
+
+    #[test]
+    fn test_liquidity_boundary_5000_tier() {
+        // 5000 <= liq < 10000 → 0.3 liquidity score.
+        let q = SignalQuality::calculate(60.0, None, Decimal::from(5000u32), None);
+        assert_eq!(q.factors.liquidity_score, 0.3);
+        // At exactly the floor it is not scored a tier lower.
+        let q2 = SignalQuality::calculate(60.0, None, Decimal::from(20000u32), None);
+        assert_eq!(q2.factors.liquidity_score, 0.7);
+    }
+
+    #[test]
+    fn test_token_age_mid_tier() {
+        // age in (6, 24] hours → 0.5 age score.
+        let q = SignalQuality::calculate(60.0, None, Decimal::from(60000u32), Some(12.0));
+        assert_eq!(q.factors.token_age_hours, Some(12.0));
+        assert_eq!(q.factors.liquidity_score, 1.0);
+        // Sanity: mid-tier score is between the new and old tiers.
+        let young = SignalQuality::calculate(60.0, None, Decimal::from(60000u32), Some(3.0));
+        let old = SignalQuality::calculate(60.0, None, Decimal::from(60000u32), Some(200.0));
+        assert!(young.score < q.score);
+        assert!(q.score < old.score);
+    }
+
+    #[test]
+    fn test_passes_liquidity_floor() {
+        // At the threshold → passes (>= is inclusive, consistent with scoring).
+        assert!(SignalQuality::passes_liquidity_floor(Decimal::from(10000u32), Decimal::from(10000u32)));
+        assert!(SignalQuality::passes_liquidity_floor(Decimal::from(20000u32), Decimal::from(10000u32)));
+        assert!(!SignalQuality::passes_liquidity_floor(Decimal::from(9999u32), Decimal::from(10000u32)));
+    }
+
+    #[test]
+    fn test_quality_category_display() {
+        assert_eq!(QualityCategory::High.to_string(), "HIGH");
+        assert_eq!(QualityCategory::Medium.to_string(), "MEDIUM");
+        assert_eq!(QualityCategory::Low.to_string(), "LOW");
+    }
 }

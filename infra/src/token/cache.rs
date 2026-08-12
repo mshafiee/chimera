@@ -208,6 +208,77 @@ mod tests {
         assert!(cache.get("token2").is_some());
         assert!(cache.get("token3").is_some());
     }
+
+    #[test]
+    fn test_default_config() {
+        let cache = TokenCache::default_config();
+        assert_eq!(cache.len(), 0);
+        assert!(cache.is_empty());
+        assert_eq!(cache.stats().capacity, 1000);
+    }
+
+    #[test]
+    fn test_stats_and_invalidate_unknown() {
+        let cache = TokenCache::new(5, 3600);
+        assert_eq!(cache.stats().entries, 0);
+        // Invalidating a key that was never inserted is a no-op.
+        cache.invalidate("missing");
+        assert_eq!(cache.stats().entries, 0);
+        cache.insert("k".to_string(), TokenSafetyResult::safe());
+        let stats = cache.stats();
+        assert_eq!(stats.entries, 1);
+        assert_eq!(stats.capacity, 5);
+    }
+
+    fn sample_metadata(mint: &str) -> crate::token::metadata::TokenMetadata {
+        crate::token::metadata::TokenMetadata {
+            mint: mint.to_string(),
+            freeze_authority: None,
+            mint_authority: None,
+            decimals: 6,
+            supply: 1_000_000,
+            is_token_2022: false,
+            has_transfer_hook: false,
+            has_permanent_delegate: false,
+            creation_timestamp: None,
+            age_hours: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_roundtrip() {
+        let store = MetadataCacheStore::new_memory();
+        assert!(store.is_empty());
+        assert_eq!(store.len(), 0);
+
+        store.insert("mint1".to_string(), sample_metadata("mint1"), 60).await;
+        assert!(!store.is_empty());
+        assert_eq!(store.len(), 1);
+
+        let got = store.get("mint1").await;
+        assert!(got.is_some());
+        assert_eq!(got.unwrap().mint, "mint1");
+        // Missing key -> None.
+        assert!(store.get("missing").await.is_none());
+
+        store.clear().await;
+        assert!(store.is_empty());
+        assert_eq!(store.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_from_arc() {
+        let arc = std::sync::Arc::new(parking_lot::RwLock::new(
+            std::collections::HashMap::new(),
+        ));
+        let store = MetadataCacheStore::from_arc(Arc::clone(&arc));
+        store.insert("a".to_string(), sample_metadata("a"), 60).await;
+        // The shared backing map reflects the insert.
+        assert!(arc.read().contains_key("a"));
+
+        let store2 = MetadataCacheStore::from_memory_cache(Arc::clone(&arc));
+        assert!(store2.get("a").await.is_some());
+    }
 }
 
 /// Unified metadata cache store abstraction

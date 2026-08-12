@@ -491,4 +491,101 @@ mod tests {
         assert_eq!(stats.losses, 1);
         assert_eq!(stats.total_paper_pnl, Decimal::from_str("15.0").unwrap()); // 5 + 5 - 5
     }
+
+    #[test]
+    fn test_signal_side_and_strategy_display() {
+        assert_eq!(SignalSide::Sell.to_string(), "SELL");
+        assert_eq!(ExperimentStrategy::Spear.to_string(), "Spear");
+    }
+
+    #[test]
+    fn test_ledger_lifecycle_and_queries() {
+        let mut ledger = ExperimentLedger::new();
+        // Empty ledger statistics → default.
+        assert_eq!(ledger.calculate_statistics().total_trades, 0);
+        // Default constructor.
+        let _d = ExperimentLedger::default();
+
+        // Tracer trade closed with real fill data.
+        let mut t1 = ExperimentTrade::new(
+            "u1".to_string(),
+            "w".to_string(),
+            "tok".to_string(),
+            SignalSide::Buy,
+            ExperimentStrategy::Spear,
+        );
+        t1.update_paper_result(Decimal::from_str("1.0").unwrap(), 100);
+        t1.update_tracer_result(
+            Decimal::from_str("1.0").unwrap(),
+            Decimal::ZERO,
+            Decimal::from_str("0.001").unwrap(),
+            Decimal::from_str("0.002").unwrap(),
+        );
+        t1.close_trade(Decimal::from_str("1.1").unwrap()).unwrap();
+        ledger.record_trade(t1);
+
+        // Paper-only short trade.
+        let mut t2 = ExperimentTrade::new(
+            "u2".to_string(),
+            "w".to_string(),
+            "tok".to_string(),
+            SignalSide::Sell,
+            ExperimentStrategy::Shield,
+        );
+        t2.update_paper_result(Decimal::from_str("1.0").unwrap(), 200);
+        t2.close_trade(Decimal::from_str("0.9").unwrap()).unwrap();
+        ledger.record_trade(t2);
+
+        // update_trade Ok + Err paths.
+        ledger.update_trade("u1", |t| t.toxic_flag = true).unwrap();
+        assert!(ledger.update_trade("missing", |_| {}).is_err());
+
+        // get_trade Some/None.
+        assert!(ledger.get_trade("u1").is_some());
+        assert!(ledger.get_trade("missing").is_none());
+
+        // get_all / get_tracer / get_paper.
+        assert_eq!(ledger.get_all_trades().len(), 2);
+        assert_eq!(ledger.get_tracer_trades().len(), 1);
+        assert_eq!(ledger.get_paper_trades().len(), 1);
+        assert_eq!(ledger.get_closed_trades().len(), 2);
+
+        // Real fill and tracer fields populated.
+        let t = ledger.get_trade("u1").unwrap();
+        assert!(t.is_tracer);
+        assert_eq!(t.real_fill_price, Some(Decimal::from_str("1.0").unwrap()));
+        assert_eq!(t.jito_tip_sol, Some(Decimal::from_str("0.001").unwrap()));
+        assert_eq!(t.dex_fee_sol, Some(Decimal::from_str("0.002").unwrap()));
+        assert_eq!(t.real_pnl, Some(Decimal::from_str("10.0").unwrap()));
+
+        // Statistics aggregate tracer + paper.
+        let stats = ledger.calculate_statistics();
+        assert_eq!(stats.total_trades, 2);
+        assert_eq!(stats.tracer_count, 1);
+        assert_eq!(stats.avg_execution_gap, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_ledger_stats_without_paper_pnl() {
+        // A closed trade with no paper PnL (closed directly) — the empty-value
+        // branches of the stats computation.
+        let mut ledger = ExperimentLedger::new();
+        let mut t = ExperimentTrade::new(
+            "u".to_string(),
+            "w".to_string(),
+            "tok".to_string(),
+            SignalSide::Buy,
+            ExperimentStrategy::Shield,
+        );
+        t.exit_time = Some(Utc::now());
+        ledger.record_trade(t);
+
+        let stats = ledger.calculate_statistics();
+        assert_eq!(stats.total_trades, 1);
+        assert_eq!(stats.avg_paper_pnl, Decimal::ZERO);
+        assert_eq!(stats.avg_real_pnl, Decimal::ZERO);
+        assert_eq!(stats.win_rate, 0.0);
+        assert_eq!(stats.wins, 0);
+        assert_eq!(stats.losses, 0);
+    }
 }

@@ -268,4 +268,80 @@ mod tests {
             .await
             .is_some());
     }
+
+    #[test]
+    fn test_tracer_state_default() {
+        let s = TracerState::default();
+        assert_eq!(s.tracer_count, 0);
+        assert_eq!(s.current_sample_rate, 1.0);
+        assert!(s.first_tracer_time.is_none());
+        assert!(s.fired_paper_trades.is_empty());
+    }
+
+    #[test]
+    fn test_execution_gap_zero_paper_returns_zero() {
+        let gap = ExecutionGap::new(Decimal::ZERO, Decimal::ONE, "entry".to_string());
+        assert_eq!(gap.gap_pct, Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn test_should_fire_tracer_disabled() {
+        let hook = TracerHook::new(false, 10, 1.0, Decimal::ZERO);
+        assert!(!hook.should_fire_tracer("paper-x").await);
+    }
+
+    #[tokio::test]
+    async fn test_should_fire_tracer_dedup() {
+        let hook = TracerHook::new(true, 10, 1.0, Decimal::ZERO);
+        assert!(hook
+            .try_record_tracer("paper-d", Decimal::ONE, Decimal::ONE, "entry".to_string())
+            .await
+            .is_some());
+        // Already fired for this paper trade → no further fire.
+        assert!(!hook.should_fire_tracer("paper-d").await);
+    }
+
+    #[tokio::test]
+    async fn test_try_record_tracer_disabled() {
+        let hook = TracerHook::new(false, 10, 1.0, Decimal::ZERO);
+        assert!(hook
+            .try_record_tracer("paper-x", Decimal::ONE, Decimal::ONE, "entry".to_string())
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_try_record_tracer_hits_cap() {
+        let hook = TracerHook::new(true, 1, 1.0, Decimal::ZERO);
+        assert!(hook
+            .try_record_tracer("cap-1", Decimal::ONE, Decimal::ONE, "entry".to_string())
+            .await
+            .is_some());
+        // Cap (1) reached → no more tracers.
+        assert!(hook
+            .try_record_tracer("cap-2", Decimal::ONE, Decimal::ONE, "entry".to_string())
+            .await
+            .is_none());
+        assert!(hook.cap_reached().await);
+    }
+
+    #[tokio::test]
+    async fn test_try_record_tracer_sample_rate_fails() {
+        // 0% sample rate → the random sample always fails (random >= 0.0).
+        let hook = TracerHook::new(true, 10, 0.0, Decimal::ZERO);
+        assert!(hook
+            .try_record_tracer("sample-1", Decimal::ONE, Decimal::ONE, "entry".to_string())
+            .await
+            .is_none());
+        assert_eq!(hook.get_stats().await.tracer_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_stats_returns_state() {
+        let hook = TracerHook::new(true, 10, 1.0, Decimal::ZERO);
+        hook.record_tracer(Decimal::ONE, Decimal::ONE, "entry".to_string()).await;
+        let stats = hook.get_stats().await;
+        assert_eq!(stats.tracer_count, 1);
+        assert!(stats.first_tracer_time.is_some());
+    }
 }

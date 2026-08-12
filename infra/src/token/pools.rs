@@ -164,4 +164,90 @@ mod tests {
         // Test that it was created successfully
         assert_eq!(enumerator.cache_ttl.as_secs(), 300);
     }
+
+    #[tokio::test]
+    async fn test_raydium_liquidity_unimplemented_errors() {
+        let enumerator = PoolEnumerator::new(
+            Arc::new(RpcClient::new("https://api.mainnet-beta.solana.com".to_string())),
+            100,
+            300,
+        );
+        let err = enumerator
+            .get_raydium_liquidity("mint1")
+            .await
+            .expect_err("on-chain Raydium is not implemented");
+        assert!(matches!(err, AppError::Http(_)));
+    }
+
+    #[tokio::test]
+    async fn test_orca_liquidity_unimplemented_errors() {
+        let enumerator = PoolEnumerator::new(
+            Arc::new(RpcClient::new("https://api.mainnet-beta.solana.com".to_string())),
+            100,
+            300,
+        );
+        let err = enumerator
+            .get_orca_liquidity("mint1")
+            .await
+            .expect_err("on-chain Orca is not implemented");
+        assert!(matches!(err, AppError::Http(_)));
+    }
+
+    #[tokio::test]
+    async fn test_combined_liquidity_zero_when_both_unimplemented() {
+        let enumerator = PoolEnumerator::new(
+            Arc::new(RpcClient::new("https://api.mainnet-beta.solana.com".to_string())),
+            100,
+            300,
+        );
+        let liq = enumerator.get_combined_liquidity("mint1").await.unwrap();
+        assert_eq!(liq, Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn test_cache_fresh_entry_returned_and_expired_evicted() {
+        let enumerator = PoolEnumerator::new(
+            Arc::new(RpcClient::new("https://api.mainnet-beta.solana.com".to_string())),
+            100,
+            300,
+        );
+
+        let liq = PoolLiquidity {
+            token_address: "mint1".to_string(),
+            liquidity_usd: Decimal::from(50_000),
+            pool_addresses: vec!["pool1".to_string()],
+        };
+
+        // Fresh entry -> returned.
+        {
+            let mut cache = enumerator.cache.write().await;
+            cache.put(
+                "mint1".to_string(),
+                PoolCacheEntry {
+                    data: liq.clone(),
+                    cached_at: SystemTime::now(),
+                },
+            );
+        }
+        let got = enumerator.get_from_cache("mint1").await;
+        assert!(got.is_some());
+        assert_eq!(got.unwrap().liquidity_usd, Decimal::from(50_000));
+
+        // Expired entry -> evicted and not returned.
+        {
+            let mut cache = enumerator.cache.write().await;
+            cache.put(
+                "mint2".to_string(),
+                PoolCacheEntry {
+                    data: liq,
+                    cached_at: SystemTime::now() - Duration::from_secs(10_000),
+                },
+            );
+        }
+        assert!(enumerator.get_from_cache("mint2").await.is_none());
+
+        // clear_cache empties everything.
+        enumerator.clear_cache().await;
+        assert!(enumerator.get_from_cache("mint1").await.is_none());
+    }
 }

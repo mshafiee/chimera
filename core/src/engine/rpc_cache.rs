@@ -209,4 +209,42 @@ mod tests {
         assert!(cache.get("key1").is_none());
         assert_eq!(cache.stats().size, 0);
     }
+
+    #[test]
+    fn test_rpc_cache_clear_expired_removes_stale_only() {
+        let cache = RpcCache::new(100);
+        // Short-lived entry.
+        cache.set("stale".to_string(), b"x".to_vec(), Duration::from_millis(20));
+        // Long-lived entry.
+        cache.set("fresh".to_string(), b"y".to_vec(), Duration::from_secs(60));
+        std::thread::sleep(Duration::from_millis(50));
+
+        cache.clear_expired();
+        assert!(cache.get("stale").is_none());
+        assert!(cache.get("fresh").is_some());
+        assert_eq!(cache.stats().size, 1);
+    }
+
+    #[test]
+    fn test_rpc_cache_clear_all_empties() {
+        let cache = RpcCache::new(100);
+        cache.set("a".to_string(), b"1".to_vec(), Duration::from_secs(10));
+        cache.set("b".to_string(), b"2".to_vec(), Duration::from_secs(10));
+        assert_eq!(cache.stats().size, 2);
+        cache.clear_all();
+        assert_eq!(cache.stats().size, 0);
+        assert!(cache.get("a").is_none());
+        assert!(cache.get("b").is_none());
+    }
+
+    #[test]
+    fn test_rpc_cache_set_self_cleans_expired_entries() {
+        // A stale entry is purged opportunistically on the next set() call.
+        let cache = RpcCache::new(100);
+        cache.set("old".to_string(), b"x".to_vec(), Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(50));
+        cache.set("new".to_string(), b"y".to_vec(), Duration::from_secs(60));
+        assert!(cache.get("old").is_none());
+        assert_eq!(cache.stats().size, 1);
+    }
 }

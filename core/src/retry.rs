@@ -117,7 +117,7 @@ pub fn calculate_backoff(attempt: u32) -> Duration {
 /// # Example
 /// ```no_run
 /// use anyhow::Result;
-/// use chimera_operator::retry::retry_with_backoff;
+/// use chimera_core::retry::retry_with_backoff;
 ///
 /// async fn fetch_data() -> Result<String> {
 ///     // Your HTTP request here
@@ -300,6 +300,107 @@ mod tests {
     async fn test_retry_with_backoff_exhausted() {
         let operation = || async { Err::<(), anyhow::Error>(anyhow::anyhow!("Permanent error")) };
 
+        let result = retry_with_backoff(operation, 3).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_http_status_error_new_and_display() {
+        let e = HttpStatusError::new(429);
+        assert_eq!(e.status, 429);
+        assert_eq!(e.to_string(), "HTTP status error: 429");
+    }
+
+    #[test]
+    fn test_extract_status_from_http_status_error() {
+        // HttpStatusError is recognized by extract_status (non-reqwest path).
+        let err = anyhow::anyhow!(HttpStatusError { status: 422 });
+        assert_eq!(extract_status(&err), 422);
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_backoff_zero_retries_rejected() {
+        // max_retries == 0 is a configuration error: nothing to attempt.
+        let result = retry_with_backoff(
+            || async { Ok::<(), anyhow::Error>(()) },
+            0,
+        )
+        .await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("max_retries = 0"), "{msg}");
+    }
+
+    /// A minimal TRACE-level subscriber so `tracing::debug!`/`warn!`/`error!`
+    /// bodies execute during the retry-loop tests (otherwise the default
+    /// dispatcher short-circuits them, leaving those lines uncovered).
+    fn install_trace_subscriber() {
+        use tracing::Subscriber;
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            struct TraceAll;
+            impl Subscriber for TraceAll {
+                fn enabled(&self, _m: &tracing::Metadata<'_>) -> bool {
+                    true
+                }
+                fn new_span(&self, _s: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                    tracing::span::Id::from_u64(1)
+                }
+                fn record(&self, _s: &tracing::span::Id, _v: &tracing::span::Record<'_>) {}
+                fn record_follows_from(&self, _s: &tracing::span::Id, _f: &tracing::span::Id) {}
+                fn event(&self, _e: &tracing::Event<'_>) {}
+                fn enter(&self, _s: &tracing::span::Id) {}
+                fn exit(&self, _s: &tracing::span::Id) {}
+            }
+            let _ = tracing::subscriber::set_global_default(TraceAll);
+        });
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_backoff_retryable_status_retries() {
+        install_trace_subscriber();
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = counter.clone();
+        let operation = move || {
+            let counter = counter_clone.clone();
+            async move {
+                let count = counter.fetch_add(1, Ordering::SeqCst);
+                if count < 2 {
+                    // A retryable 429 status error.
+                    Err(anyhow::anyhow!(HttpStatusError { status: 429 }))
+                } else {
+                    Ok::<(), anyhow::Error>(())
+                }
+            }
+        };
+        let result = retry_with_backoff(operation, 5).await;
+        assert!(result.is_ok());
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_backoff_non_retryable_status_fails_immediately() {
+        install_trace_subscriber();
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = counter.clone();
+        let operation = move || {
+            let counter = counter_clone.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err::<(), anyhow::Error>(anyhow::anyhow!(HttpStatusError { status: 400 }))
+            }
+        };
+        let result = retry_with_backoff(operation, 5).await;
+        assert!(result.is_err());
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "non-retryable status must fail on first attempt");
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_backoff_final_attempt_error() {
+        install_trace_subscriber();
+        // Always-429 (retryable) with max_retries=3: attempts 0 & 1 retry, the
+        // third is the final attempt and hits the `Err(e)` final-attempt arm.
+        let operation = || async { Err::<(), anyhow::Error>(anyhow::anyhow!(HttpStatusError { status: 429 })) };
         let result = retry_with_backoff(operation, 3).await;
         assert!(result.is_err());
     }

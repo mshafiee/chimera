@@ -517,4 +517,93 @@ mod tests {
         assert!(limiter.try_acquire());
         assert!(!limiter.try_acquire()); // Should fail at limit
     }
+
+    #[test]
+    fn test_request_weight_new_and_constants() {
+        let w = RequestWeight::new(7);
+        assert_eq!(w.value(), 7);
+        assert_eq!(RequestWeight::STANDARD.value(), 1);
+        assert_eq!(RequestWeight::SIMULATION.value(), 5);
+    }
+
+    #[test]
+    fn test_category_to_weight_and_name() {
+        let limiter = RateLimiter::new(10, 1);
+        assert_eq!(limiter.category_to_weight(RpcMethodCategory::StatusCheck).value(), 1);
+        assert_eq!(limiter.category_to_weight(RpcMethodCategory::AccountQuery).value(), 2);
+        assert_eq!(limiter.category_to_weight(RpcMethodCategory::TransactionFetch).value(), 5);
+        assert_eq!(limiter.category_to_weight(RpcMethodCategory::HeavyOperation).value(), 8);
+        assert_eq!(limiter.category_to_weight(RpcMethodCategory::Simulation).value(), 5);
+        assert_eq!(limiter.category_to_name(RpcMethodCategory::StatusCheck), "StatusCheck");
+        assert_eq!(limiter.category_to_name(RpcMethodCategory::AccountQuery), "AccountQuery");
+        assert_eq!(limiter.category_to_name(RpcMethodCategory::TransactionFetch), "TransactionFetch");
+        assert_eq!(limiter.category_to_name(RpcMethodCategory::HeavyOperation), "HeavyOperation");
+        assert_eq!(limiter.category_to_name(RpcMethodCategory::Simulation), "Simulation");
+    }
+
+    #[test]
+    fn test_try_acquire_rpc_weighted() {
+        let limiter = RateLimiter::new(10, 1);
+        assert!(limiter.try_acquire_rpc(RpcMethodCategory::StatusCheck)); // weight 1
+        assert!(limiter.try_acquire_rpc(RpcMethodCategory::AccountQuery)); // weight 2
+        // 3 credits used; a Simulation (weight 5) still fits in 10.
+        assert!(limiter.try_acquire_rpc(RpcMethodCategory::Simulation));
+        assert_eq!(limiter.current_credits(), 8);
+        // Another Simulation would exceed 10 -> denied.
+        assert!(!limiter.try_acquire_rpc(RpcMethodCategory::Simulation));
+    }
+
+    #[test]
+    fn test_current_rate_and_credit_usage() {
+        let limiter = RateLimiter::new(10, 1);
+        assert_eq!(limiter.current_rate(), 0.0);
+        assert_eq!(limiter.current_credits(), 0);
+        assert_eq!(limiter.credit_usage(), 0);
+
+        limiter.try_acquire_rpc(RpcMethodCategory::Simulation); // weight 5
+        assert!(limiter.current_rate() > 0.0);
+        assert_eq!(limiter.current_credits(), 5);
+        assert_eq!(limiter.credit_usage(), 5);
+
+        limiter.reset_credit_usage();
+        assert_eq!(limiter.credit_usage(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_metrics_with_categories() {
+        let limiter = RateLimiter::new(10, 1);
+        limiter.acquire_rpc(RpcMethodCategory::StatusCheck, RequestPriority::Polling).await;
+        limiter.acquire_rpc(RpcMethodCategory::AccountQuery, RequestPriority::Polling).await;
+        let metrics = limiter.get_metrics();
+        assert_eq!(metrics.current_credits, 3);
+        assert_eq!(metrics.total_credits_used, 3);
+        assert_eq!(metrics.max_credits, 10);
+        let by_req = metrics.requests_by_category.as_ref().unwrap();
+        assert_eq!(*by_req.get("StatusCheck").unwrap(), 1);
+        assert_eq!(*by_req.get("AccountQuery").unwrap(), 1);
+        let by_cred = metrics.credits_by_category.as_ref().unwrap();
+        assert_eq!(*by_cred.get("AccountQuery").unwrap(), 2);
+    }
+
+    #[test]
+    fn test_get_metrics_without_categories() {
+        let limiter = RateLimiter::new(10, 1);
+        limiter.try_acquire();
+        let metrics = limiter.get_metrics();
+        assert_eq!(metrics.current_credits, 1);
+        assert!(metrics.requests_by_category.is_none());
+        assert!(metrics.credits_by_category.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_acquire_rpc_and_acquire_standard() {
+        let limiter = RateLimiter::new(6, 1);
+        limiter.acquire_rpc(RpcMethodCategory::StatusCheck, RequestPriority::Polling).await; // weight 1
+        limiter.acquire_standard(RequestPriority::Entry).await; // weight 1
+        // 2 credits used. A Simulation (weight 5) would exceed the 6-credit cap,
+        // so it must wait for the window to slide before proceeding.
+        let start = Instant::now();
+        limiter.acquire_rpc(RpcMethodCategory::Simulation, RequestPriority::Polling).await;
+        assert!(start.elapsed().as_millis() > 0);
+    }
 }

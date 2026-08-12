@@ -71,4 +71,33 @@ mod tests {
         };
         assert!(format!("{:?}", result).contains("10"));
     }
+
+    /// `connect_lazy` creates a Pool handle without opening any connection, so
+    /// the pool argument can be supplied even though no database is reachable
+    /// in unit tests. Both roster functions ignore the pool and reject the
+    /// operation unconditionally.
+    fn dummy_pool() -> sqlx::Pool<sqlx::Postgres> {
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost:5432/does_not_exist")
+            .expect("connect_lazy builds a lazy pool without connecting")
+    }
+
+    #[tokio::test]
+    async fn test_merge_roster_rejected_on_postgres() {
+        let pool = dummy_pool();
+        let err = merge_roster(&pool, Path::new("roster_new.db"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not supported with PostgreSQL"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_roster_rejected_on_postgres() {
+        let pool = dummy_pool();
+        let err = validate_roster(&pool, Path::new("roster_new.db"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not supported with PostgreSQL"));
+    }
 }

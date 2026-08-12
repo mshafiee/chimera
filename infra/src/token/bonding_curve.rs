@@ -198,4 +198,30 @@ mod tests {
             .unwrap();
         assert_eq!(state.liquidity_velocity(0), 0.0);
     }
+
+    #[test]
+    fn pda_is_deterministic_and_program_scoped() {
+        let mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+        let pda = bonding_curve_pda(mint).unwrap();
+        // Same mint always yields the same PDA.
+        assert_eq!(pda, bonding_curve_pda(mint).unwrap());
+        // Different mints yield different PDAs.
+        let other = bonding_curve_pda("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB").unwrap();
+        assert_ne!(pda, other);
+    }
+
+    #[test]
+    fn pda_rejects_invalid_mint() {
+        assert!(bonding_curve_pda("not-a-valid-base58-address").is_err());
+    }
+
+    #[test]
+    fn completion_pct_clamps_out_of_range() {
+        // Above graduation clamps to 1.0, zero clamps to 0.0.
+        let over = BondingCurveState::from_account_data(&sample_curve_data(200_000_000_000, false))
+            .unwrap();
+        assert_eq!(over.completion_pct(), 1.0);
+        let zero = BondingCurveState::from_account_data(&sample_curve_data(0, false)).unwrap();
+        assert_eq!(zero.completion_pct(), 0.0);
+    }
 }

@@ -930,4 +930,47 @@ mod tests {
         let q_empty = serde_json::json!({});
         assert_eq!(out_amount(&q_empty), 0);
     }
+
+    #[tokio::test]
+    async fn test_query_jupiter_unparseable_fee_type_is_ignored() {
+        // feeAmount that is neither a string nor a number (a bool) is skipped
+        // (logged, not summed) — the `_ => None` arm of the fee parser.
+        let quote = serde_json::json!({
+            "outAmount": "1000000000",
+            "inAmount": "1000000000",
+            "priceImpactPct": "0.5",
+            "routePlan": [ { "swapInfo": { "feeAmount": true } } ]
+        })
+        .to_string();
+        let base = mock_jupiter(move |_req| (200, quote.clone())).await;
+        let comparator = make_comparator(base);
+        let sel = comparator
+            .query_jupiter(SOL, USDC, 1_000_000_000, 50, None)
+            .await
+            .expect("route");
+        assert_eq!(sel.fee_sol, Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn test_query_jupiter_non_sol_token_pair_uses_input_as_proxy() {
+        // Neither input nor output is SOL → trade value falls back to the input
+        // amount (cost accounting only).
+        let quote = serde_json::json!({
+            "outAmount": "1000000000",
+            "inAmount": "1000000000",
+            "priceImpactPct": "0.5",
+            "routePlan": [ { "swapInfo": { "feeAmount": "1000000000" } } ]
+        })
+        .to_string();
+        let base = mock_jupiter(move |_req| (200, quote.clone())).await;
+        let comparator = make_comparator(base);
+        // USDC -> some other token: neither side is SOL.
+        let sel = comparator
+            .query_jupiter(USDC, "4wBqp9c6bXWw1U9pJ5W9BmVtV9X7iV2iGJ8dJq2H9aX", 1_000_000_000, 50, None)
+            .await
+            .expect("route");
+        // trade value = 1e9/1e9 = 1 SOL proxy; fee = 1 * 1e9/1e9 = 1 SOL.
+        assert_eq!(sel.fee_sol, Decimal::ONE);
+        assert_eq!(sel.slippage_sol, dec!(0.005));
+    }
 }

@@ -333,4 +333,99 @@ mod tests {
         };
         assert!(decompile_legacy_message(&empty).is_err());
     }
+
+    #[test]
+    fn decompile_rejects_inconsistent_header() {
+        // num_required_signatures (2) exceeds the account count (1) → the
+        // header violates the Solana account-layout invariants.
+        let msg = Message {
+            header: solana_sdk::message::MessageHeader {
+                num_required_signatures: 2,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 0,
+            },
+            account_keys: vec![Pubkey::new_unique()],
+            recent_blockhash: Hash::default(),
+            instructions: vec![],
+        };
+        assert!(matches!(
+            decompile_legacy_message(&msg),
+            Err(TipInlineError::InvalidHeader)
+        ));
+    }
+
+    #[test]
+    fn inline_rejects_preexisting_signature() {
+        let payer = Pubkey::new_unique();
+        let recipient = Pubkey::new_unique();
+        let tip_account = Pubkey::new_unique();
+        let mut tx = build_legacy(&payer, &recipient);
+        // A pre-existing (non-default) signature must be rejected.
+        tx.signatures = vec![solana_sdk::signature::Signature::new_unique()];
+        assert!(matches!(
+            inline_jito_tip(&tx, &payer, &tip_account, 1_000, hash(&[3u8; 32])),
+            Err(TipInlineError::PreExistingSignature)
+        ));
+    }
+
+    #[test]
+    fn inline_rejects_header_only_signer_dropped() {
+        let payer = Pubkey::new_unique();
+        let extra = Pubkey::new_unique(); // header-only signer, no instruction refs it
+        let recipient = Pubkey::new_unique();
+        let system = system_program_id();
+        let tip_account = Pubkey::new_unique();
+
+        // Manual legacy message: payer + extra are both signers, but `extra` is
+        // NOT referenced by any instruction, so decompilation drops it and the
+        // rebuilt signer set shrinks → SignerSetChanged.
+        let msg = Message {
+            header: solana_sdk::message::MessageHeader {
+                num_required_signatures: 2,
+                num_readonly_signed_accounts: 1, // `extra` is a read-only signer
+                num_readonly_unsigned_accounts: 1, // system read-only
+            },
+            account_keys: vec![payer, extra, recipient, system],
+            recent_blockhash: Hash::default(),
+            instructions: vec![
+                solana_sdk::message::compiled_instruction::CompiledInstruction {
+                    program_id_index: 3,
+                    accounts: vec![0, 2], // payer, recipient — NOT `extra`
+                    data: vec![2, 0, 0, 0, 0, 232, 3, 0, 0, 0, 0, 0],
+                },
+            ],
+        };
+        let tx = Transaction {
+            signatures: vec![],
+            message: msg,
+        };
+
+        let err = inline_jito_tip(&tx, &payer, &tip_account, 1_000, hash(&[4u8; 32]));
+        assert!(
+            matches!(err, Err(TipInlineError::SignerSetChanged)),
+            "expected SignerSetChanged, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn inline_rejects_writability_change() {
+        // Original message has the payer as a READ-ONLY signer; the appended tip
+        // transfer writes to the payer, so the rebuilt message flips it writable.
+        let payer = Pubkey::new_unique();
+        let recipient = Pubkey::new_unique();
+        let tip_account = Pubkey::new_unique();
+        // Build a normal payer-signed transfer, then mark the payer as a
+        // read-only signer via the header.
+        let transfer = system_instruction::transfer(&payer, &recipient, 1_000);
+        let mut tx = Transaction::new_with_payer(&[transfer], Some(&payer));
+        tx.message.header.num_readonly_signed_accounts = 1;
+
+        let err = inline_jito_tip(&tx, &payer, &tip_account, 1_000, hash(&[5u8; 32]));
+        assert!(
+            matches!(err, Err(TipInlineError::WritabilityChanged)),
+            "expected WritabilityChanged, got {:?}",
+            err
+        );
+    }
 }

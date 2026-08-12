@@ -640,6 +640,106 @@ mod tests {
     }
 
     // ==========================================================================
+    // ADDITIONAL COVERAGE
+    // ==========================================================================
+
+    #[test]
+    fn determine_toxic_reason_falls_back_to_roi_drop() {
+        // A wallet satisfying neither the ROI-drop nor the local-top condition:
+        // the method's fallback returns RoiDrop (the module treats RoiDrop as
+        // the catch-all).
+        let detector = ToxicFlowDetector::new(config(30));
+        let wallet = ToxicWallet {
+            address: "x".to_string(),
+            selection_roi: 0.5,
+            post_promotion_roi: 0.4, // deterioration 0.1 < 0.3
+            local_top_entries: 1,
+            total_entries: 4, // 1*2 >= 4 is false
+            is_toxic: false,
+            toxic_reason: None,
+            detected_at: None,
+        };
+        assert!(matches!(
+            detector.determine_toxic_reason(&wallet),
+            ToxicReason::RoiDrop
+        ));
+    }
+
+    /// Minimal TRACE subscriber so `info!`/`warn!` bodies execute.
+    fn install_trace_subscriber() {
+        use tracing::Subscriber;
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            struct TraceAll;
+            impl Subscriber for TraceAll {
+                fn enabled(&self, _m: &tracing::Metadata<'_>) -> bool {
+                    true
+                }
+                fn new_span(&self, _s: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                    tracing::span::Id::from_u64(1)
+                }
+                fn record(&self, _s: &tracing::span::Id, _v: &tracing::span::Record<'_>) {}
+                fn record_follows_from(&self, _s: &tracing::span::Id, _f: &tracing::span::Id) {}
+                fn event(&self, _e: &tracing::Event<'_>) {}
+                fn enter(&self, _s: &tracing::span::Id) {}
+                fn exit(&self, _s: &tracing::span::Id) {}
+            }
+            let _ = tracing::subscriber::set_global_default(TraceAll);
+        });
+    }
+
+    fn dummy_pool() -> sqlx::Pool<sqlx::Postgres> {
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost:5432/does_not_exist")
+            .expect("lazy pool")
+    }
+
+    #[tokio::test]
+    async fn persist_empty_detector_is_ok() {
+        install_trace_subscriber();
+        // No tracked wallets → snapshot empty, the UPSERT loop is skipped, and
+        // the call returns Ok without needing a real database connection.
+        let detector = ToxicFlowDetector::new(config(30));
+        let pool = dummy_pool();
+        detector.persist_to_database(&pool, "run-empty").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn persist_with_wallets_builds_reason_and_binds() {
+        install_trace_subscriber();
+        let pool = dummy_pool();
+
+        // RoiDrop wallet → "roi_drop" reason arm.
+        let det_roi = ToxicFlowDetector::new(config(30));
+        det_roi
+            .register_wallet_promotion("roi-w".to_string(), 0.6)
+            .await
+            .unwrap();
+        det_roi.record_entry("roi-w".to_string(), false, 0.1).await.unwrap();
+        assert!(det_roi.persist_to_database(&pool, "run").await.is_err());
+
+        // LocalTopSqueeze wallet → "local_top_squeeze" reason arm.
+        let det_sq = ToxicFlowDetector::new(config(30));
+        det_sq
+            .register_wallet_promotion("sq-w".to_string(), 0.5)
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            det_sq.record_entry("sq-w".to_string(), true, 0.4).await.unwrap();
+        }
+        assert!(det_sq.persist_to_database(&pool, "run").await.is_err());
+
+        // Healthy wallet → None reason arm.
+        let det_none = ToxicFlowDetector::new(config(30));
+        det_none
+            .register_wallet_promotion("ok-w".to_string(), 0.5)
+            .await
+            .unwrap();
+        assert!(det_none.persist_to_database(&pool, "run").await.is_err());
+    }
+
+    // ==========================================================================
     // DATABASE ROUND-TRIP (requires TEST_DATABASE_URL)
     // ==========================================================================
 

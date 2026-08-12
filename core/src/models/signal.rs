@@ -285,4 +285,131 @@ mod tests {
 
         assert_eq!(signal.generate_trade_uuid(0), "custom-uuid-123");
     }
+
+    #[test]
+    fn test_strategy_is_sheddable() {
+        assert!(Strategy::Spear.is_sheddable());
+        assert!(!Strategy::Shield.is_sheddable());
+        assert!(!Strategy::Exit.is_sheddable());
+    }
+
+    #[test]
+    fn test_strategy_display() {
+        assert_eq!(Strategy::Shield.to_string(), "SHIELD");
+        assert_eq!(Strategy::Spear.to_string(), "SPEAR");
+        assert_eq!(Strategy::Exit.to_string(), "EXIT");
+        assert_eq!(Action::Buy.to_string(), "BUY");
+        assert_eq!(Action::Sell.to_string(), "SELL");
+    }
+
+    fn base_payload() -> SignalPayload {
+        SignalPayload {
+            strategy: Strategy::Shield,
+            token: "BONK".to_string(),
+            token_address: None,
+            action: Action::Buy,
+            amount_sol: Decimal::from_str("0.5").unwrap(),
+            wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+            trade_uuid: None,
+            exit_fraction: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_each_invalid_payload() {
+        // Empty token.
+        let mut p = base_payload();
+        p.token = "   ".to_string();
+        assert!(p.validate().unwrap_err().contains("Token symbol cannot be empty"));
+
+        // "UNKNOWN" sentinel token.
+        let mut p = base_payload();
+        p.token = "UNKNOWN".to_string();
+        assert!(p.validate().unwrap_err().contains("placeholder"));
+
+        // Wallet too short.
+        let mut p = base_payload();
+        p.wallet_address = "short".to_string();
+        assert!(p.validate().unwrap_err().contains("Invalid wallet address length"));
+
+        // Wallet too long.
+        let mut p = base_payload();
+        p.wallet_address = "x".repeat(45);
+        assert!(p.validate().unwrap_err().contains("Invalid wallet address length"));
+
+        // Non-positive amount.
+        let mut p = base_payload();
+        p.amount_sol = Decimal::ZERO;
+        assert!(p.validate().unwrap_err().contains("Amount must be positive"));
+
+        // Amount above max.
+        let mut p = base_payload();
+        p.amount_sol = Decimal::from(101);
+        assert!(p.validate().unwrap_err().contains("exceeds maximum"));
+
+        // exit_fraction zero.
+        let mut p = base_payload();
+        p.exit_fraction = Some(Decimal::ZERO);
+        assert!(p.validate().unwrap_err().contains("exit_fraction"));
+
+        // exit_fraction > 1.
+        let mut p = base_payload();
+        p.exit_fraction = Some(Decimal::from(2));
+        assert!(p.validate().unwrap_err().contains("exit_fraction"));
+
+        // Exit strategy with non-Sell action.
+        let mut p = base_payload();
+        p.strategy = Strategy::Exit;
+        p.action = Action::Buy;
+        assert!(p.validate().unwrap_err().contains("Exit strategy must have SELL action"));
+
+        // Exit strategy with SELL action validates fine.
+        let mut p = base_payload();
+        p.strategy = Strategy::Exit;
+        p.action = Action::Sell;
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn test_signal_payload_serde_defaults() {
+        // amount_sol and wallet_address are populated from serde defaults when
+        // omitted from the payload.
+        let json = r#"{
+            "strategy": "SHIELD",
+            "token": "BONK",
+            "action": "BUY"
+        }"#;
+        let payload: SignalPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.amount_sol, Decimal::ZERO);
+        assert_eq!(payload.wallet_address, "UNKNOWN_WALLET");
+        assert_eq!(default_amount(), Decimal::ZERO);
+        assert_eq!(default_wallet(), "UNKNOWN_WALLET");
+    }
+
+    #[test]
+    fn test_signal_token_address_accessor() {
+        let mut p = base_payload();
+        p.token_address = None;
+        let signal = Signal::new(p.clone(), 0, None);
+        assert!(signal.token_address().is_none());
+
+        p.token_address = Some("mintaddr".to_string());
+        let signal = Signal::new(p.clone(), 0, Some("1.2.3.4".into()));
+        assert_eq!(signal.token_address(), Some("mintaddr"));
+        assert_eq!(signal.source_ip.as_deref(), Some("1.2.3.4"));
+    }
+
+    #[test]
+    fn test_signal_uuid_incorporates_optional_fields() {
+        // Including token_address and exit_fraction changes the generated UUID.
+        let mut p = base_payload();
+        p.token_address = Some("mintaddr".to_string());
+        p.exit_fraction = Some(Decimal::from_str("0.5").unwrap());
+        let uuid = p.generate_trade_uuid(0);
+        assert_eq!(uuid.len(), 32); // first 16 bytes hex-encoded
+        // Two identical payloads hash the same.
+        let p2 = p.clone();
+        let uuid2 = p2.generate_trade_uuid(999);
+        assert_eq!(uuid, uuid2);
+    }
 }

@@ -3776,7 +3776,9 @@ async fn refresh_verdict(
         let rate = recorder.completeness();
         (rate, rate >= 0.99)
     } else {
-        (1.0, true)
+        // No recorder → no evidence of completeness → fail-closed (matches the
+        // HTTP profitability_verdict handler, not the old fail-open (1.0, true)).
+        (0.0, false)
     };
 
     let (gates, verdict) = evaluate_gates(
@@ -4117,6 +4119,107 @@ mod tests {
         assert_eq!(
             pm.wick_protection_max_loss_percent,
             rust_decimal::Decimal::new(-100, 1) // -10.0
+        );
+    }
+
+    fn sample_position(entry_amount_sol: rust_decimal::Decimal) -> ActivePositionEntry {
+        ActivePositionEntry {
+            trade_uuid: "trade-1".into(),
+            wallet_address: "WalletAddrWalletAddrWalletAddrWalletAddr1".into(),
+            token_address: "So11111111111111111111111111111111111111112".into(),
+            token_symbol: "BONK".into(),
+            strategy: "Shield".into(),
+            entry_price: rust_decimal::Decimal::new(120, 3), // 0.12
+            entry_amount_sol,
+            entry_time: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn build_exit_signal_populates_payload() {
+        use rust_decimal::prelude::FromPrimitive;
+        let pos = sample_position(rust_decimal::Decimal::from_f64(2.0).unwrap());
+        let fraction = rust_decimal::Decimal::from_f64(0.5).unwrap();
+        let sig = build_exit_signal(&pos, fraction);
+        assert_eq!(sig.payload.strategy, Strategy::Exit);
+        assert_eq!(sig.payload.action, Action::Sell);
+        assert_eq!(sig.payload.token, "BONK");
+        assert_eq!(
+            sig.payload.token_address.as_deref(),
+            Some("So11111111111111111111111111111111111111112")
+        );
+        assert_eq!(sig.payload.wallet_address, pos.wallet_address);
+        assert_eq!(sig.payload.trade_uuid.as_deref(), Some("trade-1"));
+        assert_eq!(sig.payload.exit_fraction, Some(fraction));
+        assert_eq!(sig.payload.amount_sol, rust_decimal::Decimal::ONE); // 2.0 * 0.5
+        // Exit signals use the trade UUID in the Signal wrapper too.
+        assert_eq!(sig.trade_uuid, "trade-1");
+    }
+
+    #[test]
+    fn build_exit_signal_zero_entry_uses_floor() {
+        use rust_decimal::prelude::FromPrimitive;
+        // entry_amount_sol == 0 falls back to a 0.01 base floor.
+        let pos = sample_position(rust_decimal::Decimal::ZERO);
+        let fraction = rust_decimal::Decimal::from_f64(0.5).unwrap();
+        let sig = build_exit_signal(&pos, fraction);
+        assert_eq!(
+            sig.payload.amount_sol,
+            rust_decimal::Decimal::new(5, 3) // 0.01 * 0.5 = 0.005
+        );
+    }
+
+    #[test]
+    fn build_exit_signal_amount_computes_fraction_and_clamps() {
+        use rust_decimal::prelude::FromPrimitive;
+        let pos = sample_position(rust_decimal::Decimal::from_f64(2.0).unwrap());
+        // amount 1.0 of a 2.0 position -> fraction 0.5.
+        let sig = build_exit_signal_amount(&pos, rust_decimal::Decimal::ONE);
+        assert_eq!(sig.payload.action, Action::Sell);
+        assert_eq!(sig.payload.strategy, Strategy::Exit);
+        assert_eq!(sig.payload.amount_sol, rust_decimal::Decimal::ONE);
+        assert_eq!(
+            sig.payload.exit_fraction,
+            Some(rust_decimal::Decimal::from_f64(0.5).unwrap())
+        );
+    }
+
+    #[test]
+    fn build_exit_signal_amount_caps_fraction_at_one() {
+        use rust_decimal::prelude::FromPrimitive;
+        // Amount larger than the position must not produce a fraction > 1
+        // (prevents oversell against entry amount).
+        let pos = sample_position(rust_decimal::Decimal::from_f64(1.0).unwrap());
+        let sig = build_exit_signal_amount(&pos, rust_decimal::Decimal::from_f64(5.0).unwrap());
+        assert_eq!(sig.payload.amount_sol, rust_decimal::Decimal::from_f64(5.0).unwrap());
+        assert_eq!(
+            sig.payload.exit_fraction,
+            Some(rust_decimal::Decimal::ONE)
+        );
+    }
+
+    #[test]
+    fn build_exit_signal_amount_clamps_tiny_amount() {
+        use rust_decimal::prelude::FromPrimitive;
+        let pos = sample_position(rust_decimal::Decimal::from_f64(1.0).unwrap());
+        // amount 0.0001 clamps up to the 0.001 floor.
+        let sig = build_exit_signal_amount(&pos, rust_decimal::Decimal::new(1, 4));
+        assert_eq!(
+            sig.payload.amount_sol,
+            rust_decimal::Decimal::new(1, 3) // 0.001
+        );
+    }
+
+    #[test]
+    fn build_exit_signal_amount_zero_entry_falls_back() {
+        use rust_decimal::prelude::FromPrimitive;
+        // entry_amount_sol == 0 falls back to a 0.01 base floor; a 1.0 amount
+        // against that floor caps the fraction at 1.0 (never > 1).
+        let pos = sample_position(rust_decimal::Decimal::ZERO);
+        let sig = build_exit_signal_amount(&pos, rust_decimal::Decimal::ONE);
+        assert_eq!(
+            sig.payload.exit_fraction,
+            Some(rust_decimal::Decimal::ONE)
         );
     }
 }

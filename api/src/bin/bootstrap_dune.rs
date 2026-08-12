@@ -1090,3 +1090,284 @@ async fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn trade(wallet: &str, pnl_pct: f64) -> BootstrapTrade {
+        BootstrapTrade {
+            wallet_address: wallet.to_string(),
+            token_address: "So11111111111111111111111111111111111111112".to_string(),
+            pnl_pct: Decimal::from_f64(pnl_pct).unwrap(),
+            exit_ts: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            hold_duration_secs: Some(3600),
+        }
+    }
+
+    fn summary_with(pnls: &[f64]) -> WalletSummary {
+        WalletSummary {
+            address: "wallet".repeat(10),
+            trades: pnls.iter().map(|&p| trade("w", p)).collect(),
+        }
+    }
+
+    #[test]
+    fn mean_pnl_empty_is_zero() {
+        let s = summary_with(&[]);
+        assert_eq!(s.mean_pnl_pct(), Decimal::ZERO);
+    }
+
+    #[test]
+    fn mean_pnl_average() {
+        let s = summary_with(&[1.0, 3.0, 5.0]);
+        assert_eq!(s.mean_pnl_pct(), Decimal::from(3));
+    }
+
+    #[test]
+    fn stddev_less_than_two_samples_is_zero() {
+        let s = summary_with(&[2.0]);
+        assert_eq!(s.stddev_pnl_pct(), Decimal::ZERO);
+    }
+
+    #[test]
+    fn stddev_sample() {
+        // mean = 5, sum_sq = 32, n-1 = 7 -> stddev = sqrt(32/7) ≈ 2.13809
+        let s = summary_with(&[2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]);
+        let sd = s.stddev_pnl_pct();
+        let expected = Decimal::from_f64(2.1380899353).unwrap();
+        assert!((sd - expected).abs() < Decimal::from_f64(0.001).unwrap());
+    }
+
+    #[test]
+    fn t_stat_zero_variance_positive_mean_is_infinity() {
+        let s = summary_with(&[1.0; 10]);
+        assert_eq!(s.t_stat(), f64::INFINITY);
+    }
+
+    #[test]
+    fn t_stat_zero_variance_non_positive_mean_is_zero() {
+        let s = summary_with(&[0.0; 10]);
+        assert_eq!(s.t_stat(), 0.0);
+    }
+
+    #[test]
+    fn t_stat_finite() {
+        let s = summary_with(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let t = s.t_stat();
+        assert!(t.is_finite() && t > 0.0);
+    }
+
+    #[test]
+    fn win_rate_empty_is_zero() {
+        let s = summary_with(&[]);
+        assert_eq!(s.win_rate(), 0.0);
+    }
+
+    #[test]
+    fn win_rate_counts_positive() {
+        let s = summary_with(&[1.0, -1.0, 2.0, -2.0, 3.0]);
+        assert_eq!(s.win_rate(), 0.6);
+    }
+
+    #[test]
+    fn passes_tstat_requires_samples_and_positive_mean() {
+        let ok = summary_with(&[1.0; 10]);
+        assert!(ok.passes_tstat());
+        let too_few = summary_with(&[1.0; 5]);
+        assert!(!too_few.passes_tstat());
+        let non_positive = summary_with(&[-1.0; 12]);
+        assert!(!non_positive.passes_tstat());
+    }
+
+    #[test]
+    fn wqs_heuristic_bounds() {
+        let full = summary_with(&[1.0, 1.0]);
+        assert_eq!(full.wqs_heuristic(), 99.0);
+        let none = summary_with(&[]);
+        assert_eq!(none.wqs_heuristic(), 40.0);
+    }
+
+    #[test]
+    fn build_bootstrap_sql_substitutes_table() {
+        let sql = build_bootstrap_sql("dex_solana.trades");
+        assert!(sql.contains("FROM dex_solana.trades"));
+        assert!(!sql.contains("{trades_table}"));
+    }
+
+    #[test]
+    fn extract_trades_table_schema_table() {
+        let sql = "WITH x AS (SELECT 1) SELECT * FROM dex_solana.trades WHERE block_time > NOW()";
+        assert_eq!(extract_trades_table(sql).unwrap(), "dex_solana.trades");
+    }
+
+    #[test]
+    fn extract_trades_table_bare_table() {
+        assert_eq!(extract_trades_table("SELECT * FROM trades").unwrap(), "trades");
+    }
+
+    #[test]
+    fn extract_trades_table_backtick_table() {
+        assert_eq!(
+            extract_trades_table("SELECT * FROM `dex_solana`.`trades`").unwrap(),
+            "`dex_solana`.`trades`"
+        );
+    }
+
+    #[test]
+    fn extract_trades_table_skips_word_boundary_false() {
+        // "fromage" contains "from" but must not match as a keyword.
+        let sql = "SELECT fromage FROM dairy.cheese";
+        assert_eq!(extract_trades_table(sql).unwrap(), "dairy.cheese");
+    }
+
+    #[test]
+    fn extract_trades_table_no_from_errors() {
+        assert!(extract_trades_table("SELECT 1").is_err());
+    }
+
+    #[test]
+    fn extract_trades_table_from_without_table_errors() {
+        let sql = "SELECT * FROM";
+        assert!(extract_trades_table(sql).is_err());
+    }
+
+    #[test]
+    fn parse_trade_valid_row() {
+        let row = json!({
+            "wallet_address": "walletwalletwalletwalletwalletwalletwallet",
+            "token_address": "So11111111111111111111111111111111111111112",
+            "pnl_pct": "12.345",
+            "exit_ts": "2024-01-01T00:00:00Z",
+            "hold_duration_secs": 7200,
+        });
+        let t = parse_trade(&row).unwrap();
+        assert_eq!(t.wallet_address, "walletwalletwalletwalletwalletwalletwallet");
+        assert_eq!(t.pnl_pct, Decimal::from_str("12.345").unwrap());
+        assert_eq!(t.hold_duration_secs, Some(7200));
+    }
+
+    #[test]
+    fn parse_trade_missing_wallet_errors() {
+        let row = json!({"token_address": "x", "pnl_pct": 1.0, "exit_ts": "2024-01-01T00:00:00Z"});
+        assert!(parse_trade(&row).is_err());
+    }
+
+    #[test]
+    fn parse_trade_short_wallet_errors() {
+        let row = json!({
+            "wallet_address": "short",
+            "token_address": "So11111111111111111111111111111111111111112",
+            "pnl_pct": 1.0,
+            "exit_ts": "2024-01-01T00:00:00Z",
+        });
+        assert!(parse_trade(&row).is_err());
+    }
+
+    #[test]
+    fn parse_trade_missing_required_columns_error() {
+        let row = json!({"wallet_address": "walletwalletwalletwalletwalletwalletwallet"});
+        assert!(parse_trade(&row).is_err());
+    }
+
+    #[test]
+    fn get_str_variants() {
+        assert_eq!(get_str(&json!({"a": "hi"}), &["a"]).unwrap(), Some("hi".into()));
+        assert_eq!(get_str(&json!({"a": null}), &["a"]).unwrap(), None);
+        assert_eq!(get_str(&json!({"a": 5}), &["a"]).unwrap(), Some("5".into()));
+        assert_eq!(get_str(&json!({"a": 5}), &["b", "a"]).unwrap(), Some("5".into()));
+        assert_eq!(get_str(&json!({"a": 5}), &["z"]).unwrap(), None);
+    }
+
+    #[test]
+    fn get_decimal_variants() {
+        assert_eq!(get_decimal(&json!({"a": 5}), &["a"]).unwrap(), Some(Decimal::from(5)));
+        assert_eq!(
+            get_decimal(&json!({"a": 1.5}), &["a"]).unwrap(),
+            Some(Decimal::from_str("1.5").unwrap())
+        );
+        assert_eq!(
+            get_decimal(&json!({"a": "2.75"}), &["a"]).unwrap(),
+            Some(Decimal::from_str("2.75").unwrap())
+        );
+        assert_eq!(get_decimal(&json!({"a": ""}), &["a"]).unwrap(), None);
+        assert_eq!(get_decimal(&json!({"a": null}), &["a"]).unwrap(), None);
+        assert!(get_decimal(&json!({"a": "not-a-num"}), &["a"]).is_err());
+        assert!(get_decimal(&json!({"a": true}), &["a"]).is_err());
+        assert_eq!(get_decimal(&json!({"b": 1}), &["a"]).unwrap(), None);
+    }
+
+    #[test]
+    fn get_i64_variants() {
+        assert_eq!(get_i64(&json!({"a": 42}), &["a"]).unwrap(), Some(42));
+        assert_eq!(get_i64(&json!({"a": "42"}), &["a"]).unwrap(), Some(42));
+        assert_eq!(get_i64(&json!({"a": ""}), &["a"]).unwrap(), None);
+        assert_eq!(get_i64(&json!({"a": null}), &["a"]).unwrap(), None);
+        assert!(get_i64(&json!({"a": "abc"}), &["a"]).is_err());
+        assert!(get_i64(&json!({"a": 1.5}), &["a"]).is_err());
+        assert!(get_i64(&json!({"a": true}), &["a"]).is_err());
+        assert_eq!(get_i64(&json!({"b": 1}), &["a"]).unwrap(), None);
+    }
+
+    #[test]
+    fn get_ts_number_epoch_seconds() {
+        let ts = get_ts(&json!({"a": 1700000000}), &["a"]).unwrap().unwrap();
+        assert_eq!(ts.timestamp(), 1_700_000_000);
+    }
+
+    #[test]
+    fn get_ts_number_milliseconds() {
+        let ts = get_ts(&json!({"a": 1700000000000_i64}), &["a"]).unwrap().unwrap();
+        assert_eq!(ts.timestamp(), 1_700_000_000);
+    }
+
+    #[test]
+    fn get_ts_rfc3339() {
+        let ts = get_ts(&json!({"a": "2024-01-01T00:00:00Z"}), &["a"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(ts.to_rfc3339(), "2024-01-01T00:00:00+00:00");
+    }
+
+    #[test]
+    fn get_ts_space_separated_frac_utc() {
+        let ts = get_ts(&json!({"a": "2024-01-01 00:00:00.000000 UTC"}), &["a"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(ts.timestamp(), 1_704_067_200);
+    }
+
+    #[test]
+    fn get_ts_space_separated_no_frac_utc() {
+        let ts = get_ts(&json!({"a": "2024-01-01 00:00:00 UTC"}), &["a"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(ts.timestamp(), 1_704_067_200);
+    }
+
+    #[test]
+    fn get_ts_t_separated_frac() {
+        let ts = get_ts(&json!({"a": "2024-01-01T00:00:00.123"}), &["a"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(ts.timestamp(), 1_704_067_200);
+    }
+
+    #[test]
+    fn get_ts_t_separated_no_frac() {
+        let ts = get_ts(&json!({"a": "2024-01-01T00:00:00"}), &["a"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(ts.timestamp(), 1_704_067_200);
+    }
+
+    #[test]
+    fn get_ts_empty_and_null_and_invalid() {
+        assert_eq!(get_ts(&json!({"a": ""}), &["a"]).unwrap(), None);
+        assert_eq!(get_ts(&json!({"a": null}), &["a"]).unwrap(), None);
+        assert!(get_ts(&json!({"a": "not-a-date"}), &["a"]).is_err());
+        assert!(get_ts(&json!({"a": true}), &["a"]).is_err());
+        assert_eq!(get_ts(&json!({"b": 1}), &["a"]).unwrap(), None);
+    }
+}

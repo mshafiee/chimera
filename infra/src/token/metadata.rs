@@ -1372,4 +1372,255 @@ mod tests {
         let data = [0u8; 10];
         assert!(parse_optional_pubkey(&data).is_none());
     }
+
+    fn test_fetcher() -> TokenMetadataFetcher {
+        TokenMetadataFetcher::new("https://api.mainnet-beta.solana.com")
+    }
+
+    #[test]
+    fn test_liquidity_entry_staleness() {
+        let fresh = LiquidityEntry {
+            liquidity_usd: Decimal::ONE,
+            fetched_at: Utc::now(),
+        };
+        assert!(!fresh.is_stale(60));
+
+        let stale = LiquidityEntry {
+            liquidity_usd: Decimal::ONE,
+            fetched_at: Utc::now() - chrono::Duration::seconds(120),
+        };
+        assert!(stale.is_stale(60));
+    }
+
+    #[test]
+    fn test_fdv_entry_staleness() {
+        let fresh = FdvEntry {
+            fdv: Decimal::ONE,
+            fetched_at: Utc::now(),
+        };
+        assert!(!fresh.is_stale(300));
+
+        let stale = FdvEntry {
+            fdv: Decimal::ONE,
+            fetched_at: Utc::now() - chrono::Duration::seconds(600),
+        };
+        assert!(stale.is_stale(300));
+    }
+
+    #[test]
+    fn test_constructor_defaults() {
+        let fetcher = test_fetcher();
+        assert_eq!(
+            fetcher.jupiter_api_url,
+            "https://api.jup.ag/swap/v2".to_string()
+        );
+        assert!(!fetcher.allow_unlisted_heuristic);
+        assert_eq!(fetcher.liquidity_ttl_secs, 60);
+        assert_eq!(fetcher.fdv_ttl_secs, 300);
+        assert_eq!(fetcher.cache_size(), 0);
+    }
+
+    #[test]
+    fn test_with_client_constructor() {
+        let rpc = std::sync::Arc::new(RpcClient::new(
+            "https://api.mainnet-beta.solana.com".to_string(),
+        ));
+        let fetcher = TokenMetadataFetcher::with_client(rpc);
+        assert_eq!(
+            fetcher.jupiter_api_url,
+            "https://api.jup.ag/swap/v2".to_string()
+        );
+    }
+
+    #[test]
+    fn test_with_client_rate_limiter_and_jupiter_constructor() {
+        let rpc = std::sync::Arc::new(RpcClient::new(
+            "https://api.mainnet-beta.solana.com".to_string(),
+        ));
+        let fetcher = TokenMetadataFetcher::with_client_rate_limiter_and_jupiter(
+            rpc,
+            None,
+            "https://custom.jup.ag".to_string(),
+        );
+        assert_eq!(fetcher.jupiter_api_url, "https://custom.jup.ag".to_string());
+    }
+
+    #[test]
+    fn test_setters() {
+        let fetcher = test_fetcher().with_unlisted_heuristic(true).with_liquidity_ttl(30).with_fdv_ttl(90);
+        assert!(fetcher.allow_unlisted_heuristic);
+        assert_eq!(fetcher.liquidity_ttl_secs, 30);
+        assert_eq!(fetcher.fdv_ttl_secs, 90);
+    }
+
+    #[test]
+    fn test_get_metadata_cache_is_shared() {
+        let fetcher = test_fetcher();
+        let cache = fetcher.get_metadata_cache();
+        {
+            let mut guard = cache.write();
+            guard.insert(
+                "mint1".to_string(),
+                TokenMetadata {
+                    mint: "mint1".to_string(),
+                    freeze_authority: None,
+                    mint_authority: None,
+                    decimals: 9,
+                    supply: 1_000_000,
+                    is_token_2022: false,
+                    has_transfer_hook: false,
+                    has_permanent_delegate: false,
+                    creation_timestamp: None,
+                    age_hours: None,
+                },
+            );
+        }
+        assert_eq!(fetcher.cache_size(), 1);
+    }
+
+    #[test]
+    fn test_price_cache_builder() {
+        let fetcher = test_fetcher();
+        let pc = chimera_core::price_cache::PriceCache::new().unwrap();
+        let fetcher = fetcher.with_price_cache(std::sync::Arc::new(pc));
+        assert!(fetcher.price_cache.is_some());
+        let fetcher2 = test_fetcher();
+        let fetcher2 = fetcher2.with_price_cache_builder(std::sync::Arc::new(
+            chimera_core::price_cache::PriceCache::new().unwrap(),
+        ));
+        assert!(fetcher2.price_cache.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_liquidity_cache_hit_miss_and_stale() {
+        let fetcher = test_fetcher();
+        // Miss on empty cache.
+        assert!(fetcher.get_cached_liquidity("mint1").is_none());
+
+        // Update then hit.
+        fetcher.update_liquidity_cache("mint1", Decimal::from(50_000)).await;
+        assert_eq!(fetcher.get_cached_liquidity("mint1"), Some(Decimal::from(50_000)));
+
+        // Stale entry -> None.
+        {
+            let mut cache = fetcher.liquidity_cache.write();
+            cache.insert(
+                "stale".to_string(),
+                LiquidityEntry {
+                    liquidity_usd: Decimal::from(100),
+                    fetched_at: Utc::now() - chrono::Duration::seconds(3600),
+                },
+            );
+        }
+        assert!(fetcher.get_cached_liquidity("stale").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_fdv_cache_hit_miss_and_stale() {
+        let fetcher = test_fetcher();
+        assert!(fetcher.get_cached_fdv("mint1").is_none());
+
+        fetcher.update_fdv_cache("mint1", Decimal::from(1_000), Decimal::from(2_000)).await;
+        assert_eq!(fetcher.get_cached_fdv("mint1"), Some(Decimal::from(2_000)));
+
+        {
+            let mut cache = fetcher.fdv_cache.write();
+            cache.insert(
+                "stale".to_string(),
+                FdvEntry {
+                    fdv: Decimal::from(5),
+                    fetched_at: Utc::now() - chrono::Duration::seconds(3600),
+                },
+            );
+        }
+        assert!(fetcher.get_cached_fdv("stale").is_none());
+    }
+
+    #[test]
+    fn test_clear_cache_and_warming_stats() {
+        let fetcher = test_fetcher();
+        // Insert metadata then clear via the sync public path.
+        let cache = fetcher.get_metadata_cache();
+        cache.write().insert("mint1".to_string(), TokenMetadata {
+            mint: "mint1".to_string(),
+            freeze_authority: None,
+            mint_authority: None,
+            decimals: 9,
+            supply: 1,
+            is_token_2022: false,
+            has_transfer_hook: false,
+            has_permanent_delegate: false,
+            creation_timestamp: None,
+            age_hours: None,
+        });
+        assert_eq!(fetcher.cache_size(), 1);
+        fetcher.clear_cache();
+        assert_eq!(fetcher.cache_size(), 0);
+
+        // No warming cycles yet -> success rate 1.0.
+        let (cycles, successes, failures, rate) = fetcher.cache_warming_stats();
+        assert_eq!(cycles, 0);
+        assert_eq!(successes, 0);
+        assert_eq!(failures, 0);
+        assert_eq!(rate, 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_get_metadata_returns_fresh_cache_hit() {
+        let fetcher = test_fetcher();
+        let meta = TokenMetadata {
+            mint: "mint1".to_string(),
+            freeze_authority: None,
+            mint_authority: None,
+            decimals: 6,
+            supply: 1_000,
+            is_token_2022: false,
+            has_transfer_hook: false,
+            has_permanent_delegate: false,
+            creation_timestamp: None,
+            age_hours: Some(12.0),
+        };
+        fetcher.metadata_cache.write().insert("mint1".to_string(), meta.clone());
+        fetcher.last_fetched.write().insert("mint1".to_string(), Instant::now());
+
+        // Fresh cache entry returns immediately (no RPC call).
+        let got = fetcher.get_metadata("mint1").await.unwrap();
+        assert_eq!(got.mint, "mint1");
+        assert_eq!(got.age_hours, Some(12.0));
+    }
+
+    #[test]
+    fn test_parse_token_2022_extensions() {
+        // TransferHook = type 25.
+        let mut transfer = vec![25u8, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let (th, pd) = parse_token_2022_dangerous_extensions(&transfer);
+        assert!(th);
+        assert!(!pd);
+
+        // PermanentDelegate = type 27.
+        let perm = vec![27u8, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let (th, pd) = parse_token_2022_dangerous_extensions(&perm);
+        assert!(!th);
+        assert!(pd);
+
+        // Both present in sequence.
+        transfer.extend_from_slice(&perm);
+        let (th, pd) = parse_token_2022_dangerous_extensions(&transfer);
+        assert!(th);
+        assert!(pd);
+
+        // Unknown extension type ignored.
+        let unknown = vec![1u8, 0, 0, 0];
+        let (th, pd) = parse_token_2022_dangerous_extensions(&unknown);
+        assert!(!th);
+        assert!(!pd);
+
+        // Empty and truncated data are safe (no panic).
+        let (th, pd) = parse_token_2022_dangerous_extensions(&[]);
+        assert!(!th);
+        assert!(!pd);
+        let (th, pd) = parse_token_2022_dangerous_extensions(&[25u8, 0]);
+        assert!(!th);
+        assert!(!pd);
+    }
 }

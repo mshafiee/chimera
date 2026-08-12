@@ -114,4 +114,23 @@ mod tests {
     fn roster_hash_empty_is_stable() {
         assert_eq!(RunContext::hash_roster(&[]), RunContext::hash_roster(&[]));
     }
+
+    #[test]
+    fn run_id_truncates_config_hash_to_16_chars() {
+        // A config hash longer than 16 chars must be truncated in run_id while
+        // the full hash is preserved on the field.
+        let started = DateTime::from_timestamp(1_753_456_789, 0).unwrap();
+        let long_hash = "abcdef0123456789XYZWEXTRA".to_string();
+        let ctx = RunContext::new(&long_hash, &[], started);
+        let expected = format!("v{}-abcdef0123456789-1753456789000", env!("CARGO_PKG_VERSION"));
+        assert_eq!(ctx.run_id, expected);
+        assert_eq!(ctx.config_hash, long_hash);
+    }
+
+    #[test]
+    fn roster_hash_depends_on_contents() {
+        let a = vec!["walletA".to_string()];
+        let b = vec!["walletB".to_string()];
+        assert_ne!(RunContext::hash_roster(&a), RunContext::hash_roster(&b));
+    }
 }

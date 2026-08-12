@@ -404,6 +404,9 @@ pub(crate) mod tests {
         >,
         pub deleted_snapshot_days: RwLock<Vec<i32>>,
         pub wallet_pnl_stats: RwLock<HashMap<String, Option<(i64, Decimal, Decimal)>>>,
+        /// When true, `insert_trade` returns an error (used to exercise the
+        /// write-queue retry/failure path in shared infra tests).
+        pub fail_insert_trade: RwLock<bool>,
     }
 
     #[allow(clippy::unimplemented)]
@@ -430,6 +433,9 @@ pub(crate) mod tests {
         }
 
         async fn insert_trade(&self, trade: &InsertTrade) -> AppResult<i64> {
+            if *self.fail_insert_trade.read() {
+                return Err(AppError::Internal("mock insert_trade failure".into()));
+            }
             self.inserted_trades.write().push(trade.trade_uuid.clone());
             Ok(1)
         }

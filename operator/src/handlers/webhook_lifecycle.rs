@@ -496,3 +496,36 @@ pub async fn toggle_wallet_webhook(
 pub struct ToggleWebhookRequest {
     pub enabled: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_response_success_sets_fields() {
+        let resp: ApiResponse<u32> = ApiResponse::success(42);
+        assert!(resp.success);
+        assert_eq!(resp.data, Some(42));
+        assert!(resp.error.is_none());
+        assert!(resp.message.is_none());
+    }
+
+    #[test]
+    fn api_response_success_with_message() {
+        let resp: ApiResponse<String> =
+            ApiResponse::success_with_message("ok".to_string(), "done".to_string());
+        assert!(resp.success);
+        assert_eq!(resp.data.as_deref(), Some("ok"));
+        assert_eq!(resp.message.as_deref(), Some("done"));
+        assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn api_response_error_sets_error_only() {
+        let resp: ApiResponse<u32> = ApiResponse::error("boom".to_string());
+        assert!(!resp.success);
+        assert!(resp.data.is_none());
+        assert_eq!(resp.error.as_deref(), Some("boom"));
+        assert!(resp.message.is_none());
+    }
+}

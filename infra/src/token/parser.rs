@@ -1045,4 +1045,90 @@ mod tests {
             "All valid base58 chars should pass"
         );
     }
+
+    // ==========================================================================
+    // NON-SPECULATIVE / PUMPFUN CLASSIFICATION
+    // ==========================================================================
+
+    #[test]
+    fn test_is_non_speculative() {
+        assert!(is_non_speculative(known_tokens::USDC));
+        assert!(is_non_speculative(known_tokens::USDT));
+        assert!(is_non_speculative(known_tokens::WSOL));
+        assert!(!is_non_speculative("7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"));
+    }
+
+    #[test]
+    fn test_is_pumpfun_token() {
+        assert!(is_pumpfun_token("So1111111111111111111111111111111111111pump"));
+        assert!(is_pumpfun_token("anything-ends-with-pump"));
+        assert!(!is_pumpfun_token("7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"));
+        assert!(!is_pumpfun_token("pumpnope"));
+    }
+
+    // ==========================================================================
+    // PARSER FAST/SLOW CHECK (network-free paths)
+    // ==========================================================================
+
+    fn test_parser() -> TokenParser {
+        let config = TokenSafetyConfig::default();
+        let cache = Arc::new(TokenCache::new(100, 3600));
+        let fetcher = Arc::new(TokenMetadataFetcher::new(
+            "https://api.mainnet-beta.solana.com",
+        ));
+        TokenParser::new(config, cache, fetcher)
+    }
+
+    #[tokio::test]
+    async fn test_fast_check_rejects_short_address() {
+        let parser = test_parser();
+        let err = parser.fast_check("short", Strategy::Shield).await.unwrap_err();
+        assert!(matches!(err, AppError::InvalidTokenAddress(_)));
+    }
+
+    #[tokio::test]
+    async fn test_fast_check_rejects_long_address() {
+        let parser = test_parser();
+        let long = "a".repeat(100);
+        let err = parser.fast_check(&long, Strategy::Shield).await.unwrap_err();
+        assert!(matches!(err, AppError::InvalidTokenAddress(_)));
+    }
+
+    #[tokio::test]
+    async fn test_fast_check_rejects_invalid_chars() {
+        let parser = test_parser();
+        // 44 chars but contains a non-base58 character.
+        let addr = format!("{}X-{}", "A".repeat(21), "B".repeat(21));
+        assert_eq!(addr.len(), 44);
+        let err = parser.fast_check(&addr, Strategy::Shield).await.unwrap_err();
+        assert!(matches!(err, AppError::InvalidTokenAddress(_)));
+    }
+
+    #[tokio::test]
+    async fn test_fast_check_whitelisted_token_is_safe() {
+        let parser = test_parser();
+        let result = parser
+            .fast_check(known_tokens::USDC, Strategy::Shield)
+            .await
+            .unwrap();
+        assert!(result.safe);
+        // Second call hits the cache.
+        let again = parser
+            .fast_check(known_tokens::USDC, Strategy::Shield)
+            .await
+            .unwrap();
+        assert!(again.safe);
+    }
+
+    #[tokio::test]
+    async fn test_slow_check_whitelisted_token_is_safe() {
+        let parser = test_parser();
+        let result = parser
+            .slow_check(known_tokens::WSOL, Strategy::Spear)
+            .await
+            .unwrap();
+        assert!(result.safe);
+        assert!(result.honeypot_checked);
+        assert!(result.liquidity_checked);
+    }
 }

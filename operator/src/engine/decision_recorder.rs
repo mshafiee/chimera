@@ -388,3 +388,175 @@ async fn insert_decision_record(
     .map_err(crate::error::AppError::Database)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::selection::Ingress;
+    use crate::monitoring::test_db::MockDb;
+    use crate::models::Strategy;
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+    use std::sync::atomic::Ordering;
+
+    fn mock_run_context() -> Arc<RunContext> {
+        Arc::new(RunContext::new(
+            "aabbccddeeff0011",
+            &["walletA".to_string(), "walletB".to_string()],
+            chrono::Utc::now(),
+        ))
+    }
+
+    fn sample_request(action: Action) -> SelectionRequest {
+        SelectionRequest {
+            wallet_address: "wallet-1".to_string(),
+            token_address: "token-1".to_string(),
+            action,
+            source_amount_sol: dec!(1.5),
+            ingress: Ingress::Webhook,
+            source_slot: Some(123_456),
+            exit_fraction: None,
+            whale_entry_price: None,
+        }
+    }
+
+    fn sample_decision(req: &SelectionRequest) -> BuyDecision {
+        BuyDecision {
+            decision_id: "decision-42".to_string(),
+            admitted: true,
+            rejection_reason: None,
+            rejection_code: None,
+            strategy: Some(Strategy::Shield),
+            size_sol: Some(dec!(2.5)),
+            source_amount_sol: req.source_amount_sol,
+            wqs: Some(87.5),
+            wqs_confidence: Some(0.91),
+            quality_score: Some(12.3),
+            consensus_wallet_count: Some(4),
+            regime_multiplier: Some(dec!(1.1)),
+            token_age_hours: Some(48.0),
+            liquidity_usd: Some(dec!(100_000)),
+            volume_24h_usd: Some(dec!(500_000)),
+            price_impact_pct: Some(dec!(0.25)),
+            config_hash: "cfg".to_string(),
+            ingress: req.ingress,
+            is_consensus: true,
+            fast_check_errored: false,
+        }
+    }
+
+    #[test]
+    fn clamp_num_bounds_values() {
+        assert_eq!(clamp_num(1_000_000_000_000.0, NUMERIC_30_18_BOUND), NUMERIC_30_18_BOUND);
+        assert_eq!(clamp_num(-1_000_000_000_000.0, NUMERIC_30_18_BOUND), -NUMERIC_30_18_BOUND);
+        assert_eq!(clamp_num(5.5, NUMERIC_30_18_BOUND), 5.5);
+        assert_eq!(clamp_num(0.0, NUMERIC_20_10_BOUND), 0.0);
+    }
+
+    #[test]
+    fn from_decision_maps_buy_request_fields() {
+        let req = sample_request(Action::Buy);
+        let decision = sample_decision(&req);
+        let ctx = mock_run_context();
+
+        let row = DecisionRow::from_decision(&decision, &req, Some("trade-abc"), chrono::Utc::now(), &ctx);
+
+        assert_eq!(row.decision_id, "decision-42");
+        assert_eq!(row.run_id, ctx.run_id);
+        assert_eq!(row.code_revision, ctx.code_revision);
+        assert_eq!(row.config_hash, ctx.config_hash);
+        assert_eq!(row.roster_hash, ctx.roster_hash);
+        assert_eq!(row.trade_uuid.as_deref(), Some("trade-abc"));
+        assert_eq!(row.ingress, "webhook");
+        assert_eq!(row.wallet_address, "wallet-1");
+        assert_eq!(row.token_address, "token-1");
+        assert_eq!(row.action, "BUY");
+        assert_eq!(row.strategy.as_deref(), Some("SHIELD"));
+        assert!(row.admitted);
+        assert!(row.rejection_code.is_none());
+        assert!(row.rejection_reason.is_none());
+        assert_eq!(row.size_sol, Some(2.5));
+        assert_eq!(row.source_amount_sol, 1.5);
+        assert_eq!(row.wqs, Some(87.5));
+        assert_eq!(row.wqs_confidence, Some(0.91));
+        assert_eq!(row.quality_score, Some(12.3));
+        assert_eq!(row.consensus_wallet_count, Some(4));
+        assert_eq!(row.regime_multiplier, Some(1.1));
+        assert_eq!(row.token_age_hours, Some(48.0));
+        assert_eq!(row.liquidity_usd, Some(100_000.0));
+        assert_eq!(row.volume_24h_usd, Some(500_000.0));
+        assert_eq!(row.price_impact_pct, Some(0.25));
+        assert_eq!(row.source_slot, Some(123_456));
+    }
+
+    #[test]
+    fn from_decision_maps_sell_rejected_decision() {
+        let req = sample_request(Action::Sell);
+        let mut decision = sample_decision(&req);
+        decision.admitted = false;
+        decision.rejection_code = Some("TOKEN_SAFETY");
+        decision.rejection_reason = Some("blacklisted".to_string());
+        decision.strategy = None;
+        decision.size_sol = None;
+        decision.consensus_wallet_count = Some(usize::MAX); // overflow → None
+
+        let ctx = mock_run_context();
+        let row = DecisionRow::from_decision(&decision, &req, None, chrono::Utc::now(), &ctx);
+
+        assert_eq!(row.action, "SELL");
+        assert!(!row.admitted);
+        assert_eq!(row.rejection_code.as_deref(), Some("TOKEN_SAFETY"));
+        assert_eq!(row.rejection_reason.as_deref(), Some("blacklisted"));
+        assert!(row.strategy.is_none());
+        assert!(row.size_sol.is_none());
+        assert!(row.trade_uuid.is_none());
+        assert_eq!(row.consensus_wallet_count, None);
+    }
+
+    #[test]
+    fn from_decision_clamps_garbage_financials() {
+        let req = sample_request(Action::Buy);
+        let mut decision = sample_decision(&req);
+        // A corrupted response producing a huge float must be clamped, not
+        // propagate as-is (would overflow the NUMERIC(30,18) column).
+        decision.size_sol = Some(Decimal::from(1_000_000_000_000_000i64));
+        decision.regime_multiplier = Some(Decimal::from(1_000_000_000_000i64));
+
+        let ctx = mock_run_context();
+        let row = DecisionRow::from_decision(&decision, &req, None, chrono::Utc::now(), &ctx);
+
+        assert_eq!(row.size_sol, Some(NUMERIC_30_18_BOUND));
+        assert_eq!(row.regime_multiplier, Some(NUMERIC_20_10_BOUND));
+    }
+
+    #[test]
+    fn completeness_returns_1_when_nothing_attempted() {
+        let db = Arc::new(MockDb::new());
+        let rec = DecisionRecorder::new(db, mock_run_context());
+        assert_eq!(rec.completeness(), 1.0);
+    }
+
+    #[test]
+    fn completeness_ratio_and_clamp() {
+        let db = Arc::new(MockDb::new());
+        let rec = DecisionRecorder::new(db, mock_run_context());
+
+        // 3 attempted, 2 persisted → 2/3
+        rec.attempted.fetch_add(3, Ordering::Relaxed);
+        rec.persisted.fetch_add(2, Ordering::Relaxed);
+        assert!((rec.completeness() - 2.0 / 3.0).abs() < 1e-9);
+
+        // persisted cannot exceed attempted (clamped to 1.0)
+        rec.persisted.fetch_add(10, Ordering::Relaxed);
+        assert_eq!(rec.completeness(), 1.0);
+    }
+
+    #[test]
+    fn new_initializes_zero_counters() {
+        let db = Arc::new(MockDb::new());
+        let rec = DecisionRecorder::new(db, mock_run_context());
+        assert_eq!(rec.attempted.load(Ordering::Relaxed), 0);
+        assert_eq!(rec.persisted.load(Ordering::Relaxed), 0);
+        assert!(rec.run_context().run_id.contains("-"));
+    }
+}

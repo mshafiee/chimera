@@ -496,6 +496,7 @@ pub enum QueueError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::kelly_sizer::tests::MockDatabase;
 
     #[test]
     fn test_retry_config_default() {
@@ -512,5 +513,177 @@ mod tests {
         assert_eq!(config.max_batch_size, 100);
         assert_eq!(config.batch_window_ms, 100);
         assert_eq!(config.max_queue_depth, 1000);
+    }
+
+    fn trade(uuid: &str) -> TradeState {
+        TradeState {
+            trade_uuid: uuid.to_string(),
+            status: TradeStatus::Pending,
+            wallet_address: "wallet".to_string(),
+            token_address: "token".to_string(),
+            token_symbol: None,
+            strategy: "SHIELD".to_string(),
+            side: "BUY".to_string(),
+            amount_sol: Decimal::ONE,
+            updated_at: std::time::SystemTime::now(),
+            version: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_start_zero_workers_then_shutdown() {
+        let db = Arc::new(MockDatabase::default());
+        let mut queue = AsyncWriteQueue::new(db, RetryConfig::default(), BatchConfig::default());
+        queue.start(0).await.unwrap();
+        queue.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_full_rejects() {
+        let db = Arc::new(MockDatabase::default());
+        let batch = BatchConfig {
+            max_queue_depth: 1,
+            ..Default::default()
+        };
+        let queue = AsyncWriteQueue::new(db, RetryConfig::default(), batch);
+        queue.enqueue(WriteOperation::InsertTrade(trade("t1"))).await.unwrap();
+        let err = queue.enqueue(WriteOperation::InsertTrade(trade("t2"))).await.unwrap_err();
+        assert!(matches!(err, QueueError::QueueFull));
+    }
+
+    #[tokio::test]
+    async fn test_worker_processes_all_operation_types() {
+        let db = Arc::new(MockDatabase::default());
+        let mut queue = AsyncWriteQueue::new(db.clone(), RetryConfig::default(), BatchConfig::default());
+        queue.start(1).await.unwrap();
+
+        queue.enqueue(WriteOperation::InsertTrade(trade("t1"))).await.unwrap();
+        queue.enqueue(WriteOperation::InsertPosition {
+            trade_uuid: "p1".to_string(),
+            wallet_address: "wallet".to_string(),
+            token_address: "token".to_string(),
+            token_symbol: None,
+            strategy: "SHIELD".to_string(),
+            entry_amount_sol: Decimal::ONE,
+            entry_price: Decimal::from(2),
+            entry_tx_signature: "sig".to_string(),
+        }).await.unwrap();
+        queue.enqueue(WriteOperation::UpdateTradeStatus {
+            trade_uuid: "t1".to_string(),
+            status: TradeStatus::Active,
+            tx_signature: Some("sig".to_string()),
+            error_message: None,
+            network_fee_sol: None,
+        }).await.unwrap();
+        queue.enqueue(WriteOperation::UpdatePositionState {
+            trade_uuid: "p1".to_string(),
+            state: "ACTIVE".to_string(),
+        }).await.unwrap();
+        queue.enqueue(WriteOperation::UpsertWallet {
+            address: "wallet".to_string(),
+            status: "ACTIVE".to_string(),
+            wqs_score: None,
+            win_rate: None,
+        }).await.unwrap();
+
+        // Give the worker time to drain (batch window is 100ms).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let depth_zero = loop {
+            let snap = queue.get_metrics();
+            if snap.current_queue_depth == 0 {
+                break snap;
+            }
+            assert!(std::time::Instant::now() < deadline, "worker never drained queue");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        assert_eq!(depth_zero.operations_queued, 5);
+
+        queue.shutdown().await.unwrap();
+
+        // Worker flushed all operations to the mock DB on shutdown.
+        assert_eq!(db.inserted_trades.read().len(), 1);
+        assert_eq!(db.inserted_positions.read().len(), 1);
+        assert_eq!(db.updated_trade_statuses.read().len(), 1);
+        assert_eq!(db.updated_positions.read().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_batch_window_flushes() {
+        let db = Arc::new(MockDatabase::default());
+        let batch = BatchConfig {
+            max_batch_size: 100,
+            batch_window_ms: 10,
+            max_queue_depth: 1000,
+        };
+        let mut queue = AsyncWriteQueue::new(db.clone(), RetryConfig::default(), batch);
+        queue.start(1).await.unwrap();
+        queue.enqueue(WriteOperation::InsertTrade(trade("t0"))).await.unwrap();
+        // Exceed the 10ms batch window before the next arrival so the worker
+        // flushes the pending batch on receipt.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        queue.enqueue(WriteOperation::InsertTrade(trade("t1"))).await.unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let snapshot = loop {
+            let snap = queue.get_metrics();
+            if snap.operations_completed >= 1 {
+                break snap;
+            }
+            assert!(std::time::Instant::now() < deadline, "worker never flushed batch");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        queue.shutdown().await.unwrap();
+        assert_eq!(db.inserted_trades.read().len(), 2);
+        assert!(snapshot.batches_processed >= 1, "batch window should have flushed");
+        // The window-based flush ran before shutdown (completed >= 1).
+        assert!(snapshot.operations_completed >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_retry_gives_up_after_max_retries() {
+        let db = Arc::new(MockDatabase::default());
+        *db.fail_insert_trade.write() = true;
+        let retry = RetryConfig {
+            max_retries: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+            backoff_multiplier: 2.0,
+        };
+        let db_dyn: Arc<dyn Database> = db.clone();
+        let op = WriteOperation::InsertTrade(trade("t1"));
+        let result = AsyncWriteQueue::execute_operation_with_retry(&db_dyn, op, &retry, 0).await;
+        assert!(!result.success);
+        assert!(result.error.is_some());
+        assert_eq!(result.retry_count, 1, "one retry attempted before giving up");
+        // DB never recorded the trade because it always failed.
+        assert!(db.inserted_trades.read().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_retry_zero_retries_fails_immediately() {
+        let db = Arc::new(MockDatabase::default());
+        *db.fail_insert_trade.write() = true;
+        let retry = RetryConfig {
+            max_retries: 0,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+            backoff_multiplier: 2.0,
+        };
+        let db_dyn: Arc<dyn Database> = db.clone();
+        let op = WriteOperation::InsertTrade(trade("t1"));
+        let result = AsyncWriteQueue::execute_operation_with_retry(&db_dyn, op, &retry, 0).await;
+        assert!(!result.success);
+        assert_eq!(result.retry_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_execute_succeeds_on_first_try() {
+        let db = Arc::new(MockDatabase::default());
+        let db_dyn: Arc<dyn Database> = db.clone();
+        let op = WriteOperation::InsertTrade(trade("t1"));
+        let result = AsyncWriteQueue::execute_operation_with_retry(&db_dyn, op, &RetryConfig::default(), 0).await;
+        assert!(result.success);
+        assert_eq!(result.retry_count, 0);
+        assert_eq!(db.inserted_trades.read().len(), 1);
     }
 }
