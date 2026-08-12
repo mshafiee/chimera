@@ -951,94 +951,47 @@ impl SignalProcessor {
             None
         };
 
-        // ── Profitability gate check (enforce verdict before execution) ──
-        if let Some(ref verdict_cache) = self.profitability_verdict {
-            match verdict_cache.read().await.as_ref() {
-                Some(cached) => {
-                    match cached.verdict.as_str() {
-                        "GO" => {
-                            tracing::debug!(
-                                trade_uuid = %signal.trade_uuid,
-                                verdict = %cached.verdict,
-                                sample_size = cached.gates.sample_size.value,
-                                sample_size_threshold = cached.gates.sample_size.threshold,
-                                verdict_confidence = cached.gates.net_return.lower_95_ci,
-                                "Profitability gate verdict GO: proceeding with trade"
-                            );
-                        }
-                        "INCONCLUSIVE" => {
-                            let gates = &cached.gates;
-                            // Check if sample_size gate is PASS (gate failure) vs FAIL (insufficient data)
-                            if gates.sample_size.status == "PASS" && self.config.profitability_gate.enabled {
-                                // Gate failure (not insufficient sample): scale down position size
-                                let original_amount = signal.payload.amount_sol;
-                                let factor = rust_decimal::Decimal::from_f64(
-                                    self.config.profitability_gate.inconclusive_size_factor
-                                ).unwrap_or(rust_decimal::Decimal::ONE);
-                                let scaled_amount = original_amount * factor;
-                                signal.payload.amount_sol = scaled_amount;
-                                tracing::info!(
-                                    trade_uuid = %signal.trade_uuid,
-                                    verdict = %cached.verdict,
-                                    sample_size = gates.sample_size.value,
-                                    original_amount = %original_amount,
-                                    scaled_amount = %scaled_amount,
-                                    factor = %self.config.profitability_gate.inconclusive_size_factor,
-                                    "Profitability gate INCONCLUSIVE: scaled position size"
-                                );
-                            } else {
-                                // Insufficient sample: proceed normally
-                                tracing::debug!(
-                                    trade_uuid = %signal.trade_uuid,
-                                    verdict = %cached.verdict,
-                                    sample_size = gates.sample_size.value,
-                                    threshold = gates.sample_size.threshold,
-                                    verdict_confidence = gates.net_return.lower_95_ci,
-                                    "Profitability gate INCONCLUSIVE: sample insufficient, proceeding"
-                                );
-                            }
-                        }
-                        "STOP" => {
-                            // Reject trade via dead_letter + WS broadcast
-                            let _ = self.db.mark_trade_dead_letter(
-                                &signal.trade_uuid,
-                                &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                                "Profitability verdict STOP: integrity/completeness failure",
-                            ).await;
-                            if let Some(ref ws) = self.ws_state {
-                                ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
-                                    trade_uuid: signal.trade_uuid.clone(),
-                                    status: "DEAD_LETTER".to_string(),
-                                    token_symbol: Some(signal.payload.token.clone()),
-                                    strategy: signal.payload.strategy.to_string(),
-                                }));
-                            }
-                            tracing::warn!(
-                                trade_uuid = %signal.trade_uuid,
-                                verdict = %cached.verdict,
-                                sample_size = cached.gates.sample_size.value,
-                                "Profitability verdict STOP: rejecting trade via dead_letter"
-                            );
-                            return;
-                        }
-                        _ => {
-                            // Unknown verdict: proceed normally
-                            tracing::warn!(
-                                trade_uuid = %signal.trade_uuid,
-                                verdict = %cached.verdict,
-                                "Profitability verdict unknown, proceeding"
-                            );
-                        }
-                    }
-                }
-                None => {
-                    // No cached verdict yet (startup): proceed normally (fail-open)
-                    tracing::trace!(
-                        trade_uuid = %signal.trade_uuid,
-                        "No cached profitability verdict yet, proceeding (fail-open)"
-                    );
-                }
+        // ── Profitability gate: LIVE fail-closed enforcement ──────────────
+        // Live entry BUYs require a GO verdict (sample ≥ 60, 95%-CI net return
+        // > 0, drawdown ≤ 20%, completeness ≥ 99% — see docs/profitability-gates.md).
+        // Anything else dead-letters the trade. Paper/Devnet and exits always
+        // proceed. See `profitability_gate_blocks` for the decision table.
+        let verdict_str: String = match self.profitability_verdict.as_ref() {
+            Some(cache) => cache
+                .read()
+                .await
+                .as_ref()
+                .map_or(String::new(), |c| c.verdict.clone()),
+            None => String::new(), // no cache → cannot be GO → fail-closed
+        };
+        if let Some(reason) = profitability_gate_blocks(
+            self.config.trade_mode,
+            signal.payload.action,
+            signal.payload.strategy,
+            &verdict_str,
+        ) {
+            let _ = self
+                .db
+                .mark_trade_dead_letter(
+                    &signal.trade_uuid,
+                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                    reason,
+                )
+                .await;
+            if let Some(ref ws) = self.ws_state {
+                ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
+                    trade_uuid: signal.trade_uuid.clone(),
+                    status: "DEAD_LETTER".to_string(),
+                    token_symbol: Some(signal.payload.token.clone()),
+                    strategy: signal.payload.strategy.to_string(),
+                }));
             }
+            tracing::warn!(
+                trade_uuid = %signal.trade_uuid,
+                verdict = %verdict_str,
+                "Profitability gate: live entry BUY blocked (fail-closed)"
+            );
+            return;
         }
 
         // Execute the trade
@@ -1734,6 +1687,34 @@ impl SignalProcessor {
 /// Pure function extracted from `process_signal` so the ramp arithmetic is
 /// unit-testable at any wall-clock time; the caller computes
 /// `mins_since_midnight` from `Utc::now()`.
+/// Profitability gate decision table (pure, no I/O — unit-tested).
+///
+/// Returns `Some(reason)` when a signal must be dead-lettered by the
+/// profitability gate, or `None` when it may proceed. The gate is **live
+/// entry-BUY only**: Paper/Devnet and all exits (sells) always proceed, so
+/// shadow evidence keeps accumulating and protective exits are never blocked.
+///
+/// Live entries require a `"GO"` verdict; anything else (no verdict yet,
+/// INCONCLUSIVE, STOP, unknown) fails closed. See docs/profitability-gates.md.
+pub fn profitability_gate_blocks(
+    trade_mode: crate::config::TradeMode,
+    action: Action,
+    strategy: Strategy,
+    verdict: &str,
+) -> Option<&'static str> {
+    use crate::config::TradeMode;
+    if trade_mode != TradeMode::Live || action != Action::Buy || strategy == Strategy::Exit {
+        return None;
+    }
+    match verdict {
+        "GO" => None,
+        "" => Some("Profitability verdict not computed — fail-closed (live) until edge is proven"),
+        "STOP" => Some("Profitability verdict STOP: integrity/completeness failure"),
+        "INCONCLUSIVE" => Some("Profitability verdict INCONCLUSIVE: edge not statistically proven (live)"),
+        _ => Some("Profitability verdict unknown: fail-closed (live)"),
+    }
+}
+
 pub fn off_hours_multiplier(mins_since_midnight: i64, base_mult: Decimal) -> Decimal {
     const RAMP_DOWN_START: i64 = 60;
     const FULL_REDUCTION_START: i64 = 120;
@@ -1798,6 +1779,7 @@ impl Drop for AdmissionGuard<'_> {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use rust_decimal::Decimal;

@@ -216,7 +216,12 @@ services:
         - CHIMERA_SELECTION__SL_COOLDOWN_HOURS=12
         - CHIMERA_SELECTION__SL_COOLDOWN_LOSS_PCT=5
         # Paper trading mode (simulated execution, no real SOL)
-       - CHIMERA_TRADE_MODE=paper
+        - CHIMERA_TRADE_MODE=paper
+        # Profitability verdict enforcement (Phase C): populate the verdict
+        # cache so live entry BUYs can reach GO. In Live mode the SignalProcessor
+        # fail-closes any non-GO verdict; Paper mode always proceeds so shadow
+        # evidence keeps accumulating. See docs/profitability-gates.md.
+        - CHIMERA_PROFITABILITY_GATE__ENABLED=true
        # Dune Analytics API key for wallet PnL monitoring
        - DUNE_API_KEY=${DUNE_API_KEY:-}
        # Shadow paper trader: close positions after 24h (was 168h default) so

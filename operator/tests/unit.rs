@@ -132,3 +132,6 @@ mod entry_confirmation_tests;
 
 #[path = "unit/executor_tests.rs"]
 mod executor_tests;
+
+#[path = "unit/profitability_gate_tests.rs"]
+mod profitability_gate_tests;
