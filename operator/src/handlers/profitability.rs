@@ -359,6 +359,8 @@ pub async fn fetch_outcomes(
           AND t.status = 'CLOSED'
           AND t.pnl_data_valid = TRUE
           AND t.side = 'BUY'
+          AND t.net_pnl_sol IS NOT NULL
+          AND dr.size_sol IS NOT NULL
           AND dr.decided_at > NOW() - INTERVAL '30 days'
           AND ($1 = '' OR dr.run_id = $1)
         "#,
