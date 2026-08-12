@@ -129,6 +129,10 @@ const BIAS_THRESHOLD: f64 = 0.05;
 const MAX_SINGLE_LOSS_THRESHOLD: f64 = 0.10;
 const MAX_DRAWDOWN_THRESHOLD: f64 = 0.20;
 const COMPLETENESS_THRESHOLD: f64 = 0.99;
+// The verdict evaluates a rolling 30-day window of closed outcomes, NOT the
+// current run. A run is scoped to a single process lifetime and resets on every
+// restart, which left the verdict stuck at 0/60 samples and made GO unreachable.
+// The window is inlined as `dr.decided_at > NOW() - INTERVAL '30 days'` below.
 
 /// GET /api/v1/profitability/verdict
 pub async fn profitability_verdict(
@@ -137,19 +141,11 @@ pub async fn profitability_verdict(
 ) -> Result<Json<VerdictResponse>, AppError> {
     let DbPool::PostgreSQL(pool) = state.db.pool();
 
-    let run_id = match params
-        .run_id
-        .or_else(|| state.run_context.as_ref().map(|rc| rc.run_id.clone()))
-    {
-        Some(id) if !id.is_empty() => id,
-        _ => {
-            // An empty run_id makes the SQL predicate `($1 = '' OR ...)` match
-            // EVERY run, silently mixing scopes — refuse instead.
-            return Err(AppError::Internal(
-                "Cannot resolve run_id: no run context available and no run_id provided".to_string(),
-            ));
-        }
-    };
+    // The verdict evaluates a rolling 30-day window (rolling 30-day window), so an
+    // empty run_id is the DEFAULT and intended behavior — it accumulates
+    // evidence across restarts rather than resetting to 0/60 on every deploy.
+    // An explicit ?run_id= still scopes to that run if requested.
+    let run_id = params.run_id.filter(|id| !id.is_empty()).unwrap_or_default();
 
     let total_capital_sol: f64 = state
         .config
@@ -363,6 +359,7 @@ pub async fn fetch_outcomes(
           AND t.status = 'CLOSED'
           AND t.pnl_data_valid = TRUE
           AND t.side = 'SELL'
+          AND dr.decided_at > NOW() - INTERVAL '30 days'
           AND ($1 = '' OR dr.run_id = $1)
         "#,
     )
@@ -410,6 +407,7 @@ pub async fn count_missing_outcomes(
         FROM decision_records dr
         WHERE dr.admitted = TRUE
           AND dr.action = 'BUY'
+          AND dr.decided_at > NOW() - INTERVAL '30 days'
           AND ($1 = '' OR dr.run_id = $1)
           AND (
             dr.trade_uuid IS NULL
@@ -442,6 +440,7 @@ pub async fn count_invalid_pnl(
         WHERE dr.admitted = TRUE
           AND dr.action = 'BUY'
           AND t.pnl_data_valid = FALSE
+          AND dr.decided_at > NOW() - INTERVAL '30 days'
           AND ($1 = '' OR dr.run_id = $1)
         "#,
     )

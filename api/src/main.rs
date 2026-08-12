@@ -3782,7 +3782,10 @@ async fn refresh_verdict(
 ) -> Result<Option<CachedVerdict>, anyhow::Error> {
     use chimera_operator::handlers::evaluate_gates;
 
-    let run_id = run_context.run_id.clone();
+    // Rolling 30-day window (empty run_id bypasses per-run scoping) so the
+    // verdict accumulates evidence across restarts instead of resetting to 0/60.
+    let _ = run_context;
+    let run_id = String::new();
 
     let outcomes = fetch_outcomes(pool, &run_id).await?;
     let missing_outcomes = count_missing_outcomes(pool, &run_id).await?;
