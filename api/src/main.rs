@@ -343,6 +343,22 @@ async fn main() -> anyhow::Result<()> {
     config.trade_mode =
         resolve_trade_mode(explicit_mode, config.trade_mode, &config.rpc.primary_url);
 
+    // The config crate does not reliably map CHIMERA_PROFITABILITY_GATE__ENABLED
+    // -> config.profitability_gate.enabled (the underscore-bearing segment breaks
+    // the "__" separator split — same quirk as CHIMERA_JUPITER__API_KEY below).
+    // Read it explicitly so the verdict refresh task + enforcement cache populate.
+    if let Ok(v) = std::env::var("CHIMERA_PROFITABILITY_GATE__ENABLED") {
+        let enabled = matches!(v.to_lowercase().as_str(), "true" | "1");
+        if config.profitability_gate.enabled != enabled {
+            tracing::info!(
+                from_config = config.profitability_gate.enabled,
+                from_env = enabled,
+                "profitability_gate.enabled overridden from CHIMERA_PROFITABILITY_GATE__ENABLED"
+            );
+            config.profitability_gate.enabled = enabled;
+        }
+    }
+
     // Install the Jupiter API key into the process-global credential store.
     // Attached as `x-api-key` on every Jupiter request (quote/swap/price).
     // F1: keyless access is being phased out; Live mode hard-fails without it
