@@ -345,7 +345,11 @@ services:
       # penalty when historical data is missing (instead of strict rejection)
       - SCOUT_STRICT_HISTORICAL_LIQUIDITY=flexible
       # Performance Optimization
-      - SCOUT_WALLET_TX_LIMIT=100
+      # Helius quota conservation (2026-08-13): the daily credit quota is
+      # exhausted by combined scout analysis (~50k tx-fetches/cycle) + operator
+      # webhook/RPC monitoring, halting all signal flow. Cut per-wallet tx fetch
+      # (100->60) to stretch the quota. Was 100.
+      - SCOUT_WALLET_TX_LIMIT=60
       - SCOUT_WALLET_TX_MAX_PAGES=15
       - SCOUT_DISCOVERY_MIN_SOL=0.05                             # Increased from 0.01 (filter spam)
       - SCOUT_MIN_WALLET_AGE_DAYS=7                               # Filter out wallets < 7 days old

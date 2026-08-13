@@ -600,6 +600,22 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(30),
+        // Shadow total-PnL proven branch: a wallet is also proven on total
+        // shadow mirror_main PnL (captures moonshot wallets the t-stat rejects).
+        shadow_proven_enabled: std::env::var("CHIMERA_SELECTION__SHADOW_PROVEN_ENABLED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(true),
+        shadow_proven_min_samples: std::env::var("CHIMERA_SELECTION__SHADOW_PROVEN_MIN_SAMPLES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20),
+        shadow_proven_min_total_pnl_sol: std::env::var(
+            "CHIMERA_SELECTION__SHADOW_PROVEN_MIN_TOTAL_PNL_SOL",
+        )
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2.0),
         // Token liquidity-velocity gate: only pump.fun curve tokens in the
         // fast-accumulation phase (velocity >= 0.10 SOL/trade) and before the
         // late-curve dump zone (completion <= 0.85).

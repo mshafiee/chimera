@@ -145,6 +145,16 @@ pub struct SelectionConfig {
     pub wallet_tstat_threshold: f64,
     pub wallet_tstat_min_samples: i32,
     pub wallet_tstat_window_days: i32,
+    /// Shadow total-PnL proven branch (2026-08-13): a wallet ALSO counts as
+    /// "proven" if it has >= `shadow_proven_min_samples` mirror_main shadow
+    /// exits with total PnL >= `shadow_proven_min_total_pnl_sol`. This captures
+    /// high-variance "moonshot" wallets (e.g. 8% win / +278% avg, +195 SOL over
+    /// 70 signals) that the t-stat gate rejects (huge std -> low t). Total PnL
+    /// is the realized copy-profitability ground truth. OR'd with the t-stat
+    /// path in `wallet_is_proven`. Env: CHIMERA_SELECTION__SHADOW_PROVEN_ENABLED.
+    pub shadow_proven_enabled: bool,
+    pub shadow_proven_min_samples: i32,
+    pub shadow_proven_min_total_pnl_sol: f64,
     /// Token liquidity-velocity gate (2026-08-07): for pump.fun bonding-curve
     /// tokens, only admit those in the FAST-accumulation phase — "liquidity
     /// velocity is the single most informative predictor of graduation"
@@ -238,6 +248,9 @@ impl SelectionConfig {
         hasher.update(self.wallet_tstat_threshold.to_le_bytes());
         hasher.update(self.wallet_tstat_min_samples.to_le_bytes());
         hasher.update(self.wallet_tstat_window_days.to_le_bytes());
+        hasher.update(u8::from(self.shadow_proven_enabled).to_le_bytes());
+        hasher.update(self.shadow_proven_min_samples.to_le_bytes());
+        hasher.update(self.shadow_proven_min_total_pnl_sol.to_le_bytes());
         hasher.update(u8::from(self.token_velocity_gate_enabled).to_le_bytes());
         hasher.update(self.token_min_liquidity_velocity.to_le_bytes());
         hasher.update(self.token_max_curve_completion.to_le_bytes());
@@ -1996,6 +2009,12 @@ impl SelectionService {
     /// positive realized net PnL, per the live `trades` table. Fails closed on
     /// any error — an unverifiable wallet must not bypass the gate.
     async fn wallet_is_proven(&self, wallet_address: &str) -> bool {
+        // Shadow total-PnL proven (2026-08-13): admits high-variance "moonshot"
+        // wallets (big total shadow PnL, low t-stat) the paths below reject.
+        // OR'd first so it short-circuits; no-op when shadow_proven_enabled=false.
+        if self.wallet_is_shadow_total_proven(wallet_address).await {
+            return true;
+        }
         // Research-backed criterion (arxiv 2601.08641): wallet selection is
         // the dominant factor in copier profitability. Only wallets whose
         // shadow mirror_main PnL is STATISTICALLY significant (t > threshold)
@@ -2107,6 +2126,54 @@ impl SelectionService {
             passes,
             "T-stat check"
         );
+        passes
+    }
+
+    /// Shadow total-PnL proven check (2026-08-13): a wallet counts as proven if
+    /// its `mirror_main` shadow exits in the window total >=
+    /// `shadow_proven_min_total_pnl_sol` over >= `shadow_proven_min_samples`
+    /// exits. Unlike the t-stat gate, this captures high-variance "moonshot"
+    /// wallets whose edge is real in total PnL but not statistically significant
+    /// by t (huge std from rare large winners). Reuses `get_wallet_pnl_statistics`
+    /// (total PnL ≈ mean × n). Fail-closed on any error or missing data.
+    async fn wallet_is_shadow_total_proven(&self, wallet_address: &str) -> bool {
+        if !self.config.shadow_proven_enabled {
+            return false;
+        }
+        let stats = match self
+            .db
+            .get_wallet_pnl_statistics(wallet_address, self.config.wallet_tstat_window_days)
+            .await
+        {
+            Ok(Some(s)) => s,
+            Ok(None) => return false,
+            Err(e) => {
+                tracing::warn!(
+                    wallet = wallet_address,
+                    error = %e,
+                    "Shadow total-PnL proven check failed — treating as unproven (fail-closed)"
+                );
+                return false;
+            }
+        };
+        let (n, mean, _stddev) = stats;
+        if n < self.config.shadow_proven_min_samples as i64 || mean <= Decimal::ZERO {
+            return false;
+        }
+        let total = mean * Decimal::from(n);
+        let min_total = Decimal::from_f64(self.config.shadow_proven_min_total_pnl_sol)
+            .unwrap_or(Decimal::ZERO);
+        let passes = total >= min_total;
+        if passes {
+            tracing::info!(
+                wallet = wallet_address,
+                n,
+                mean = %mean,
+                total_pnl = %total,
+                min_total_pnl = %min_total,
+                "Shadow total-PnL proven check passed — moonshot wallet admitted"
+            );
+        }
         passes
     }
 
@@ -2264,6 +2331,9 @@ mod tests {
             wallet_tstat_threshold: 1.645,
             wallet_tstat_min_samples: 10,
             wallet_tstat_window_days: 30,
+            shadow_proven_enabled: true,
+            shadow_proven_min_samples: 20,
+            shadow_proven_min_total_pnl_sol: 2.0,
             token_velocity_gate_enabled: false,
             token_min_liquidity_velocity: 0.10,
             token_max_curve_completion: 0.85,
