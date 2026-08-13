@@ -333,7 +333,7 @@ services:
       - BIRDEYE_API_KEY=${BIRDEYE_API_KEY:-}
       # Improved Discovery Configuration
       - SCOUT_MIN_TRADE_COUNT=1
-      - SCOUT_MAX_WALLETS=500
+      - SCOUT_MAX_WALLETS=250
       - SCOUT_DISCOVERY_HOURS=72
       # Deep scan capped at 7d (was 720h): 30-day scan hung on 2026-08-05
       # (started 00:56, never completed — scout stuck at 0% CPU all day,
@@ -351,7 +351,7 @@ services:
       # (100->60) to stretch the quota. Was 100.
       - SCOUT_WALLET_TX_LIMIT=60
       - SCOUT_WALLET_TX_MAX_PAGES=15
-      - SCOUT_DISCOVERY_MIN_SOL=0.05                             # Increased from 0.01 (filter spam)
+      - SCOUT_DISCOVERY_MIN_SOL=0.1                              # Raised 0.05->0.1 to cut discovery volume + Helius burn
       - SCOUT_MIN_WALLET_AGE_DAYS=7                               # Filter out wallets < 7 days old
       - SCOUT_VALIDATE_WALLET_ACTIVITY=true                       # Require recent trades at discovery (filter dormant wallets)
       - SCOUT_ACTIVITY_RECENCY_HOURS=24                           # Discovered wallet must have >=1 trade in last 24h (was 48h — fresher wallets)

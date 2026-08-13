@@ -2723,6 +2723,19 @@ async def main_async():
     elif not _reval_enabled:
         print("\n[Scout] Re-validation sweep: SKIPPED (SCOUT_REVALIDATE_CANDIDATES not enabled)")
 
+    # Shadow-profitability promotion (2026-08-13): re-apply AFTER the roster write
+    # + re-validation sweep so scout's WQS/performance re-classification does not
+    # overwrite promotions of wallets with PROVEN mirror_main shadow PnL (the
+    # ground truth). Idempotent; promote proven winners, demote proven losers.
+    if not args.dry_run:
+        try:
+            from core.shadow_promoter import run_cycle as _shadow_cycle
+            _s = _shadow_cycle(dry_run=False)
+            print(f"[Scout] Shadow-profitability roster correction: "
+                  f"+{len(_s['promote'])} promoted, {len(_s['demote'])} demoted")
+        except Exception as e:
+            print(f"[Scout] Shadow-promoter cycle failed (non-fatal): {e}")
+
     # Summary
     print("\n[Scout] Analysis complete:")
     print(f"  Total analyzed: {stats['total']}")
