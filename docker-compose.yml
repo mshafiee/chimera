@@ -153,6 +153,10 @@ services:
        # RPC endpoints: use Helius RPC (reliable from this network) instead of
        # the public Solana RPC, which has proven unreachable here (DNS rotates
        # to IPs that time out, taking the health check down -> HAProxy 503).
+       # RPC endpoints. Set CHIMERA_RPC__FALLBACK_URL to a DIFFERENT provider
+       # (e.g. a second Helius project, or Quicknode/Triton) so a single-provider
+       # quota exhaustion can't take down both RPC and signal ingress. Today both
+       # default to the same Helius key — one quota event halts all trading.
        - "CHIMERA_RPC__PRIMARY_URL=${CHIMERA_RPC__PRIMARY_URL:-https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}}"
        - "CHIMERA_RPC__FALLBACK_URL=${CHIMERA_RPC__FALLBACK_URL:-https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}}"
        # Minimum WQS for signal admission
