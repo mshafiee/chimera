@@ -3933,14 +3933,24 @@ impl Database for PostgresBackend {
         min_samples: i32,
     ) -> AppResult<Option<rust_decimal::Decimal>> {
         let avg: Option<(rust_decimal::Decimal,)> = sqlx::query_as(
-            "SELECT AVG(se.pnl_pct)
-             FROM shadow_exits se
-             JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
-             WHERE sp.token_address = $1
-               AND se.exit_strategy = 'mirror_main'
-               AND sp.opened_at > NOW() - ($2 || ' hours')::interval
-             GROUP BY sp.token_address
-             HAVING COUNT(*) >= $3",
+            // Dedup (2026-08-14): keep one exit per (wallet, hour).
+            // Repeat whale BUY signals opened up to 14 shadow positions per
+            // token in under a minute, multiplying every moonshot exit N
+            // times and inflating this gate 7-14x. no_price exits book zero
+            // PnL and are excluded so they neither dilute the average nor
+            // shadow a real position in the same hour bucket.
+            r#"WITH dedup AS (
+                 SELECT DISTINCT ON (sp.wallet_address, date_trunc('hour', sp.opened_at))
+                        se.pnl_pct
+                 FROM shadow_exits se
+                 JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
+                 WHERE sp.token_address = $1
+                   AND se.exit_strategy = 'mirror_main'
+                   AND se.exit_reason IS DISTINCT FROM 'no_price'
+                   AND sp.opened_at > NOW() - ($2 || ' hours')::interval
+                 ORDER BY sp.wallet_address, date_trunc('hour', sp.opened_at), sp.opened_at
+               )
+               SELECT AVG(pnl_pct) FROM dedup HAVING COUNT(*) >= $3"#,
         )
         .bind(token_address)
         .bind(window_hours)
@@ -3956,15 +3966,31 @@ impl Database for PostgresBackend {
         window_days: i32,
     ) -> AppResult<Option<(i64, rust_decimal::Decimal, rust_decimal::Decimal)>> {
         let row: Option<(i64, rust_decimal::Decimal, rust_decimal::Decimal)> = sqlx::query_as(
-            "SELECT COUNT(*)::bigint AS n,
-                    COALESCE(AVG(se.pnl_pct), 0) AS mean,
-                    COALESCE(STDDEV(se.pnl_pct), 0) AS stddev
-             FROM shadow_exits se
-             JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
-             WHERE sp.wallet_address = $1
-               AND se.exit_strategy IN ('mirror_main', 'dune_wallet')
-               AND sp.opened_at > NOW() - ($2 || ' days')::interval
-             HAVING COUNT(*) > 0",
+            // Dedup (2026-08-14): one exit per (token, strategy, hour) — see
+            // get_token_mirror_avg_pnl. This feeds the t-stat gate and the
+            // shadow total-PnL proven branch; duplicate positions multiplied
+            // both mean×n totals and sample counts, admitting wallets whose
+            // only "edge" was re-signaling a pumping token. The strategy is
+            // part of the key: mirror_main and dune_wallet rows on the same
+            // token+hour are independent evidence, not duplicates.
+            // no_price exits are excluded (zero-PnL distortions of
+            // mean/stddev).
+            r#"WITH dedup AS (
+                 SELECT DISTINCT ON (sp.token_address, se.exit_strategy, date_trunc('hour', sp.opened_at))
+                        se.pnl_pct
+                 FROM shadow_exits se
+                 JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
+                 WHERE sp.wallet_address = $1
+                   AND se.exit_strategy IN ('mirror_main', 'dune_wallet')
+                   AND se.exit_reason IS DISTINCT FROM 'no_price'
+                   AND sp.opened_at > NOW() - ($2 || ' days')::interval
+                 ORDER BY sp.token_address, se.exit_strategy, date_trunc('hour', sp.opened_at), sp.opened_at
+               )
+               SELECT COUNT(*)::bigint AS n,
+                      COALESCE(AVG(pnl_pct), 0) AS mean,
+                      COALESCE(STDDEV(pnl_pct), 0) AS stddev
+               FROM dedup
+               HAVING COUNT(*) > 0"#,
         )
         .bind(wallet_address)
         .bind(window_days)

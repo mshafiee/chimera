@@ -571,7 +571,10 @@ async fn main() -> anyhow::Result<()> {
         mirror_gate_min_samples: std::env::var("CHIMERA_SELECTION__MIRROR_GATE_MIN_SAMPLES")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(3),
+            // 10 since 2026-08-14 (was lowered to 3 on inflated duplicate
+            // shadow data). Deduped statistics need the original sample
+            // floor before a token's mirror average means anything.
+            .unwrap_or(10),
         mirror_gate_window_hours: std::env::var("CHIMERA_SELECTION__MIRROR_GATE_WINDOW_HOURS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -580,6 +583,14 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(rust_decimal::Decimal::new(3, 0)), // 3%
+        momentum_bypass_enabled: std::env::var("CHIMERA_SELECTION__MOMENTUM_BYPASS_ENABLED")
+            .ok()
+            .map(|v| v == "true" || v == "1")
+            // Default OFF (2026-08-14): the bypass admits tokens on
+            // micro-tick "momentum" from a seconds-old price-cache history —
+            // late entries into in-progress pumps are the losing class in
+            // deduplicated shadow data. Opt-in only.
+            .unwrap_or(false),
         // Wallet profitability gate: only wallets with statistically
         // significant shadow mirror_main PnL (t-stat > 1.645, >= 10 samples,
         // 30d window) are proven signal sources. Research-backed

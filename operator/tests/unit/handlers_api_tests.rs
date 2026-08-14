@@ -461,11 +461,13 @@ async fn shadow_leaderboard_empty_and_seeded() {
     )
     .await;
     seed_shadow_exit(&h.pool, "shadow-1", "mirror_main", "0.25", "8.0").await;
+    // Second exit on a DIFFERENT token: same-hour duplicates on one
+    // (wallet, token) are deduped since 2026-08-14.
     seed_shadow_position(
         &h.pool,
         "shadow-2",
         WALLET_A,
-        TOKEN_A,
+        TOKEN_B,
         true,
         chrono::Utc::now(),
     )
@@ -482,6 +484,18 @@ async fn shadow_leaderboard_empty_and_seeded() {
     )
     .await;
     seed_shadow_exit(&h.pool, "shadow-3", "mirror_main", "9.0", "50.0").await;
+    // Duplicate of shadow-1 (same wallet+token, same hour): must be dropped
+    // by the dedup so the row below still reports exits_7d = 2.
+    seed_shadow_position(
+        &h.pool,
+        "shadow-4",
+        WALLET_A,
+        TOKEN_A,
+        true,
+        chrono::Utc::now(),
+    )
+    .await;
+    seed_shadow_exit(&h.pool, "shadow-4", "mirror_main", "9.0", "50.0").await;
 
     let resp = api_get(&h.app, "/api/v1/shadow/leaderboard", Default::default()).await;
     assert_eq!(resp.status(), StatusCode::OK);

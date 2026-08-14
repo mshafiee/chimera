@@ -88,6 +88,9 @@ fn base_config() -> SelectionConfig {
         wallet_tstat_threshold: 1.645,
         wallet_tstat_min_samples: 10,
         wallet_tstat_window_days: 30,
+        shadow_proven_enabled: false,
+        shadow_proven_min_samples: 20,
+        shadow_proven_min_total_pnl_sol: 2.0,
         token_velocity_gate_enabled: false,
         token_min_liquidity_velocity: 0.10,
         token_max_curve_completion: 0.85,
@@ -107,6 +110,7 @@ fn base_config() -> SelectionConfig {
         repeat_signal_gate_enabled: true,
         repeat_signal_min_prior: 1,
         momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
+        momentum_bypass_enabled: false,
     }
 }
 
@@ -179,6 +183,25 @@ fn request(token: &str, action: Action) -> SelectionRequest {
         source_slot: None,
         exit_fraction: None,
         whale_entry_price: None,
+    }
+}
+
+/// Seed `n` prior shadow positions for `token` so the repeat-signal gate
+/// (2026-08-11) sees genuine prior interest — full-pipeline admission tests
+/// must clear it like production signals do.
+async fn seed_prior_shadow(db: &Arc<dyn Database>, token: &str, n: i64) {
+    let pool = pg_pool(db);
+    for i in 0..n {
+        sqlx::query(
+            "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, main_admitted, entry_amount_sol, ingress) \
+             VALUES ($1, 'd', 'run', $2, $3, true, 0.1, 'webhook')",
+        )
+        .bind(format!("prior-{token}-{i}"))
+        .bind(WALLET)
+        .bind(token)
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 }
 
@@ -374,6 +397,7 @@ async fn test_token_safety_gates() {
 #[tokio::test]
 async fn test_token_age_gates() {
     let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
     seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
     seed_wallet(&db, WALLET_B, "ACTIVE", 75.0).await;
     seed_wallet(&db, WALLET_C, "ACTIVE", 90.0).await;
@@ -486,18 +510,20 @@ async fn test_liquidity_fetch_failure_fails_closed() {
 #[tokio::test]
 async fn test_proven_wallet_age_waiver() {
     let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
     let pool = pg_pool(&db);
     seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
 
     // T-stat-proven wallet: 10 mirror_main exits at +5% (stddev 0 → t=∞).
     for i in 0..10 {
         sqlx::query(
-            "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, strategy, main_admitted, entry_amount_sol, ingress) \
-             VALUES ($1, 'd', 'run', $2, $3, 'SHIELD', true, 0.1, 'webhook')",
+            "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, strategy, main_admitted, entry_amount_sol, ingress, opened_at) \
+             VALUES ($1, 'd', 'run', $2, $3, 'SHIELD', true, 0.1, 'webhook', NOW() - make_interval(hours => $4::int))",
         )
         .bind(format!("waiver-{i}"))
         .bind(WALLET)
         .bind(TOKEN)
+        .bind(i as i32 + 1)
         .execute(&pool)
         .await
         .unwrap();
@@ -565,6 +591,7 @@ async fn test_liquidity_gates() {
 #[tokio::test]
 async fn test_consensus_or_proven_gate() {
     let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
     seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
     let mut cfg = base_config();
     cfg.require_consensus_or_proven = true;
@@ -643,6 +670,7 @@ async fn test_consensus_or_proven_gate() {
 
     // bypass_consensus_proven → gate skipped even for unproven wallets.
     let (db2, _guard2) = create_test_db().await;
+    seed_prior_shadow(&db2, TOKEN, 1).await;
     seed_wallet(&db2, WALLET, "ACTIVE", 80.0).await;
     let service = build_service(
         db2.clone(),
@@ -658,6 +686,7 @@ async fn test_consensus_or_proven_gate() {
 #[tokio::test]
 async fn test_tstat_gate_variants() {
     let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
     let pool = pg_pool(&db);
     seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
 
@@ -683,11 +712,12 @@ async fn test_tstat_gate_variants() {
     ) {
         for i in 0..n {
             sqlx::query(
-                "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, strategy, main_admitted, entry_amount_sol, ingress) \
-                 VALUES ($1, 'd', 'run', $2, '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R', 'SHIELD', true, 0.1, 'webhook')",
+                "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, strategy, main_admitted, entry_amount_sol, ingress, opened_at) \
+                 VALUES ($1, 'd', 'run', $2, '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R', 'SHIELD', true, 0.1, 'webhook', NOW() - make_interval(hours => $3::int))",
             )
             .bind(format!("{prefix}-{i}"))
             .bind(wallet)
+            .bind(i as i32 + 1)
             .execute(pool)
             .await
             .unwrap();
@@ -791,11 +821,12 @@ async fn test_consensus_and_cluster_detection() {
         for i in 0..10 {
             sqlx::query(
                 "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, strategy, main_admitted, entry_amount_sol, ingress) \
-                 VALUES ($1, 'd', 'run', $2, $3, 'SHIELD', true, 0.1, 'webhook')",
+                 VALUES ($1, 'd', 'run', $2, $3, 'SHIELD', true, 0.1, 'webhook', NOW() - make_interval(hours => $4::int))",
             )
             .bind(format!("cl-{w}-{i}"))
             .bind(w)
             .bind(TOKEN)
+            .bind(i as i32 + 1)
             .execute(&pool2)
             .await
             .unwrap();
@@ -837,6 +868,7 @@ async fn test_consensus_and_cluster_detection() {
 #[tokio::test]
 async fn test_mirror_gate_paths() {
     let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
     let pool = pg_pool(&db);
     seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
     let mut cfg = base_config();
@@ -845,11 +877,12 @@ async fn test_mirror_gate_paths() {
     async fn seed_mirror(pool: &sqlx::Pool<sqlx::Postgres>, token: &str, pnl_pcts: &[&str]) {
         for (i, p) in pnl_pcts.iter().enumerate() {
             sqlx::query(
-                "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, strategy, main_admitted, entry_amount_sol, ingress) \
-                 VALUES ($1, 'd', 'run', '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU', $2, 'SHIELD', true, 0.1, 'webhook')",
+                "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, strategy, main_admitted, entry_amount_sol, ingress, opened_at) \
+                 VALUES ($1, 'd', 'run', '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU', $2, 'SHIELD', true, 0.1, 'webhook', NOW() - make_interval(hours => $3::int))",
             )
             .bind(format!("mir-{token}-{i}"))
             .bind(token)
+            .bind(i as i32 + 1)
             .execute(pool)
             .await
             .unwrap();
@@ -1039,6 +1072,8 @@ async fn test_velocity_gate_graduated_and_error_paths() {
         )),
     ));
     let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
+    seed_prior_shadow(&db, PUMP_TOKEN, 1).await;
     seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
     let mut cfg = base_config();
     cfg.token_velocity_gate_enabled = true;
@@ -1077,6 +1112,8 @@ async fn test_velocity_gate_graduated_and_error_paths() {
         )),
     ));
     let (db2, _guard2) = create_test_db().await;
+    seed_prior_shadow(&db2, TOKEN, 1).await;
+    seed_prior_shadow(&db2, PUMP_TOKEN_B, 1).await;
     seed_wallet(&db2, WALLET, "ACTIVE", 80.0).await;
     let service = build_service(db2.clone(), parser2, cfg);
     let d = service.decide(&request(PUMP_TOKEN_B, Action::Buy)).await;
@@ -1090,6 +1127,7 @@ async fn test_velocity_gate_graduated_and_error_paths() {
 #[tokio::test]
 async fn test_stop_loss_cooldown_gate() {
     let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
     let pool = pg_pool(&db);
     seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
 
@@ -1125,6 +1163,7 @@ async fn test_stop_loss_cooldown_gate() {
 
     // No recent loss on a different token → cooldown check passes (Ok(false)).
     let other_token = "9HsFJKqobLFZ6QLT7xXhS3ggDfSGTJPUh2Rfug4VFGWh";
+    seed_prior_shadow(&db, other_token, 1).await;
     let service = build_service(
         db.clone(),
         seeded_parser(other_token, "SHIELD", "100000", true),
@@ -1175,6 +1214,7 @@ async fn test_averaging_down_gate() {
 #[tokio::test]
 async fn test_pump_chase_gate() {
     let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
     seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
 
     let cache =
@@ -1209,6 +1249,7 @@ async fn test_pump_chase_gate() {
 
     // No history → fail-open → admitted.
     let (db2, _guard2) = create_test_db().await;
+    seed_prior_shadow(&db2, TOKEN, 1).await;
     seed_wallet(&db2, WALLET, "ACTIVE", 80.0).await;
     let cache2 =
         Arc::new(PriceCache::with_jupiter_price_api("http://127.0.0.1:1".to_string()).unwrap());
@@ -1233,6 +1274,7 @@ async fn test_pump_chase_gate() {
 #[tokio::test]
 async fn test_signal_quality_too_low() {
     let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
     // SHIELD wallet: liquidity exactly at the floor (0.1 score) + a 2h-old
     // token (passes the 1h age gate; age score 0.3) → 0.32 + 0.10 + 0.03 =
     // 0.45 < 0.55 shield threshold.
@@ -1258,6 +1300,7 @@ async fn test_signal_quality_too_low() {
 #[tokio::test]
 async fn test_portfolio_heat_limits() {
     let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
     let pool = pg_pool(&db);
     seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
 
@@ -1298,6 +1341,7 @@ async fn test_portfolio_heat_limits() {
     // max heat 20 SOL; SHIELD share = 20×0.6 = 12 SOL; a 15 SOL SHIELD
     // position (15% total heat) exceeds the allocation.
     let (db2, _guard2) = create_test_db().await;
+    seed_prior_shadow(&db2, TOKEN, 1).await;
     let pool2 = pg_pool(&db2);
     seed_wallet(&db2, WALLET, "ACTIVE", 80.0).await;
     sqlx::query(
@@ -1336,6 +1380,7 @@ async fn test_portfolio_heat_limits() {
 #[tokio::test]
 async fn test_wallet_performance_boost_path() {
     let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
     let pool = pg_pool(&db);
     seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
 
@@ -1373,6 +1418,7 @@ async fn test_wallet_performance_boost_path() {
 #[tokio::test]
 async fn test_position_size_zero_rejected() {
     let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
     let pool = pg_pool(&db);
     seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
 
@@ -1410,6 +1456,7 @@ async fn test_position_size_zero_rejected() {
 #[tokio::test]
 async fn test_admitted_buy_full_pipeline() {
     let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
     let pool = pg_pool(&db);
     seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
     seed_wallet(&db, WALLET_B, "ACTIVE", 75.0).await;
@@ -1464,6 +1511,7 @@ async fn test_admitted_buy_full_pipeline() {
 #[tokio::test]
 async fn test_admitted_with_all_attachments() {
     let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
     let pool = pg_pool(&db);
     seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
 

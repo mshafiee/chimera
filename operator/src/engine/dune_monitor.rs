@@ -1092,16 +1092,27 @@ impl DunePnlMonitor {
         }
 
         let losers: Vec<ShadowLoser> = sqlx::query_as(
+            // Dedup (2026-08-14): one exit per (wallet, token, hour) —
+            // duplicate shadow positions multiplied sample counts and let
+            // repeated signals on one losing token dominate the demotion
+            // statistics. no_price exits book zero PnL and are excluded.
             r#"
-            SELECT sp.wallet_address, COUNT(*) AS n, AVG(se.pnl_pct)::float8 AS avg_pnl
-            FROM shadow_exits se
-            JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
-            WHERE sp.opened_at > NOW() - make_interval(hours => $1::int)
-              AND se.exit_strategy = 'mirror_main'
-              AND sp.token_address NOT LIKE '%pump'
-              AND sp.main_admitted = true
-            GROUP BY sp.wallet_address
-            HAVING COUNT(*) >= $2 AND AVG(se.pnl_pct) < $3 + $4
+            WITH dedup AS (
+                SELECT DISTINCT ON (sp.wallet_address, sp.token_address, date_trunc('hour', sp.opened_at))
+                       sp.wallet_address, se.pnl_pct
+                FROM shadow_exits se
+                JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
+                WHERE sp.opened_at > NOW() - make_interval(hours => $1::int)
+                  AND se.exit_strategy = 'mirror_main'
+                  AND se.exit_reason IS DISTINCT FROM 'no_price'
+                  AND sp.token_address NOT LIKE '%pump'
+                  AND sp.main_admitted = true
+                ORDER BY sp.wallet_address, sp.token_address, date_trunc('hour', sp.opened_at), sp.opened_at
+            )
+            SELECT wallet_address, COUNT(*) AS n, AVG(pnl_pct)::float8 AS avg_pnl
+            FROM dedup
+            GROUP BY wallet_address
+            HAVING COUNT(*) >= $2 AND AVG(pnl_pct) < $3 + $4
             "#,
         )
         .bind(self.shadow_quality_window_hours)

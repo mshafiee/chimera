@@ -118,6 +118,9 @@ fn make_selection_service(
         wallet_tstat_threshold: 1.645,
         wallet_tstat_min_samples: 10,
         wallet_tstat_window_days: 30,
+        shadow_proven_enabled: false,
+        shadow_proven_min_samples: 20,
+        shadow_proven_min_total_pnl_sol: 2.0,
         token_velocity_gate_enabled: false,
         token_min_liquidity_velocity: 0.10,
         token_max_curve_completion: 0.85,
@@ -137,6 +140,7 @@ fn make_selection_service(
         repeat_signal_gate_enabled: true,
         repeat_signal_min_prior: 1,
         momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
+        momentum_bypass_enabled: false,
     };
     Arc::new(SelectionService::new(
         db, parser, None, None, None, None, None, config,

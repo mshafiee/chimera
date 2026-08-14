@@ -66,10 +66,11 @@ async fn insert_wallet_dune_shadow(db: &Arc<dyn Database>, wallet: &str, pnl_pct
         let shadow_id = format!("dune_{}_{}", &wallet[..8], i);
         sqlx::query(
             "INSERT INTO shadow_positions (shadow_id, wallet_address, token_address, main_admitted, entry_amount_sol, ingress, opened_at, fully_closed)
-             VALUES ($1, $2, 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', false, 0.1, 'Dune', NOW() - INTERVAL '1 hour', true)",
+             VALUES ($1, $2, 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', false, 0.1, 'Dune', NOW() - make_interval(hours => $3::int), true)",
         )
         .bind(&shadow_id)
         .bind(wallet)
+        .bind(i as i32 + 2)
         .execute(&pool)
         .await
         .unwrap();
@@ -93,10 +94,11 @@ async fn insert_wallet_mirror_shadow(db: &Arc<dyn Database>, wallet: &str, pnl_p
         let shadow_id = format!("mirror_{}_{}", &wallet[..8], i);
         sqlx::query(
             "INSERT INTO shadow_positions (shadow_id, wallet_address, token_address, main_admitted, entry_amount_sol, ingress, opened_at, fully_closed)
-             VALUES ($1, $2, 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', false, 0.1, 'Webhook', NOW() - INTERVAL '1 hour', true)",
+             VALUES ($1, $2, 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', false, 0.1, 'Webhook', NOW() - make_interval(hours => $3::int), true)",
         )
         .bind(&shadow_id)
         .bind(wallet)
+        .bind(i as i32 + 2)
         .execute(&pool)
         .await
         .unwrap();
@@ -201,6 +203,9 @@ fn build_selection_service(
         wallet_tstat_threshold: 1.645,
         wallet_tstat_min_samples: 10,
         wallet_tstat_window_days: 30,
+        shadow_proven_enabled: false,
+        shadow_proven_min_samples: 20,
+        shadow_proven_min_total_pnl_sol: 2.0,
         token_velocity_gate_enabled: false,
         token_min_liquidity_velocity: 0.10,
         token_max_curve_completion: 0.85,
@@ -220,6 +225,7 @@ fn build_selection_service(
         repeat_signal_gate_enabled: true,
         repeat_signal_min_prior: 1,
         momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
+        momentum_bypass_enabled: false,
     };
     let service = SelectionService::new(
         db,

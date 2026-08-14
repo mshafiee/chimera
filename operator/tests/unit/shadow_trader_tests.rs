@@ -841,3 +841,140 @@ async fn test_cleanup_peaks_removes_closed() {
     trader.check_exits().await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 }
+
+// ── Dedup (2026-08-14) ────────────────────────────────────────────────────────
+
+/// Repeat BUY signals for the same (wallet, token) inside the dedup window
+/// must open exactly ONE shadow position. Production data showed 14 positions
+/// in 31 seconds — every moonshot exit booked 14x, inflating all
+/// shadow-derived selection statistics.
+#[tokio::test]
+async fn test_open_shadow_position_dedups_repeat_signals() {
+    let (db, _guard) = create_test_db().await;
+    let pool = pg_pool(&db);
+    let cache = price_cache();
+    seed_prices(&cache, "2.0");
+    let trader = ShadowTrader::new(db.clone(), cache.clone(), shadow_config(), None);
+
+    // First signal opens the position.
+    trader.on_signal(
+        &decision(true, Some(Strategy::Shield)),
+        &request(Action::Buy),
+    );
+    wait_for_position(&pool, None).await;
+
+    // Second signal for the same (wallet, token) must be deduplicated.
+    trader.on_signal(
+        &decision(true, Some(Strategy::Shield)),
+        &request(Action::Buy),
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM shadow_positions WHERE wallet_address = $1")
+            .bind(WALLET)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        count, 1,
+        "duplicate (wallet, token) signal must not open a second position"
+    );
+
+    // A DIFFERENT token is unaffected by the dedup window.
+    let mut other = request(Action::Buy);
+    other.token_address = "DiffToken11111111111111111111111111111111111111".to_string();
+    cache.set_price(
+        &other.token_address,
+        dec("2.0"),
+        PriceSource::Cached,
+        None,
+    );
+    trader.on_signal(&decision(true, Some(Strategy::Shield)), &other);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM shadow_positions WHERE wallet_address = $1")
+            .bind(WALLET)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 2, "a different token must still open");
+}
+
+/// get_wallet_pnl_statistics (t-stat + shadow-proven input) must count ONE
+/// exit per (wallet, token, hour) and ignore no_price exits.
+#[tokio::test]
+async fn test_wallet_pnl_statistics_dedups_duplicate_positions() {
+    let (db, _guard) = create_test_db().await;
+    let pool = pg_pool(&db);
+
+    // Three duplicate positions for TOKEN inside one hour bucket (the
+    // machine-gun pattern), plus two unique tokens in their own buckets.
+    // All duplicates share an identical opened_at so they land in the same
+    // date_trunc('hour') bucket deterministically (no minute-boundary flake)
+    // and carry the same pnl_pct so the deduped mean does not depend on
+    // which of the tieing rows DISTINCT ON keeps.
+    for (id, token, mins_ago, pnl_pct) in [
+        ("dup-a", TOKEN, 299, dec("10")),
+        ("dup-b", TOKEN, 299, dec("10")),
+        ("dup-c", TOKEN, 299, dec("10")),
+        (
+            "uni-b",
+            "TokB11111111111111111111111111111111111111111",
+            200,
+            dec("20"),
+        ),
+        (
+            "uni-c",
+            "TokC11111111111111111111111111111111111111111",
+            100,
+            dec("30"),
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, main_admitted, entry_amount_sol, entry_price_usd, entry_sol_price_usd, ingress, opened_at) \
+             VALUES ($1, 'd', 'run', $2, $3, true, 0.1, 0.01, 150.0, 'webhook', NOW() - make_interval(mins => $4::int))",
+        )
+        .bind(id)
+        .bind(WALLET)
+        .bind(token)
+        .bind(mins_ago)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO shadow_exits (shadow_id, exit_strategy, exit_price_usd, exit_sol_price_usd, pnl_pct, pnl_sol, exit_reason, hold_duration_secs, exited_at) \
+             VALUES ($1, 'mirror_main', 0.02, 150.0, $2, 0.01, 'time_exit', 3600, NOW())",
+        )
+        .bind(id)
+        .bind(pnl_pct)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // A no_price exit must be excluded entirely (zero-PnL distortion).
+    sqlx::query(
+        "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, main_admitted, entry_amount_sol, ingress, fully_closed, opened_at) \
+         VALUES ('nop-d', 'd', 'run', $1, 'TokD11111111111111111111111111111111111111111', true, 0.1, 'webhook', true, NOW() - INTERVAL '50 minutes')",
+    )
+    .bind(WALLET)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO shadow_exits (shadow_id, exit_strategy, exit_reason, pnl_pct, pnl_sol, hold_duration_secs) \
+         VALUES ('nop-d', 'mirror_main', 'no_price', 0, 0, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (n, mean, _stddev) = db
+        .get_wallet_pnl_statistics(WALLET, 30)
+        .await
+        .unwrap()
+        .expect("stats must exist");
+    assert_eq!(n, 3, "3 hour-buckets (dup earliest + B + C), not 5 exits");
+    assert_eq!(mean, dec("20"), "mean over deduped set: (10+20+30)/3");
+}

@@ -292,6 +292,9 @@ pub async fn build_with_market_regime(
         wallet_tstat_threshold: 1.645,
         wallet_tstat_min_samples: 10,
         wallet_tstat_window_days: 30,
+        shadow_proven_enabled: false,
+        shadow_proven_min_samples: 20,
+        shadow_proven_min_total_pnl_sol: 2.0,
         token_velocity_gate_enabled: false,
         token_min_liquidity_velocity: 0.10,
         token_max_curve_completion: 0.85,
@@ -311,6 +314,7 @@ pub async fn build_with_market_regime(
         repeat_signal_gate_enabled: true,
         repeat_signal_min_prior: 1,
         momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
+        momentum_bypass_enabled: false,
     };
     let token_cache = Arc::new(TokenCache::new(1000, 300));
     let token_fetcher = Arc::new(
@@ -1014,6 +1018,9 @@ pub fn make_selection_service_with_parser(
         wallet_tstat_threshold: 1.645,
         wallet_tstat_min_samples: 10,
         wallet_tstat_window_days: 30,
+        shadow_proven_enabled: false,
+        shadow_proven_min_samples: 20,
+        shadow_proven_min_total_pnl_sol: 2.0,
         token_velocity_gate_enabled: false,
         token_min_liquidity_velocity: 0.10,
         token_max_curve_completion: 0.85,
@@ -1033,6 +1040,7 @@ pub fn make_selection_service_with_parser(
         repeat_signal_gate_enabled: true,
         repeat_signal_min_prior: 1,
         momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
+        momentum_bypass_enabled: false,
     };
     Arc::new(chimera_operator::engine::SelectionService::new(
         db,

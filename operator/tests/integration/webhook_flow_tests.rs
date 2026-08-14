@@ -335,6 +335,9 @@ async fn build_real_webhook_app() -> (Router, Arc<dyn Database>, crate::common::
         wallet_tstat_threshold: 1.645,
         wallet_tstat_min_samples: 10,
         wallet_tstat_window_days: 30,
+        shadow_proven_enabled: false,
+        shadow_proven_min_samples: 20,
+        shadow_proven_min_total_pnl_sol: 2.0,
         token_velocity_gate_enabled: false,
         token_min_liquidity_velocity: 0.10,
         token_max_curve_completion: 0.85,
@@ -354,6 +357,7 @@ async fn build_real_webhook_app() -> (Router, Arc<dyn Database>, crate::common::
         repeat_signal_gate_enabled: true,
         repeat_signal_min_prior: 1,
         momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
+        momentum_bypass_enabled: false,
     };
     let selection = Arc::new(SelectionService::new(
         db.clone(),

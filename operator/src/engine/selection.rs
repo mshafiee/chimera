@@ -136,6 +136,13 @@ pub struct SelectionConfig {
     /// bypass the shadow-mirror sample requirement. Tokens with sustained
     /// upward momentum have proven themselves without needing 10 shadow exits.
     pub momentum_bypass_min_pct: Decimal,
+    /// Master switch for the momentum bypass (2026-08-14, default OFF).
+    /// Price-cache history spans seconds-to-minutes for fresh tokens, so the
+    /// "momentum" it measures is micro-tick noise on an in-progress pump —
+    /// deduplicated shadow data shows late entries into pumping tokens are
+    /// the losing class (fixed_1h -4.2%/trade deduped vs +314 SOL inflated).
+    /// Opt-in only: CHIMERA_SELECTION__MOMENTUM_BYPASS_ENABLED=true.
+    pub momentum_bypass_enabled: bool,
     /// Wallet profitability gate (2026-08-07): only admit wallets whose
     /// shadow mirror_main PnL is statistically significant (t-statistic >
     /// threshold). Research: wallet selection is the dominant factor in
@@ -244,6 +251,7 @@ impl SelectionConfig {
         hasher.update(self.mirror_gate_min_samples.to_le_bytes());
         hasher.update(self.mirror_gate_window_hours.to_le_bytes());
         hasher.update(self.momentum_bypass_min_pct.to_string().as_bytes());
+        hasher.update(u8::from(self.momentum_bypass_enabled).to_le_bytes());
         hasher.update(u8::from(self.wallet_tstat_enabled).to_le_bytes());
         hasher.update(self.wallet_tstat_threshold.to_le_bytes());
         hasher.update(self.wallet_tstat_min_samples.to_le_bytes());
@@ -1283,28 +1291,35 @@ impl SelectionService {
                     // shows positive momentum, bypass the shadow-mirror sample
                     // requirement. Tokens with sustained upward price trend have
                     // proven themselves — the momentum IS the evidence.
+                    // Disabled by default since 2026-08-14: price-cache
+                    // history for fresh tokens is seconds old, so this
+                    // admitted late entries into in-progress pumps.
                     let mut momentum_bypassed = false;
-                    if let Some(ref price_cache) = self.price_cache {
-                        let history = price_cache.price_history_read();
-                        if let Some(token_history) = history.get(&req.token_address) {
-                            if token_history.len() >= 3 {
-                                let latest = token_history.back().map(|(_, p)| *p);
-                                let oldest = token_history.front().map(|(_, p)| *p);
-                                if let (Some(latest), Some(oldest)) = (latest, oldest) {
-                                    if oldest > Decimal::ZERO {
-                                        let momentum_pct =
-                                            ((latest - oldest) / oldest) * Decimal::from(100);
-                                        if momentum_pct >= self.config.momentum_bypass_min_pct {
-                                            momentum_bypassed = true;
-                                            tracing::info!(
-                                                ingress = ?req.ingress,
-                                                decision = "BUY",
-                                                token = %req.token_address,
-                                                wallet = %req.wallet_address,
-                                                momentum_pct = %momentum_pct,
-                                                "Shadow-mirror gate bypassed: token has positive price-cache momentum ({} samples)",
-                                                token_history.len()
-                                            );
+                    if self.config.momentum_bypass_enabled {
+                        if let Some(ref price_cache) = self.price_cache {
+                            let history = price_cache.price_history_read();
+                            if let Some(token_history) = history.get(&req.token_address) {
+                                if token_history.len() >= 3 {
+                                    let latest = token_history.back().map(|(_, p)| *p);
+                                    let oldest = token_history.front().map(|(_, p)| *p);
+                                    if let (Some(latest), Some(oldest)) = (latest, oldest) {
+                                        if oldest > Decimal::ZERO {
+                                            let momentum_pct =
+                                                ((latest - oldest) / oldest) * Decimal::from(100);
+                                            if momentum_pct
+                                                >= self.config.momentum_bypass_min_pct
+                                            {
+                                                momentum_bypassed = true;
+                                                tracing::info!(
+                                                    ingress = ?req.ingress,
+                                                    decision = "BUY",
+                                                    token = %req.token_address,
+                                                    wallet = %req.wallet_address,
+                                                    momentum_pct = %momentum_pct,
+                                                    "Shadow-mirror gate bypassed: token has positive price-cache momentum ({} samples)",
+                                                    token_history.len()
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -2353,6 +2368,7 @@ mod tests {
             repeat_signal_gate_enabled: true,
             repeat_signal_min_prior: 1,
             momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
+            momentum_bypass_enabled: false,
         };
 
         let mut config2 = config1.clone();

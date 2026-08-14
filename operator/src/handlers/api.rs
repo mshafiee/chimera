@@ -205,20 +205,32 @@ pub async fn get_shadow_leaderboard(
 ) -> Result<Json<Vec<ShadowLeaderboardRow>>, AppError> {
     let DbPool::PostgreSQL(pool) = state.db.pool();
     let rows: Vec<ShadowLeaderboardRow> = sqlx::query_as(
+        // Dedup (2026-08-14): one exit per (wallet, strategy, token, hour).
+        // Duplicate shadow positions (repeat signals, same token, seconds
+        // apart) booked moonshot gains N times and made the leaderboard —
+        // and any decision derived from it — overstate wallets 7-14x.
+        // no_price exits book zero PnL and are excluded.
         r#"
-        SELECT sp.wallet_address,
-               se.exit_strategy,
+        WITH dedup AS (
+            SELECT DISTINCT ON (sp.wallet_address, se.exit_strategy, sp.token_address, date_trunc('hour', sp.opened_at))
+                   sp.wallet_address, se.exit_strategy, se.pnl_pct, se.pnl_sol
+            FROM shadow_exits se
+            JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
+            WHERE sp.opened_at > NOW() - INTERVAL '7 days'
+              AND sp.token_address NOT LIKE '%pump'
+              AND sp.main_admitted = true
+              AND se.exit_reason IS DISTINCT FROM 'no_price'
+            ORDER BY sp.wallet_address, se.exit_strategy, sp.token_address, date_trunc('hour', sp.opened_at), sp.opened_at
+        )
+        SELECT wallet_address,
+               exit_strategy,
                COUNT(*) AS exits_7d,
-               SUM(CASE WHEN se.pnl_sol > 0 THEN 1 ELSE 0 END) AS wins_7d,
-               ROUND(100.0 * SUM(CASE WHEN se.pnl_sol > 0 THEN 1 ELSE 0 END) / COUNT(*), 1)::float8 AS win_rate_pct,
-               ROUND(AVG(se.pnl_pct)::numeric, 2)::float8 AS avg_pnl_pct,
-               ROUND(SUM(se.pnl_sol)::numeric, 3)::float8 AS total_pnl_sol
-        FROM shadow_exits se
-        JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
-        WHERE sp.opened_at > NOW() - INTERVAL '7 days'
-          AND sp.token_address NOT LIKE '%pump'
-          AND sp.main_admitted = true
-        GROUP BY sp.wallet_address, se.exit_strategy
+               SUM(CASE WHEN pnl_sol > 0 THEN 1 ELSE 0 END) AS wins_7d,
+               ROUND(100.0 * SUM(CASE WHEN pnl_sol > 0 THEN 1 ELSE 0 END) / COUNT(*), 1)::float8 AS win_rate_pct,
+               ROUND(AVG(pnl_pct)::numeric, 2)::float8 AS avg_pnl_pct,
+               ROUND(SUM(pnl_sol)::numeric, 3)::float8 AS total_pnl_sol
+        FROM dedup
+        GROUP BY wallet_address, exit_strategy
         ORDER BY total_pnl_sol DESC
         LIMIT 100
         "#,

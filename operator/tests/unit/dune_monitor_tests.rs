@@ -833,15 +833,18 @@ async fn test_demote_shadow_losers_flow() {
     let pool = pg_pool(&db);
     seed_wallet_status(&db, WALLET, "ACTIVE", 80.0).await;
 
-    // Three admitted shadow positions with -5% mirror_main exits.
+    // Three admitted shadow positions with -5% mirror_main exits, each in a
+    // distinct hour bucket (read-side dedup counts one exit per
+    // wallet+token+hour since 2026-08-14).
     for i in 0..3 {
         sqlx::query(
-            "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, strategy, main_admitted, entry_amount_sol, ingress) \
-             VALUES ($1, 'd', 'run', $2, $3, 'SHIELD', true, 0.1, 'webhook')",
+            "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, strategy, main_admitted, entry_amount_sol, ingress, opened_at) \
+             VALUES ($1, 'd', 'run', $2, $3, 'SHIELD', true, 0.1, 'webhook', NOW() - make_interval(hours => $4::int))",
         )
         .bind(format!("sl-{i}"))
         .bind(WALLET)
         .bind(TOKEN)
+        .bind(i + 1)
         .execute(&pool)
         .await
         .unwrap();

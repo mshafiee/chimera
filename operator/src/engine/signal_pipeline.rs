@@ -732,16 +732,27 @@ impl SignalProcessor {
                     let banned: bool = {
                         let DbPool::PostgreSQL(pool) = self.db.pool();
                         sqlx::query_scalar(
+                            // Dedup (2026-08-14): one exit per (wallet, hour)
+                            // so repeat whale BUY signals on a token cannot
+                            // multiply its sample count toward min_samples
+                            // with the same round-trip PnL. no_price exits
+                            // book zero PnL and are excluded.
                             r#"
                             SELECT EXISTS(
+                                WITH dedup AS (
+                                    SELECT DISTINCT ON (sp.wallet_address, date_trunc('hour', sp.opened_at))
+                                           se.pnl_pct
+                                    FROM shadow_exits se
+                                    JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
+                                    WHERE sp.token_address = $1
+                                      AND se.exit_strategy = 'mirror_main'
+                                      AND se.exit_reason IS DISTINCT FROM 'no_price'
+                                      AND sp.opened_at > NOW() - ($2 || ' hours')::interval
+                                    ORDER BY sp.wallet_address, date_trunc('hour', sp.opened_at), sp.opened_at
+                                )
                                 SELECT 1
-                                FROM shadow_exits se
-                                JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
-                                WHERE sp.token_address = $1
-                                  AND se.exit_strategy = 'mirror_main'
-                                  AND sp.opened_at > NOW() - ($2 || ' hours')::interval
-                                GROUP BY sp.token_address
-                                HAVING COUNT(*) >= $3 AND AVG(se.pnl_pct) < $4 + $5
+                                FROM dedup
+                                HAVING COUNT(*) >= $3 AND AVG(pnl_pct) < $4 + $5
                             )
                             "#,
                         )

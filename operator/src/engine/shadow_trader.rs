@@ -22,6 +22,14 @@ const EXIT_STRATEGIES: [&str; 5] = [
 
 const FIXED_HOLDS_SECS: [i64; 3] = [3600, 14400, 86400];
 
+/// Write-time dedup window: at most one shadow position per (wallet, token)
+/// within this window (2026-08-14). Repeat whale BUY signals on one token
+/// opened up to 14 shadow positions in 31 seconds; every moonshot exit then
+/// booked N times, inflating all shadow-derived statistics (mirror gate,
+/// t-stat, shadow-proven, demotion) 7-14x and promoting exactly the wrong
+/// wallets. Matches the read-side hour-bucket dedup granularity.
+const DEDUP_WINDOW_SECS: i64 = 3600;
+
 #[derive(Clone)]
 pub struct ShadowConfig {
     pub enabled: bool,
@@ -134,6 +142,44 @@ impl ShadowTrader {
     ) {
         let shadow_id = uuid::Uuid::new_v4().to_string();
         let sol_price = price_cache.get_sol_price_usd();
+
+        // Write-time dedup (2026-08-14): skip if this wallet already opened a
+        // real (priced) shadow position for this token inside the dedup
+        // window. See DEDUP_WINDOW_SECS. no_price positions do not block —
+        // they book zero PnL and a later priced signal must still open one.
+        {
+            let DbPool::PostgreSQL(pool) = db.pool();
+            let duplicate: Result<Option<i32>, _> = sqlx::query_scalar(
+                r#"SELECT 1 FROM shadow_positions
+                   WHERE wallet_address = $1
+                     AND token_address = $2
+                     AND entry_price_usd IS NOT NULL
+                     AND opened_at > NOW() - ($3 || ' seconds')::interval
+                   LIMIT 1"#,
+            )
+            .bind(&req.wallet_address)
+            .bind(&req.token_address)
+            .bind(DEDUP_WINDOW_SECS)
+            .fetch_optional(&pool)
+            .await;
+            match duplicate {
+                Ok(Some(_)) => {
+                    tracing::debug!(
+                        wallet = %req.wallet_address,
+                        token = %req.token_address,
+                        window_secs = DEDUP_WINDOW_SECS,
+                        "Shadow: duplicate (wallet, token) within dedup window — skipping position"
+                    );
+                    return;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    // Fail-open: the read-side dedup in every statistics
+                    // consumer is the correctness backstop.
+                    tracing::warn!(error = %e, "Shadow: dedup check failed — opening anyway");
+                }
+            }
+        }
 
         // NOTE (2026-08-06): shadow tokens are NOT tracked in the live price
         // cache — that pushed hundreds of tokens into the 5s background

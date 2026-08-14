@@ -291,6 +291,17 @@ async fn evaluate_price_held_but_selection_rejects() {
 async fn evaluate_admits_and_queues_trade() {
     let h = build(test_config()).await;
     seed_wallet(&h.pool, WALLET_A, "ACTIVE", Some(85.0)).await;
+    // Prior shadow signal so the repeat-signal gate (2026-08-11) does not
+    // shadow-only this token's first confirmed entry.
+    sqlx::query(
+        "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, main_admitted, entry_amount_sol, ingress) \
+         VALUES ('ec-prior', 'd', 'run', $1, $2, true, 0.1, 'webhook')",
+    )
+    .bind(WALLET_A)
+    .bind(TOKEN_A)
+    .execute(&h.pool)
+    .await
+    .unwrap();
 
     let price_cache = h.price_cache.clone();
     price_cache.set_price(TOKEN_A, dec("0.01"), PriceSource::Jupiter, Some(6));
