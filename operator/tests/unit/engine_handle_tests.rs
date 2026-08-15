@@ -141,6 +141,7 @@ fn make_selection_service(
         repeat_signal_min_prior: 1,
         momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
         momentum_bypass_enabled: false,
+        wqs_proven_waiver_enabled: true,
     };
     Arc::new(SelectionService::new(
         db, parser, None, None, None, None, None, config,

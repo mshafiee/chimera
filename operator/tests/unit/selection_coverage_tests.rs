@@ -111,6 +111,7 @@ fn base_config() -> SelectionConfig {
         repeat_signal_min_prior: 1,
         momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
         momentum_bypass_enabled: false,
+        wqs_proven_waiver_enabled: true,
     }
 }
 
@@ -562,6 +563,98 @@ async fn test_proven_wallet_age_waiver() {
     );
 }
 
+/// Proven-wallet WQS waiver (2026-08-15): a WQS-10 wallet whose deduped
+/// mirror_main statistics prove copy-profitability must clear the WQS floor;
+/// WQS (own PnL) and copy-PnL diverge post-dedup.
+#[tokio::test]
+async fn test_wqs_proven_waiver() {
+    let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
+    let pool = pg_pool(&db);
+
+    // T-stat-proven wallet at WQS 10 (below the 15 floor): 10 mirror_main
+    // exits at +5% spread over distinct hour buckets.
+    seed_wallet(&db, WALLET, "ACTIVE", 10.0).await;
+    for i in 0..10 {
+        sqlx::query(
+            "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, strategy, main_admitted, entry_amount_sol, ingress, opened_at) \
+             VALUES ($1, 'd', 'run', $2, $3, 'SHIELD', true, 0.1, 'webhook', NOW() - make_interval(hours => $4::int))",
+        )
+        .bind(format!("wqsw-{i}"))
+        .bind(WALLET)
+        .bind(TOKEN)
+        .bind(i as i32 + 1)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO shadow_exits (shadow_id, exit_strategy, pnl_pct, pnl_sol) VALUES ($1, 'mirror_main', 5.0, 0.005)",
+        )
+        .bind(format!("wqsw-{i}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let mut cfg = base_config();
+    cfg.wallet_tstat_enabled = true;
+    // Old token so the age gate passes; the WQS waiver is what's under test.
+    let (_hel, helius) = helius_mock_with_txs(vec![old_tx()]).await;
+    let service = build_service_full(
+        db.clone(),
+        seeded_parser(TOKEN, "SHIELD", "100000", true),
+        cfg.clone(),
+        None,
+        None,
+        None,
+        Some(helius),
+        None,
+    );
+    let d = service.decide(&request(TOKEN, Action::Buy)).await;
+    assert!(
+        d.admitted,
+        "WQS floor waived for proven wallet: {:?}",
+        d.rejection_code
+    );
+
+    // Waiver disabled → the floor rejects again.
+    let mut cfg_off = cfg.clone();
+    cfg_off.wqs_proven_waiver_enabled = false;
+    let service = build_service_full(
+        db.clone(),
+        seeded_parser(TOKEN, "SHIELD", "100000", true),
+        cfg_off,
+        None,
+        None,
+        None,
+        Some(helius_mock_with_txs(vec![old_tx()]).await.1),
+        None,
+    );
+    let d = service.decide(&request(TOKEN, Action::Buy)).await;
+    assert_eq!(d.rejection_code, Some("WQS_TOO_LOW"));
+
+    // Unproven WQS-10 wallet → floor applies even with the waiver on.
+    let (db3, _guard3) = create_test_db().await;
+    seed_prior_shadow(&db3, TOKEN, 1).await;
+    seed_wallet(&db3, WALLET, "ACTIVE", 10.0).await;
+    let service = build_service_full(
+        db3.clone(),
+        seeded_parser(TOKEN, "SHIELD", "100000", true),
+        cfg,
+        None,
+        None,
+        None,
+        Some(helius_mock_with_txs(vec![old_tx()]).await.1),
+        None,
+    );
+    let d = service.decide(&request(TOKEN, Action::Buy)).await;
+    assert_eq!(
+        d.rejection_code,
+        Some("WQS_TOO_LOW"),
+        "unproven wallets must not clear the WQS floor"
+    );
+}
+
 #[tokio::test]
 async fn test_liquidity_gates() {
     let (db, _guard) = create_test_db().await;
@@ -820,7 +913,7 @@ async fn test_consensus_and_cluster_detection() {
     for w in [WALLET, WALLET_B, WALLET_C] {
         for i in 0..10 {
             sqlx::query(
-                "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, strategy, main_admitted, entry_amount_sol, ingress) \
+                "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, strategy, main_admitted, entry_amount_sol, ingress, opened_at) \
                  VALUES ($1, 'd', 'run', $2, $3, 'SHIELD', true, 0.1, 'webhook', NOW() - make_interval(hours => $4::int))",
             )
             .bind(format!("cl-{w}-{i}"))

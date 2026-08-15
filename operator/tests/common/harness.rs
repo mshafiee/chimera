@@ -315,6 +315,7 @@ pub async fn build_with_market_regime(
         repeat_signal_min_prior: 1,
         momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
         momentum_bypass_enabled: false,
+        wqs_proven_waiver_enabled: true,
     };
     let token_cache = Arc::new(TokenCache::new(1000, 300));
     let token_fetcher = Arc::new(
@@ -1041,6 +1042,7 @@ pub fn make_selection_service_with_parser(
         repeat_signal_min_prior: 1,
         momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
         momentum_bypass_enabled: false,
+        wqs_proven_waiver_enabled: true,
     };
     Arc::new(chimera_operator::engine::SelectionService::new(
         db,

@@ -143,6 +143,12 @@ pub struct SelectionConfig {
     /// the losing class (fixed_1h -4.2%/trade deduped vs +314 SOL inflated).
     /// Opt-in only: CHIMERA_SELECTION__MOMENTUM_BYPASS_ENABLED=true.
     pub momentum_bypass_enabled: bool,
+    /// Proven-wallet WQS waiver (2026-08-15, default ON): waive the min WQS
+    /// floor for wallets proven by deduped shadow statistics (t-stat or
+    /// shadow-total). WQS measures the whale's own PnL, not copy PnL — the
+    /// two diverge post-dedup. Env:
+    /// CHIMERA_SELECTION__WQS_PROVEN_WAIVER_ENABLED.
+    pub wqs_proven_waiver_enabled: bool,
     /// Wallet profitability gate (2026-08-07): only admit wallets whose
     /// shadow mirror_main PnL is statistically significant (t-statistic >
     /// threshold). Research: wallet selection is the dominant factor in
@@ -252,6 +258,7 @@ impl SelectionConfig {
         hasher.update(self.mirror_gate_window_hours.to_le_bytes());
         hasher.update(self.momentum_bypass_min_pct.to_string().as_bytes());
         hasher.update(u8::from(self.momentum_bypass_enabled).to_le_bytes());
+        hasher.update(u8::from(self.wqs_proven_waiver_enabled).to_le_bytes());
         hasher.update(u8::from(self.wallet_tstat_enabled).to_le_bytes());
         hasher.update(self.wallet_tstat_threshold.to_le_bytes());
         hasher.update(self.wallet_tstat_min_samples.to_le_bytes());
@@ -867,7 +874,7 @@ impl SelectionService {
             }
         }
 
-        let wallet_wqs = wallet.wqs_score.and_then(|d| d.to_f64()).unwrap_or(0.0);
+        let mut wallet_wqs = wallet.wqs_score.and_then(|d| d.to_f64()).unwrap_or(0.0);
         let wqs_confidence = wallet.wqs_confidence.and_then(|d| d.to_f64());
         let wallet_success_rate = wallet
             .win_rate
@@ -878,19 +885,46 @@ impl SelectionService {
         // pump.fun tokens always use SHIELD (SPEAR has 0% win rate on pump.fun).
         let min_wqs = self.config.min_wqs_score;
         if wallet_wqs < min_wqs {
-            let reason = format!("Wallet WQS {:.1} below minimum {:.1}", wallet_wqs, min_wqs);
+            // Proven-wallet WQS waiver (2026-08-15): WQS measures the whale's
+            // OWN PnL; the deduped mirror_main t-stat / shadow-total evidence
+            // measures how profitable the wallet is to COPY with our exits —
+            // the actual objective. Post-dedup these diverge: the two best
+            // copy targets (t=2.65/n=175, t=2.33/n=78) sit at WQS 10 and were
+            // hard-blocked here while several WQS-80 wallets are dedup-negative.
+            // Waive the floor only for wallets already proven by deduped
+            // shadow statistics (same pattern as the proven age waiver).
+            let proven_waiver = self.config.wqs_proven_waiver_enabled
+                && self.wallet_is_proven(&req.wallet_address).await;
+            if !proven_waiver {
+                let reason =
+                    format!("Wallet WQS {:.1} below minimum {:.1}", wallet_wqs, min_wqs);
+                tracing::info!(
+                    ingress = ?req.ingress,
+                    decision = "BUY",
+                    token = %req.token_address,
+                    wallet = %req.wallet_address,
+                    rejection_code = "WQS_TOO_LOW",
+                    reason = %reason,
+                    wallet_wqs = wallet_wqs,
+                    min_wqs = min_wqs,
+                    "selection: BUY rejected by gate"
+                );
+                return BuyDecision::rejected(req, &self.config_hash, "WQS_TOO_LOW", reason);
+            }
             tracing::info!(
                 ingress = ?req.ingress,
                 decision = "BUY",
                 token = %req.token_address,
                 wallet = %req.wallet_address,
-                rejection_code = "WQS_TOO_LOW",
-                reason = %reason,
                 wallet_wqs = wallet_wqs,
                 min_wqs = min_wqs,
-                "selection: BUY rejected by gate"
+                "WQS floor waived: wallet proven by deduped shadow statistics"
             );
-            return BuyDecision::rejected(req, &self.config_hash, "WQS_TOO_LOW", reason);
+            // Score quality at the floor, not the raw sub-floor WQS: the
+            // 40%-weighted WQS term would otherwise pin a waived wallet at
+            // ~0.34 max — knife-edge against the 0.30 SPEAR threshold — and
+            // re-reject here what step 2 just waived.
+            wallet_wqs = min_wqs;
         }
         let is_pumpfun = is_pumpfun_token(&req.token_address);
         let strategy = if wallet_wqs >= 80.0 || is_pumpfun {
@@ -2369,6 +2403,7 @@ mod tests {
             repeat_signal_min_prior: 1,
             momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
             momentum_bypass_enabled: false,
+            wqs_proven_waiver_enabled: true,
         };
 
         let mut config2 = config1.clone();

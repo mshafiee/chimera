@@ -591,6 +591,14 @@ async fn main() -> anyhow::Result<()> {
             // late entries into in-progress pumps are the losing class in
             // deduplicated shadow data. Opt-in only.
             .unwrap_or(false),
+        // Proven-wallet WQS waiver (2026-08-15): waive the WQS floor for
+        // wallets proven by deduped shadow stats. WQS (own PnL) and mirror
+        // copy-PnL diverge post-dedup; the two best copy targets sat at
+        // WQS 10 behind this floor.
+        wqs_proven_waiver_enabled: std::env::var("CHIMERA_SELECTION__WQS_PROVEN_WAIVER_ENABLED")
+            .ok()
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(true),
         // Wallet profitability gate: only wallets with statistically
         // significant shadow mirror_main PnL (t-stat > 1.645, >= 10 samples,
         // 30d window) are proven signal sources. Research-backed
