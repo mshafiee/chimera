@@ -99,6 +99,9 @@ pub struct MonitoringState {
     pub helius_auth_enforce: bool,
     /// Enforce mode for RPC signature verification (B2, staged).
     pub rpc_verify_enforce: bool,
+    /// Fraction of webhook events that get RPC re-verification (see
+    /// `MonitoringConfig::rpc_verify_sample_rate`). 1.0 = verify all.
+    pub rpc_verify_sample_rate: f64,
 }
 
 impl MonitoringState {
@@ -176,6 +179,12 @@ impl MonitoringState {
             .as_ref()
             .map(|m| m.rpc_verify_enforce)
             .unwrap_or(false);
+        let rpc_verify_sample_rate = config
+            .monitoring
+            .as_ref()
+            .map(|m| m.rpc_verify_sample_rate)
+            .filter(|r| (0.0..=1.0).contains(r))
+            .unwrap_or(0.05);
 
         Ok(Self {
             db,
@@ -200,6 +209,7 @@ impl MonitoringState {
             helius_auth_header,
             helius_auth_enforce,
             rpc_verify_enforce,
+            rpc_verify_sample_rate,
         })
     }
 

@@ -1542,6 +1542,18 @@ pub struct MonitoringConfig {
     /// `rpc_verify_failed` but always accept.
     #[serde(default = "default_true")]
     pub rpc_verify_enforce: bool,
+    /// Fraction of webhook events that get RPC signature re-verification
+    /// (0.0–1.0, default 0.05). Each verify is a `getTransaction` RPC call;
+    /// at ~80K events/day that is the single largest Helius quota consumer
+    /// and exhausted the daily quota by ~07:00 UTC, after which enforce mode
+    /// dropped every arriving event (17h/day signal blackout). The webhook
+    /// payload is already authenticated by HMAC + Authorization header, so
+    /// RPC re-verification is a consistency spot-check, not the auth layer.
+    /// RPC *errors* (429/network) fail OPEN — an unavailable RPC says
+    /// nothing about event authenticity. A definitive `not found` still
+    /// rejects in enforce mode.
+    #[serde(default = "default_rpc_verify_sample_rate")]
+    pub rpc_verify_sample_rate: f64,
     /// Minutes threshold for the stale trade reaper. PENDING/QUEUED trades
     /// older than this value are automatically cancelled. Set to 0 to disable.
     #[serde(default = "default_stale_trade_max_age")]
@@ -1639,6 +1651,10 @@ fn default_helius_dry_run() -> bool {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_rpc_verify_sample_rate() -> f64 {
+    0.05
 }
 
 fn default_false() -> bool {
@@ -1767,6 +1783,7 @@ impl Default for MonitoringConfig {
             helius_webhook_auth_header: None,
             helius_auth_enforce: true,
             rpc_verify_enforce: true,
+            rpc_verify_sample_rate: default_rpc_verify_sample_rate(),
             stale_trade_reaper_minutes: default_stale_trade_max_age(),
         }
     }
@@ -1832,6 +1849,7 @@ impl std::fmt::Debug for MonitoringConfig {
             )
             .field("helius_auth_enforce", &self.helius_auth_enforce)
             .field("rpc_verify_enforce", &self.rpc_verify_enforce)
+            .field("rpc_verify_sample_rate", &self.rpc_verify_sample_rate)
             .field(
                 "stale_trade_reaper_minutes",
                 &self.stale_trade_reaper_minutes,

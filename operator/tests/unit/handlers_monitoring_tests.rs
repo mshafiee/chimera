@@ -175,6 +175,54 @@ async fn helius_webhook_rpc_verify_enforce_drops_unverifiable() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+/// Fail-open regression (2026-08-15): an RPC *error* during signature
+/// re-verification must NOT drop the event. The daily quota exhausted by
+/// ~07:00 UTC made every verify Err, and enforce mode then discarded every
+/// arriving webhook for 17h/day. The event is already HMAC + auth-header
+/// authenticated; RPC unavailability is not evidence of forgery. A SELL with
+/// an active position must still be queued.
+#[tokio::test]
+async fn helius_webhook_rpc_verify_error_fails_open_and_processes() {
+    let mut config = test_config();
+    let mon = config.monitoring.as_mut().unwrap();
+    mon.rpc_verify_enforce = true;
+    // Force verification of every event so the RPC error path is exercised
+    // (the default 5% sampling may skip this signature).
+    mon.rpc_verify_sample_rate = 1.0;
+    let h = build(config).await;
+    seed_wallet(&h.pool, WALLET_A, "ACTIVE", Some(85.0)).await;
+    seed_trade(
+        &h.pool, "t-fopos", WALLET_A, TOKEN_A, "BUY", "ACTIVE", "SHIELD", "1.0", None,
+    )
+    .await;
+    seed_position(
+        &h.pool, "t-fopos", WALLET_A, TOKEN_A, "SHIELD", "ACTIVE", "1.0", "0.01", None,
+    )
+    .await;
+
+    // RPC returns 401 for the test key → Err → fail-open accepts.
+    let resp = api_post(
+        &h.app,
+        WEBHOOK_URL,
+        Default::default(),
+        webhook_payload("sig-failopen-processed", WALLET_A, "SELL"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM trades WHERE wallet_address = $1 AND trade_uuid != 't-fopos'",
+    )
+    .bind(WALLET_A)
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count, 1,
+        "RPC error must fail open: the HMAC-authenticated event still processes"
+    );
+}
+
 #[tokio::test]
 async fn helius_webhook_sell_admitted_and_queued() {
     let h = build(test_config()).await;
@@ -658,6 +706,7 @@ fn monitoring_app(
         helius_auth_header: None,
         helius_auth_enforce: false,
         rpc_verify_enforce: false,
+        rpc_verify_sample_rate: 0.05,
     };
     Router::new()
         .route(WEBHOOK_URL, axum::routing::post(helius_webhook_handler))

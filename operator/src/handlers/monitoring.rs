@@ -87,50 +87,80 @@ pub async fn helius_webhook_handler(
             "Received Helius webhook event"
         );
 
-        // ── RPC signature verification (B2, staged) ──────────────────────
+        // ── RPC signature verification (B2, staged, sampled 2026-08-15) ──
         //
         // Fetch the transaction by signature from trusted Solana RPC (via
-        // Helius) and confirm it exists. In dry-run mode (`rpc_verify_enforce
-        // = false`) we log the result but always accept; in enforce mode we
-        // drop events whose signature cannot be confirmed.
-        match state
-            .helius_client
-            .verify_signature_exists(&event.signature)
-            .await
-        {
-            Ok(true) => {
-                tracing::debug!(
-                    signature = %event.signature,
-                    "rpc_verify_ok: transaction confirmed on-chain"
-                );
-            }
-            Ok(false) => {
-                if state.rpc_verify_enforce {
-                    tracing::warn!(
+        // Helius) and confirm it exists. In dry-run mode
+        // (`rpc_verify_enforce = false`) we log the result but always
+        // accept; in enforce mode we drop events whose signature is
+        // definitively NOT on-chain.
+        //
+        // 2026-08-15: two corrections after the daily-quota death spiral
+        // (~80K events/day × 1 getTransaction each exhausted the Helius
+        // quota by ~07:00 UTC; enforce mode then dropped every arriving
+        // event — 17h/day of total signal loss while Helius kept pushing
+        // authenticated webhooks):
+        //   1. SAMPLED verification — the payload already passed HMAC and
+        //      Authorization-header auth; RPC re-check is a consistency
+        //      spot-check, not the auth layer. Only `sample_rate` of events
+        //      are verified (default 5%), cutting the dominant quota burn.
+        //   2. FAIL-OPEN on RPC errors — a 429/network failure says nothing
+        //      about event authenticity; rejecting on it destroyed all
+        //      signals exactly when the system was most starved. A
+        //      definitive `not found` (Ok(false)) still rejects in enforce
+        //      mode.
+        let verify_this_event = {
+            // Deterministic per-signature sampling: the same signature
+            // always resolves the same way (idempotent on redelivery).
+            let bucket = event
+                .signature
+                .bytes()
+                .map(|b| b as u64)
+                .sum::<u64>()
+                % 100;
+            (bucket as f64) < state.rpc_verify_sample_rate * 100.0
+        };
+        if !verify_this_event {
+            tracing::debug!(
+                signature = %event.signature,
+                sample_rate = state.rpc_verify_sample_rate,
+                "rpc_verify_skipped: sampled out (event already HMAC-authenticated)"
+            );
+        } else {
+            match state
+                .helius_client
+                .verify_signature_exists(&event.signature)
+                .await
+            {
+                Ok(true) => {
+                    tracing::debug!(
                         signature = %event.signature,
-                        "rpc_verify_rejected: transaction not found on-chain (enforce mode)"
-                    );
-                    continue;
-                } else {
-                    tracing::warn!(
-                        signature = %event.signature,
-                        "rpc_verify_failed: transaction not found on-chain (dry-run, accepting)"
+                        "rpc_verify_ok: transaction confirmed on-chain"
                     );
                 }
-            }
-            Err(e) => {
-                if state.rpc_verify_enforce {
+                Ok(false) => {
+                    if state.rpc_verify_enforce {
+                        tracing::warn!(
+                            signature = %event.signature,
+                            "rpc_verify_rejected: transaction not found on-chain (enforce mode)"
+                        );
+                        continue;
+                    } else {
+                        tracing::warn!(
+                            signature = %event.signature,
+                            "rpc_verify_failed: transaction not found on-chain (dry-run, accepting)"
+                        );
+                    }
+                }
+                Err(e) => {
+                    // Fail-open: RPC unavailability is not evidence of
+                    // forgery, and the event already passed HMAC + auth
+                    // header. Rejecting here caused the 17h/day signal
+                    // blackout whenever the quota was exhausted.
                     tracing::warn!(
                         signature = %event.signature,
                         error = %e,
-                        "rpc_verify_rejected: RPC fetch failed (enforce mode)"
-                    );
-                    continue;
-                } else {
-                    tracing::warn!(
-                        signature = %event.signature,
-                        error = %e,
-                        "rpc_verify_error: RPC fetch failed (dry-run, accepting)"
+                        "rpc_verify_error: RPC fetch failed — accepting (fail-open; event already HMAC-authenticated)"
                     );
                 }
             }
