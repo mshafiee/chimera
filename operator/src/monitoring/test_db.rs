@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 pub struct MockDb {
     pub wallets: Arc<Mutex<HashMap<String, Wallet>>>,
     pub wallet_monitoring: Arc<Mutex<HashMap<String, WalletMonitoring>>>,
+    pub webhook_config: Arc<Mutex<HashMap<String, String>>>,
     pub trade_uuids: Arc<Mutex<Vec<String>>>,
     pub last_speculative_timestamps: Arc<Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
     pub wallet_query_error: Arc<AtomicBool>,
@@ -71,6 +72,13 @@ impl MockDb {
             .lock()
             .unwrap()
             .insert(wm.wallet_address.clone(), wm);
+    }
+
+    pub fn set_webhook_config(&self, key: &str, value: String) {
+        self.webhook_config
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), value);
     }
 
     pub fn add_trade_uuid(&self, uuid: &str) {
@@ -726,16 +734,20 @@ impl Database for MockDb {
     }
 
     async fn get_webhook_configuration(&self, key: &str) -> AppResult<Option<String>> {
-        unimplemented!("MockDb::get_webhook_configuration not implemented")
+        Ok(self.webhook_config.lock().unwrap().get(key).cloned())
     }
 
     async fn update_webhook_configuration(
         &self,
         key: &str,
         value: &str,
-        updated_by: &str,
+        _updated_by: &str,
     ) -> AppResult<()> {
-        unimplemented!("MockDb::update_webhook_configuration not implemented")
+        self.webhook_config
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), value.to_string());
+        Ok(())
     }
 
     async fn get_orphaned_webhooks(&self, helius_webhook_ids: &[String]) -> AppResult<Vec<String>> {

@@ -24,6 +24,63 @@ pub struct WebhookHealthConfig {
     pub auth_header: Option<String>,
 }
 
+/// `webhook_configuration` key holding a Unix-epoch seconds value; while
+/// now < value, registration attempts are skipped. Set on quota-classified
+/// registration failures (2026-08-15) so the health task stops hammering the
+/// Helius webhook API with hundreds of doomed calls per cycle (441 failures /
+/// 2 days) that waste the post-reset window and trigger Cloudflare 1015
+/// rate limits.
+const PAUSE_KEY: &str = "webhook_registration_paused_until";
+
+/// Backoff duration after a quota-classified registration failure.
+const PAUSE_SECS: u64 = 3600;
+
+/// Returns true when registration is currently paused (cooldown active).
+async fn registration_paused(db: &dyn Database) -> bool {
+    match db.get_webhook_configuration(PAUSE_KEY).await {
+        Ok(Some(ts)) => {
+            let until: i64 = ts.trim().parse().unwrap_or(0);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            now < until
+        }
+        _ => false,
+    }
+}
+
+/// Pauses registration for `PAUSE_SECS`. Only called on quota/rate-limit
+/// classified failures; success or non-quota errors do not pause.
+async fn pause_registration(db: &dyn Database, reason: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let until = now + PAUSE_SECS as i64;
+    match db
+        .update_webhook_configuration(PAUSE_KEY, &until.to_string(), "health_task")
+        .await
+    {
+        Ok(_) => info!(
+            paused_until = until,
+            reason = %reason,
+            "Webhook registration paused (quota/rate-limit backoff)"
+        ),
+        Err(e) => warn!(error = %e, "Failed to persist webhook registration pause marker"),
+    }
+}
+
+/// Classifies a registration error message as quota/rate-limit (pauses
+/// registration) vs. transient per-wallet (does not).
+fn is_quota_classified(msg: &str) -> bool {
+    let low = msg.to_ascii_lowercase();
+    low.contains("max usage reached")
+        || low.contains("1015")
+        || low.contains("429")
+        || low.contains("rate limit")
+}
+
 /// Start the webhook health monitoring task
 ///
 /// This task runs continuously in the background, performing:
@@ -322,13 +379,35 @@ pub async fn run_startup_webhook_check(
     }
 
     // 1. Register webhooks for ACTIVE wallets that need them (re-query after clearing stale IDs)
+    // Backoff (2026-08-15): when a prior cycle hit a quota/rate-limit error,
+    // skip registration entirely until the pause expires. The old behavior
+    // retried hundreds of doomed calls per cycle, wasting the post-reset
+    // window and triggering Cloudflare 1015 rate limits that blocked even
+    // legitimate retries.
     let wallets_needing_webhooks = db.get_wallets_needing_webhook_registration().await?;
     let wallets_checked = wallets_needing_webhooks.len();
 
-    info!(
-        wallets_count = wallets_checked,
-        "Found ACTIVE wallets needing webhook registration"
-    );
+    if wallets_checked > 0 {
+        info!(
+            wallets_count = wallets_checked,
+            "Found ACTIVE wallets needing webhook registration"
+        );
+    }
+
+    if registration_paused(db.as_ref()).await {
+        info!(
+            wallets_skipped = wallets_checked,
+            "Webhook registration skipped — cooldown active from a prior quota/rate-limit failure"
+        );
+        return Ok(StartupWebhookResult {
+            wallets_checked,
+            registered: 0,
+            orphaned,
+            cleaned_up,
+            failed: 0,
+            duration_ms: start.elapsed().as_millis() as u64,
+        });
+    }
 
     for wallet_address in &wallets_needing_webhooks {
         match manager.register_wallet_webhook(wallet_address).await {
@@ -338,6 +417,10 @@ pub async fn run_startup_webhook_check(
             }
             Ok(result) => {
                 failed += 1;
+                let err_msg = result.error_message.clone().unwrap_or_default();
+                if is_quota_classified(&err_msg) {
+                    pause_registration(db.as_ref(), &err_msg).await;
+                }
                 warn!(
                     wallet = %wallet_address,
                     error = ?result.error_message,
@@ -346,6 +429,9 @@ pub async fn run_startup_webhook_check(
             }
             Err(e) => {
                 failed += 1;
+                if is_quota_classified(&e.to_string()) {
+                    pause_registration(db.as_ref(), &e.to_string()).await;
+                }
                 error!(
                     wallet = %wallet_address,
                     error = %e,
@@ -464,5 +550,23 @@ mod tests {
         assert_eq!(config.stale_threshold_days, 7);
         assert!(config.helius_dry_run);
         assert!(!config.auto_cleanup_enabled);
+    }
+
+    #[test]
+    fn test_is_quota_classified_recognizes_quota_and_rate_limits() {
+        // The exact strings observed in production during the daily-quota
+        // death spiral (2026-08-15).
+        assert!(is_quota_classified(
+            "Webhook registration failed: {\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32429,\"message\":\"max usage reached\"}}"
+        ));
+        assert!(is_quota_classified("Webhook registration failed: error code: 1015"));
+        assert!(is_quota_classified("HTTP 429 Too Many Requests"));
+        assert!(is_quota_classified("rate limit exceeded"));
+
+        // Non-quota errors must NOT pause registration.
+        assert!(!is_quota_classified("Invalid Solana address format"));
+        assert!(!is_quota_classified("Webhook ID no longer exists in Helius — clearing"));
+        assert!(!is_quota_classified("connection reset by peer"));
+        assert!(!is_quota_classified(""));
     }
 }
