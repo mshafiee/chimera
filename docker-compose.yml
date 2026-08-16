@@ -355,6 +355,13 @@ services:
       - SCOUT_MIN_WALLET_AGE_DAYS=7                               # Filter out wallets < 7 days old
       - SCOUT_VALIDATE_WALLET_ACTIVITY=true                       # Require recent trades at discovery (filter dormant wallets)
       - SCOUT_ACTIVITY_RECENCY_HOURS=24                           # Discovered wallet must have >=1 trade in last 24h (was 48h — fresher wallets)
+      # On-chain discovery OFF (2026-08-16): discovery burned ~498 credits
+      # per run, ran ~every 10.5 min under the probe-cadence loop (122
+      # runs/day ≈ 60K credits) and returned 0 new wallets every time — the
+      # candidate pool already holds 10.9K wallets. Analysis, WQS scoring and
+      # shadow promotion of existing candidates are unaffected. Re-enable
+      # only with a per-day discovery budget once the plan supports it.
+      - SCOUT_DISCOVERY_ENABLED=false
       # WQS Thresholds (relaxed for paper trading)
       - SCOUT_MIN_WQS_ACTIVE=15.0
       - SCOUT_MIN_WQS_CANDIDATE=10.0

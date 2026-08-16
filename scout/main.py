@@ -2167,10 +2167,18 @@ async def main_async():
                 print(f"[Scout] ⚠ Failed to initialize High-Conviction Integration: {e}")
                 high_conviction = None
 
-        # Use async factory for proper wallet discovery
+        # Use async factory for proper wallet discovery.
+        # SCOUT_DISCOVERY_ENABLED=false (2026-08-16): multi-timeframe discovery
+        # burned ~498 credits/run, ran ~every 10.5 min under the probe-cadence
+        # loop (122 runs/day), and found 0 new wallets every single time — the
+        # candidate pool already holds 10.9K wallets. Discovery is opt-out;
+        # analysis/promotion of existing candidates is unaffected.
+        _discover_wallets = os.getenv("SCOUT_DISCOVERY_ENABLED", "true").lower() == "true"
+        if not _discover_wallets:
+            print("[Scout] On-chain wallet discovery DISABLED (SCOUT_DISCOVERY_ENABLED=false)")
         base_analyzer = await WalletAnalyzer.create(
             helius_api_key=helius_api_key,
-            discover_wallets=True,  # Enable wallet discovery from on-chain data
+            discover_wallets=_discover_wallets,
             max_wallets=args.max_wallets,
             budget_manager=budget_manager,  # Pass budget manager for API quota tracking
         )
@@ -2936,10 +2944,52 @@ def main():
 
     args = parse_args()
     exit_code = 0
-    
+
+    async def _probe_helius_quota() -> bool:
+        """Cheap availability probe: one getBalance RPC. Never runs a full
+        cycle just to test credits (2026-08-16: the probe-cadence loop ran
+        the ENTIRE scout cycle — including a ~498-credit discovery pass —
+        every 600s while exhausted, 122 runs/day, all finding 0 wallets)."""
+        import aiohttp
+
+        api_key = os.getenv("HELIUS_API_KEY", "")
+        if not api_key:
+            return False
+        url = f"https://mainnet.helius-rpc.com/?api-key={api_key}"
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "quota-probe",
+            "method": "getBalance",
+            "params": ["11111111111111111111111111111111"],
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, json=payload, timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    return resp.status == 200
+        except Exception:
+            return False
+
     if args.continuous:
         print(f"[Scout] Continuous mode enabled (interval={args.continuous_interval}s)")
         while True:
+            # Probe-only fast path while the quota is exhausted: never run a
+            # full cycle until a cheap probe confirms credits are back.
+            if _quota_state["exhausted"]:
+                if asyncio.run(_probe_helius_quota()):
+                    print("[Scout] Quota probe OK — credits available, running full cycle")
+                    _quota_state["exhausted"] = False
+                else:
+                    probe_seconds = 600
+                    if ScoutConfig:
+                        probe_seconds = ScoutConfig.get_quota_probe_interval_seconds()
+                    print(
+                        f"[Scout] Helius quota still exhausted — probing again in "
+                        f"{probe_seconds}s (probe only, no full cycle)"
+                    )
+                    time.sleep(probe_seconds)
+                    continue
             try:
                 exit_code = asyncio.run(main_async())
                 if exit_code != 0:
@@ -2953,14 +3003,9 @@ def main():
                 traceback.print_exc()
             sleep_seconds = args.continuous_interval
             if _quota_state["exhausted"]:
-                probe_seconds = 600
-                if ScoutConfig:
-                    probe_seconds = ScoutConfig.get_quota_probe_interval_seconds()
-                sleep_seconds = min(args.continuous_interval, probe_seconds)
-                print(
-                    f"[Scout] Helius quota exhausted — sleeping {sleep_seconds}s "
-                    f"(probe cadence) to re-test credits before next run"
-                )
+                # The cycle ended exhausted — the loop top will probe-only
+                # until credits return; no full-cycle churn in between.
+                continue
             print(f"[Scout] Sleeping {sleep_seconds}s before next run...")
             time.sleep(sleep_seconds)
     else:
