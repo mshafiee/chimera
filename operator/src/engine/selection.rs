@@ -1647,14 +1647,38 @@ impl SelectionService {
         // / amount_out in SOL per raw token unit); comparing it to the current
         // price-cache price tells us how much the copier would overpay. Fails
         // open when either price is unavailable (young tokens without cache data).
+        //
+        // 2026-08-17: two fail-open corrections after production forensics.
+        // The gate computed +185,451,383% and +52,449,789% "pumps" (minutes
+        // after whale entry) for tokens the entry-confirmation path had just
+        // verified as price-holding, and rejected both — the unit conversion
+        // was untrustworthy, not the market:
+        //   1. decimals: the price entry's decimals are often None for fresh
+        //      tokens and the old `unwrap_or(6)` guess was wrong by 10^3-10^6
+        //      for 9-decimal/unknown tokens. Now resolves via the dedicated
+        //      decimals cache and skips the gate when unknown.
+        //   2. plausibility: a computed pump >10,000% (100x) within the
+        //      confirmation window indicates inconsistent inputs (decimals
+        //      mismatch, Jupiter quoting an illiquid fresh pair), not a real
+        //      move. Skip the gate and let the remaining gates decide.
+        let mut pump_pct_computed: Option<(Decimal, u8)> = None;
         if self.config.pump_since_whale_guard_enabled {
             if let Some(ref price_cache) = self.price_cache {
                 if let Some(whale_price) = req.whale_entry_price {
                     if whale_price > Decimal::ZERO {
                         if let Some(current_entry) = price_cache.get_price(&req.token_address) {
                             let sol_usd = price_cache.get_sol_price_usd();
-                            let decimals = current_entry.decimals.unwrap_or(6);
-                            if let Some(sol_usd) = sol_usd {
+                            let decimals = current_entry
+                                .decimals
+                                .or_else(|| price_cache.get_decimals(&req.token_address))
+                                .filter(|d| (2..=12).contains(d));
+                            if decimals.is_none() {
+                                tracing::debug!(
+                                    token = %req.token_address,
+                                    "Pump-since-whale guard skipped: token decimals unknown (fail-open)"
+                                );
+                            }
+                            if let (Some(decimals), Some(sol_usd)) = (decimals, sol_usd) {
                                 if sol_usd > Decimal::ZERO
                                     && current_entry.price_usd > Decimal::ZERO
                                 {
@@ -1667,33 +1691,46 @@ impl SelectionService {
                                     let pump_pct = ((current_sol_per_raw - whale_price)
                                         / whale_price)
                                         * Decimal::from(100);
-                                    if pump_pct > self.config.max_pump_since_whale_pct {
-                                        let reason = format!(
-                                            "Token already up {:.1}% since whale entry (max {:.0}%) — buying the top",
-                                            pump_pct, self.config.max_pump_since_whale_pct
-                                        );
-                                        tracing::info!(
-                                            ingress = ?req.ingress,
-                                            decision = "BUY",
+                                    if pump_pct > Decimal::from(10_000) {
+                                        tracing::warn!(
                                             token = %req.token_address,
                                             wallet = %req.wallet_address,
-                                            rejection_code = "ALREADY_PUMPED",
-                                            reason = %reason,
-                                            pump_since_whale_pct = %pump_pct,
-                                            "selection: BUY rejected by gate"
+                                            pump_pct = %pump_pct,
+                                            decimals = decimals,
+                                            "Pump-since-whale guard: implausible pump (>10000%) — unit inconsistency, failing open"
                                         );
-                                        return BuyDecision::rejected(
-                                            req,
-                                            &self.config_hash,
-                                            "ALREADY_PUMPED",
-                                            reason,
-                                        );
+                                    } else {
+                                        pump_pct_computed = Some((pump_pct, decimals));
                                     }
                                 }
                             }
                         }
                     }
                 }
+            }
+        }
+        if let Some((pump_pct, _)) = pump_pct_computed {
+            if pump_pct > self.config.max_pump_since_whale_pct {
+                let reason = format!(
+                    "Token already up {:.1}% since whale entry (max {:.0}%) — buying the top",
+                    pump_pct, self.config.max_pump_since_whale_pct
+                );
+                tracing::info!(
+                    ingress = ?req.ingress,
+                    decision = "BUY",
+                    token = %req.token_address,
+                    wallet = %req.wallet_address,
+                    rejection_code = "ALREADY_PUMPED",
+                    reason = %reason,
+                    pump_since_whale_pct = %pump_pct,
+                    "selection: BUY rejected by gate"
+                );
+                return BuyDecision::rejected(
+                    req,
+                    &self.config_hash,
+                    "ALREADY_PUMPED",
+                    reason,
+                );
             }
         }
 

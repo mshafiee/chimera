@@ -382,6 +382,85 @@ async fn test_non_speculative_and_pumpfun_bonding_curve() {
     assert_eq!(d.rejection_code, Some("PUMPFUN_BONDING_CURVE"));
 }
 
+/// Pump-since-whale guard unit-consistency regression (2026-08-17).
+/// Production computed +185,451,383% / +52,449,789% "pumps" minutes after
+/// whale entry for price-confirmed tokens and rejected them — the unit
+/// conversion was broken (decimals guesswork), not the market. Implausible
+/// pumps and unknown decimals must fail open; a real above-threshold pump
+/// still rejects.
+#[tokio::test]
+async fn test_pump_since_whale_implausible_fails_open() {
+    let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
+    seed_wallet(&db, WALLET, "ACTIVE", 85.0).await;
+
+    let (_hel, helius) = helius_mock_with_txs(vec![old_tx()]).await;
+    let make_service = |price_usd: &str, decimals: Option<u8>| {
+        // Point the eager-fetch at a dead port so fetch attempts fail fast.
+        let cache = Arc::new(
+            chimera_core::price_cache::PriceCache::with_jupiter_price_api(
+                "http://127.0.0.1:1".to_string(),
+            )
+            .expect("price cache"),
+        );
+        cache.set_price(
+            "So11111111111111111111111111111111111111112",
+            dec("200"),
+            chimera_core::price_cache::PriceSource::Jupiter,
+            Some(9),
+        );
+        cache.set_price(
+            TOKEN,
+            dec(price_usd),
+            chimera_core::price_cache::PriceSource::Jupiter,
+            decimals,
+        );
+        build_service_full(
+            db.clone(),
+            seeded_parser(TOKEN, "SHIELD", "100000", true),
+            base_config(),
+            None,
+            None,
+            None,
+            Some(helius.clone()),
+            None,
+        )
+        .with_price_cache(cache)
+    };
+
+    // Case A — implausible pump (production value: whale bought at
+    // 1.02e-15 SOL/raw; a price implying a >10,000% move). Must fail open.
+    let service = make_service("0.2042", Some(6));
+    let mut req = request(TOKEN, Action::Buy);
+    req.whale_entry_price = Some(dec("0.0000000000000010208428573208"));
+    let d = service.decide(&req).await;
+    assert_ne!(
+        d.rejection_code,
+        Some("ALREADY_PUMPED"),
+        "implausible pump must fail open, got {:?}",
+        d.rejection_reason
+    );
+
+    // Case B — real +20% pump over the 15% threshold must still reject.
+    let service = make_service("0.24", Some(6));
+    let mut req = request(TOKEN, Action::Buy);
+    req.whale_entry_price = Some(dec("0.000000001"));
+    let d = service.decide(&req).await;
+    assert_eq!(d.rejection_code, Some("ALREADY_PUMPED"));
+
+    // Case C — decimals unknown: conversion untrustworthy, must fail open.
+    let service = make_service("0.24", None);
+    let mut req = request(TOKEN, Action::Buy);
+    req.whale_entry_price = Some(dec("0.000000001"));
+    let d = service.decide(&req).await;
+    assert_ne!(
+        d.rejection_code,
+        Some("ALREADY_PUMPED"),
+        "unknown decimals must fail open, got {:?}",
+        d.rejection_reason
+    );
+}
+
 #[tokio::test]
 async fn test_token_safety_gates() {
     let (db, _guard) = create_test_db().await;
