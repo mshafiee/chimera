@@ -203,7 +203,7 @@ wid='''$wid'''
 for addr in w.get('accountAddresses',[]):
     subprocess.run([
         'docker','exec','chimera-postgres','psql','-U','chimera','-d','chimera','-t','-A','-c',
-        f\"INSERT INTO wallet_monitoring (wallet_address, helius_webhook_id, monitoring_enabled, webhook_status) VALUES ('{addr}', '{wid}', true, 'registered') ON CONFLICT (wallet_address) DO UPDATE SET helius_webhook_id = EXCLUDED.helius_webhook_id, webhook_status = 'registered', last_registration_error = NULL, updated_at = NOW();\"
+        f\"INSERT INTO wallet_monitoring (wallet_address, helius_webhook_id, monitoring_enabled, webhook_status) VALUES ('{addr}', '{wid}', true, 'active') ON CONFLICT (wallet_address) DO UPDATE SET helius_webhook_id = EXCLUDED.helius_webhook_id, webhook_status = 'active', last_registration_error = NULL, updated_at = NOW();\"
     ], check=False)
     print(f'upsert {addr[:8]}... -> {wid[:8]}')
 " 2>/dev/null || true
