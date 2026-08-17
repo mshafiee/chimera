@@ -218,8 +218,34 @@ done
 log "Coverage: $COVERED_COUNT / ${#WALLETS[@]} ACTIVE wallets"
 [ "$COVERED_COUNT" -eq "${#WALLETS[@]}" ] || fail "Coverage incomplete — aborting before cleanup"
 
-# ── 8. Delete stale webhooks (not in CREATED_IDS, not referenced by ACTIVE rows) ──
-log "Deleting stale webhooks"
+# ── 8. Delete stale/empty webhooks ──────────────────────────────────────────
+# Targets: (a) empty webhooks (0 accountAddresses — deliver nothing; left
+# behind by the 2026-08-17 startup-check destruction), clearing their DB refs
+# first so nothing points at them; (b) non-created webhooks not referenced by
+# any ACTIVE wallet's DB row.
+log "Deleting stale/empty webhooks"
+resp_del="$(list_webhooks || true)"
+if echo "$resp_del" | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin); sys.exit(0 if isinstance(d,list) else 1)
+except Exception:
+    sys.exit(1)' 2>/dev/null; then
+    echo "$resp_del" | python3 -c "
+import json,sys,subprocess
+whs=json.load(sys.stdin)
+for w in whs:
+    wid=w.get('webhookID','')
+    addrs=w.get('accountAddresses',[])
+    if not addrs:
+        print(wid)
+" | while read -r wid; do
+        [ -n "$wid" ] || continue
+        docker exec chimera-postgres psql -U chimera -d chimera -t -A -c \
+            "UPDATE wallet_monitoring SET helius_webhook_id = NULL WHERE helius_webhook_id = '$wid';" >/dev/null 2>&1 || true
+        code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "${BASE_URL}/v0/webhooks/${wid}?api-key=${HELIUS_API_KEY}" || true)"
+        log "DELETE empty webhook $wid -> HTTP $code"
+    done
+fi
 for wid in "${COVERED[@]}"; do
     [ -n "$wid" ] || continue
     skip=false
