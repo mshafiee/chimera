@@ -252,19 +252,32 @@ impl WebhookLifecycleManager {
             let webhook = match self.helius_client.get_webhook_typed(&batch_webhook_id).await {
                 Ok(w) => w,
                 Err(e) => {
-                    // Stale ID: clear DB references so find_webhook_with_capacity
-                    // does not keep returning it, then retry another candidate.
+                    // Only treat as stale on a definitive 404 (2026-08-17):
+                    // transient errors (429/network) previously cleared ALL
+                    // DB references to a healthy shared webhook, after which
+                    // the orphan cleanup deleted it. On transient errors,
+                    // stop trying batch candidates this round (fall through
+                    // to creating a fresh webhook) but keep the references.
+                    let err = e.to_string();
+                    if err.contains("404") || err.contains("Not Found") {
+                        warn!(
+                            wallet = %wallet,
+                            webhook_id = %batch_webhook_id,
+                            "Batched webhook candidate gone from Helius (404) — clearing DB references and retrying"
+                        );
+                        let _ = self
+                            .db
+                            .clear_webhook_id_for_webhook(&batch_webhook_id)
+                            .await;
+                        continue;
+                    }
                     warn!(
                         wallet = %wallet,
                         webhook_id = %batch_webhook_id,
-                        error = %e,
-                        "Batched webhook candidate is stale in Helius — clearing DB references and retrying"
+                        error = %err,
+                        "Batched webhook candidate check failed transiently — keeping references, creating a new webhook"
                     );
-                    let _ = self
-                        .db
-                        .clear_webhook_id_for_webhook(&batch_webhook_id)
-                        .await;
-                    continue;
+                    break;
                 }
             };
 
@@ -910,31 +923,44 @@ impl WebhookLifecycleManager {
             .and_then(|dw| dw.helius_webhook_id.clone());
 
         if let Some(ref id) = webhook_id {
-            if !self.config.helius_dry_run {
-                match self.helius_client.delete_webhook(id).await {
-                    Ok(()) => {
-                        info!(
-                            wallet = %wallet,
-                            webhook_id = %id,
-                            "Deleted stale webhook for recovery"
-                        );
-                    }
-                    Err(e) => {
+            // Verify-then-delete (2026-08-17): the persisted "error"/"unhealthy"
+            // flag is often a stale artifact of a transient failure. Deleting
+            // the webhook without re-checking destroyed live webhooks —
+            // including a freshly consolidated 50-wallet shared webhook. Only
+            // delete on a definitive 404; if the webhook still exists, clear
+            // the stale flag and keep it.
+            match self.helius_client.get_webhook_typed(id).await {
+                Ok(_) => {
+                    info!(
+                        wallet = %wallet,
+                        webhook_id = %id,
+                        "Recovery skipped: webhook still exists in Helius (stale health flag cleared)"
+                    );
+                    let _ = self
+                        .db
+                        .update_webhook_health_status(wallet, "healthy", None)
+                        .await;
+                    continue;
+                }
+                Err(e) => {
+                    let err = e.to_string();
+                    if !(err.contains("404") || err.contains("Not Found")) {
+                        // Transient error (429/network): do NOT delete and do
+                        // NOT strip the DB reference — retry next cycle.
                         warn!(
                             wallet = %wallet,
                             webhook_id = %id,
-                            error = %e,
-                            "Failed to delete stale webhook for recovery"
+                            error = %err,
+                            "Recovery deferred: webhook verification failed transiently"
                         );
                         continue;
                     }
+                    info!(
+                        wallet = %wallet,
+                        webhook_id = %id,
+                        "Webhook confirmed gone (404) — deleting reference for re-registration"
+                    );
                 }
-            } else {
-                info!(
-                    wallet = %wallet,
-                    webhook_id = %id,
-                    "Would delete stale webhook for recovery (dry-run)"
-                );
             }
         }
 
@@ -1056,10 +1082,12 @@ impl WebhookLifecycleManager {
                 Err(e) => {
                     warn!(wallet = %wallet, error = %e, "Webhook health check failed");
                     unhealthy += 1;
-                    let _ = self
-                        .db
-                        .update_webhook_health_status(wallet, "error", None)
-                        .await;
+                    // Transient failures (429/network) must NOT flip the
+                    // persisted status to "error": the reconcile recovery
+                    // loop deletes webhooks whose rows carry "error", so one
+                    // quota blip used to delete live webhooks (2026-08-17:
+                    // a freshly consolidated 50-wallet webhook was destroyed
+                    // this way). Leave the previous status untouched.
                 }
             }
         }
