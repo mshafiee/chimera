@@ -852,10 +852,54 @@ impl ProfitTargetManager {
         // exit: if a tier target and a protective-stop breach occur in the
         // same tick, a partial sell would leave the position open past its
         // stop for at least one more full tick.
-        if trailing_hit || time_exit {
+        //
+        // Trailing-exit quote guard (2026-08-17): the trailing stop is a
+        // PROFIT-protection rail — it only activates after the activation
+        // threshold and is floored at entry+min_target. When the price-cache
+        // says profit but the live sell quote does not clear cost breakeven
+        // (cache vs execution divergence on illiquid fresh tokens — observed
+        // production: +5.4% cache "profit" seconds after entry, executed
+        // sell realized -1.5%), the trailing exit banks a loss dressed as a
+        // profit. Suppress it, same as the tiered guard; the dedicated
+        // stop-loss rail still protects genuine crashes. Time exits stay
+        // unguarded (capital recycling, not profit taking).
+        if trailing_hit && !time_exit {
+            if !self
+                .quote_confirms_profit(token_address, entry_price_snap)
+                .await
+            {
+                tracing::warn!(
+                    trade_uuid = %trade_uuid,
+                    token = %token_address,
+                    current_price = %current_price,
+                    entry_price = %entry_price_snap,
+                    profit_percent = %profit_percent,
+                    trailing_stop_price = %trailing_stop_price_snap,
+                    "Trailing-stop exit suppressed: live sell quote does not clear cost breakeven — holding (stop-loss rail remains active)"
+                );
+            } else {
+                tracing::info!(
+                    trade_uuid = %trade_uuid,
+                    token_address = token_address,
+                    current_price = %current_price,
+                    entry_price = %entry_price_snap,
+                    profit_percent = %profit_percent,
+                    pnl_percent = %profit_percent,
+                    trailing_stop_active = trailing_stop_active_snap,
+                    trailing_stop_price = %trailing_stop_price_snap,
+                    trailing_hit,
+                    time_exit,
+                    elapsed_hours,
+                    reason = "trailing_stop",
+                    "Profit exit triggered: trailing stop or time exit"
+                );
+                return ProfitTargetAction::FullExit;
+            }
+        }
+        if time_exit {
             tracing::info!(
                 trade_uuid = %trade_uuid,
-                token_address = %token_address,
+                token_address = token_address,
                 current_price = %current_price,
                 entry_price = %entry_price_snap,
                 profit_percent = %profit_percent,
@@ -865,7 +909,7 @@ impl ProfitTargetManager {
                 trailing_hit,
                 time_exit,
                 elapsed_hours,
-                reason = if trailing_hit { "trailing_stop" } else { "time_exit" },
+                reason = "time_exit",
                 "Profit exit triggered: trailing stop or time exit"
             );
             return ProfitTargetAction::FullExit;
