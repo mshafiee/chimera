@@ -884,6 +884,12 @@ impl SelectionService {
         // Configurable minimum WQS; ≥80 → SHIELD; min..80 → SPEAR.
         // pump.fun tokens always use SHIELD (SPEAR has 0% win rate on pump.fun).
         let min_wqs = self.config.min_wqs_score;
+        // Proven-ness resolved once per decision (2026-08-18): reused by the
+        // WQS waiver here AND the sizing factors at the sizing step — one
+        // oracle, one DB round trip. None = not yet resolved (WQS ≥ floor
+        // wallets skip the waiver query; the sizing site resolves lazily
+        // only when the proven boost is configured).
+        let mut wallet_proven: Option<bool> = None;
         if wallet_wqs < min_wqs {
             // Proven-wallet WQS waiver (2026-08-15): WQS measures the whale's
             // OWN PnL; the deduped mirror_main t-stat / shadow-total evidence
@@ -895,6 +901,9 @@ impl SelectionService {
             // shadow statistics (same pattern as the proven age waiver).
             let proven_waiver = self.config.wqs_proven_waiver_enabled
                 && self.wallet_is_proven(&req.wallet_address).await;
+            // Cache for the sizing site: when the waiver is disabled the
+            // wallet is rejected here regardless, so Some(false) is exact.
+            wallet_proven = Some(proven_waiver);
             if !proven_waiver {
                 let reason =
                     format!("Wallet WQS {:.1} below minimum {:.1}", wallet_wqs, min_wqs);
@@ -927,6 +936,13 @@ impl SelectionService {
             wallet_wqs = min_wqs;
         }
         let is_pumpfun = is_pumpfun_token(&req.token_address);
+        // NOTE (2026-08-18): proven wallets were considered for Shield
+        // routing here, but waived wallets carry wallet_wqs = min_wqs (15)
+        // after the floor rewrite and score signal quality at that floor —
+        // which clears SPEAR's threshold but not SHIELD's higher one. Shield
+        // routing would re-reject at the quality gate exactly what the
+        // waiver admitted. Proven sizing under SPEAR is enabled instead by
+        // raising spear_max_size_sol (config) above proven_size_sol.
         let strategy = if wallet_wqs >= 80.0 || is_pumpfun {
             Strategy::Shield
         } else {
@@ -1848,6 +1864,20 @@ impl SelectionService {
             );
         }
         let size_sol = if let Some(ref sizer) = self.position_sizer {
+            // Resolve proven-ness (2026-08-18): reuse the waiver's result
+            // when already computed; otherwise query the oracle only when
+            // the sizer's proven boost is enabled (avoids a DB round trip
+            // per signal when the feature is off).
+            let is_proven = match wallet_proven {
+                Some(v) => v,
+                None => {
+                    if sizer.proven_boost_enabled() {
+                        self.wallet_is_proven(&req.wallet_address).await
+                    } else {
+                        false
+                    }
+                }
+            };
             let factors = SizingFactors {
                 is_consensus,
                 wallet_wqs,
@@ -1869,6 +1899,7 @@ impl SelectionService {
                 },
                 boost_target_sol,
                 token_address: Some(req.token_address.clone()),
+                is_proven,
             };
             let size = match sizer.calculate_size(factors).await {
                 Ok(s) => s,

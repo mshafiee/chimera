@@ -2224,6 +2224,34 @@ pub struct PositionSizingConfig {
     /// Minimum position size in SOL (paper trading only)
     #[serde(default = "default_min_size_sol")]
     pub min_size_sol: Decimal,
+    /// Skip-below-minimum semantics (2026-08-18): when true, a sizer output
+    /// below `min_size_sol` rejects the entry (POSITION_SIZE_ZERO) instead of
+    /// being clamped up to the minimum. The round-trip fixed cost (~0.0006
+    /// SOL tips) is 0.24% of a 0.25 SOL position but 2.4% of a 0.025 SOL
+    /// one — clamping up forced marginal-conviction entries to trade at the
+    /// minimum with the worst cost ratio and nullified the sizer's quality
+    /// scaling. The pipeline off-hours floor is also disabled in skip mode
+    /// (sub-min off-hours sizes reject with OFF_HOURS_BELOW_MIN instead of
+    /// being rescued).
+    #[serde(default = "default_true")]
+    pub skip_below_min_size: bool,
+    /// Proven-wallet sizing boost (2026-08-18): wallets proven by deduped
+    /// shadow statistics (selection's wallet_is_proven oracle, passed via
+    /// SizingFactors.is_proven) size at the fixed `proven_size_sol`,
+    /// bypassing the WQS × confidence chain. The raw chain crushes exactly
+    /// the best copy targets (proven wallets carry WQS ~10 — an own-PnL
+    /// score anti-correlated with copy-PnL post-dedup) to ~0.025 SOL, which
+    /// under skip semantics would reject every proven entry. Atomic with
+    /// skip_below_min_size: enabling skip without the boost (or a
+    /// proven_size_sol ≥ min_size_sol) silences the proven roster.
+    #[serde(default = "default_true")]
+    pub proven_sizing_boost: bool,
+    /// Fixed size (SOL) for proven-wallet entries under the boost. Subject
+    /// to strategy max, portfolio heat, and the spear_lite cap; the
+    /// conviction-size cap is intentionally NOT applied (its 0.25 default
+    /// would re-clamp proven entries on history-less fresh tokens).
+    #[serde(default = "default_proven_size_sol")]
+    pub proven_size_sol: Decimal,
     /// Minimum position size in SOL for live trading (distinct from paper min_size_sol)
     /// Rejects trades below this threshold to avoid uneconomical execution due to fixed costs
     #[serde(default = "default_min_live_position_sol")]
@@ -2291,6 +2319,10 @@ fn default_max_size_sol() -> Decimal {
 
 fn default_min_size_sol() -> Decimal {
     dec!(0.05)
+}
+
+fn default_proven_size_sol() -> Decimal {
+    dec!(0.75)
 }
 
 fn default_min_live_position_sol() -> Decimal {
@@ -2367,6 +2399,9 @@ impl Default for PositionSizingConfig {
             base_size_sol: default_base_size_sol(),
             max_size_sol: default_max_size_sol(),
             min_size_sol: default_min_size_sol(),
+            skip_below_min_size: true,
+            proven_sizing_boost: true,
+            proven_size_sol: default_proven_size_sol(),
             min_live_position_sol: default_min_live_position_sol(),
             shield_max_size_sol: default_shield_max_size_sol(),
             spear_max_size_sol: default_spear_max_size_sol(),

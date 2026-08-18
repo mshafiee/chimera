@@ -415,23 +415,63 @@ impl SignalProcessor {
                 );
             }
 
-            // Hard floor re-clamp: off-hours reduction (or any prior shrinkage)
-            // may only bring a position DOWN to the floor, never below it.
-            // Without this, every 00:01-06:00 UTC position halves to ~0.125 SOL
-            // and is cost-killed on the round trip. Applied to every BUY so no
-            // sub-floor size can reach execution regardless of the shrink path.
+            // Minimum-size enforcement at the pipeline (2026-08-18):
+            //
+            // Legacy (skip_below_min_size = false): hard floor re-clamp —
+            // off-hours reduction (or any prior shrinkage) may only bring a
+            // position DOWN to the floor, never below it.
+            //
+            // Skip mode (default): the floor does NOT rescue — a sub-minimum
+            // size here is either an off-hours shrink crossing the minimum
+            // or a sizer output that already rejected upstream. Rescuing it
+            // up means paying the fixed ~0.0006 SOL tip load on an entry the
+            // sizer considered sub-economic — the exact uneconomical trade
+            // the minimum exists to prevent. Reject observably instead.
             let pre_floor_sol = signal.payload.amount_sol;
             let min_size_sol = self.config.position_sizing.min_size_sol;
-            signal.payload.amount_sol = signal.payload.amount_sol.max(min_size_sol);
-            tracing::info!(
-                trade_uuid = %trade_uuid,
-                final_amount_sol = %signal.payload.amount_sol,
-                pre_floor_sol = %pre_floor_sol,
-                off_hours_mult = %off_hours_mult,
-                min_size_sol = %min_size_sol,
-                strategy = ?signal.payload.strategy,
-                "signal_pipeline: final position size after floor re-clamp"
-            );
+            if self.config.position_sizing.skip_below_min_size {
+                if signal.payload.amount_sol < min_size_sol {
+                    let reason = format!(
+                        "OFF_HOURS_BELOW_MIN: size {} SOL below minimum {} SOL after off-hours multiplier — skipping (cost-uneconomical)",
+                        signal.payload.amount_sol, min_size_sol
+                    );
+                    tracing::info!(
+                        trade_uuid = %trade_uuid,
+                        pre_floor_sol = %pre_floor_sol,
+                        min_size_sol = %min_size_sol,
+                        off_hours_mult = %off_hours_mult,
+                        "signal_pipeline: sub-minimum size rejected (skip-below-min semantics)"
+                    );
+                    let _ = self
+                        .db
+                        .mark_trade_dead_letter(
+                            &trade_uuid,
+                            &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                            &reason,
+                        )
+                        .await;
+                    if let Some(ref ws) = self.ws_state {
+                        ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
+                            trade_uuid: trade_uuid.clone(),
+                            status: "DEAD_LETTER".to_string(),
+                            token_symbol: Some(signal.payload.token.clone()),
+                            strategy: signal.payload.strategy.to_string(),
+                        }));
+                    }
+                    return;
+                }
+            } else {
+                signal.payload.amount_sol = signal.payload.amount_sol.max(min_size_sol);
+                tracing::info!(
+                    trade_uuid = %trade_uuid,
+                    final_amount_sol = %signal.payload.amount_sol,
+                    pre_floor_sol = %pre_floor_sol,
+                    off_hours_mult = %off_hours_mult,
+                    min_size_sol = %min_size_sol,
+                    strategy = ?signal.payload.strategy,
+                    "signal_pipeline: final position size after floor re-clamp"
+                );
+            }
         }
 
         // Re-check portfolio heat and strategy allocation before execution (for BUY signals)

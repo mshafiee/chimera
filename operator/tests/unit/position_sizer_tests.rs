@@ -73,6 +73,7 @@ fn neutral_factors() -> SizingFactors {
         wqs_capped_max_size: None,
         boost_target_sol: None,
         token_address: None,
+        is_proven: false,
     }
 }
 
@@ -298,6 +299,7 @@ async fn test_position_size_capped_at_max() {
         wqs_capped_max_size: None,
         boost_target_sol: None,
         token_address: None,
+        is_proven: false,
     };
 
     let size = sizer.calculate_size(factors).await.unwrap();
@@ -319,6 +321,7 @@ async fn test_position_size_floor_at_minimum() {
 
     let (db, _tmp) = create_test_db().await;
     let _pool = pg_pool(&db);
+    let db_legacy = db.clone();
     let cfg = sizing_config_with_max("2.0", "20.0", "0.5", 10); // min=0.5 SOL
     let sizer = PositionSizer::new(db, cfg);
 
@@ -339,15 +342,56 @@ async fn test_position_size_floor_at_minimum() {
         wqs_capped_max_size: None,
         boost_target_sol: None,
         token_address: None,
+        is_proven: false,
     };
 
     let size = sizer.calculate_size(factors).await.unwrap();
     let min = Decimal::from_str("0.5").unwrap();
 
+    // Skip-below-min semantics (2026-08-18, default): all-penalty factors
+    // compute ~0.013 SOL — far below the 0.5 minimum — so the entry REJECTS
+    // (zero) instead of being clamped up to trade at the minimum with the
+    // worst cost ratio.
+    assert_eq!(
+        size, Decimal::ZERO,
+        "Sub-minimum computed size must return zero under skip-below-min semantics"
+    );
+
+    // Legacy mode (skip_below_min_size = false): clamps up to the minimum —
+    // rollback path preserved.
+    let cfg_legacy = Arc::new(PositionSizingConfig {
+        base_size_sol: Decimal::from_str("2.0").unwrap(),
+        max_size_sol: Decimal::from_str("20.0").unwrap(),
+        min_size_sol: min,
+        skip_below_min_size: false,
+        max_concurrent_positions: 10,
+        ..PositionSizingConfig::default()
+    });
+    let sizer_legacy = PositionSizer::new(db_legacy, cfg_legacy);
+    let factors_legacy = SizingFactors {
+        is_consensus: false,
+        wallet_wqs: 10.0,
+        wqs_confidence: None, // low: no WQS bonus
+        wallet_success_rate: Decimal::from_str("0.2").unwrap(), // 0.8x penalty
+        token_age_hours: Some(1.0), // 0.5x penalty
+        estimated_slippage: Decimal::from_str("5.0").unwrap(), // 0.7x penalty
+        signal_quality: Some(Decimal::from_str("0.5").unwrap()), // 0.7x penalty
+        token_volatility_24h: Some(Decimal::from_str("50.0").unwrap()), // additional reduction
+        wallet_address: "test_wallet".to_string(),
+        total_capital_sol: Decimal::from_str("10.0").unwrap(),
+        strategy: chimera_operator::models::Strategy::Spear,
+        consensus_wallet_count: None,
+        regime_multiplier: Decimal::ONE,
+        wqs_capped_max_size: None,
+        boost_target_sol: None,
+        token_address: None,
+        is_proven: false,
+    };
+    let size_legacy = sizer_legacy.calculate_size(factors_legacy).await.unwrap();
     assert!(
-        size >= min,
-        "Position size must not go below min_size_sol=0.5, got {}",
-        size
+        size_legacy >= min,
+        "Legacy mode must clamp up to min_size_sol=0.5, got {}",
+        size_legacy
     );
 }
 
@@ -438,6 +482,7 @@ async fn test_hybrid_sizing_eliminated_multiplier_drift() {
         wqs_capped_max_size: None, // 1.0x (neutral regime)
         boost_target_sol: None,
         token_address: None,
+        is_proven: false,
     };
 
     let size = sizer.calculate_size(factors).await.unwrap();
@@ -514,6 +559,7 @@ async fn test_kelly_caps_work_with_hybrid_sizing() {
         wqs_capped_max_size: None,
         boost_target_sol: None,
         token_address: None,
+        is_proven: false,
     };
 
     let size = sizer.calculate_size(factors).await.unwrap();
@@ -642,5 +688,85 @@ async fn test_conviction_cap_skipped_without_token_context() {
         size,
         Decimal::from_str("0.5").unwrap(),
         "no token context → full-size base unchanged (cap disabled)"
+    );
+}
+
+// ─── Proven-wallet sizing override + skip-below-min semantics (2026-08-18) ──
+
+/// Proven wallets (is_proven) size at the fixed proven_size_sol, bypassing
+/// the WQS × confidence chain that would crush them (WQS ~10 → ~0.025 SOL
+/// → rejected under skip semantics). Strategy max still applies.
+#[tokio::test]
+async fn test_proven_wallet_override_and_cap_exemptions() {
+    let (db, _tmp) = create_test_db().await;
+    let cfg = Arc::new(PositionSizingConfig {
+        base_size_sol: Decimal::from_str("0.75").unwrap(),
+        min_size_sol: Decimal::from_str("0.25").unwrap(),
+        proven_sizing_boost: true,
+        proven_size_sol: Decimal::from_str("0.75").unwrap(),
+        conviction_size_cap_enabled: true,
+        conviction_size_default_cap_sol: Decimal::from_str("0.25").unwrap(),
+        ..PositionSizingConfig::default()
+    });
+    let sizer = PositionSizer::new(db, cfg);
+
+    // WQS-10 proven wallet with all penalties — chain would compute ~0.013.
+    let mut factors = neutral_factors();
+    factors.wallet_wqs = 10.0;
+    factors.is_proven = true;
+    factors.token_address = Some("tok_proven_override".to_string()); // conviction cap would clamp to 0.25
+    factors.wqs_capped_max_size = Some(Decimal::from_str("0.25").unwrap()); // spear_lite would clamp to 0.25
+
+    let size = sizer.calculate_size(factors).await.unwrap();
+    assert_eq!(
+        size,
+        Decimal::from_str("0.75").unwrap(),
+        "proven wallet must size at proven_size_sol, exempt from WQS micro-cap and conviction cap"
+    );
+}
+
+/// Proven override respects the strategy max cap (Shield 2.0 default).
+#[tokio::test]
+async fn test_proven_override_respects_strategy_max() {
+    let (db, _tmp) = create_test_db().await;
+    let cfg = Arc::new(PositionSizingConfig {
+        shield_max_size_sol: Decimal::from_str("0.5").unwrap(),
+        proven_size_sol: Decimal::from_str("0.75").unwrap(),
+        ..PositionSizingConfig::default()
+    });
+    let sizer = PositionSizer::new(db, cfg);
+
+    let mut factors = neutral_factors();
+    factors.is_proven = true;
+    let size = sizer.calculate_size(factors).await.unwrap();
+    assert_eq!(
+        size,
+        Decimal::from_str("0.5").unwrap(),
+        "strategy max caps the proven override"
+    );
+}
+
+/// Boost disabled: proven wallets fall back to the WQS chain — which under
+/// skip semantics rejects (zero) at WQS 10. Documents the atomic coupling:
+/// skip_below_min_size without proven_sizing_boost silences the proven roster.
+#[tokio::test]
+async fn test_proven_boost_disabled_rejects_low_wqs() {
+    let (db, _tmp) = create_test_db().await;
+    let cfg = Arc::new(PositionSizingConfig {
+        base_size_sol: Decimal::from_str("0.75").unwrap(),
+        min_size_sol: Decimal::from_str("0.25").unwrap(),
+        proven_sizing_boost: false,
+        ..PositionSizingConfig::default()
+    });
+    let sizer = PositionSizer::new(db, cfg);
+
+    let mut factors = neutral_factors();
+    factors.wallet_wqs = 10.0;
+    factors.wqs_confidence = Some(0.5);
+    factors.is_proven = true;
+    let size = sizer.calculate_size(factors).await.unwrap();
+    assert_eq!(
+        size, Decimal::ZERO,
+        "without the boost, a WQS-10 wallet's chain output (~0.04) must reject under skip semantics"
     );
 }

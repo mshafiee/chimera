@@ -56,6 +56,13 @@ pub struct SizingFactors {
     /// Token address for the conviction-size cap (75th percentile of the
     /// token's own recent entry sizes). None disables the token-based cap.
     pub token_address: Option<String>,
+    /// Wallet is proven by deduped shadow statistics (selection's
+    /// wallet_is_proven oracle: mirror t-stat / shadow-total). Proven
+    /// wallets size at the fixed `proven_size_sol` under
+    /// `proven_sizing_boost` — their WQS (~10, own-PnL score) is
+    /// anti-correlated with copy-PnL and would otherwise crush the size
+    /// (2026-08-18).
+    pub is_proven: bool,
 }
 
 impl PositionSizer {
@@ -74,6 +81,13 @@ impl PositionSizer {
 
     pub fn off_hours_size_multiplier(&self) -> rust_decimal::Decimal {
         self.config.off_hours_size_multiplier
+    }
+
+    /// Whether the proven-wallet sizing boost is enabled — callers use this
+    /// to decide whether resolving the proven oracle is worth a DB round
+    /// trip (2026-08-18).
+    pub fn proven_boost_enabled(&self) -> bool {
+        self.config.proven_sizing_boost
     }
 
     /// Calculate position size based on factors.
@@ -133,8 +147,25 @@ impl PositionSizer {
                     // A zero kelly_base means non-positive EV — the full_kelly_cap zero-check
                     // below will reject the trade. Clamping up to min_size_sol first would
                     // inflate a negative-EV signal past the zero-cap guard.
+                    //
+                    // Skip-below-min semantics (2026-08-18): a non-zero but
+                    // sub-minimum Kelly output rejects rather than clamping
+                    // up — a tiny Kelly allocation says the edge is thin, and
+                    // the fixed tip load would eat it. (Dormant branch:
+                    // use_kelly_sizing is false in production, kept
+                    // consistent with the non-Kelly path.)
                     if kelly_base.is_zero() {
                         kelly_base
+                    } else if self.config.skip_below_min_size
+                        && kelly_base < self.config.min_size_sol
+                    {
+                        tracing::info!(
+                            wallet = %factors.wallet_address,
+                            kelly_base_sol = %kelly_base,
+                            min_size_sol = %self.config.min_size_sol,
+                            "Kelly base below min_size_sol — returning zero (skip-below-min semantics)"
+                        );
+                        Decimal::ZERO
                     } else {
                         kelly_base
                             .max(self.config.min_size_sol)
@@ -394,20 +425,70 @@ impl PositionSizer {
 
         // Per-wallet copy-performance boost: a proven wallet's boost target
         // overrides the computed size. Still bounded by strategy_max (next
-        // line) and the min_size_sol floor, so a misconfigured boost cannot
-        // exceed strategy caps or breach the floor.
+        // line), so a misconfigured boost cannot exceed strategy caps.
         if let Some(boost) = factors.boost_target_sol {
             size = boost;
         }
 
-        size = size.max(self.config.min_size_sol).min(strategy_max);
+        // Proven-wallet sizing override (2026-08-18): the fixed proven size
+        // replaces the WQS × confidence chain output entirely — the chain
+        // crushes proven wallets (WQS ~10 → ~0.025 SOL) because WQS measures
+        // the whale's OWN PnL, not copy PnL. Under skip-below-min semantics
+        // that crush would reject every proven entry, silently undoing the
+        // selection WQS waiver — this override is atomic with it.
+        // Caps that still apply below: strategy_max, spear_lite (WQS cap),
+        // portfolio heat (caller). The conviction-size cap is deliberately
+        // NOT applied: its history-less default (0.25) would re-clamp
+        // proven entries on fresh tokens, restoring the minimum-size regime.
+        if self.config.proven_sizing_boost && factors.is_proven {
+            tracing::info!(
+                wallet = %factors.wallet_address,
+                strategy = ?factors.strategy,
+                wqs_chain_size = %size,
+                proven_size_sol = %self.config.proven_size_sol,
+                "Proven-wallet sizing override applied (bypasses WQS × confidence chain)"
+            );
+            size = self.config.proven_size_sol;
+        }
+
+        // Min/max application (2026-08-18): under skip_below_min_size, a
+        // sub-minimum computed size REJECTS (returns zero → the caller's
+        // POSITION_SIZE_ZERO) instead of being clamped up: paying the fixed
+        // ~0.0006 SOL tip load on a marginal-conviction size is exactly the
+        // uneconomical entry the minimum exists to prevent. Legacy mode
+        // (flag off) preserves the clamp-up for rollback.
+        if self.config.skip_below_min_size {
+            if size < self.config.min_size_sol {
+                tracing::info!(
+                    wallet = %factors.wallet_address,
+                    strategy = ?factors.strategy,
+                    computed_size = %size,
+                    min_size_sol = %self.config.min_size_sol,
+                    "Sizer output below min_size_sol — returning zero (skip-below-min semantics)"
+                );
+                return Ok(Decimal::ZERO);
+            }
+            size = size.min(strategy_max);
+        } else {
+            size = size.max(self.config.min_size_sol).min(strategy_max);
+        }
 
         // WQS-based micro-position cap for low-conviction wallets.
         // Applied after strategy max to ensure unproven wallets trade small.
         // A cap below min_size_sol would be overridden by the hard floor below
         // (a pointless, silently-ineffective cap) — skip it explicitly.
+        // Proven wallets are exempt (2026-08-18): they carry WQS ~10 BY
+        // DESIGN of the boost (own-PnL score, anti-correlated with copy
+        // PnL) — capping them to the spear_lite micro-size would undo the
+        // proven sizing override.
         if let Some(wqs_cap) = factors.wqs_capped_max_size {
-            if wqs_cap < self.config.min_size_sol {
+            if factors.is_proven && self.config.proven_sizing_boost {
+                tracing::debug!(
+                    wallet = %factors.wallet_address,
+                    wqs_cap = %wqs_cap,
+                    "Skipping WQS micro-position cap for proven wallet"
+                );
+            } else if wqs_cap < self.config.min_size_sol {
                 tracing::warn!(
                     wqs_cap = %wqs_cap,
                     min_size_sol = %self.config.min_size_sol,
@@ -429,7 +510,13 @@ impl PositionSizer {
         // entry sizes (7d), falling back to the default cap (0.25 SOL) when
         // history is too thin. Keeps the bot small and invisible so copy-traders
         // don't pile onto our entry as exit liquidity (arxiv 2601.08641).
-        if self.config.conviction_size_cap_enabled {
+        // Proven wallets are exempt (2026-08-18): the history-less default
+        // (0.25 SOL) would re-clamp every proven entry on fresh tokens,
+        // restoring the minimum-size cost regime the proven override exists
+        // to escape.
+        if self.config.conviction_size_cap_enabled
+            && !(factors.is_proven && self.config.proven_sizing_boost)
+        {
             if let Some(ref token) = factors.token_address {
                 let cap = self
                     .token_conviction_cap_sol(token)
@@ -454,13 +541,25 @@ impl PositionSizer {
             }
         }
 
-        // Hard floor guarantee: the returned size can never fall below
-        // min_size_sol regardless of any earlier cap (strategy max, WQS
-        // micro-position cap, or multiplicative shrinkage). Sub-floor positions
-        // incur a fixed round-trip cost (~1.2% at 0.25 SOL) that turns marginal
-        // winners into net losses. Negative-EV signals are rejected earlier
-        // (Kelly zero-cap / dust checks) and never reach this point.
-        size = size.max(self.config.min_size_sol);
+        // Final minimum application (2026-08-18): skip mode rejects sub-min
+        // outputs (caps may shrink below min — e.g. a token's 75th-percentile
+        // entry size); legacy mode clamps up. Sub-floor positions incur a
+        // fixed round-trip cost (~1.2% at 0.25 SOL) that turns marginal
+        // winners into net losses — skip them rather than rescue them.
+        if self.config.skip_below_min_size {
+            if size < self.config.min_size_sol {
+                tracing::info!(
+                    wallet = %factors.wallet_address,
+                    token = ?factors.token_address,
+                    final_size = %size,
+                    min_size_sol = %self.config.min_size_sol,
+                    "Final size below min_size_sol after caps — returning zero (skip-below-min semantics)"
+                );
+                return Ok(Decimal::ZERO);
+            }
+        } else {
+            size = size.max(self.config.min_size_sol);
+        }
 
         Ok(size)
     }
@@ -546,6 +645,7 @@ impl PositionSizer {
             wqs_capped_max_size: None,
             boost_target_sol: None,
             token_address: token_address.map(|s| s.to_string()),
+            is_proven: false, // set by the selection call site (oracle lives there)
         })
     }
 

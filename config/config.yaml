@@ -43,8 +43,11 @@ circuit_breakers:
   cooldown_minutes: 30
 
 strategy:
-  shield_percent: 50
-  spear_percent: 50
+  # 60/40 split (2026-08-18): Shield allocation = capital 10 × heat 20% × 60%
+  # = 1.2 SOL — admits one 0.75 SOL proven entry plus a small concurrent
+  # position, serializing concurrent proven entries during validation.
+  shield_percent: 60
+  spear_percent: 40
   max_position_sol: 1.0
   min_position_sol: 0.01
   shield_signal_quality_threshold: 0.40  # Raised from 0.30: data shows only the 0.50+ quality band is gross-profitable (+0.06 SOL); 0.30-0.50 lost -0.53 SOL. 0.40 drops the worst sub-0.40 band (-0.37 SOL).
@@ -272,9 +275,28 @@ profit_management:
 
 # Position sizing configuration
 position_sizing:
-  base_size_sol: 0.5         # Increased from 0.25: halves fee impact (16.8% -> ~8.4% of move)
+  base_size_sol: 0.75        # Was 0.5: WQS-80 × confidence ≈ 0.30-0.38 clears min_size_sol instead of straddling it (2026-08-18)
   max_size_sol: 2.0
   min_size_sol: 0.25
+  # Proven (waived) wallets route to SPEAR (WQS-floor quality scoring clears
+  # SPEAR's threshold, not SHIELD's) — raised 0.5 -> 1.0 so the 0.75 SOL
+  # proven size fits under the strategy cap. Unproven Spear flow is already
+  # bounded by the WQS chain, spear_lite cap, and skip-below-min semantics.
+  spear_max_size_sol: 1.0
+  # Cost-ratio policy (2026-08-18): entries the sizer computes below
+  # min_size_sol REJECT instead of clamping up — the fixed ~0.0006 SOL tip
+  # load is 0.24% of 0.25 SOL but 2.4% of 0.025 SOL; marginal-conviction
+  # sizes skip rather than trade at the minimum with the worst cost ratio.
+  skip_below_min_size: true
+  # Proven-wallet sizing (2026-08-18): wallets proven by deduped shadow stats
+  # (t-stat/shadow-total oracle) size at a fixed 0.75 SOL — the WQS ×
+  # confidence chain crushes them (WQS ~10, own-PnL score anti-correlated
+  # with copy-PnL) to ~0.025 SOL, which skip semantics would reject. Atomic
+  # with skip_below_min_size. Caps still applied: strategy max, spear_lite,
+  # portfolio heat (NOT the conviction-size cap: its 0.25 history-less
+  # default would re-clamp proven entries on fresh tokens).
+  proven_sizing_boost: true
+  proven_size_sol: 0.75
   min_live_position_sol: 0.02  # Minimum position size for live trading (distinct from paper)
   consensus_multiplier: 2.0  # Increased from 1.5x to 2.0x for stronger consensus signals
   max_concurrent_positions: 12  # Was 20: fewer simultaneous positions reduces exposure to negative-EV signals and churn costs
