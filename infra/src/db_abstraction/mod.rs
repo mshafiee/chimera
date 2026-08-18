@@ -110,6 +110,25 @@ pub trait Database: Send + Sync {
     /// Get active positions
     async fn get_active_positions(&self) -> AppResult<Vec<Position>>;
 
+    /// Active positions excluding one trade (default: filter in memory).
+    /// Used by the execution-time heat re-checks so a trade being processed
+    /// is not double-counted: by re-check time the queued trade's own
+    /// position row is already flushed to the DB (write queue) AND present
+    /// in the in-memory registry, so counting `current_heat + own_size`
+    /// charges the same exposure twice (2026-08-18: this blocked every
+    /// ≥0.375 SOL entry — 0.75+0.75 > the 1.2 SOL Shield allocation).
+    async fn get_active_positions_excluding(
+        &self,
+        exclude_trade_uuid: &str,
+    ) -> AppResult<Vec<Position>> {
+        Ok(self
+            .get_active_positions()
+            .await?
+            .into_iter()
+            .filter(|p| p.trade_uuid != exclude_trade_uuid)
+            .collect())
+    }
+
     /// Get position by trade UUID
     async fn get_position_by_trade_uuid(&self, trade_uuid: &str) -> AppResult<Option<Position>>;
 

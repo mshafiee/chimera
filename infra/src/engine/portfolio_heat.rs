@@ -347,6 +347,66 @@ impl PortfolioHeat {
         Ok((shield_heat, spear_heat))
     }
 
+    /// `get_strategy_heat` excluding one trade from BOTH heat sources —
+    /// the positions table (write-queue flush) and the in-flight status
+    /// trades (PENDING/QUEUED/EXECUTING/RETRY). Used by the execution-time
+    /// re-check so the trade being processed is counted exactly once (in
+    /// `position_size_sol`), never twice (2026-08-18).
+    pub async fn get_strategy_heat_excluding(
+        &self,
+        exclude_trade_uuid: &str,
+    ) -> Result<(Decimal, Decimal), String> {
+        let now = chrono::Utc::now();
+        let heat_cutoff = now - chrono::Duration::seconds(1800);
+
+        let positions = self
+            .db
+            .get_active_positions_excluding(exclude_trade_uuid)
+            .await
+            .map_err(|e| format!("Failed to query strategy heat: {}", e))?;
+
+        let mut shield_heat = Decimal::ZERO;
+        let mut spear_heat = Decimal::ZERO;
+
+        for pos in &positions {
+            let include = pos.state == "ACTIVE"
+                || (pos.state == "EXITING" && pos.last_updated >= heat_cutoff);
+            if include {
+                match pos.strategy.as_str() {
+                    "SHIELD" => shield_heat += pos.entry_amount_sol,
+                    "SPEAR" => spear_heat += pos.entry_amount_sol,
+                    _ => {}
+                }
+            }
+        }
+
+        for status in &["PENDING", "QUEUED", "EXECUTING", "RETRY"] {
+            let trades = self
+                .db
+                .get_trades_by_status(status, i32::MAX)
+                .await
+                .map_err(|e| format!("Failed to query strategy heat: {}", e))?;
+            for trade in &trades {
+                if trade.trade_uuid == exclude_trade_uuid {
+                    continue;
+                }
+                if trade.side == "BUY" {
+                    let trade_age = chrono::Utc::now() - trade.created_at;
+                    let is_stale = trade_age.num_seconds() > 300;
+                    if !is_stale {
+                        match trade.strategy.as_str() {
+                            "SHIELD" => shield_heat += trade.amount_sol,
+                            "SPEAR" => spear_heat += trade.amount_sol,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((shield_heat, spear_heat))
+    }
+
     pub async fn can_open_strategy_position(
         &self,
         strategy: chimera_core::models::Strategy,
@@ -354,11 +414,70 @@ impl PortfolioHeat {
         shield_percent: u32,
         spear_percent: u32,
     ) -> Result<bool, String> {
-        if !self.can_open_position(position_size_sol).await? {
+        self.can_open_strategy_position_excluding(
+            strategy,
+            position_size_sol,
+            shield_percent,
+            spear_percent,
+            None,
+        )
+        .await
+    }
+
+    /// Strategy allocation check that can exclude the trade being processed
+    /// (2026-08-18). The pipeline's execution-time re-check runs AFTER the
+    /// trade's own position row is flushed (write queue) — without the
+    /// exclusion, `current_heat + own_size` double-counts it and every
+    /// entry larger than half the strategy allocation self-blocks.
+    pub async fn can_open_strategy_position_excluding(
+        &self,
+        strategy: chimera_core::models::Strategy,
+        position_size_sol: Decimal,
+        shield_percent: u32,
+        spear_percent: u32,
+        exclude_trade_uuid: Option<&str>,
+    ) -> Result<bool, String> {
+        // Non-positive sizes are rejected before anything else so capacity
+        // accounting stays sound.
+        if position_size_sol <= Decimal::ZERO {
             return Ok(false);
         }
 
-        let (shield_heat, spear_heat) = self.get_strategy_heat().await?;
+        // Self-excluded mode (2026-08-18): both gates derive from the
+        // excluded heats. The general can_open_position / calculate_heat
+        // path reads the registry fast path, which still contains the
+        // trade being processed — using it here would double-count the
+        // same exposure the exclusion exists to remove.
+        let (shield_heat, spear_heat) = match exclude_trade_uuid {
+            Some(uuid) => self.get_strategy_heat_excluding(uuid).await?,
+            None => {
+                if !self.can_open_position(position_size_sol).await? {
+                    return Ok(false);
+                }
+                self.get_strategy_heat().await?
+            }
+        };
+
+        // General heat gate in excluded mode: total exposure (ex-self) plus
+        // the new size against the 30% critical-heat ceiling used by the
+        // pipeline re-check.
+        if let Some(_uuid) = exclude_trade_uuid {
+            let total_exposure = shield_heat + spear_heat;
+            let capital = *self.total_capital_sol.read();
+            let max_heat_sol = capital * (self.max_heat_percent / Decimal::from(100));
+            if total_exposure + position_size_sol > max_heat_sol {
+                tracing::warn!(
+                    trade_uuid = %_uuid,
+                    strategy = ?strategy,
+                    total_exposure_ex_self = %total_exposure,
+                    position_size = %position_size_sol,
+                    max_heat_sol = %max_heat_sol,
+                    "[PORTFOLIO_HEAT] General heat check (self-excluded): BLOCKED"
+                );
+                return Ok(false);
+            }
+        }
+
         let allocation_pct = match strategy {
             chimera_core::models::Strategy::Shield => Decimal::from(shield_percent),
             chimera_core::models::Strategy::Spear => Decimal::from(spear_percent),
@@ -767,6 +886,102 @@ mod tests {
         let heat = PortfolioHeat::new(db, dec!(100));
         assert!(!heat
             .can_open_strategy_position(chimera_core::models::Strategy::Shield, dec!(1), 50, 50)
+            .await
+            .unwrap());
+    }
+
+    /// Self-exclusion regression (2026-08-18): the execution-time re-check
+    /// runs after the queued trade's own rows are flushed — position row AND
+    /// in-flight status trade. Without exclusion, `current + own` charges
+    /// the trade twice and any entry larger than half the strategy
+    /// allocation self-blocks (production: all four 0.75 SOL entries on
+    /// 2026-08-18 dead-lettered against the 1.2 SOL Shield allocation).
+    #[tokio::test]
+    async fn test_can_open_strategy_position_self_exclusion() {
+        // 100 capital, 20% heat -> 20 SOL. SHIELD 60% -> 12 SOL allocation.
+        // The trade being processed ("self") is a 7.5 SOL SHIELD position
+        // (flushed) AND a QUEUED 7.5 SOL trade (in-flight) — both count
+        // toward heat in the naive path.
+        let self_uuid = "self-trade";
+        let mut trades = HashMap::new();
+        trades.insert(
+            "QUEUED".to_string(),
+            vec![buy_trade(self_uuid, "SHIELD", dec!(7.5), now_ago_secs(10))],
+        );
+        let db = heat_db(
+            vec![position(
+                self_uuid,
+                "SHIELD",
+                "ACTIVE",
+                dec!(7.5),
+                now_ago_secs(10),
+            )],
+            trades,
+        );
+        let heat = PortfolioHeat::new(db, dec!(100));
+
+        // Naive (non-excluding): 7.5 (position) + 7.5 (queued) + 7.5 (new)
+        // = 22.5 > 12 -> blocked. This documents the double-count.
+        assert!(!heat
+            .can_open_strategy_position(chimera_core::models::Strategy::Shield, dec!(7.5), 60, 40)
+            .await
+            .unwrap());
+
+        // Self-excluding: the trade's own exposure is counted exactly once
+        // (in position_size_sol) -> 0 + 7.5 <= 12 -> allowed.
+        let mut trades = HashMap::new();
+        trades.insert(
+            "QUEUED".to_string(),
+            vec![buy_trade(self_uuid, "SHIELD", dec!(7.5), now_ago_secs(10))],
+        );
+        let db = heat_db(
+            vec![position(
+                self_uuid,
+                "SHIELD",
+                "ACTIVE",
+                dec!(7.5),
+                now_ago_secs(10),
+            )],
+            trades,
+        );
+        let heat = PortfolioHeat::new(db, dec!(100));
+        assert!(heat
+            .can_open_strategy_position_excluding(
+                chimera_core::models::Strategy::Shield,
+                dec!(7.5),
+                60,
+                40,
+                Some(self_uuid)
+            )
+            .await
+            .unwrap());
+
+        // Exclusion must not mask OTHER positions: a different trade's 7.5
+        // SOL + our new 7.5 = 15 > 12 -> still blocked.
+        let mut trades = HashMap::new();
+        trades.insert(
+            "QUEUED".to_string(),
+            vec![buy_trade("other-trade", "SHIELD", dec!(7.5), now_ago_secs(10))],
+        );
+        let db = heat_db(
+            vec![position(
+                "other-pos",
+                "SHIELD",
+                "ACTIVE",
+                dec!(7.5),
+                now_ago_secs(10),
+            )],
+            trades,
+        );
+        let heat = PortfolioHeat::new(db, dec!(100));
+        assert!(!heat
+            .can_open_strategy_position_excluding(
+                chimera_core::models::Strategy::Shield,
+                dec!(7.5),
+                60,
+                40,
+                Some(self_uuid)
+            )
             .await
             .unwrap());
     }

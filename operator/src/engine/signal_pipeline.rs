@@ -486,21 +486,35 @@ impl SignalProcessor {
             };
 
             // 1. Portfolio Heat Check
+            //
+            // Self-exclusion (2026-08-18): by this point the queued trade's
+            // own row exists in BOTH the in-memory registry (queue_signal
+            // inserted it) and the DB (write queue flushed it). The re-check
+            // must therefore EXCLUDE this trade's own exposure — otherwise
+            // `current + own` charges it twice and every entry larger than
+            // half the cap self-blocks (observed: all four 0.75 SOL entries
+            // on 2026-08-18 dead-lettered this way).
             let can_open = if let Some(ref registry) = self.state_registry {
-                // Fast path: check in-memory portfolio heat
+                // Fast path: check in-memory portfolio heat, minus this trade
                 let heat = registry.get_portfolio_heat();
-                let new_exposure = heat.total_exposure_sol + signal.payload.amount_sol;
+                let own_exposure = registry
+                    .get_trade(&trade_uuid)
+                    .map(|t| t.amount_sol)
+                    .unwrap_or(Decimal::ZERO);
+                let new_exposure =
+                    heat.total_exposure_sol - own_exposure + signal.payload.amount_sol;
                 let capital = self.config.position_sizing.total_capital_sol;
                 let max_heat = capital * Decimal::from(30u32) / Decimal::from(100u32);
                 tracing::debug!(
                     trade_uuid = %trade_uuid,
                     exposure_sol = %heat.total_exposure_sol,
+                    own_exposure_sol = %own_exposure,
                     requested_amount_sol = %signal.payload.amount_sol,
                     new_exposure_sol = %new_exposure,
                     cap_sol = %max_heat,
                     portfolio_total_capital = %capital,
                     can_open = new_exposure <= max_heat,
-                    "signal_pipeline: portfolio heat re-check (in-memory)"
+                    "signal_pipeline: portfolio heat re-check (in-memory, self-excluded)"
                 );
                 new_exposure <= max_heat
             } else {
@@ -574,21 +588,23 @@ impl SignalProcessor {
                     return;
                 }
 
-            // 2. Strategy Allocation Check
+            // 2. Strategy Allocation Check (self-excluding: the queued
+            // trade's own rows are already flushed — see note above)
             tracing::debug!(
                 trade_uuid = %trade_uuid,
                 strategy = ?signal.payload.strategy,
                 requested_amount_sol = %signal.payload.amount_sol,
                 shield_percent = self.config.strategy.shield_percent,
                 spear_percent = self.config.strategy.spear_percent,
-                "signal_pipeline: strategy allocation re-check"
+                "signal_pipeline: strategy allocation re-check (self-excluded)"
             );
             match portfolio_heat
-                .can_open_strategy_position(
+                .can_open_strategy_position_excluding(
                     signal.payload.strategy,
                     signal.payload.amount_sol,
                     self.config.strategy.shield_percent,
                     self.config.strategy.spear_percent,
+                    Some(&trade_uuid),
                 )
                 .await
             {
