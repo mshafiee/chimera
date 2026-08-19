@@ -58,7 +58,7 @@ strategy:
   slippage_fallback_small_percent: 0.005   # 0.5% slippage estimate for trades < threshold when Jupiter impact unavailable
   slippage_fallback_large_percent: 0.01    # 1.0% slippage estimate for trades >= threshold
   slippage_fallback_threshold_sol: 0.5     # SOL boundary between small/large for slippage fallback
-  copy_wallet_sells: false  # Signal-based exit: ignore wallet SELLs, manage exits via profit targets/stop-loss
+  copy_wallet_sells: true  # Exit on the copied wallet's SELL signal. Shadow comparison on the SAME 183 admitted positions: wallet_sell +13.20 SOL vs exit-system (mirror_main) -0.16 SOL, balanced 92W/91L @ +7.15% avg. The stop/trailing/time ladder cut would-be winners into quick losses (17% realized win rate). Flipped 2026-08-19 — revert if realized post-cost net return stays negative (guardrail).
 
 jito:
   enabled: true  # Overridden by CHIMERA_JITO__ENABLED env var for mainnet-paper
@@ -122,7 +122,7 @@ token_safety:
   min_token_age_proven_hours: 0.1
   # Allow pump.fun tokens with real DEX liquidity (graduated). Bonding-curve
   # tokens stay blocked: they have $0 DEX liquidity and fail the $15K pumpfun
-  # floor below. Positions are managed by profit targets/stop-loss (copy_wallet_sells: false).
+  # floor below. Positions exit on the copied wallet's SELL (copy_wallet_sells: true).
   # Re-enabled 2026-08-06 (was false since 70% of trades / 17% win rate / negative EV
   # — that data predates the $15K graduated liquidity floor).
   allow_graduated_pumpfun: true
