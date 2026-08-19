@@ -895,6 +895,102 @@ async fn test_demote_shadow_losers_disabled_and_no_losers() {
     assert_eq!(m.demote_shadow_losers().await.unwrap(), 0);
 }
 
+#[tokio::test]
+async fn test_demote_shadow_losers_grades_on_wallet_sell_exit() {
+    // The grader must respect the configured shadow_exit_strategy. Seeds only
+    // wallet_sell shadow exits, so a wallet_sell-graded monitor (the
+    // copy_wallet_sells=true regime) must demote the negative-EV wallet, while
+    // a mirror_main-graded monitor must NOT (its exits are absent) — proving
+    // the two grading regimes are distinct (FIX: demote was hard-coded to
+    // mirror_main while live exits became wallet_sell). See dune_monitor.rs
+    // shadow_exit_strategy + the `se.exit_strategy = $5` bind.
+    let (db, _guard) = create_test_db().await;
+    let pool = pg_pool(&db);
+    seed_wallet_status(&db, WALLET, "ACTIVE", 80.0).await;
+
+    // Three admitted shadow positions whose ONLY exit is a losing wallet_sell.
+    for i in 0..3 {
+        sqlx::query(
+            "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, strategy, main_admitted, entry_amount_sol, ingress, opened_at) \
+             VALUES ($1, 'd', 'run', $2, $3, 'SHIELD', true, 0.1, 'webhook', NOW() - make_interval(hours => $4::int))",
+        )
+        .bind(format!("qws-{i}"))
+        .bind(WALLET)
+        .bind(TOKEN)
+        .bind(i + 1)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO shadow_exits (shadow_id, exit_strategy, pnl_pct, pnl_sol, exit_reason) \
+             VALUES ($1, 'wallet_sell', -5.0, -0.005, 'wallet_sold')",
+        )
+        .bind(format!("qws-{i}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let mut cfg = base_config();
+    cfg.shadow_quality_enabled = true;
+    cfg.shadow_quality_min_samples = 3;
+    cfg.shadow_quality_demote_threshold_pct = -2.0;
+    cfg.shadow_quality_cost_adjustment_pct = 0.0;
+    cfg.shadow_quality_window_hours = 48;
+
+    // Graded on wallet_sell → the wallet_sell exits are counted → demote.
+    let m_ws = {
+        let _guard = ENV_LOCK.lock();
+        let old = std::env::var("DUNE_API_BASE_URL").ok();
+        std::env::set_var("DUNE_API_BASE_URL", "http://127.0.0.1:1");
+        let m = DunePnlMonitor::new(&cfg, db.clone(), "wallet_sell".to_string());
+        match old {
+            Some(v) => std::env::set_var("DUNE_API_BASE_URL", v),
+            None => std::env::remove_var("DUNE_API_BASE_URL"),
+        }
+        drop(_guard);
+        m
+    };
+    assert_eq!(m_ws.demote_shadow_losers().await.unwrap(), 1);
+    let (status,): (String,) = sqlx::query_as("SELECT status FROM wallets WHERE address = $1")
+        .bind(WALLET)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "CANDIDATE");
+
+    // Re-seed a fresh ACTIVE wallet and confirm mirror_main grading IGNORES the
+    // wallet_sell exits (would otherwise falsely demote under the old code).
+    seed_wallet_status(&db, WALLET_B, "ACTIVE", 80.0).await;
+    for i in 0..3 {
+        sqlx::query(
+            "UPDATE shadow_positions SET wallet_address = $2 WHERE shadow_id = $1",
+        )
+        .bind(format!("qws-{i}"))
+        .bind(WALLET_B)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let m_mm = {
+        let _guard = ENV_LOCK.lock();
+        let old = std::env::var("DUNE_API_BASE_URL").ok();
+        std::env::set_var("DUNE_API_BASE_URL", "http://127.0.0.1:1");
+        let m = DunePnlMonitor::new(&cfg, db.clone(), "mirror_main".to_string());
+        match old {
+            Some(v) => std::env::set_var("DUNE_API_BASE_URL", v),
+            None => std::env::remove_var("DUNE_API_BASE_URL"),
+        }
+        drop(_guard);
+        m
+    };
+    assert_eq!(
+        m_mm.demote_shadow_losers().await.unwrap(),
+        0,
+        "mirror_main grading must ignore wallet_sell exits"
+    );
+}
+
 // ── audit_actives_onchain ────────────────────────────────────────────────────
 
 #[tokio::test]
