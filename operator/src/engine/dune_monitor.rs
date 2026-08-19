@@ -87,6 +87,14 @@ pub struct DunePnlMonitor {
     shadow_quality_demote_threshold_pct: f64,
     shadow_quality_cost_adjustment_pct: f64,
     shadow_quality_window_hours: i64,
+    /// Shadow exit strategy used to grade wallet quality: `mirror_main` (the
+    /// stop/trailing/time ladder) or `wallet_sell` (copy the wallet's own
+    /// SELL). MUST match the live exit mode (`strategy.copy_wallet_sells`) so
+    /// wallets are promoted/demoted on the exit the system actually uses —
+    /// grading on the stale exit while live exits differ would demote
+    /// wallets that are profitable under the current strategy (and vice
+    /// versa).
+    shadow_exit_strategy: String,
     onchain_config: crate::config::OnchainAssessmentConfig,
     promotion_ctx: Option<DunePromotionContext>,
 }
@@ -109,7 +117,7 @@ struct DuneError {
 }
 
 impl DunePnlMonitor {
-    pub fn new(config: &DuneConfig, db: Arc<dyn Database>) -> Self {
+    pub fn new(config: &DuneConfig, db: Arc<dyn Database>, shadow_exit_strategy: String) -> Self {
         let api_key = std::env::var("DUNE_API_KEY").unwrap_or_default();
         if api_key.is_empty() {
             warn!("DUNE_API_KEY not set — Dune PnL monitor will run but skip checks");
@@ -139,6 +147,7 @@ impl DunePnlMonitor {
             shadow_quality_demote_threshold_pct: config.shadow_quality_demote_threshold_pct,
             shadow_quality_cost_adjustment_pct: config.shadow_quality_cost_adjustment_pct,
             shadow_quality_window_hours: config.shadow_quality_window_hours,
+            shadow_exit_strategy,
             onchain_config: config.onchain_assessment.clone(),
             promotion_ctx: None,
         }
@@ -1103,7 +1112,7 @@ impl DunePnlMonitor {
                 FROM shadow_exits se
                 JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
                 WHERE sp.opened_at > NOW() - make_interval(hours => $1::int)
-                  AND se.exit_strategy = 'mirror_main'
+                  AND se.exit_strategy = $5
                   AND se.exit_reason IS DISTINCT FROM 'no_price'
                   AND sp.token_address NOT LIKE '%pump'
                   AND sp.main_admitted = true
@@ -1119,6 +1128,7 @@ impl DunePnlMonitor {
         .bind(self.shadow_quality_min_samples)
         .bind(self.shadow_quality_demote_threshold_pct)
         .bind(self.shadow_quality_cost_adjustment_pct)
+        .bind(&self.shadow_exit_strategy)
         .fetch_all(&pool)
         .await?;
 

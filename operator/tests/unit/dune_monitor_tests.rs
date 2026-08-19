@@ -69,7 +69,7 @@ fn monitor(
     std::env::set_var("DUNE_API_BASE_URL", dune_url);
     let old_key = std::env::var("DUNE_API_KEY").ok();
     std::env::set_var("DUNE_API_KEY", "test-key");
-    let m = DunePnlMonitor::new(config, db).with_promotion_context(ctx);
+    let m = DunePnlMonitor::new(config, db, "mirror_main".to_string()).with_promotion_context(ctx);
     match old {
         Some(v) => std::env::set_var("DUNE_API_BASE_URL", v),
         None => std::env::remove_var("DUNE_API_BASE_URL"),
@@ -322,7 +322,7 @@ async fn test_promote_disabled_or_no_key_returns_zero() {
     let _guard = ENV_LOCK.lock();
     std::env::set_var("DUNE_API_BASE_URL", format!("{}/api/v1", dune.url));
     std::env::remove_var("DUNE_API_KEY");
-    let m = DunePnlMonitor::new(&base_config(), db.clone());
+    let m = DunePnlMonitor::new(&base_config(), db.clone(), "mirror_main".to_string());
     std::env::remove_var("DUNE_API_BASE_URL");
     std::env::set_var("DUNE_API_KEY", "test-key");
     drop(_guard);
@@ -1016,7 +1016,7 @@ async fn test_run_without_dune_key_still_runs_onchain_cycles() {
     let old_url = std::env::var("DUNE_API_BASE_URL").ok();
     std::env::set_var("DUNE_API_BASE_URL", format!("{}/api/v1", dune.url));
     std::env::remove_var("DUNE_API_KEY");
-    let m = Arc::new(DunePnlMonitor::new(&cfg, db.clone()));
+    let m = Arc::new(DunePnlMonitor::new(&cfg, db.clone(), "mirror_main".to_string()));
     match old_url {
         Some(v) => std::env::set_var("DUNE_API_BASE_URL", v),
         None => std::env::remove_var("DUNE_API_BASE_URL"),

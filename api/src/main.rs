@@ -1107,7 +1107,18 @@ async fn main() -> anyhow::Result<()> {
         ),
     );
     let mut dune_pnl_monitor =
-        chimera_operator::engine::dune_monitor::DunePnlMonitor::new(&config.dune, db_pool.clone());
+        chimera_operator::engine::dune_monitor::DunePnlMonitor::new(
+            &config.dune,
+            db_pool.clone(),
+            // Grade wallet quality on the exit strategy actually in force, so
+            // demotion/keep decisions match how the system really exits. With
+            // copy_wallet_sells=true the live exit is the wallet's own SELL.
+            if config.strategy.copy_wallet_sells {
+                "wallet_sell".to_string()
+            } else {
+                "mirror_main".to_string()
+            },
+        );
     tracing::info!(
         toxic_threshold = config.experiment.toxic_threshold_percent,
         dune_enabled = config.dune.enabled,

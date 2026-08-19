@@ -202,10 +202,11 @@ impl SignalProcessor {
         // However, wallet-originated SELLs always have exit_fraction=None
         // (monitoring.rs:344), while internal EXITs from build_exit_signal
         // always have exit_fraction=Some(fraction) (main.rs:3038).
-        if signal.payload.action == Action::Sell
-            && !self.config.strategy.copy_wallet_sells
-            && signal.payload.exit_fraction.is_none()
-        {
+        if skip_wallet_sell_signal(
+            signal.payload.action,
+            self.config.strategy.copy_wallet_sells,
+            signal.payload.exit_fraction,
+        ) {
             tracing::info!(
                 trade_uuid = %trade_uuid,
                 wallet = %signal.payload.wallet_address,
@@ -1782,6 +1783,24 @@ pub fn profitability_gate_blocks(
     }
 }
 
+/// Whether a wallet-originated SELL signal should be skipped.
+///
+/// A wallet SELL is identifiable by `exit_fraction == None`; internal EXITs
+/// always carry a fraction. In signal-trading mode (`copy_wallet_sells = false`)
+/// the wallet's own SELL is ignored and the position is managed by the internal
+/// exit system (profit targets/stop-loss/time). In copy-trading mode
+/// (`copy_wallet_sells = true`) the wallet SELL is followed and closes the
+/// position — the exit that the shadow backtest showed nets +13.20 SOL vs
+/// the exit system's −0.16 SOL on the same admitted positions. Internal EXITs
+/// are never skipped.
+fn skip_wallet_sell_signal(
+    action: Action,
+    copy_wallet_sells: bool,
+    exit_fraction: Option<rust_decimal::Decimal>,
+) -> bool {
+    action == Action::Sell && !copy_wallet_sells && exit_fraction.is_none()
+}
+
 pub fn off_hours_multiplier(mins_since_midnight: i64, base_mult: Decimal) -> Decimal {
     const RAMP_DOWN_START: i64 = 60;
     const FULL_REDUCTION_START: i64 = 120;
@@ -1908,5 +1927,34 @@ mod tests {
             assert!(m <= Decimal::ONE, "mins={mins} produced {m}");
             assert!(m >= dec!(0.4), "mins={mins} produced {m}");
         }
+    }
+
+    // ── wallet-sell follow/skip decision (copy_trader exit mode) ──
+
+    #[test]
+    fn wallet_sell_skipped_when_copy_disabled() {
+        // signal-trading (copy_wallet_sells=false): a wallet SELL (no fraction)
+        // is skipped — the position is managed by the internal exit system.
+        assert!(skip_wallet_sell_signal(Action::Sell, false, None));
+    }
+
+    #[test]
+    fn wallet_sell_followed_when_copy_enabled() {
+        // copy-trading (copy_wallet_sells=true): the wallet SELL is followed
+        // and closes the position — NOT skipped.
+        assert!(!skip_wallet_sell_signal(Action::Sell, true, None));
+    }
+
+    #[test]
+    fn internal_exit_never_skipped() {
+        // Internal EXITs always carry a fraction and must never be skipped,
+        // regardless of copy_wallet_sells.
+        assert!(!skip_wallet_sell_signal(Action::Sell, false, Some(Decimal::ONE)));
+        assert!(!skip_wallet_sell_signal(Action::Sell, true, Some(Decimal::ONE)));
+    }
+
+    #[test]
+    fn non_sell_action_never_skipped() {
+        assert!(!skip_wallet_sell_signal(Action::Buy, false, None));
     }
 }
