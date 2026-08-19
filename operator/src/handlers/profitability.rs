@@ -126,6 +126,11 @@ const SAMPLE_THRESHOLD: i64 = 60;
 const NET_RETURN_THRESHOLD: f64 = 0.0;
 const COHORT_MIN_COUNT: i64 = 10;
 const BIAS_THRESHOLD: f64 = 0.05;
+/// Winsorization cap for the paper/live bias gate (±100%). A single corrupted
+/// C3 shadow-fill capture (e.g. 1,140%) must not fail the whole gate for
+/// everyone — cap each value before averaging so the mean reflects real
+/// modeled slippage, not quote failures.
+const BIAS_WINSORIZE_CAP: f64 = 1.0;
 const MAX_SINGLE_LOSS_THRESHOLD: f64 = 0.10;
 const MAX_DRAWDOWN_THRESHOLD: f64 = 0.20;
 const COMPLETENESS_THRESHOLD: f64 = 0.99;
@@ -239,8 +244,18 @@ pub fn evaluate_gates(
     let (declared_bias, bias_status) = if bias_vals.is_empty() {
         (0.0, "INCONCLUSIVE")
     } else {
-        let b = bias_vals.iter().sum::<f64>() / bias_vals.len() as f64;
-        let status = if b.abs() <= BIAS_THRESHOLD { "PASS" } else { "FAIL" };
+        // Winsorize: cap each value at ±100% before averaging. A corrupted
+        // shadow-fill capture must not be able to fail the entire bias gate.
+        let b = bias_vals
+            .iter()
+            .map(|v| v.clamp(-BIAS_WINSORIZE_CAP, BIAS_WINSORIZE_CAP))
+            .sum::<f64>()
+            / bias_vals.len() as f64;
+        let status = if b.abs() <= BIAS_THRESHOLD {
+            "PASS"
+        } else {
+            "FAIL"
+        };
         (b, status)
     };
 
@@ -395,14 +410,25 @@ struct OutcomeRow {
     closed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// An admitted BUY decision is only "missing an outcome" once it is terminally
+/// dead — a decision can't be missing an outcome while its trade is still
+/// in flight (QUEUED/EXECUTING/ACTIVE/EXITING/RETRY), because it may still
+/// close. Counting in-flight trades as missing was structurally failing the
+/// integrity gate whenever any positions were open.
+///
+/// Terminal-without-outcome states:
+/// - NO trade row at all, with the decision old enough that one must exist;
+/// - a trade row stuck in a terminal failure state (DEAD_LETTER/REJECTED), or
+///   FAILED long enough that retry is effectively exhausted.
+///
+/// CLOSED-but-invalid PnL is NOT counted here — that is `count_invalid_pnl`'s
+/// job, and counting it in both places would double-report one violation.
+const MISSING_OUTCOME_STALE_DAYS: i64 = 3;
+
 pub async fn count_missing_outcomes(
     pool: &sqlx::Pool<sqlx::Postgres>,
     run_id: &str,
 ) -> Result<i64, AppError> {
-    // Count EVERY admitted BUY decision without a qualifying closed/valid SELL
-    // outcome — a NULL trade_uuid is only one of the ways an outcome can be
-    // missing (an OPEN/CANCELLED trade, a non-BUY close, or NULL pnl_data_valid
-    // all leave the decision without a usable outcome).
     let n: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*)
@@ -411,19 +437,34 @@ pub async fn count_missing_outcomes(
           AND dr.action = 'BUY'
           AND dr.decided_at > NOW() - INTERVAL '30 days'
           AND ($1 = '' OR dr.run_id = $1)
+          AND NOT EXISTS (
+              SELECT 1 FROM trades t
+              WHERE t.trade_uuid = dr.trade_uuid
+                AND t.status = 'CLOSED'
+                AND t.pnl_data_valid = TRUE
+                AND t.side = 'BUY'
+          )
           AND (
-            dr.trade_uuid IS NULL
-            OR NOT EXISTS (
-                SELECT 1 FROM trades t
-                WHERE t.trade_uuid = dr.trade_uuid
-                  AND t.status = 'CLOSED'
-                  AND t.pnl_data_valid = TRUE
-                  AND t.side = 'BUY'
-            )
+              -- Never had a trade row, and the decision is old enough that one
+              -- must have been created by now (trade rows are written within
+              -- seconds of the decision).
+              (
+                dr.trade_uuid IS NULL
+                AND dr.decided_at < NOW() - MAKE_INTERVAL(days => $2)
+              )
+              OR EXISTS (
+                  SELECT 1 FROM trades t
+                  WHERE t.trade_uuid = dr.trade_uuid
+                    AND (
+                        t.status IN ('DEAD_LETTER', 'REJECTED')
+                        OR (t.status = 'FAILED' AND t.updated_at < NOW() - MAKE_INTERVAL(days => $2))
+                    )
+              )
           )
         "#,
     )
     .bind(run_id)
+    .bind(MISSING_OUTCOME_STALE_DAYS)
     .fetch_one(pool)
     .await
     .map_err(AppError::Database)?;
@@ -687,5 +728,34 @@ mod tests {
         assert_eq!(gates.completeness.status, "FAIL");
         assert_eq!(verdict, "STOP");
     }
-}
 
+    #[test]
+    fn bias_gate_ignores_single_corrupt_outlier() {
+        // 60 positive outcomes, one corrupted C3 capture at 1,140% (the
+        // pre-fix production offender). Winsorizing at ±100% must keep the
+        // mean inside the 5% band instead of failing every metric.
+        let mut outcomes: Vec<Outcome> =
+            (0..60).map(|i| outcome(0.01, i, Some("SHIELD"))).collect();
+        for o in &mut outcomes {
+            o.price_impact_pct = Some(0.0);
+        }
+        outcomes[0].price_impact_pct = Some(11.4);
+        let (gates, verdict) = evaluate_gates(outcomes, 0, 0, 1.0, true, 1.0);
+        assert_eq!(gates.paper_live_bias.status, "PASS");
+        assert_eq!(verdict, "GO");
+    }
+
+    #[test]
+    fn bias_gate_still_fails_on_genuine_high_bias() {
+        // 60 positive outcomes but a genuine ~20% mean modeled slippage —
+        // winsorizing must NOT turn real bias into a pass.
+        let mut outcomes: Vec<Outcome> =
+            (0..60).map(|i| outcome(0.01, i, Some("SHIELD"))).collect();
+        for o in &mut outcomes {
+            o.price_impact_pct = Some(0.20);
+        }
+        let (gates, verdict) = evaluate_gates(outcomes, 0, 0, 1.0, true, 1.0);
+        assert_eq!(gates.paper_live_bias.status, "FAIL");
+        assert_eq!(verdict, "INCONCLUSIVE");
+    }
+}

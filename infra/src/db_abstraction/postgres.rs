@@ -1307,7 +1307,8 @@ impl Database for PostgresBackend {
 
     async fn cancel_stale_trades(&self, max_age_minutes: i32) -> AppResult<u64> {
         let result = sqlx::query(
-            r#"UPDATE trades SET status = 'DEAD_LETTER', updated_at = NOW()
+            r#"UPDATE trades SET status = 'DEAD_LETTER', updated_at = NOW(),
+               error_message = 'Canceled by stale-trade sweeper (never executed)'
                WHERE status IN ('PENDING', 'QUEUED')
                AND created_at < NOW() - make_interval(mins => $1::int)"#,
         )

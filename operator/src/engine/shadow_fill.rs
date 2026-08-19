@@ -41,6 +41,30 @@ use crate::engine::transaction_builder::TransactionBuilder;
 /// quote's `outAmount` (tolerance-independent) drives the modeled price.
 const SHADOW_SLIPPAGE_BPS: u16 = 1000;
 
+/// Sanity ceiling for modeled slippage (%). A move >100% between the
+/// decision-time and delayed Jupiter quotes (captured milliseconds apart) is a
+/// failed or vacuous quote — liquidity vanished, a tiny `outAmount`, or a
+/// mid-launch pump — not slippage. Such values are discarded (NULL) so a
+/// handful of bad captures can't skew the paper/live bias verdict.
+const MAX_MODELED_SLIPPAGE_PCT: f64 = 100.0;
+
+/// Raw modeled slippage between the decision-time and delayed quote fill
+/// prices, as an absolute percentage. Returns `None` on missing/degenerate
+/// inputs (one side absent, or a zero decision price).
+fn raw_modeled_slippage(decision_price: Option<f64>, delayed_price: Option<f64>) -> Option<f64> {
+    let (d, l) = (decision_price?, delayed_price?);
+    if d == 0.0 {
+        return None;
+    }
+    Some(((l - d) / d).abs() * 100.0)
+}
+
+/// Whether a modeled slippage value is sane enough to record. Non-finite
+/// results and values beyond `MAX_MODELED_SLIPPAGE_PCT` are quote failures.
+fn in_slippage_bounds(slip: f64) -> bool {
+    slip.is_finite() && slip <= MAX_MODELED_SLIPPAGE_PCT
+}
+
 /// Default non-landing probability (binary mask) for the v1 model.
 fn default_nonlanding_prob() -> f64 {
     match std::env::var("CHIMERA_NONLANDING_PROB") {
@@ -202,10 +226,24 @@ pub async fn capture_and_model_fill(
 
     let delayed_price = delayed_quote.as_ref().and_then(|q| fill_price(q, is_buy));
 
-    let modeled_slippage_pct = match (decision_price, delayed_price) {
-        (Some(d), Some(l)) if d != 0.0 => Some(((l - d) / d).abs() * 100.0),
-        _ => None,
-    };
+    // Sanity-bound: a > MAX_MODELED_SLIPPAGE_PCT move between two quotes
+    // captured milliseconds apart is a failed quote, not slippage. Discarding
+    // it keeps the capture budget honest and prevents a few corrupt values
+    // from blowing up the paper/live bias verdict (observed: up to 1,140%).
+    let modeled_slippage_pct = raw_modeled_slippage(decision_price, delayed_price).filter(|slip| {
+        let ok = in_slippage_bounds(*slip);
+        if !ok {
+            tracing::warn!(
+                decision_id = %decision_id,
+                token_address = %token_address,
+                is_buy,
+                modeled_slippage_pct = slip,
+                max = MAX_MODELED_SLIPPAGE_PCT,
+                "Shadow-fill modeled slippage exceeds sanity ceiling — treating as failed quote"
+            );
+        }
+        ok
+    });
 
     let payload: Value = json!({
         "model_version": "v1-delayed-requote",
@@ -264,3 +302,43 @@ fn parse_amount(value: Option<&Value>) -> Option<u128> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_slippage_missing_inputs_is_none() {
+        assert_eq!(raw_modeled_slippage(None, Some(1.0)), None);
+        assert_eq!(raw_modeled_slippage(Some(1.0), None), None);
+        assert_eq!(raw_modeled_slippage(None, None), None);
+    }
+
+    #[test]
+    fn raw_slippage_zero_decision_price_is_none() {
+        assert_eq!(raw_modeled_slippage(Some(0.0), Some(1.0)), None);
+    }
+
+    #[test]
+    fn raw_slippage_computes_positive_percent() {
+        // 1.10 compared to 1.00 is +10% (absolute).
+        let up = raw_modeled_slippage(Some(1.0), Some(1.1)).unwrap();
+        assert!((up - 10.0).abs() < 1e-9, "expected ~10.0, got {up}");
+        // Slippage below decision price also yields a positive percent.
+        let down = raw_modeled_slippage(Some(1.0), Some(0.9)).unwrap();
+        assert!((down - 10.0).abs() < 1e-9, "expected ~10.0, got {down}");
+    }
+
+    #[test]
+    fn bounds_accept_realistic_slippage() {
+        assert!(in_slippage_bounds(5.0));
+        assert!(in_slippage_bounds(99.9));
+    }
+
+    #[test]
+    fn bounds_reject_corrupt_and_nonfinite() {
+        assert!(!in_slippage_bounds(1140.0));
+        assert!(!in_slippage_bounds(101.0));
+        assert!(!in_slippage_bounds(f64::INFINITY));
+        assert!(!in_slippage_bounds(f64::NAN));
+    }
+}
