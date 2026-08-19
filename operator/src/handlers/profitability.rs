@@ -423,7 +423,7 @@ struct OutcomeRow {
 ///
 /// CLOSED-but-invalid PnL is NOT counted here — that is `count_invalid_pnl`'s
 /// job, and counting it in both places would double-report one violation.
-const MISSING_OUTCOME_STALE_DAYS: i64 = 3;
+const MISSING_OUTCOME_STALE_DAYS: i32 = 3;
 
 pub async fn count_missing_outcomes(
     pool: &sqlx::Pool<sqlx::Postgres>,
@@ -450,14 +450,14 @@ pub async fn count_missing_outcomes(
               -- seconds of the decision).
               (
                 dr.trade_uuid IS NULL
-                AND dr.decided_at < NOW() - MAKE_INTERVAL(days => $2)
+                AND dr.decided_at < NOW() - MAKE_INTERVAL(days => $2::int)
               )
               OR EXISTS (
                   SELECT 1 FROM trades t
                   WHERE t.trade_uuid = dr.trade_uuid
                     AND (
                         t.status IN ('DEAD_LETTER', 'REJECTED')
-                        OR (t.status = 'FAILED' AND t.updated_at < NOW() - MAKE_INTERVAL(days => $2))
+                        OR (t.status = 'FAILED' AND t.updated_at < NOW() - MAKE_INTERVAL(days => $2::int))
                     )
               )
           )
