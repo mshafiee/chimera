@@ -748,3 +748,91 @@ async fn test_revert_position_exit_restores_state_and_amount() {
 
     assert_eq!(exit_trade_status.0, "FAILED");
 }
+
+// ─── Conversion fix: cancel_stale_trades must produce a RETRYABLE DLQ row ────
+
+#[tokio::test]
+async fn test_cancel_stale_trades_creates_retryable_dlq_row() {
+    // A stale (PENDING/QUEUED, past threshold) trade is DEAD_LETTERed AND gets a
+    // dead_letter_queue row with can_retry=TRUE and a SignalPayload the retry
+    // worker can deserialize — so the automated DLQ loop can re-inject it.
+    // This is the fix for the 555/561 dead-letters that had no DLQ row and were
+    // therefore invisible to the retry worker.
+    let (db, _tmp) = create_test_db().await;
+    let pool = pg_pool(&db);
+
+    // Stale PENDING trade (2h old), stale QUEUED trade, and a fresh PENDING trade.
+    sqlx::query(
+        "INSERT INTO trades (trade_uuid, wallet_address, token_address, token_symbol, strategy, side, amount_sol, status, created_at) \
+         VALUES ('stale-pending', 'w1', 't1', 'SYM', 'SHIELD', 'BUY', 1.0, 'PENDING', NOW() - INTERVAL '2 hours')",
+    ).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO trades (trade_uuid, wallet_address, token_address, token_symbol, strategy, side, amount_sol, status, created_at) \
+         VALUES ('stale-queued', 'w1', 't2', 'SYM2', 'SPEAR', 'BUY', 0.5, 'QUEUED', NOW() - INTERVAL '2 hours')",
+    ).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO trades (trade_uuid, wallet_address, token_address, token_symbol, strategy, side, amount_sol, status, created_at) \
+         VALUES ('fresh-pending', 'w2', 't3', 'SYM3', 'SHIELD', 'BUY', 0.25, 'PENDING', NOW())",
+    ).execute(&pool).await.unwrap();
+
+    let swept = db.cancel_stale_trades(1).await.unwrap();
+    assert_eq!(
+        swept, 2,
+        "both stale PENDING and QUEUED trades should be swept"
+    );
+
+    // The stale PENDING trade is DEAD_LETTERed with the sweeper reason.
+    let (status, err): (String, String) = sqlx::query_as(
+        "SELECT status, COALESCE(error_message,'') FROM trades WHERE trade_uuid = 'stale-pending'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "DEAD_LETTER");
+    assert!(
+        err.contains("stale-trade sweeper"),
+        "reason recorded: {err}"
+    );
+
+    // It gets a RETRYABLE DLQ row whose payload deserializes into a SignalPayload.
+    let (n, payload): (i64, String) = sqlx::query_as(
+        "SELECT COUNT(*), COALESCE(MAX(payload),'') FROM dead_letter_queue WHERE trade_uuid = 'stale-pending'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 1, "must create one DLQ row for the swept trade");
+    let parsed: chimera_operator::SignalPayload =
+        serde_json::from_str(&payload).expect("DLQ payload must deserialize into SignalPayload");
+    assert_eq!(parsed.strategy.to_string(), "SHIELD");
+    assert_eq!(parsed.action.to_string(), "BUY");
+    assert_eq!(parsed.amount_sol, Decimal::from_str("1.0").unwrap());
+    assert_eq!(parsed.wallet_address, "w1");
+    // The DLQ row must be retryable so the worker picks it up.
+    let can_retry: bool = sqlx::query_scalar(
+        "SELECT can_retry FROM dead_letter_queue WHERE trade_uuid = 'stale-pending'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(can_retry, "stale-trade DLQ row must be retryable");
+
+    // The stale QUEUED trade is also swept (already in the first call), and a
+    // subsequent call finds nothing left to sweep.
+    let swept2 = db.cancel_stale_trades(1).await.unwrap();
+    assert_eq!(
+        swept2, 0,
+        "no new stale trades remain after the first sweep"
+    );
+
+    // The fresh trade is never swept.
+    let fresh_status: (String,) =
+        sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = 'fresh-pending'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        fresh_status.0, "PENDING",
+        "fresh trade must remain untouched"
+    );
+}

@@ -19,10 +19,11 @@ use crate::circuit_breaker::CircuitBreaker;
 use crate::config::AppConfig;
 use crate::db_abstraction::{
     trades_to_csv, trades_to_pdf, ConfigAuditItem, Database, DbPool, DeadLetterItem,
-    LatencyBucket, PositionDetail, TradeDetail, WalletDetail,
+    LatencyBucket, PositionDetail, TradeDetail, UpdateTradeStatus, WalletDetail,
 };
 use crate::error::{AppError, AppResult};
 use crate::middleware::{AuthExtension, Role};
+use crate::{Signal, SignalPayload};
 use crate::monitoring::signal_aggregator::SignalAggregator;
 use crate::notifications::{CompositeNotifier, NotificationEvent};
 use crate::metrics::QueryLatencyStats;
@@ -2686,11 +2687,11 @@ pub async fn retry_dead_letter_item(
     }
 
     // Check retry limits (configurable, default 3)
-    let max_retries = 3; // Could be made configurable
-    if dlq_item.retry_count >= max_retries {
+    const MAX_RETRIES: i64 = 3; // Could be made configurable
+    if dlq_item.retry_count as i64 >= MAX_RETRIES {
         return Err(AppError::BadRequest(format!(
             "Trade {} has reached maximum retry limit ({})",
-            trade_uuid, max_retries
+            trade_uuid, MAX_RETRIES
         )));
     }
 
@@ -2702,27 +2703,97 @@ pub async fn retry_dead_letter_item(
         ));
     }
 
-    // Extract wallet address from the trade payload if available
-    // For simplicity, we'll skip wallet status check in this implementation
-    // In production, you'd want to verify the wallet is still ACTIVE
+    let engine = state.engine.as_ref().ok_or_else(|| {
+        AppError::Internal("Retry engine not available".to_string())
+    })?;
 
-    // Update the DLQ item to mark it for retry
-    let new_retry_count = (dlq_item.retry_count + 1) as i64;
-    state
+    // Reconstruct the signal from the stored SignalPayload (same JSON the
+    // automatic DLQ retry worker consumes). This is a REAL re-queue — it moves
+    // the trade DEAD_LETTER->QUEUED (atomically, to avoid a TOCTOU race) and
+    // pushes the signal back through the full execution path, so it re-passes
+    // slow-path safety / heat / circuit-breaker checks before execution.
+    let payload = serde_json::from_str::<SignalPayload>(&dlq_item.payload).map_err(|_| {
+        AppError::BadRequest(format!(
+            "Trade {} has a malformed DLQ payload; cannot reconstruct signal",
+            trade_uuid
+        ))
+    })?;
+
+    let trade_uuid_for_update = payload
+        .trade_uuid
+        .clone()
+        .unwrap_or_else(|| trade_uuid.clone());
+
+    // Atomically move DEAD_LETTER -> QUEUED; only proceed if the guard succeeds.
+    let guarded = match state.db.pool() {
+        DbPool::PostgreSQL(ref pool) => sqlx::query(
+            "UPDATE trades SET status = 'QUEUED', error_message = NULL WHERE trade_uuid = $1 AND status = 'DEAD_LETTER'",
+        )
+        .bind(&trade_uuid_for_update)
+        .execute(pool)
+        .await,
+    };
+
+    let rows_moved = match guarded {
+        Ok(res) => res.rows_affected(),
+        Err(e) => {
+            return Err(AppError::Database(e));
+        }
+    };
+
+    if rows_moved == 0 {
+        return Err(AppError::BadRequest(format!(
+            "Trade {} is no longer DEAD_LETTER (possibly already re-queued or closed)",
+            trade_uuid
+        )));
+    }
+
+    // Look up wallet WQS for correct strategy routing (mirrors the auto loop).
+    let wallet_wqs = state
         .db
-        .update_dlq_item(&trade_uuid, new_retry_count, true, false)
-        .await?;
+        .get_wallet(&payload.wallet_address)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|w| w.wqs_score)
+        .and_then(|wqs| wqs.to_f64());
 
-    // Re-process the trade by inserting it back into the trades table
-    // This is a simplified version - in production you'd want more robust logic
-    // For now, we'll return success indicating the retry has been queued
+    let signal = Signal::new(payload, chrono::Utc::now().timestamp(), None);
 
-    Ok(Json(RetryResponse {
-        success: true,
-        message: format!("Trade {} queued for retry (attempt {}/{})", trade_uuid, new_retry_count, max_retries),
-        trade_uuid,
-        retry_attempt: new_retry_count as i32,
-    }))
+    match engine.queue_signal(signal, wallet_wqs).await {
+        Ok(_) => {
+            let new_retry_count = (dlq_item.retry_count as i64) + 1;
+            let can_still_retry = new_retry_count < MAX_RETRIES;
+            let _ = state
+                .db
+                .update_dlq_item(&trade_uuid_for_update, new_retry_count, can_still_retry, true)
+                .await;
+            Ok(Json(RetryResponse {
+                success: true,
+                message: format!("Trade {} re-queued for execution (attempt {}/{})", trade_uuid, new_retry_count, MAX_RETRIES),
+                trade_uuid,
+                retry_attempt: new_retry_count as i32,
+            }))
+        }
+        Err(e) => {
+            // Revert to DEAD_LETTER (keep processed_at NULL so the auto loop can
+            // pick it up on a later cycle). Do not mark the DLQ row processed.
+            let _ = state
+                .db
+                .update_trade_status(&UpdateTradeStatus {
+                    trade_uuid: trade_uuid_for_update,
+                    status: "DEAD_LETTER".to_string(),
+                    tx_signature: None,
+                    error_message: Some(format!("Manual DLQ re-queue failed: {}", e)),
+                    network_fee_sol: None,
+                })
+                .await;
+            Err(AppError::Internal(format!(
+                "Failed to re-queue trade {}: {}",
+                trade_uuid, e
+            )))
+        }
+    }
 }
 
 /// Response for retry operations

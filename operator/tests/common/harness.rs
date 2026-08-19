@@ -882,6 +882,43 @@ pub async fn seed_dead_letter(
     .unwrap();
 }
 
+/// Seed a dead-letter row with a real SignalPayload JSON (the format the
+/// automated DLQ retry worker and the manual retry endpoint deserialize).
+/// `amount_sol` is emitted as a string exactly like rust_decimal Decimal's
+/// serde representation.
+pub async fn seed_dead_letter_with_payload(
+    pool: &Pool<Postgres>,
+    trade_uuid: &str,
+    wallet: &str,
+    token: &str,
+    side: &str,
+    strategy: &str,
+    amount_sol: &str,
+    can_retry: bool,
+    retry_count: i32,
+) {
+    let payload = serde_json::json!({
+        "strategy": strategy,
+        "token": token,
+        "token_address": token,
+        "action": side,
+        "amount_sol": amount_sol,
+        "wallet_address": wallet,
+        "trade_uuid": trade_uuid,
+    });
+    sqlx::query(
+        "INSERT INTO dead_letter_queue (trade_uuid, payload, reason, can_retry, retry_count) \
+         VALUES ($1, $2, 'test-failure', $3, $4)",
+    )
+    .bind(trade_uuid)
+    .bind(payload.to_string())
+    .bind(can_retry)
+    .bind(retry_count)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 pub async fn seed_wallet_monitoring(
     pool: &Pool<Postgres>,
     wallet: &str,

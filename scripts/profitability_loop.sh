@@ -2,8 +2,11 @@
 # Profitability evidence loop — diagnose over-rejection + map the achievable frontier.
 #
 # Runs entirely against the operator's read-only shadow data:
-#   A. rejection funnel (which gate rejects the most, and was it right?)
+#   A. rejection funnel (which gate rejects the most, and was it right?), winsorized so
+#      moon-shot outliers cannot inflate an apparent edge.
 #   B. Pareto frontier  (what win rate / monthly return is actually achievable?)
+#   C. conversion funnel (how many admitted decisions actually close — the ADMISSION->CLOSE
+#      health metric; a tiny close rate invalidates the verdict's sample).
 #
 # Usage (on the production server, or anywhere with DB access):
 #   bash scripts/profitability_loop.sh
@@ -32,4 +35,12 @@ if command -v python3 >/dev/null 2>&1; then
     (cd scout && python3 -m analysis.cli frontier)
 else
     echo "python3 not found — run 'python -m analysis.cli frontier' from the scout/ dir" >&2
+fi
+
+echo
+echo "=== C. Conversion funnel (admitted BUYs -> terminal outcome) ==="
+if docker exec chimera-postgres pg_isready -U chimera -d chimera >/dev/null 2>&1; then
+    docker exec -i chimera-postgres psql -U chimera -d chimera < scripts/conversion_funnel.sql
+else
+    psql "$DATABASE_URL" -f scripts/conversion_funnel.sql
 fi

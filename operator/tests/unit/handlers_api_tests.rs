@@ -21,9 +21,9 @@ mod harness;
 
 use harness::{
     api_get, api_post, api_put, auth_headers, build, json_body, seed_closed_position_with_pnl,
-    seed_config_audit, seed_dead_letter, seed_position, seed_reconciliation_run, seed_shadow_exit,
-    seed_shadow_position, seed_trade, seed_wallet, test_config, Harness, TOKEN_A, TOKEN_B,
-    WALLET_A, WALLET_B,
+    seed_config_audit, seed_dead_letter, seed_dead_letter_with_payload, seed_position,
+    seed_reconciliation_run, seed_shadow_exit, seed_shadow_position, seed_trade, seed_wallet,
+    test_config, Harness, TOKEN_A, TOKEN_B, WALLET_A, WALLET_B,
 };
 
 /// Assert a JSON value equals a decimal string, ignoring trailing-zero scale
@@ -1436,12 +1436,12 @@ async fn dead_letter_queue_list_and_pagination() {
 #[tokio::test]
 async fn retry_dead_letter_item_paths() {
     let h = build(test_config()).await;
-    seed_dead_letter(&h.pool, "dl-1", true, 0).await;
 
-    // Forbidden for readonly
+    // Forbidden for readonly (needs an existing DLQ row to reach the auth gate)
+    seed_dead_letter(&h.pool, "dl-f", true, 0).await;
     let resp = api_post(
         &h.app,
-        "/api/v1/incidents/dead-letter/dl-1/retry",
+        "/api/v1/incidents/dead-letter/dl-f/retry",
         auth_headers(Role::Readonly),
         json!({}),
     )
@@ -1480,7 +1480,62 @@ async fn retry_dead_letter_item_paths() {
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-    // Success
+    // Circular-import note: the success path now really re-queues, which needs a
+    // trade row in DEAD_LETTER and a deserializable SignalPayload. A row with an
+    // empty '{}' payload is malformed -> BadRequest.
+    seed_trade(
+        &h.pool,
+        "dl-mal",
+        WALLET_A,
+        TOKEN_A,
+        "BUY",
+        "DEAD_LETTER",
+        "SHIELD",
+        "0.25",
+        None,
+    )
+    .await;
+    seed_dead_letter(&h.pool, "dl-mal", true, 0).await;
+    let resp = api_post(
+        &h.app,
+        "/api/v1/incidents/dead-letter/dl-mal/retry",
+        auth_headers(Role::Operator),
+        json!({}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // A DEAD_LETTER trade with no matching trade row (only a DLQ row) cannot be
+    // re-queued -> the conditional DEAD_LETTER->QUEUED guard matches nothing.
+    seed_dead_letter(&h.pool, "dl-norow", true, 0).await;
+    let resp = api_post(
+        &h.app,
+        "/api/v1/incidents/dead-letter/dl-norow/retry",
+        auth_headers(Role::Operator),
+        json!({}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Success: a real DEAD_LETTER trade + valid SignalPayload is re-queued,
+    // moving the trade to QUEUED and incrementing the DLQ retry count.
+    seed_wallet(&h.pool, WALLET_A, "ACTIVE", Some(80.0)).await;
+    seed_trade(
+        &h.pool,
+        "dl-1",
+        WALLET_A,
+        TOKEN_A,
+        "BUY",
+        "DEAD_LETTER",
+        "SHIELD",
+        "0.25",
+        None,
+    )
+    .await;
+    seed_dead_letter_with_payload(
+        &h.pool, "dl-1", WALLET_A, TOKEN_A, "BUY", "SHIELD", "0.25", true, 0,
+    )
+    .await;
     let resp = api_post(
         &h.app,
         "/api/v1/incidents/dead-letter/dl-1/retry",
@@ -1493,13 +1548,45 @@ async fn retry_dead_letter_item_paths() {
     assert_eq!(body["success"], true);
     assert_eq!(body["retry_attempt"], 1);
 
+    // The trade moved DEAD_LETTER -> QUEUED (re-queued into the engine).
+    let status: String = sqlx::query_scalar("SELECT status FROM trades WHERE trade_uuid = 'dl-1'")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "QUEUED");
+
+    // Retrying the same DLQ item now that it's QUEUED (not DEAD_LETTER) is refused.
+    let resp = api_post(
+        &h.app,
+        "/api/v1/incidents/dead-letter/dl-1/retry",
+        auth_headers(Role::Operator),
+        json!({}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
     // Circuit breaker tripped → 503
     h.api_state
         .circuit_breaker
         .manual_trip("test", "trip".to_string())
         .await
         .unwrap();
-    seed_dead_letter(&h.pool, "dl-4", true, 0).await;
+    seed_trade(
+        &h.pool,
+        "dl-4",
+        WALLET_A,
+        TOKEN_A,
+        "BUY",
+        "DEAD_LETTER",
+        "SHIELD",
+        "0.25",
+        None,
+    )
+    .await;
+    seed_dead_letter_with_payload(
+        &h.pool, "dl-4", WALLET_A, TOKEN_A, "BUY", "SHIELD", "0.25", true, 0,
+    )
+    .await;
     let resp = api_post(
         &h.app,
         "/api/v1/incidents/dead-letter/dl-4/retry",

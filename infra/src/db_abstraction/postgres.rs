@@ -259,7 +259,7 @@ impl Database for PostgresBackend {
             sqlx::query(
                 r#"
                 UPDATE trades
-                SET status = $1, tx_signature = $2, error_message = $3,
+                SET status = $1, tx_signature = $2, error_message = COALESCE($3, error_message),
                     network_fee_sol = COALESCE($5, network_fee_sol),
                     closed_at = CASE WHEN $1 = 'CLOSED' THEN CURRENT_TIMESTAMP ELSE closed_at END
                 WHERE trade_uuid = $4
@@ -1306,11 +1306,62 @@ impl Database for PostgresBackend {
     }
 
     async fn cancel_stale_trades(&self, max_age_minutes: i32) -> AppResult<u64> {
+        // Cancels PENDING/QUEUED trades stuck past the staleness threshold AND
+        // records each cancellation as a RETRYABLE dead-letter so the automated
+        // DLQ retry worker (api/src/main.rs) can re-inject them once transient
+        // pressure clears. Without the DLQ row, the retry loop's filter
+        // (can_retry=TRUE AND processed_at IS NULL) would never see these
+        // queued-but-never-executed trades — they are precisely the class the
+        // conversion funnel was losing.
+        //
+        // The payload is reconstructed from the trade row into the same
+        // SignalPayload JSON the retry worker deserializes (strategy/action use
+        // the DB's uppercase strings, which match the enum's serde
+        // rename_all="UPPERCASE"; amount_sol is emitted as a string, matching
+        // how rust_decimal::Decimal serializes).
         let result = sqlx::query(
-            r#"UPDATE trades SET status = 'DEAD_LETTER', updated_at = NOW(),
-               error_message = 'Canceled by stale-trade sweeper (never executed)'
-               WHERE status IN ('PENDING', 'QUEUED')
-               AND created_at < NOW() - make_interval(mins => $1::int)"#,
+            r#"
+            WITH stale AS (
+                SELECT trade_uuid, wallet_address, token_symbol, token_address, side, amount_sol, strategy
+                FROM trades
+                WHERE status IN ('PENDING', 'QUEUED')
+                  AND created_at < NOW() - make_interval(mins => $1::int)
+                FOR UPDATE
+            ), updated AS (
+                UPDATE trades t
+                SET status = 'DEAD_LETTER', updated_at = NOW(),
+                    error_message = 'Canceled by stale-trade sweeper (never executed)'
+                FROM stale
+                WHERE t.trade_uuid = stale.trade_uuid
+                RETURNING t.trade_uuid
+            ), dlq_inserted AS (
+                INSERT INTO dead_letter_queue (trade_uuid, payload, reason, error_details, can_retry)
+                SELECT s.trade_uuid,
+                       jsonb_build_object(
+                           'strategy',     s.strategy,
+                           'token',        COALESCE(s.token_symbol, s.token_address, ''),
+                           'token_address', s.token_address,
+                           'action',       s.side,
+                           'amount_sol',   s.amount_sol::text,
+                           'wallet_address', s.wallet_address,
+                           'trade_uuid',   s.trade_uuid
+                       )::text,
+                       'STALE_TRADE',
+                       'Canceled by stale-trade sweeper: queued but not executed in time; retryable',
+                       TRUE
+                FROM stale s
+                JOIN updated u ON u.trade_uuid = s.trade_uuid
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM dead_letter_queue dlq WHERE dlq.trade_uuid = s.trade_uuid
+                )
+                RETURNING trade_uuid
+            )
+            -- Return one row per SWEPT trade (not per DLQ row), so rows_affected
+            -- still means "how many stale trades were cancelled" for the reaper's
+            -- logging in api/src/main.rs. A pre-existing DLQ row (skipped by the
+            -- NOT EXISTS above) must not undercount the swept trades.
+            SELECT u.trade_uuid FROM updated u
+            "#,
         )
         .bind(max_age_minutes)
         .execute(&self.pool)
