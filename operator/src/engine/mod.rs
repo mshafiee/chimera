@@ -19,6 +19,7 @@ pub mod selection;
 pub mod shadow_fill;
 pub mod shadow_trader;
 pub mod signal_pipeline;
+pub mod smart_exit;
 pub mod stop_loss;
 pub mod transaction_builder;
 pub mod worker_pool;

@@ -9,11 +9,13 @@
 
 use crate::config::ProfitManagementConfig;
 use crate::db_abstraction::Database;
+use crate::engine::smart_exit::should_defer_exit;
 use crate::monitoring::SignalAggregator;
 use crate::price_cache::PriceCache;
 use crate::token::TokenParser;
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -67,6 +69,13 @@ pub struct StopLossManager {
     /// Optional token parser for the pre-graduation exit rail (bonding-curve
     /// completion checks). Set via `set_token_parser` after construction.
     token_parser: Arc<RwLock<Option<Arc<TokenParser>>>>,
+    /// Per-position live-fill deferral budget (Phase 1 smart exit). Keyed by
+    /// trade_uuid: how many consecutive monitor ticks a protective exit has been
+    /// deferred while waiting for a better fill. Bounded by
+    /// `ProfitManagementConfig::defer_max_ticks` so a persistently bad fill never
+    /// strands a position. In-memory only — a restart re-evaluates positions
+    /// fresh, which is safe for a ~15s window.
+    defer_counts: RwLock<HashMap<String, u64>>,
 }
 
 /// Stop-loss action
@@ -90,6 +99,7 @@ impl StopLossManager {
             price_cache,
             signal_aggregator: Arc::new(RwLock::new(None)),
             token_parser: Arc::new(RwLock::new(None)),
+            defer_counts: RwLock::new(HashMap::new()),
         }
     }
 
@@ -103,6 +113,90 @@ impl StopLossManager {
     /// rail can read pump.fun bonding-curve state.
     pub async fn set_token_parser(&self, parser: Arc<TokenParser>) {
         *self.token_parser.write().await = Some(parser);
+    }
+
+    /// Decide whether a protective exit (stop-loss / recovery gate) should be
+    /// DEFERRED this tick because the LIVE sell fill would realize a materially
+    /// worse loss than the price-cache reading.
+    ///
+    /// This closes the realize-vs-price gap: the shadow `mirror_main` exit
+    /// (which mirrors these rails against the cached price) predicts ~46.6% win
+    /// on admitted signals, but real closes realize ~21% win because protective
+    /// exits fire on the stale cache price and sell into a bad fill.
+    ///
+    /// Fail-safe: returns `false` (do not defer → exit now) when disabled, no
+    /// token_parser is wired, no live fill is decidable, or the position is
+    /// past the bounded defer budget. A catastrophic loss (at/beyond −25%, the
+    /// hard-stop floor) never defers via `should_defer_exit`.
+    async fn protective_stop_should_defer(
+        &self,
+        trade_uuid: &str,
+        token_address: &str,
+        entry_price_usd: Decimal,
+        cache_loss_pct: Decimal,
+    ) -> bool {
+        // Config gate: preserve today's behavior unless deferral is enabled and
+        // a quote client is wired in.
+        if self.config.defer_max_ticks == 0 || self.config.exit_skew_pct <= Decimal::ZERO {
+            return false;
+        }
+        let Some(parser) = self.token_parser.read().await.clone() else {
+            return false;
+        };
+
+        // Decode the entry to build a test amount (mirrors profit_targets'
+        // quote_confirms_profit). Unknown decimals -> cannot quote -> fail-safe.
+        let decimals = match self.price_cache.get_price(token_address) {
+            Some(entry) => entry.decimals,
+            None => None,
+        };
+        let Some(decimals) = decimals else {
+            return false;
+        };
+        let Some(test_amount) = 10u64.checked_pow(decimals as u32) else {
+            return false;
+        };
+        let out_sol = match parser.sell_quote_out_sol(token_address, test_amount).await {
+            Ok(Some(v)) => v,
+            _ => return false,
+        };
+        let sol_price_usd = match self.price_cache.get_sol_price_usd() {
+            Some(v) if v > Decimal::ZERO => v,
+            _ => return false,
+        };
+        if entry_price_usd.is_zero() {
+            return false;
+        }
+
+        // Implied live fill price per token (USD) and its implied loss.
+        // `test_amount` = 10^decimals SPL units = exactly 1 token, so `out_sol`
+        // is the SOL received for 1 token → `out_sol * sol_price_usd` is USD per
+        // token, comparable to `entry_price_usd`. (Matches profit_targets'
+        // `quote_confirms_profit`, which uses `out_sol * sol_price_usd`.)
+        let fill_price_usd = out_sol * sol_price_usd;
+        let live_loss_pct =
+            ((fill_price_usd - entry_price_usd) / entry_price_usd) * Decimal::from(100);
+
+        let defer = should_defer_exit(
+            cache_loss_pct,
+            Some(live_loss_pct),
+            dec!(-25), // hard-stop catastrophe floor (matches is_hard_stop)
+            self.config.exit_skew_pct,
+        );
+        if !defer {
+            return false;
+        }
+
+        // Bounded defer budget: count consecutive deferred ticks per position so
+        // a persistently bad fill never strands the position indefinitely.
+        let mut counts = self.defer_counts.write().await;
+        let count = counts.entry(trade_uuid.to_string()).or_insert(0);
+        *count += 1;
+        if *count > self.config.defer_max_ticks {
+            *count = 0; // reset so a later re-entry starts a fresh budget
+            return false;
+        }
+        true
     }
 
     /// Calculate ATR (Average True Range) from a close-price series.
@@ -251,23 +345,75 @@ impl StopLossManager {
         let is_hard_stop = loss_percent <= dec!(-25);
 
         // Recovery Gate: after wick protection + buffer (~90s), if the position
-        // hasn't recovered above the threshold, exit immediately. Data shows
-        // winners recover above -1% within 48s; losers stay below -2.5%.
-        // This cuts losers 60% faster than waiting for the -5% to -20% stop-loss.
+        // hasn't recovered above the threshold, cut. Data shows winners recover
+        // above -1% within 48s; losers stay below -2.5%. This cuts losers 60%
+        // faster than waiting for the -5% to -20% stop-loss.
         let recovery_gate_secs = self.config.recovery_gate_secs as i64;
         let recovery_gate_threshold = self.config.recovery_gate_threshold;
+        let recovery_gate_max_secs = self.config.recovery_gate_max_secs as i64;
         if elapsed_secs > recovery_gate_secs && loss_percent < recovery_gate_threshold {
-            tracing::warn!(
-                trade_uuid = %trade_uuid,
-                wallet_address = %wallet_address,
-                token_address = token_address,
-                loss_pct = %loss_percent,
-                elapsed_secs,
-                recovery_gate_secs,
-                recovery_gate_threshold = %recovery_gate_threshold,
-                "RECOVERY_GATE: Position not recovered above threshold at gate time — exiting early"
-            );
-            return StopLossAction::Exit;
+            // Phase 2 (selective recovery gate): the gate's blanket below-threshold
+            // cut was the single biggest bleed in shadow (−1.70 SOL, 30 losses at
+            // −5.7% avg) because it realized temporary dips that would have
+            // recovered. So we only CUT a below-threshold position when it is
+            // ALSO at/beyond the hard floor (a genuine dump) OR it has stayed
+            // below threshold past the longer re-evaluation window
+            // (`recovery_gate_max_secs`). A soft-band dip inside that window is
+            // held for recovery instead of being realized.
+            let hard_floor_reached = loss_percent <= self.config.recovery_gate_hard_threshold;
+            let longer_window_elapsed = elapsed_secs >= recovery_gate_max_secs;
+            if !hard_floor_reached && !longer_window_elapsed {
+                tracing::debug!(
+                    trade_uuid = %trade_uuid,
+                    token = token_address,
+                    loss_pct = %loss_percent,
+                    recovery_gate_threshold = %recovery_gate_threshold,
+                    recovery_gate_hard_threshold = %self.config.recovery_gate_hard_threshold,
+                    recovery_gate_max_secs,
+                    "RECOVERY_GATE: soft-band dip within re-evaluation window — holding for recovery (selective gate)"
+                );
+            } else {
+                // A genuine dump (hard floor) or a position that refused to
+                // recover past the longer window: cut it. Smart-exit (Phase 1)
+                // still applies — before realizing this exit on the cache price,
+                // check whether the LIVE sell fill is materially worse and defer
+                // for up to `defer_max_ticks`. The defer budget + the −25% hard
+                // stop floor prevent bag-holding, and catastrophic losses never
+                // defer.
+                if self
+                    .protective_stop_should_defer(
+                        trade_uuid,
+                        token_address,
+                        entry_price,
+                        loss_percent,
+                    )
+                    .await
+                {
+                    tracing::debug!(
+                        trade_uuid = %trade_uuid,
+                        token = token_address,
+                        loss_pct = %loss_percent,
+                        cache_loss_pct = %loss_percent,
+                        hard_floor_reached,
+                        longer_window_elapsed,
+                        "RECOVERY_GATE: live sell fill materially worse than cache — deferring exit (bounded budget)"
+                    );
+                } else {
+                    tracing::warn!(
+                        trade_uuid = %trade_uuid,
+                        wallet_address = %wallet_address,
+                        token_address = token_address,
+                        loss_pct = %loss_percent,
+                        elapsed_secs,
+                        recovery_gate_secs,
+                        recovery_gate_threshold = %recovery_gate_threshold,
+                        recovery_gate_hard_threshold = %self.config.recovery_gate_hard_threshold,
+                        recovery_gate_max_secs,
+                        "RECOVERY_GATE: Position not recovered above threshold at gate time — exiting early"
+                    );
+                    return StopLossAction::Exit;
+                }
+            }
         }
 
         // Get wallet WQS for dynamic stop calculation.
@@ -540,21 +686,40 @@ impl StopLossManager {
                 return StopLossAction::None;
             }
 
-            tracing::warn!(
-                trade_uuid = %trade_uuid,
-                token_address = token_address,
-                current_price = %current_price,
-                entry_price = %entry_price,
-                loss_percent = %loss_percent,
-                stop_loss_threshold = %stop_loss_threshold,
-                wqs,
-                is_consensus,
-                wick_elapsed_secs = elapsed_secs,
-                is_hard_stop,
-                exit_signal = ?StopLossAction::Exit,
-                "STOP-LOSS TRIGGERED — exiting position"
-            );
-            return StopLossAction::Exit;
+            if self
+                .protective_stop_should_defer(
+                    trade_uuid,
+                    token_address,
+                    entry_price,
+                    loss_percent,
+                )
+                .await
+            {
+                tracing::debug!(
+                    trade_uuid = %trade_uuid,
+                    token = token_address,
+                    loss_pct = %loss_percent,
+                    cache_loss_pct = %loss_percent,
+                    wqs,
+                    "Adaptive stop: live sell fill materially worse than cache — deferring exit (bounded budget)"
+                );
+            } else {
+                tracing::warn!(
+                    trade_uuid = %trade_uuid,
+                    token_address = token_address,
+                    current_price = %current_price,
+                    entry_price = %entry_price,
+                    loss_percent = %loss_percent,
+                    stop_loss_threshold = %stop_loss_threshold,
+                    wqs,
+                    is_consensus,
+                    wick_elapsed_secs = elapsed_secs,
+                    is_hard_stop,
+                    exit_signal = ?StopLossAction::Exit,
+                    "STOP-LOSS TRIGGERED — exiting position"
+                );
+                return StopLossAction::Exit;
+            }
         }
 
         tracing::debug!(

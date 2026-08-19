@@ -29,13 +29,6 @@ const DUNE_API_BASE: &str = "https://api.dune.com/api/v1";
 const POLL_INTERVAL_SECS: u64 = 10;
 const MAX_POLLS: usize = 30;
 
-/// Dune API base URL. Production always uses the hardcoded endpoint; the
-/// `DUNE_API_BASE_URL` env override exists as a test seam so the monitor can
-/// be exercised against a local mock server (2026-08-10).
-fn dune_api_base() -> String {
-    std::env::var("DUNE_API_BASE_URL").unwrap_or_else(|_| DUNE_API_BASE.to_string())
-}
-
 /// A wallet with negative 24h PnL, parsed from the Dune CSV result.
 #[derive(Debug)]
 struct LosingWallet {

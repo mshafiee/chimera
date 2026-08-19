@@ -1996,6 +1996,35 @@ pub struct ProfitManagementConfig {
     /// after recovery_gate_secs. Default -2.5 (exit if still below -2.5%).
     #[serde(default = "default_recovery_gate_threshold")]
     pub recovery_gate_threshold: Decimal,
+    /// Selective recovery gate (Phase 2) — hard floor: below this loss the gate
+    /// cuts immediately (a genuine dump, not a temporary dip), bypassing the
+    /// soft-band deferral. The blanket below-threshold cut was the single
+    /// biggest bleed in shadow (−1.70 SOL, 30 losses at −5.7% avg) because it
+    /// realized temporary dips that would have recovered. Default −5.0.
+    #[serde(default = "default_recovery_gate_hard_threshold")]
+    pub recovery_gate_hard_threshold: Decimal,
+    /// Selective recovery gate (Phase 2) — longer re-evaluation window (secs):
+    /// a below-`recovery_gate_threshold` position in the soft band (down to
+    /// `recovery_gate_hard_threshold`) is only cut once this longer window has
+    /// elapsed, so temporary dips get time to recover before being realized.
+    /// Default 300 (5 min), i.e. ~5x the base `recovery_gate_secs`.
+    #[serde(default = "default_recovery_gate_max_secs")]
+    pub recovery_gate_max_secs: u64,
+    /// Smart-exit realization guard (Phase 1): when a protective exit (recovery
+    /// gate / stop-loss) fires on the price-CACHE reading but the LIVE sell fill
+    /// would realize a materially worse loss, DEFER the exit for up to
+    /// `defer_max_ticks` instead of selling into the bad fill. This is the gap
+    /// between the cached exit price and the realizable fill (the 46.6% shadow
+    /// win rate vs ~21% real realized win rate). A catastrophic loss (at/beyond
+    /// the −25% hard-stop floor) always sells immediately — a true dump is never
+    /// deferred.
+    #[serde(default = "default_exit_skew_pct")]
+    pub exit_skew_pct: Decimal,
+    /// Max position-monitor ticks (each ~5s) a protective exit may be deferred
+    /// while waiting for a better fill before it exits regardless — bounds the
+    /// worst case so a persistently bad fill never strands a position.
+    #[serde(default = "default_defer_max_ticks")]
+    pub defer_max_ticks: u64,
     /// Pre-graduation exit rail (2026-08-07, Phase 5): exit pump.fun curve
     /// tokens when the bonding curve reaches the late-curve dump zone
     /// (completion > threshold, curve not yet complete) — before the depth
@@ -2117,6 +2146,22 @@ fn default_recovery_gate_threshold() -> Decimal {
     dec!(-2.5)
 }
 
+fn default_recovery_gate_hard_threshold() -> Decimal {
+    dec!(-5.0)
+}
+
+fn default_recovery_gate_max_secs() -> u64 {
+    300
+}
+
+fn default_exit_skew_pct() -> Decimal {
+    dec!(5.0)
+}
+
+fn default_defer_max_ticks() -> u64 {
+    3
+}
+
 fn default_pre_graduation_exit_enabled() -> bool {
     true
 }
@@ -2205,6 +2250,10 @@ impl Default for ProfitManagementConfig {
             atr_stop_loss_enabled: default_atr_stop_loss_enabled(),
             recovery_gate_secs: default_recovery_gate_secs(),
             recovery_gate_threshold: default_recovery_gate_threshold(),
+            recovery_gate_hard_threshold: default_recovery_gate_hard_threshold(),
+            recovery_gate_max_secs: default_recovery_gate_max_secs(),
+            exit_skew_pct: default_exit_skew_pct(),
+            defer_max_ticks: default_defer_max_ticks(),
             pre_graduation_exit_enabled: default_pre_graduation_exit_enabled(),
             pre_graduation_exit_threshold: default_pre_graduation_exit_threshold(),
             exit_profiles: ExitProfileConfig::default(),

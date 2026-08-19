@@ -35,6 +35,9 @@ mod kelly_sizer_tests;
 #[path = "unit/stop_loss_tests.rs"]
 mod stop_loss_tests;
 
+#[path = "unit/smart_exit_tests.rs"]
+mod smart_exit_tests;
+
 #[path = "unit/profit_target_tests.rs"]
 mod profit_target_tests;
 

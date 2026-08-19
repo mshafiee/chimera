@@ -252,6 +252,19 @@ profit_management:
   wick_protection_max_loss_percent: -5.0  # Widened from -3%: don't kill normal pump.fun volatility during grace
   recovery_gate_secs: 120           # Widened from 60: don't recovery-gate-exit during the 2-min breathing window
   recovery_gate_threshold: -5.0     # Widened from -2%: only exit on significant losses (>5%) at gate time
+  # Selective recovery gate (Phase 2): below `recovery_gate_threshold` we no
+  # longer blanket-cut. We cut immediately only when the loss is ALSO at/beyond
+  # `recovery_gate_hard_threshold` (a genuine dump) or it stays below threshold
+  # past `recovery_gate_max_secs`. Soft-band dips inside the window are held for
+  # recovery, so temporary dips aren't prematurely realized.
+  recovery_gate_hard_threshold: -7.0   # Genuine dump floor: cut immediately below this
+  recovery_gate_max_secs: 300          # Longer re-evaluation window (5 min) for soft-band dips
+  # Smart-exit realization guard (Phase 1): when a protective exit fires on the
+  # price-CACHE reading but the LIVE sell fill is `exit_skew_pct` worse, defer up
+  # to `defer_max_ticks` monitor ticks (~5s each) for a better fill. Catastrophic
+  # losses (past the hard stop floor) and missing quotes never defer.
+  exit_skew_pct: 5.0
+  defer_max_ticks: 3
   pre_graduation_exit_enabled: true   # Phase 5: exit pump.fun curve tokens at >85% completion (dump zone)
   pre_graduation_exit_threshold: 0.85 # Before the graduation depth discontinuity
   # Per-wallet exit profiles: derive per-wallet time-exit hours + trailing

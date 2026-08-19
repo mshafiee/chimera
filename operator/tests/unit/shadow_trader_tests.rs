@@ -525,6 +525,75 @@ async fn test_exit_recovery_gate() {
     );
 }
 
+// ─── Phase 2: selective recovery gate — shadow mirror parity ────────────────
+// The real monitor only CUTS a below-threshold position once the loss is
+// at/beyond `recovery_gate_hard_threshold` OR it has stayed below threshold
+// past `recovery_gate_max_secs`. Soft-band dips inside that window are HELD.
+// The mirror (check_mirror_main) must apply exactly the same condition so
+// shadow stays comparable to live exit behavior.
+async fn seed_shadow_position_secs(
+    pool: &sqlx::Pool<sqlx::Postgres>,
+    shadow_id: &str,
+    entry_price: &str,
+    opened_secs_ago: i64,
+    strategy: Option<&str>,
+) {
+    seed_shadow_position(pool, shadow_id, entry_price, 0, strategy).await;
+    sqlx::query(
+        "UPDATE shadow_positions SET opened_at = NOW() - ($2::int * INTERVAL '1 second') WHERE shadow_id = $1",
+    )
+    .bind(shadow_id)
+    .bind(opened_secs_ago)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn test_mirror_selective_recovery_gate_parity() {
+    let (db, _guard) = create_test_db().await;
+    let pool = pg_pool(&db);
+    // Selective gate: soft threshold -2.5% (default), hard floor -5% (default),
+    // longer window 300s. Recovery gate_secs default 90s.
+
+    // Case 1: soft-band dip (-3%) at 120s (past 90s gate, inside 300s window):
+    //     the selective gate HOLDS -> no recovery_gate exit from the mirror.
+    let cache1 = price_cache();
+    seed_prices(&cache1, "0.97"); // -3%
+    let trader1 = ShadowTrader::new(db.clone(), cache1, shadow_config(), None);
+    seed_shadow_position_secs(&pool, "mir-soft", "1.00", 120, Some("SHIELD")).await;
+    trader1.check_exits().await;
+    let reasons = exit_reasons(&pool, "mir-soft").await;
+    assert!(
+        !reasons.contains(&"recovery_gate".to_string()),
+        "soft-band dip inside the window must be held by the mirror: {reasons:?}"
+    );
+
+    // Case 2: soft-band dip (-3%) at 360s (past the 300s window): must exit.
+    let cache2 = price_cache();
+    seed_prices(&cache2, "0.97");
+    let trader2 = ShadowTrader::new(db.clone(), cache2, shadow_config(), None);
+    seed_shadow_position_secs(&pool, "mir-window", "1.00", 360, Some("SHIELD")).await;
+    trader2.check_exits().await;
+    let reasons = exit_reasons(&pool, "mir-window").await;
+    assert!(
+        reasons.contains(&"recovery_gate".to_string()),
+        "soft-band loser past the longer window must exit: {reasons:?}"
+    );
+
+    // Case 3: at/beyond the hard floor (-6%) at 120s: must exit immediately.
+    let cache3 = price_cache();
+    seed_prices(&cache3, "0.94"); // -6% <= -5% hard floor
+    let trader3 = ShadowTrader::new(db.clone(), cache3, shadow_config(), None);
+    seed_shadow_position_secs(&pool, "mir-hard", "1.00", 120, Some("SHIELD")).await;
+    trader3.check_exits().await;
+    let reasons = exit_reasons(&pool, "mir-hard").await;
+    assert!(
+        reasons.contains(&"recovery_gate".to_string()),
+        "at/beyond the hard floor must exit even inside the window: {reasons:?}"
+    );
+}
+
 #[tokio::test]
 async fn test_exit_max_stop_loss_distance() {
     let (db, _guard) = create_test_db().await;

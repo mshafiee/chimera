@@ -638,8 +638,18 @@ impl ShadowTrader {
         //    immediately (data: winners recover above -1% within 48s, losers
         //    stay below -2.5%). The mirror previously held to -8%, massively
         //    overstating losses for positions the real system exits at -2%.
+        //
+        //    Parity (Phase 2, selective gate): the real monitor's recovery gate
+        //    is now selective — it only CUTS a below-threshold position once the
+        //    loss is at/beyond `recovery_gate_hard_threshold` (a genuine dump)
+        //    OR it has stayed below threshold past `recovery_gate_max_secs`.
+        //    Soft-band dips inside that window are held for recovery. The mirror
+        //    applies exactly the same condition so shadow stays comparable to
+        //    live exit behavior.
         if elapsed_secs_u64 > config.recovery_gate_secs
             && loss_pct < config.recovery_gate_threshold
+            && (loss_pct <= config.recovery_gate_hard_threshold
+                || elapsed_secs_u64 >= config.recovery_gate_max_secs)
         {
             return Some("recovery_gate".to_string());
         }

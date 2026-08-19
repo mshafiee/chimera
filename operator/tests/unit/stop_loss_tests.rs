@@ -632,9 +632,16 @@ fn pool_of(db: &Arc<dyn Database>) -> Pool<Postgres> {
 #[tokio::test]
 async fn test_recovery_gate_exits_stale_losers() {
     let (db, _tmp) = create_test_db().await;
+    // Selective gate (Phase 2): soft threshold -1%, hard floor -5%, longer
+    // re-evaluation window 300s. A -3% stale loser is a soft-band dip (between
+    // -1% and -5%) — within the window it is HELD for recovery (not cut) — but
+    // it cuts once the loss reaches the hard floor OR the longer window elapses.
     let cfg = ProfitManagementConfig {
         recovery_gate_secs: 30,
         recovery_gate_threshold: Decimal::from_str("-1.0").unwrap(),
+        recovery_gate_hard_threshold: Decimal::from_str("-5.0").unwrap(),
+        recovery_gate_max_secs: 300,
+        defer_max_ticks: 0, // disable bad-fill defer so the gate cut is direct
         ..ProfitManagementConfig::default()
     };
     let pc = Arc::new(PriceCache::new().unwrap());
@@ -646,19 +653,75 @@ async fn test_recovery_gate_exits_stale_losers() {
         Some(9),
     );
 
-    // Entry 60s ago (past recovery gate), still -3% → recovery gate exits.
+    // Entry 60s ago (past recovery gate), -3% (soft band): harder than the -1%
+    // soft threshold but above the -5% floor and inside the 300s window →
+    // selective gate holds for recovery, does NOT exit yet.
     let action = mgr
-        .check_stop_loss("g1", WALLET_A, Decimal::ONE, "tok-gate", past_entry())
+        .check_stop_loss("g1", WALLET_A, Decimal::ONE, "tok-gate", entry_secs_ago(60))
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::None,
+        "soft-band dip inside the re-evaluation window must be held, not cut (selective gate)"
+    );
+
+    // Same -3% position but past the longer 300s window → must now exit.
+    let pc2 = Arc::new(PriceCache::new().unwrap());
+    pc2.set_price(
+        "tok-gate2",
+        Decimal::from_str("0.97").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+    let (db2, _tmp2) = create_test_db().await;
+    let cfg2 = ProfitManagementConfig {
+        recovery_gate_secs: 30,
+        recovery_gate_threshold: Decimal::from_str("-1.0").unwrap(),
+        recovery_gate_hard_threshold: Decimal::from_str("-5.0").unwrap(),
+        recovery_gate_max_secs: 300,
+        defer_max_ticks: 0,
+        ..ProfitManagementConfig::default()
+    };
+    let mgr2 = StopLossManager::new(db2, Arc::new(cfg2), pc2.clone());
+    let action = mgr2
+        .check_stop_loss("g2", WALLET_A, Decimal::ONE, "tok-gate2", entry_secs_ago(400))
         .await;
     assert_eq!(
         action,
         StopLossAction::Exit,
-        "recovery gate must exit stale losers"
+        "soft-band loser past the longer window must exit (selective gate)"
+    );
+
+    // At/beyond the hard floor -> immediate exit (genuine dump), even inside the window.
+    let pc3 = Arc::new(PriceCache::new().unwrap());
+    pc3.set_price(
+        "tok-gate3",
+        Decimal::from_str("0.94").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+    let (db3, _tmp3) = create_test_db().await;
+    let cfg3 = ProfitManagementConfig {
+        recovery_gate_secs: 30,
+        recovery_gate_threshold: Decimal::from_str("-1.0").unwrap(),
+        recovery_gate_hard_threshold: Decimal::from_str("-5.0").unwrap(),
+        recovery_gate_max_secs: 300,
+        defer_max_ticks: 0,
+        ..ProfitManagementConfig::default()
+    };
+    let mgr3 = StopLossManager::new(db3, Arc::new(cfg3), pc3.clone());
+    let action = mgr3
+        .check_stop_loss("g3", WALLET_A, Decimal::ONE, "tok-gate3", entry_secs_ago(60))
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::Exit,
+        "at/beyond the hard floor must exit even inside the window (selective gate)"
     );
 
     // Fresh entry (0s): recovery gate not yet triggered; loss small → hold.
     let action = mgr
-        .check_stop_loss("g2", WALLET_A, Decimal::ONE, "tok-gate", chrono::Utc::now())
+        .check_stop_loss("g4", WALLET_A, Decimal::ONE, "tok-gate", chrono::Utc::now())
         .await;
     assert_eq!(action, StopLossAction::None);
 }
@@ -1452,4 +1515,225 @@ async fn test_pre_graduation_curve_states() {
         .check_pre_graduation("pg-e", "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R")
         .await;
     assert_eq!(action, StopLossAction::None);
+}
+
+// ─── Phase 1 smart-exit: safety invariants on the recovery gate ──────────────
+fn entry_secs_ago(secs: i64) -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now() - chrono::TimeDelta::seconds(secs)
+}
+
+fn set_cache_price(price_cache: &Arc<PriceCache>, token: &str, price: &str) {
+    price_cache.set_price(
+        token,
+        Decimal::from_str(price).unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+}
+
+#[tokio::test]
+async fn test_recovery_gate_still_exits_when_defer_disabled() {
+    let (db, _tmp) = create_test_db().await;
+    let pool = pg_pool(&db);
+    insert_wallet(&pool, "wallet_defer_off", 50.0).await;
+    let price_cache = Arc::new(PriceCache::new().unwrap());
+    const TOKEN: &str = "tok_defer_off";
+    set_cache_price(&price_cache, TOKEN, "0.95");
+
+    let config = Arc::new(ProfitManagementConfig {
+        defer_max_ticks: 0,
+        ..ProfitManagementConfig::default()
+    });
+    let mgr = StopLossManager::new(db, config, price_cache);
+
+    let action = mgr
+        .check_stop_loss(
+            "u-defloff",
+            "wallet_defer_off",
+            Decimal::from_str("1.0").unwrap(),
+            TOKEN,
+            entry_secs_ago(120),
+        )
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::Exit,
+        "defer disabled -> recovery gate must still exit"
+    );
+}
+
+#[tokio::test]
+async fn test_recovery_gate_still_exits_when_no_quote_client() {
+    let (db, _tmp) = create_test_db().await;
+    let pool = pg_pool(&db);
+    insert_wallet(&pool, "wallet_noquote", 50.0).await;
+    let price_cache = Arc::new(PriceCache::new().unwrap());
+    const TOKEN: &str = "tok_noquote";
+    set_cache_price(&price_cache, TOKEN, "0.95");
+
+    let mgr = StopLossManager::new(db, default_config(), price_cache);
+
+    let action = mgr
+        .check_stop_loss(
+            "u-noquote",
+            "wallet_noquote",
+            Decimal::from_str("1.0").unwrap(),
+            TOKEN,
+            entry_secs_ago(120),
+        )
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::Exit,
+        "no quote client -> fail-safe: recovery gate exits"
+    );
+}
+
+// ─── Phase 1 positive path: defer on a materially worse live fill ────────────
+// A local mock of the Jupiter sell-quote endpoint. `out_amount` is the SOL
+// output in lamports (1e9 = 1 SOL) for the probed token amount.
+async fn spawn_quote_mock(out_amount: Option<u64>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 16384];
+            let Ok(n) = sock.read(&mut buf).await else {
+                continue;
+            };
+            let _req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = match out_amount {
+                Some(amt) => serde_json::json!({"outAmount": amt.to_string()}).to_string(),
+                None => serde_json::json!({"error": "No route found"}).to_string(),
+            };
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// Build a `TokenParser` whose Jupiter sell-quote endpoint is the mock server.
+fn quote_parser(jupiter_url: &str) -> Arc<chimera_operator::TokenParser> {
+    let cache = Arc::new(chimera_operator::token::TokenCache::new(100, 100));
+    let fetcher = Arc::new(
+        chimera_operator::token::TokenMetadataFetcher::new_with_rate_limiter_and_jupiter(
+            "http://127.0.0.1:1",
+            None,
+            jupiter_url.to_string(),
+        ),
+    );
+    Arc::new(chimera_operator::TokenParser::new(
+        chimera_operator::token::TokenSafetyConfig {
+            freeze_authority_whitelist: std::collections::HashSet::new(),
+            mint_authority_whitelist: std::collections::HashSet::new(),
+            min_liquidity_shield_usd: Decimal::from_str("0").unwrap(),
+            min_liquidity_spear_usd: Decimal::from_str("0").unwrap(),
+            honeypot_detection_enabled: false,
+            holder_concentration_check_enabled: false,
+            max_holder_concentration_pct: 100.0,
+        },
+        cache,
+        fetcher,
+    ))
+}
+
+#[tokio::test]
+async fn test_recovery_gate_defers_on_bad_live_fill_then_exits_after_budget() {
+    // Scenario: entry $100, cache $97 (-3%). The recovery gate is configured as
+    // a hard cut at -2% (so the gate would exit) but a live sell quote returns
+    // $40/token (0.4 SOL × $100) → -60% realized. Because the live fill is
+    // materially worse than the cache reading (gap 57% > skew 5%), Phase 1
+    // defers for up to `defer_max_ticks` (3), then exits regardless.
+    let (db, _tmp) = create_test_db().await;
+    let pool = pg_pool(&db);
+    insert_wallet(&pool, "wallet_defer_pos", 50.0).await;
+
+    let mock = spawn_quote_mock(Some(400_000_000)).await; // 0.4 SOL per token
+
+    let price_cache = Arc::new(PriceCache::new().unwrap());
+    const TOKEN: &str = "tok_defer_pos";
+    set_cache_price(&price_cache, TOKEN, "97"); // -3% vs entry 100, decimals 9
+    price_cache.set_price(
+        "So11111111111111111111111111111111111111112",
+        Decimal::from_str("100").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+
+    let config = Arc::new(ProfitManagementConfig {
+        recovery_gate_secs: 30,
+        recovery_gate_threshold: Decimal::from_str("-1.0").unwrap(),
+        recovery_gate_hard_threshold: Decimal::from_str("-2.0").unwrap(),
+        recovery_gate_max_secs: 300,
+        defer_max_ticks: 3,
+        exit_skew_pct: Decimal::from_str("5.0").unwrap(),
+        ..ProfitManagementConfig::default()
+    });
+    let mgr = StopLossManager::new(db.clone(), config, price_cache.clone());
+    mgr.set_token_parser(quote_parser(&mock)).await;
+
+    // Defer while within budget (3 ticks): the gate holds instead of selling
+    // into the bad -60% fill.
+    for _ in 0..3 {
+        let action = mgr
+            .check_stop_loss(
+                "u-defer-pos",
+                "wallet_defer_pos",
+                Decimal::from_str("100.0").unwrap(),
+                TOKEN,
+                entry_secs_ago(120),
+            )
+            .await;
+        assert_eq!(
+            action,
+            StopLossAction::None,
+            "bad live fill must defer while within the bounded budget"
+        );
+    }
+
+    // Budget exhausted → the gate cuts on the next tick rather than hold forever.
+    let action = mgr
+        .check_stop_loss(
+            "u-defer-pos",
+            "wallet_defer_pos",
+            Decimal::from_str("100.0").unwrap(),
+            TOKEN,
+            entry_secs_ago(120),
+        )
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::Exit,
+        "defer budget exhausted -> recovery gate must exit"
+    );
+
+    // A catastrophic hard stop at -25% never defers even with a wired quote.
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("70").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+    let action = mgr
+        .check_stop_loss(
+            "u-catastrophic",
+            "wallet_defer_pos",
+            Decimal::from_str("100.0").unwrap(),
+            TOKEN,
+            entry_secs_ago(120),
+        )
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::Exit,
+        "at/beyond the -25% hard stop floor never defers"
+    );
 }
