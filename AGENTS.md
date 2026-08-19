@@ -1,6 +1,10 @@
 # Chimera Agent Guidelines
 
-This file provides build, test, and coding conventions for AI agents working on this codebase.
+Chimera is a high-frequency copy-trading platform for Solana. Wallet trade signals arrive over an HMAC-authenticated webhook and are validated and executed by a Rust hot path (token-safety, circuit breakers, Jito bundles, position tracking). A Python cold path (`scout/`) continuously scores candidate wallets with a Wallet Quality Score and backtests them before promotion. A React dashboard (`web/`) is the monitoring/control surface. Two strategies run on the same engine: **Shield** (capital preservation) and **Spear** (high-conviction, Jito bundles).
+
+## Precedence
+
+The **closest `AGENTS.md` to the file you're editing wins**: this root file for cross-cutting rules, then the scoped `AGENTS.md` in the subsystem directory if present. Per-language style, structure, and boundaries live in the scoped files — see the Scope Index below.
 
 ## Deployment Workflow
 
@@ -21,174 +25,48 @@ COMPOSE_PROFILE=mainnet-prod docker compose -f docker-compose.yml -f docker-comp
 
 **Never scp binaries or files directly to the server.** Always commit to git and pull on the server.
 
-## Build Commands
+## Commands
 
-```bash
-# All components
-make build                    # Build all (operator + web)
-make build-operator          # Rust operator (release)
-make build-operator-debug    # Rust operator (debug)
-make build-web              # Web dashboard
+The `make` task-runner is the single entry point across all components. Per-language commands and single-test recipes live in the scoped files.
 
-# Development
-make dev                     # Start operator dev mode (RUST_LOG=debug)
-make dev-operator           # Same as above
-make dev-web                # Web dashboard dev server
-```
+| Command | Purpose |
+|---------|---------|
+| `make build` | Build all (`build-operator` + `build-web`) |
+| `make test` | All tests (`test-operator` + `test-scout`) |
+| `make test-all` | All suites, incl. `test-integration` + `test-chaos` |
+| `make lint` | All linters (`lint-operator`/`lint-scout`/`lint-web`) |
+| `make fmt` | Format all |
+| `make dev` | Dev mode (`dev-operator`) |
+| `make version` / `make version-check` | Show / verify version across manifests |
+| `make release TYPE=patch\|minor\|major` | Bump version, sync manifests, tag |
+| `make preflight` / `make deploy` | Pre-deploy checks / deploy |
 
-## Testing
+## Conventions (repo-wide)
 
-```bash
-# Run all tests
-make test                    # All tests (operator + scout)
-make test-all               # All suites including integration/chaos
+Cross-cutting rules that apply everywhere; per-language detail lives in the scoped files.
 
-# Individual components
-make test-operator          # Rust tests only
-make test-scout             # Python pytest
-make test-integration       # Operator integration tests (--test-threads=1)
-make test-chaos             # Resilience tests
-make test-e2e               # Web E2E tests (Playwright)
-
-# Single tests
-cd operator && cargo test test_name -- --test-threads=1
-cd scout && python -m pytest tests/test_file.py::test_name -v
-```
-
-## Linting & Formatting
-
-```bash
-make lint                   # All linters
-make lint-operator          # Clippy (Rust): cargo clippy -- -D warnings
-make lint-scout             # Ruff (Python): python -m ruff check .
-make lint-web               # ESLint (TypeScript): npm run lint
-
-make fmt                    # Format all
-make fmt-operator           # cargo fmt
-make fmt-web                # prettier --write "src/**/*.{ts,tsx}"
-```
-
-## Code Style
-
-### Rust (Operator)
-
-**Imports:** Group external crates, then internal modules. Use std imports first.
-```rust
-use std::path::PathBuf;
-use anyhow::Result;
-use sqlx::Pool;
-use crate::config::AppConfig;
-use crate::db::DbPool;
-```
-
-**Error Handling:** Use `anyhow::Result` for public functions, custom `AppResult` type alias. Map errors with `.map_err(AppError::from)?`. Use `tracing` for structured logging.
-```rust
-pub async fn init_pool(config: &DatabaseConfig) -> AppResult<DbPool> {
-    sqlx::query("SELECT 1")
-        .fetch_one(pool)
-        .await
-        .map_err(AppError::Database)?;
-    Ok(pool)
-}
-```
-
-**Types:** Use `rust_decimal::Decimal` for all financial values. Define type aliases for complex types.
-```rust
-pub type DbPool = Pool<Postgres>;  // PostgreSQL only — SQLite was decommissioned 2026-07
-pub type AppResult<T> = Result<T, AppError>;
-```
-
-**Async:** All hot-path functions use `async fn` with tokio runtime. Use `Arc` for shared state.
-
-**Documentation:** Module docs with `//!`, function docs with `///`.
-
-### Python (Scout)
-
-**Imports:** Organize stdlib, external, internal. Use absolute imports within scout.
-```python
-import asyncio
-from decimal import Decimal
-from core.analyzer import WalletAnalyzer
-from core.wqs import calculate_wqs
-```
-
-**Type Hints:** Required for all functions.
-```python
-async def analyze_wallet(address: str) -> Optional[WalletMetrics]:
-    pass
-```
-
-**Error Handling:** Try/except with traceback logging. Return `None` on recoverable errors.
-```python
-try:
-    metrics = await analyzer.get_metrics(address)
-except Exception as e:
-    print(f"ERROR: {e}")
-    traceback.print_exc()
-    return None
-```
-
-**Financial Values:** Use `Decimal` class for precision (see `core/decimal_utils.py`).
-
-**Async:** Use `asyncio` with `async def`. Limit concurrency with `asyncio.Semaphore`.
-
-### TypeScript (Web)
-
-**Imports:** Named imports preferred.
-```typescript
-import { useState, useEffect } from 'react'
-import { useWallet } from '@solana/wallet-adapter-react'
-```
-
-**Components:** Functional components with hooks. TypeScript strict mode enabled.
-```typescript
-interface Props {
-  walletAddress: string
-  onTrade: (trade: Trade) => void
-}
-
-export function TradeCard({ walletAddress, onTrade }: Props) {
-  // ...
-}
-```
-
-**Styling:** TailwindCSS classes. Use `clsx` for conditional classes.
-
-**State:** Zustand for global state, React hooks for local state.
-
-## Conventions
-
- - **Financial precision:** Never use float/double for money. Use `rust_decimal::Decimal` (Rust) or `Decimal` (Python).
-- **Async patterns:** Use `tokio::spawn` for background tasks (Rust), `asyncio.create_task` (Python).
-- **Database:** PostgreSQL in production, SQLite in development. Use `sqlx` (Rust) or `psycopg3` (Python) with `%s` placeholders. Never use `?` placeholders (SQLite only).
-- **Logging:** Structured logging with `tracing` (Rust) or `print` with prefixes (Python).
-- **Tests:** Write unit tests inline, integration tests in `tests/` directory. Use property-based testing (Hypothesis) for Python.
-- **Security:** Never commit secrets. Use encrypted vault (`vault.rs`) for keypairs. Validate all inputs.
-- **Dependencies:** Check existing codebase before adding new crates/npm packages. Use versions from `Cargo.toml`/`package.json`.
+- **Financial precision:** Never use `float`/`double` for money. Use `rust_decimal::Decimal` (Rust) or `Decimal` (Python, via `scout/core/decimal_utils.py`).
+- **Database:** PostgreSQL in production (SQLite decommissioned 2026-07), SQLite in development. `sqlx` (Rust) or `psycopg3` (Python) with `%s` placeholders — never `?` (SQLite only).
+- **Logging:** Structured logging with `tracing` (Rust); `print` with prefixes (Python).
+- **Async:** `tokio::spawn` for background tasks (Rust); `asyncio.create_task` (Python).
+- **Security:** Never commit secrets. Use the encrypted vault (`infra/src/vault.rs`) for keypairs. Validate all inputs.
+- **Tests:** Unit tests inline; integration tests in `tests/`. Property-based testing (Hypothesis) for Python.
+- **Dependencies:** Reuse existing crates/packages before adding new ones; pin versions from `Cargo.toml`/`package.json`.
+- **Sizing/exit changes:** always ship the matching tests (see scoped boundaries).
 
 ## Versioning & Releases
 
-**Policy:** Unified Semantic Versioning across all components. Single source of truth = `VERSION` file at repo root. See `docs/core/versioning.md` for full policy.
-
-```bash
-make version              # Show current version (reads VERSION file)
-make version-check        # Verify VERSION matches all manifests (CI-enforced)
-make release TYPE=patch   # Bump patch, sync all manifests, generate changelog, commit & tag
-make release TYPE=minor   # Bump minor
-make release TYPE=major   # Bump major
-make changelog            # Show changes since last tag
-```
+**Policy:** Unified Semantic Versioning across all components. Single source of truth = `VERSION` file at repo root. See `docs/core/versioning.md`.
 
 **Key rules:**
-- Never edit version in Cargo.toml/package.json/pyproject.toml manually — use `make release`
-- `chore(release):` commits auto-generate the tag; push with `git push --follow-tags`
-- Safety-critical changes (circuit_breaker, executor, token safety) get a `🛡️ safety:` CHANGELOG marker
-- Pre-releases: use `--pre=alpha|beta|rc` (never trade live on alpha/beta)
-- Historical version refs in `docs/archive/` and dated runbook entries are preserved as-is
+- Never edit versions in `Cargo.toml`/`package.json`/`pyproject.toml` by hand — use `make release`.
+- `chore(release):` commits auto-generate the tag; push with `git push --follow-tags`.
+- Safety-critical changes (circuit_breaker, executor, token safety) get a `🛡️ safety:` CHANGELOG marker.
+- Pre-releases: `--pre=alpha|beta|rc` (never trade live on alpha/beta).
 
 ## Scoped AGENTS.md (subsystem index)
 
-**Precedence:** the closest `AGENTS.md` to the file you're editing wins — this root file for cross-cutting rules, then the scoped `AGENTS.md` in the subsystem directory if present. Each subsystem has its own file with commands, structure, style, and boundaries specific to that crate.
+Each subsystem carries its own `AGENTS.md` with commands, structure, style, and boundaries specific to that crate.
 
 | Subsystem | Scope | Stack |
 |-----------|-------|-------|
