@@ -178,13 +178,18 @@ services:
        - CHIMERA_ENTRY_CONFIRMATION__WAIT_SECS=300
        - CHIMERA_ENTRY_CONFIRMATION__MAX_DRAWDOWN_PCT=3.0
        # Shadow-mirror token gate (2026-08-06): admit only tokens whose whale
-       # round-trips (mirror_main shadow avg, 48h) clear the post-cost
-       # breakeven. 48h data: negative-mirror tokens -1.82% avg vs
-       # positive-mirror +2.73% — the gate filters to the +1.3% EV subset.
+       # round-trips (mirror_main shadow avg) clear the post-cost breakeven.
+       # Recalibrated 2026-08-20 on DEDUPED shadow data (fix 8f3a728 removed the
+       # duplicate-exit inflation that had made min_samples=10 unreachable):
+       # at 10 samples only 8 tokens in the pool were evaluable -> the gate
+       # locked out ~333 tokens/day as SHADOW_MIRROR_INSUFFICIENT. Lowered to
+       # min_samples=3 with a 72h window (34 tokens qualify, 4.25x) while
+       # MIN_AVG_PCT stays at 1.5 (>= post-cost breakeven; qualifying averages
+       # cluster well above it, so no safe token is lost).
        - CHIMERA_SELECTION__MIRROR_GATE_ENABLED=true
        - CHIMERA_SELECTION__MIRROR_GATE_MIN_AVG_PCT=1.5
-       - CHIMERA_SELECTION__MIRROR_GATE_MIN_SAMPLES=10
-       - CHIMERA_SELECTION__MIRROR_GATE_WINDOW_HOURS=48
+       - CHIMERA_SELECTION__MIRROR_GATE_MIN_SAMPLES=3
+       - CHIMERA_SELECTION__MIRROR_GATE_WINDOW_HOURS=72
        # Wallet profitability gate (2026-08-07): only wallets with
        # statistically significant shadow PnL (t-stat > 1.645, >=10 samples,
        # 30d) are proven signal sources. Research: wallet selection is the
