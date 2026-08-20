@@ -56,3 +56,25 @@ def test_finalize_sorts_and_dedups():
     pts = [(10, Decimal("2")), (5, Decimal("1")), (10, Decimal("3"))]
     got = pp._finalize(pts)
     assert got == [(5, Decimal("1")), (10, Decimal("2"))]
+
+
+def test_parse_ohlcv_close():
+    # rows: [start_ts, o, h, l, close, volume]
+    rows = [
+        [1700000100, "1", "2", "0.5", "1.5", "100"],
+        [1700000160, "1.5", "3", "1", "2.0", "200"],
+        [1700000160, "9", "9", "9", "2.0", "200"],  # duplicate ts -> dropped
+    ]
+    got = pp.parse_ohlcv_close(rows)
+    assert got == [(1700000100, Decimal("1.5")), (1700000160, Decimal("2.0"))]
+
+
+def test_parse_ohlcv_close_drops_bad_rows():
+    rows = [
+        ["x", "1", "2", "3", "4", "5"],  # bad ts
+        [1700000100, "1", "2", "3", "0", "5"],  # non-positive close
+        [1700000200, "1", "2", "3", "7", "5"],
+    ]
+    got = pp.parse_ohlcv_close(rows)
+    assert got == [(1700000200, Decimal("7"))]
+

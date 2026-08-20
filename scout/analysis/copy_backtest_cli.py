@@ -27,13 +27,7 @@ from decimal import Decimal
 
 from core.copy_backtest import CopyBacktest, format_report
 from core.db import execute_and_fetchall
-from core.helius_client import HeliusClient
-from core.replay_harness import (
-    load_stored_paths,
-    reconstruct_and_store,
-    replay_input_json,
-    run_replay,
-)
+from core.replay_harness import load_stored_paths, replay_input_json, run_replay
 
 _HELP = (
     "usage: python -m analysis.copy_backtest_cli "
@@ -122,6 +116,9 @@ def main(argv: list[str]) -> int:
 
 
 def _cmd_path(limit: int) -> int:
+    from core.price_path import geckoterminal_ohlcv
+    from core.replay_harness import persist_paths
+
     tokens = execute_and_fetchall(
         "SELECT DISTINCT token_address, "
         "       EXTRACT(EPOCH FROM MIN(opened_at))::bigint AS tf, "
@@ -130,10 +127,27 @@ def _cmd_path(limit: int) -> int:
         "GROUP BY token_address LIMIT %s",
         (limit,),
     )
-    windows = {r["token_address"]: (int(r["tf"]), int(r["tt"])) for r in tokens}
-    client = HeliusClient()
-    paths = asyncio.run(reconstruct_and_store(client, windows))
-    print(f"[path] reconstructed {len(paths)} tokens / {sum(len(v) for v in paths.values())} points")
+
+    async def _reconstruct() -> dict:
+        paths = {}
+        for r in tokens:
+            addr = r["token_address"]
+            tf = int(r["tf"])
+            tt = int(r["tt"])
+            try:
+                pts = await geckoterminal_ohlcv(addr, timeframe="hour")
+            except Exception as e:  # noqa: BLE001
+                print(f"ERROR: path {addr}: {e}")
+                continue
+            # keep only the position's window
+            in_window = [(ts, p) for ts, p in pts if tf <= ts <= tt]
+            if in_window:
+                paths[addr] = in_window
+        return paths
+
+    paths = asyncio.run(_reconstruct())
+    n = persist_paths(paths)
+    print(f"[path] reconstructed {len(paths)} tokens / {n} points persisted")
     return 0
 
 

@@ -145,3 +145,66 @@ async def reconstruct_price_path(
         if not before:
             break
     return _finalize(points)
+
+
+# ── GeckoTerminal OHLCV (public, no key) ────────────────────────────────────
+# On the current Helius plan the enriched swap-enabling endpoints are not
+# available (address-activity feed returns no tokenTransfers/events.swap; the
+# `/v0/transactions` batch-parse returns "Method not found"), so the on-chain
+# swap path above is best-effort only. GeckoTerminal's public OHLCV API is the
+# available price-path source for tokens with a live pool. The close is in the
+# pool quote currency (USDC/USDT for stablecoin pairs), consistent with the
+# shadow `entry_price_usd` the replay compares against.
+
+GECKO_BASE = "https://api.geckoterminal.com/api/v2"
+
+
+def parse_ohlcv_close(ohlcv_list: Sequence[Sequence]) -> List[Tuple[int, Decimal]]:
+    """Parse GeckoTerminal `ohlcv_list` rows into sorted (ts_unix, close).
+
+    Each row is ``[start_ts, open, high, low, close, volume]`` (start_ts in
+    unix seconds). Rows with a non-positive or missing close are dropped."""
+    out: List[Tuple[int, Decimal]] = []
+    for row in ohlcv_list or []:
+        try:
+            ts = int(row[0])
+            close = Decimal(str(row[4]))
+        except (IndexError, TypeError, ValueError):
+            continue
+        if close > 0:
+            out.append((ts, close))
+    return _finalize(out)
+
+
+async def geckoterminal_ohlcv(token_address: str, timeframe: str = "hour") -> List[Tuple[int, Decimal]]:
+    """Return a token's hourly OHLCV close series via GeckoTerminal, or [] if
+    the token has no live pool."""
+    import aiohttp
+
+    out: List[Tuple[int, Decimal]] = []
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"{GECKO_BASE}/networks/solana/tokens/{token_address}/pools",
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as r:
+                if r.status != 200:
+                    return out
+                pools = (await r.json()).get("data") or []
+            if not pools:
+                return out
+            pool_addr = str(pools[0]["id"]).replace("solana_", "")
+            async with s.get(
+                f"{GECKO_BASE}/networks/solana/pools/{pool_addr}/ohlcv/{timeframe}",
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as r:
+                if r.status != 200:
+                    return out
+                data = (await r.json()).get("data") or []
+            for item in data:
+                attrs = item.get("attributes") or {}
+                out.extend(parse_ohlcv_close(attrs.get("ohlcv_list") or []))
+    except Exception as e:  # noqa: BLE001 - provider errors are recoverable
+        print(f"ERROR: geckoterminal_ohlcv {token_address}: {e}")
+        return out
+    return _finalize(out)
