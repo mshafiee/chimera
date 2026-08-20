@@ -1059,6 +1059,7 @@ mod tests {
             }
         }
 
+        #[allow(clippy::await_holding_lock)]
         async fn with_env<F, Fut, T>(&self, key: &str, f: F) -> T
         where
             F: FnOnce() -> Fut,
@@ -1907,7 +1908,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bulk_update_webhook_urls() {
-        let mock = MockServer::spawn(|method, path| {
+        let mock = MockServer::spawn(|method, _path| {
             assert_eq!(method, "PUT");
             (200, "{}".to_string())
         });

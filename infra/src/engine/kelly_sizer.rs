@@ -365,6 +365,7 @@ pub(crate) mod tests {
     // =====================================================================
 
     #[derive(Default)]
+    #[allow(clippy::type_complexity)]
     pub(crate) struct MockDatabase {
         pub trades_filtered: RwLock<Vec<TradeDetail>>,
         pub fail_trades_filtered: RwLock<bool>,

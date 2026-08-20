@@ -542,7 +542,7 @@ mod tests {
     fn test_paper_seed_escapes_cold_start_and_lowers_exit_tip() {
         // Simulate the seeded paper-mode tip history (values from seed_paper_history_if_empty)
         let config = test_config();
-        let mut seeded: Vec<Decimal> = vec![
+        let mut seeded: Vec<Decimal> = [
             "0.0005", "0.0006", "0.0007", "0.0008", "0.0009",
             "0.0010", "0.0011", "0.0012", "0.0014", "0.0016",
             "0.0018", "0.0020",

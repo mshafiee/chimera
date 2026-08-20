@@ -674,9 +674,10 @@ mod tier_tests {
     use rust_decimal::Decimal;
 
     fn cfg() -> chimera_core::config::MonitoringConfig {
-        let mut c = chimera_core::config::MonitoringConfig::default();
-        c.wallet_boost_enabled = true;
-        c
+        chimera_core::config::MonitoringConfig {
+            wallet_boost_enabled: true,
+            ..Default::default()
+        }
     }
 
     #[test]
