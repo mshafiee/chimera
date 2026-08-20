@@ -16,7 +16,7 @@ Options:
 import sys
 from decimal import Decimal
 
-from ..core.copy_backtest import CopyBacktest, format_report
+from core.copy_backtest import CopyBacktest, format_report
 
 _HELP = "usage: python -m analysis.copy_backtest_cli {exit|gate|strategy|gap} [--cost X] [--exit STRAT]"
 
