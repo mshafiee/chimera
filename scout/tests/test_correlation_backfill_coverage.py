@@ -118,7 +118,7 @@ def test_backfill_correlation_pnl_single_address(fake_db_layer, monkeypatch):
     captured = {}
 
     def fake_execute_query(conn, query, params=None):
-        if "t.wallet_address IN" in query:
+        if "t.wallet_address = ANY" in query:
             captured["params"] = params
             return _FakeCursor({"walletA": _pnl_rows()["walletA"]})
         if "UPDATE wqs_pnl_correlation" in query:
@@ -128,8 +128,8 @@ def test_backfill_correlation_pnl_single_address(fake_db_layer, monkeypatch):
     monkeypatch.setattr(cb, "execute_query", fake_execute_query)
     monkeypatch.setattr(cb, "execute_update", lambda query, params: None)
     cb.backfill_correlation_pnl("data/test.db")
-    # Single-element IN must be a 2-tuple for psycopg
-    assert captured["params"][0] == ("walletA", "walletA")
+    # psycopg3: single-element IN must be a LIST for = ANY(%s) (no 2-tuple hack)
+    assert captured["params"][0] == ["walletA"]
 
 
 def test_backfill_correlation_pnl_error_reraises(fake_db_layer, monkeypatch, capsys):

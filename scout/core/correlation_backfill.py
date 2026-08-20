@@ -48,12 +48,13 @@ def backfill_correlation_pnl(db_path: str) -> int:
             if not rows:
                 return 0
 
-            # Batch-compute copy PnL from Chimera trades for all flagged wallets
-            addresses = tuple(r["wallet_address"] for r in rows)
-            # psycopg expects an explicit tuple for a single-element IN;
-            # handle len==1 by doubling to a 2-tuple so the driver sees a tuple.
-            if len(addresses) == 1:
-                addresses = (addresses[0], addresses[0])
+            # Batch-compute copy PnL from Chimera trades for all flagged wallets.
+            # psycopg3 (unlike psycopg2) does NOT expand a tuple in `IN %s` — it
+            # binds it as a single parameter, producing invalid `IN $1`. Use the
+            # array-any form with a Python LIST, which psycopg3 adapts to a
+            # Postgres array (works for one or many addresses). Matches the
+            # `= ANY($1)` pattern used in the Rust operators.
+            addresses = [r["wallet_address"] for r in rows]
 
             pnl_cursor = execute_query(
                 conn,
@@ -69,7 +70,7 @@ def backfill_correlation_pnl(db_path: str) -> int:
                    WHERE t.status = 'CLOSED'
                      AND t.pnl_data_valid = TRUE
                      AND t.side = 'SELL'
-                     AND t.wallet_address IN %s
+                       AND t.wallet_address = ANY(%s)
                    GROUP BY t.wallet_address""",
                 (addresses,),
             )
