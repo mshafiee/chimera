@@ -1,6 +1,7 @@
-"""CLI: python -m analysis.copy_backtest_cli {exit|gate|strategy|gap} [opts]
+"""CLI: python -m analysis.copy_backtest_cli {exit|gate|strategy|gap|skew|path|replay} [opts]
 
-Runs the repeatable copy-engine backtest over shadow history (Phase 1).
+Runs the repeatable copy-engine backtest over shadow history (Phase 1) and the
+price-path replay harness (Phase 2C/2D).
 
 Commands:
   exit      metric table per exit_strategy (cost-adjusted)
@@ -8,18 +9,77 @@ Commands:
   strategy  metric table split by Shield/Spear
   gap       predicted (shadow mirror_main) vs realized (closed trades) win rate
   skew      realized live-vs-mark sell fill skew + defer-trigger bands
+  path      reconstruct+store on-chain price paths for up to --limit shadow tokens
+  replay    run the Rust replay_exit binary over stored paths (--limit)
 
 Options:
-  --cost X      override cost-per-SOL (default: observed from trades)
-  --exit STRAT  exit strategy for gate/strategy reports (default mirror_main)
+  --cost X       override cost-per-SOL (default: observed from trades)
+  --exit STRAT   exit strategy for gate/strategy reports (default mirror_main)
+  --limit N      cap positions/tokens for path|replay (default 100)
+  --binary PATH  path to replay_exit binary (default from env REPLAY_EXIT_BIN)
 """
 
+import asyncio
+import json
+import os
 import sys
 from decimal import Decimal
 
 from core.copy_backtest import CopyBacktest, format_report
+from core.db import execute_and_fetchall
+from core.helius_client import HeliusClient
+from core.replay_harness import (
+    load_stored_paths,
+    reconstruct_and_store,
+    replay_input_json,
+    run_replay,
+)
 
-_HELP = "usage: python -m analysis.copy_backtest_cli {exit|gate|strategy|gap} [--cost X] [--exit STRAT]"
+_HELP = (
+    "usage: python -m analysis.copy_backtest_cli "
+    "{exit|gate|strategy|gap|skew|path|replay} [--cost X] [--exit STRAT] [--limit N] [--binary PATH]"
+)
+
+
+def _opt(args: list, key: str):
+    """Consume `--key <val>` returning value or None."""
+    for i in range(len(args) - 1):
+        if args[i] == key:
+            return args[i + 1]
+    return None
+
+
+def _cmd_build_replay_limit(limit: int) -> list:
+    # Bounded set of shadow_position tokens that already have stored paths.
+    rows = execute_and_fetchall(
+        "SELECT sp.token_address, "
+        "       COALESCE(sp.entry_price_usd,0) AS entry_price_usd, "
+        "       COALESCE(sp.strategy,'SHIELD') AS strategy, "
+        "       EXTRACT(EPOCH FROM sp.opened_at)::bigint AS opened_at, "
+        "       sp.entry_amount_sol "
+        "FROM shadow_positions sp "
+        "JOIN (SELECT token_address FROM price_path_points GROUP BY token_address "
+        "      HAVING COUNT(*) >= 2) pp USING (token_address) "
+        "WHERE NOT COALESCE(sp.main_admitted, FALSE) "
+        "LIMIT %s",
+        (limit,),
+    )
+
+    positions = []
+    for r in rows:
+        pts = load_stored_paths(r["token_address"])
+        if len(pts) < 2:
+            continue
+        positions.append(
+            {
+                "entry_price": r["entry_price_usd"],
+                "opened_at": int(r["opened_at"]),
+                "strategy": r["strategy"],
+                "size_sol": r["entry_amount_sol"] or "1.0",
+                "points": pts,
+            }
+        )
+    return positions
 
 
 def main(argv: list[str]) -> int:
@@ -28,20 +88,14 @@ def main(argv: list[str]) -> int:
         return 2
 
     cmd = argv[0]
-    cost: Decimal | None = None
-    exit_strat = "mirror_main"
     rest = argv[1:]
-    i = 0
-    while i < len(rest):
-        if rest[i] == "--cost" and i + 1 < len(rest):
-            cost = Decimal(rest[i + 1])
-            i += 2
-        elif rest[i] == "--exit" and i + 1 < len(rest):
-            exit_strat = rest[i + 1]
-            i += 2
-        else:
-            print(_HELP, file=sys.stderr)
-            return 2
+    cost_s = _opt(rest, "--cost")
+    exit_strat = _opt(rest, "--exit") or "mirror_main"
+    limit_s = _opt(rest, "--limit")
+    binary = _opt(rest, "--binary") or os.getenv("REPLAY_EXIT_BIN")
+
+    limit = int(limit_s) if limit_s else 100
+    cost = Decimal(cost_s) if cost_s else None
 
     bt = CopyBacktest(cost_per_sol=cost)
     if cmd == "exit":
@@ -54,11 +108,54 @@ def main(argv: list[str]) -> int:
         print(bt.realize_vs_price_gap())
     elif cmd == "skew":
         print(bt.fill_skew_report())
+    elif cmd == "path":
+        return _cmd_path(limit)
+    elif cmd == "replay":
+        if not binary:
+            print("replay requires --binary PATH (or REPLAY_EXIT_BIN)", file=sys.stderr)
+            return 2
+        return _cmd_replay(limit, binary)
     else:
         print(_HELP, file=sys.stderr)
         return 2
     return 0
 
 
+def _cmd_path(limit: int) -> int:
+    tokens = execute_and_fetchall(
+        "SELECT DISTINCT token_address, "
+        "       EXTRACT(EPOCH FROM MIN(opened_at))::bigint AS tf, "
+        "       EXTRACT(EPOCH FROM MAX(COALESCE(closed_at, NOW())))::bigint AS tt "
+        "FROM shadow_positions WHERE token_address IS NOT NULL "
+        "GROUP BY token_address LIMIT %s",
+        (limit,),
+    )
+    windows = {r["token_address"]: (int(r["tf"]), int(r["tt"])) for r in tokens}
+    client = HeliusClient()
+    paths = asyncio.run(reconstruct_and_store(client, windows))
+    print(f"[path] reconstructed {len(paths)} tokens / {sum(len(v) for v in paths.values())} points")
+    return 0
+
+
+def _cmd_replay(limit: int, binary: str) -> int:
+    positions = _cmd_build_replay_limit(limit)
+    if not positions:
+        print("[replay] no positions with stored paths (run `path` first)", file=sys.stderr)
+        return 1
+    replay_json = replay_input_json(positions)
+    try:
+        out = run_replay(replay_json, binary)
+    except Exception as e:  # noqa: BLE001
+        print(f"[replay] failed: {e}", file=sys.stderr)
+        return 1
+    n = len(out.get("results", []))
+    wins = sum(1 for r in out.get("results", []) if float(r["pnl_sol"]) > 0)
+    total = sum(Decimal(r["pnl_sol"]) for r in out.get("results", []))
+    print(f"[replay] {n} replayed, {wins} wins, total pnl {total:.2f} SOL")
+    print(json.dumps(out, indent=2, default=str))
+    return 0
+
+
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
+

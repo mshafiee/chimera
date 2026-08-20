@@ -617,96 +617,18 @@ impl ShadowTrader {
         elapsed_secs: i64,
         strategy: &Option<String>,
     ) -> Option<String> {
-        if entry_price.is_zero() {
-            return None;
-        }
-
-        let pnl_pct = (current_price - entry_price) / entry_price * Decimal::from(100);
-        let profit_pct = pnl_pct.max(Decimal::ZERO);
-        let loss_pct = pnl_pct.min(Decimal::ZERO);
-
-        let elapsed_secs_u64 = elapsed_secs as u64;
-
-        // Order mirrors the real position monitor (stop_loss.rs + profit_targets.rs):
-        // 1. Hard stop: absolute floor at -25%.
-        if loss_pct <= dec!(-25) {
-            return Some("stop_loss".to_string());
-        }
-
-        // 2. Recovery gate: the DOMINANT loser exit in the real monitor — after
-        //    the wick window, any position still below the threshold is cut
-        //    immediately (data: winners recover above -1% within 48s, losers
-        //    stay below -2.5%). The mirror previously held to -8%, massively
-        //    overstating losses for positions the real system exits at -2%.
-        //
-        //    Parity (Phase 2, selective gate): the real monitor's recovery gate
-        //    is now selective — it only CUTS a below-threshold position once the
-        //    loss is at/beyond `recovery_gate_hard_threshold` (a genuine dump)
-        //    OR it has stayed below threshold past `recovery_gate_max_secs`.
-        //    Soft-band dips inside that window are held for recovery. The mirror
-        //    applies exactly the same condition so shadow stays comparable to
-        //    live exit behavior.
-        if elapsed_secs_u64 > config.recovery_gate_secs
-            && loss_pct < config.recovery_gate_threshold
-            && (loss_pct <= config.recovery_gate_hard_threshold
-                || elapsed_secs_u64 >= config.recovery_gate_max_secs)
-        {
-            return Some("recovery_gate".to_string());
-        }
-
-        // 3. Adaptive stop approximation: the real monitor clamps the dynamic
-        //    stop to max_stop_loss_distance. Mirror uses the flat value.
-        if loss_pct <= config.max_stop_loss_distance {
-            return Some("stop_loss".to_string());
-        }
-
-        // 4. Wick window: during the first wick_protection_secs, cap losses at
-        //    wick_protection_max_loss_percent (fast-dump protection).
-        if elapsed_secs_u64 <= config.wick_protection_secs
-            && loss_pct <= config.wick_protection_max_loss_percent
-        {
-            return Some("stop_loss".to_string());
-        }
-
-        // 5. Trailing stop — per-wallet activation/distance when a profile
-        //    exists (mirrors profit_targets.rs using eff params).
-        if profit_pct >= eff.trailing_activation_pct {
-            let trailing_stop_price = peak_price
-                * (Decimal::ONE - eff.trailing_distance_pct / Decimal::from(100));
-            if current_price <= trailing_stop_price {
-                return Some("trailing_stop".to_string());
-            }
-        }
-
-        // 6. Profit targets (currently empty — trailing-only regime).
-        for target in &config.targets {
-            if profit_pct >= *target {
-                return Some(format!("profit_target_{}", target));
-            }
-        }
-
-        // 7. Tiered time exit — matches profit_targets.rs exactly, using
-        //    per-wallet hours when a profile exists:
-        //    profit > 25%: eff.high_profit_hours (SPEAR 24h / SHIELD 48h base)
-        //    profit > 10%: eff.medium_profit_hours (SPEAR 12h / SHIELD
-        //                  config.time_exit_hours base)
-        //    else:         SPEAR losing_spear / SHIELD losing_shield (global)
-        let is_spear = strategy.as_deref() == Some("SPEAR");
-        let exit_limit_hours = if profit_pct > dec!(25) {
-            eff.high_profit_hours
-        } else if profit_pct > dec!(10) {
-            eff.medium_profit_hours
-        } else if is_spear {
-            config.losing_time_exit_hours_spear
-        } else {
-            config.losing_time_exit_hours_shield
-        };
-
-        if elapsed_secs >= exit_limit_hours as i64 * 3600 {
-            return Some("time_exit".to_string());
-        }
-
-        None
+        // Single source of truth: the same exit-rule evaluation used by the
+        // offline replay harness (`exit_rules::evaluate_exit`) so shadow never
+        // drifts from what a grid-search tunes.
+        crate::engine::exit_rules::evaluate_exit(
+            config,
+            eff,
+            entry_price,
+            current_price,
+            peak_price,
+            elapsed_secs,
+            strategy.as_deref().unwrap_or("SHIELD"),
+        )
     }
 
     fn compute_pnl(

@@ -8,6 +8,7 @@ pub mod entry_confirmation;
 mod execution_lock;
 pub mod executor;
 pub mod exit_profile;
+pub mod exit_rules;
 pub mod jito_searcher;
 pub mod onchain_assessment;
 pub mod position_sizer;

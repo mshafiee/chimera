@@ -339,6 +339,9 @@ impl MetadataCacheStore {
 
     /// Insert token metadata into cache with TTL
     pub async fn insert(&self, key: String, value: super::metadata::TokenMetadata, ttl_secs: u64) {
+        // `ttl_secs` is only consumed by the redis-cache branch; keep it "used"
+        // unconditionally so non-redis builds don't warn (trait signature parity).
+        let _ = ttl_secs;
         match self {
             Self::Memory(cache) => {
                 let mut cache_write = cache.write();
