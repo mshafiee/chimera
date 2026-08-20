@@ -75,3 +75,31 @@ protective/neutral; keep.
   entry/exit snapshots and `price_at_signal`). With both collected, re-run
   `fill_skew_report` and a deferral grid-search.
 
+## Phase 2 replay implementation (2026-08-20) — gap now tunable via paths
+Built the price-path + replay pipeline and validated it end-to-end on production:
+- **Source discovery:** Helius swap reconstruction is blocked on this plan — the
+  address-activity feed (`/addresses/{token}/transactions`) returns no
+  `tokenTransfers`/`events.swap`, and the `/v0/transactions` batch-parse returns
+  "Method not found". **GeckoTerminal public OHLCV** (no key) is the available
+  price-path source for tokens with a live pool (`scout/core/price_path.py`:
+  `geckoterminal_ohlcv` + `parse_ohlcv_close`). Helius swap extraction remains as
+  best-effort if an enriched endpoint becomes available.
+- **Persistence:** `price_path_points` + `price_path_fidelity` tables (migration
+  `0020_price_path_replay.sql`, applied on prod); `scout/core/fidelity.py` computes
+  path-vs-provider Pearson/MAPE/gate so a grid-search only trusts passing paths.
+- **Trustworthy replay:** `operator/src/engine/exit_rules.rs` is now the single
+  source of truth for the exit decision; `shadow_trader::check_mirror_main`
+  delegates to it. `operator/src/bin/replay_exit.rs` replays reconstructed paths
+  through the real rules with `ProfitManagementConfig` overrides.
+- **End-to-end validation:** `path --limit 1` reconstructed 1 token / 25 hourly
+  points from GeckoTerminal and persisted them; the Rust replay binary ran the
+  position's path through the real exit rules and exited `recovery_gate` at
+  −7.69% (~95 min hold). Replay entry is anchored to the first in-window path
+  price (shadow positions often lack a recorded USD entry price).
+- **CLI:** `analysis.copy_backtest_cli path|replay` orchestrate reconstruction,
+  persistence, and replay (Rust binary via `--binary REPLAY_EXIT_BIN`).
+- Next: run a full (or quota-budgeted) reconstruction over shadow tokens, apply
+  the fidelity gate, then grid-search `ProfitManagementConfig`/smart-exit params
+  and diff each candidate set against this baseline.
+
+
