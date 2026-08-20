@@ -75,6 +75,9 @@ COPY --from=builder /build/target/release/import_keypair /app/import_keypair
 # One-shot Dune bootstrap (wallet PnL history + roster seed). Runs manually
 # via `docker compose run --rm bootstrap_dune bootstrap_dune --apply --roster`.
 COPY --from=builder /build/target/release/bootstrap_dune /app/bootstrap_dune
+# Offline exit-rule replay harness (analyzes reconstructed price paths against
+# the real exit rules; used by scout copy_backtest CLI --binary). One-shot.
+COPY --from=builder /build/target/release/replay_exit /app/replay_exit
 
 # Create directories (config files are mounted as volumes in docker-compose)
 RUN mkdir -p /app/config /app/data && chown -R chimera:chimera /app
