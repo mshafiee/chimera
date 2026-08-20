@@ -505,7 +505,7 @@ impl SignalProcessor {
                 let new_exposure =
                     heat.total_exposure_sol - own_exposure + signal.payload.amount_sol;
                 let capital = self.config.position_sizing.total_capital_sol;
-                let max_heat = capital * Decimal::from(30u32) / Decimal::from(100u32);
+                let max_heat = capital * self.config.position_sizing.portfolio_heat_percent;
                 tracing::debug!(
                     trade_uuid = %trade_uuid,
                     exposure_sol = %heat.total_exposure_sol,
@@ -554,10 +554,13 @@ impl SignalProcessor {
                     }
                 };
                 let capital = self.config.position_sizing.total_capital_sol;
-                let max_heat = capital * Decimal::from(30u32) / Decimal::from(100u32);
+                let max_heat = capital * self.config.position_sizing.portfolio_heat_percent;
                 let reason = format!(
-                    "Portfolio heat limit reached: {} SOL + {} SOL > {} SOL max (20% of capital)",
-                    heat.total_exposure_sol, signal.payload.amount_sol, max_heat
+                    "Portfolio heat limit reached: {} SOL + {} SOL > {} SOL max ({} of capital)",
+                    heat.total_exposure_sol,
+                    signal.payload.amount_sol,
+                    max_heat,
+                    self.config.position_sizing.portfolio_heat_percent
                 );
                 tracing::warn!(
                     trade_uuid = %trade_uuid,
@@ -1195,8 +1198,7 @@ impl SignalProcessor {
                     }
 
                     let max_heat_sol = self.config.position_sizing.total_capital_sol
-                        * rust_decimal::Decimal::from_f64_retain(0.30)
-                            .unwrap_or(rust_decimal::Decimal::ZERO);
+                        * self.config.position_sizing.portfolio_heat_percent;
 
                     match self
                         .db

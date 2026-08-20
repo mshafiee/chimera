@@ -96,6 +96,23 @@ impl PositionSizer {
     /// token_age (0.5×–1×), slippage (0.7×–1×), quality (0.7×–1.3×), volatility (0.5×–1×),
     /// regime (0.5×–2×). Total range: ~0.06× to ~4.4×. Min/max caps prevent extreme sizes.
     pub async fn calculate_size(&self, factors: SizingFactors) -> AppResult<Decimal> {
+        // Capital-relative sizing (2026-08-20): positions are a fraction of
+        // total capital. A zero/non-positive capital is a misconfiguration that
+        // would produce zero or nonsensical sizes — reject rather than mint
+        // dust/no-op orders.
+        let capital = factors.total_capital_sol;
+        if capital <= Decimal::ZERO {
+            tracing::warn!(
+                wallet = %factors.wallet_address,
+                strategy = ?factors.strategy,
+                total_capital_sol = %capital,
+                "Sizer rejected: total_capital_sol must be positive for capital-relative sizing"
+            );
+            return Ok(Decimal::ZERO);
+        }
+        // Per-position % cap, bounded by the absolute safety ceiling `max_size_sol`.
+        let pct_cap_sol = (capital * self.config.max_position_pct).min(self.config.max_size_sol);
+
         // Kelly Criterion override: derive base size from historical win/loss ratio.
         // Falls back to WQS-scaled sizing when Kelly can't compute (< 10 trades).
         //
@@ -206,8 +223,8 @@ impl PositionSizer {
                     // Do NOT clamp to min_size_sol here — the fallback cap already
                     // constrains unproven wallets. Clamping up would inflate a
                     // negative-EV or unproven signal past the conservative cap.
-                    (self.config.base_size_sol * wqs_factor * confidence)
-                        .min(self.config.max_size_sol)
+                    (capital * self.config.base_size_pct * wqs_factor * confidence)
+                        .min(pct_cap_sol)
                 }
             }
         } else {
@@ -226,7 +243,7 @@ impl PositionSizer {
             };
             let wqs_factor = Decimal::from_f64_retain(factors.wallet_wqs / 100.0)
                 .unwrap_or(Decimal::from_str("0.5").unwrap_or(dec!(0.5)));
-            (self.config.base_size_sol * wqs_factor * confidence).min(self.config.max_size_sol)
+            (capital * self.config.base_size_pct * wqs_factor * confidence).min(pct_cap_sol)
         };
 
         // Confidence multiplier (using Decimal)
@@ -403,11 +420,17 @@ impl PositionSizer {
             }
         }
 
-        // Apply strategy-specific max cap (Barbell: Shield gets larger allocation, Spear smaller)
+        // Apply strategy-specific max cap (Barbell: Shield gets larger allocation, Spear smaller).
+        // Capital-relative (2026-08-20): per-strategy caps are a % of capital, bounded by the
+        // absolute safety ceiling `max_size_sol` so the 1000 SOL auto-scale case still stops at 50.
         let strategy_max = match factors.strategy {
-            crate::models::Strategy::Shield => self.config.shield_max_size_sol,
-            crate::models::Strategy::Spear => self.config.spear_max_size_sol,
-            crate::models::Strategy::Exit => self.config.max_size_sol,
+            crate::models::Strategy::Shield => {
+                (capital * self.config.shield_max_pct).min(self.config.max_size_sol)
+            }
+            crate::models::Strategy::Spear => {
+                (capital * self.config.spear_max_pct).min(self.config.max_size_sol)
+            }
+            crate::models::Strategy::Exit => pct_cap_sol,
         };
 
         // Reject dust trades: if strategy_max is below min_size_sol, the resulting size
@@ -445,10 +468,10 @@ impl PositionSizer {
                 wallet = %factors.wallet_address,
                 strategy = ?factors.strategy,
                 wqs_chain_size = %size,
-                proven_size_sol = %self.config.proven_size_sol,
+                proven_size_sol = %self.config.proven_size_pct,
                 "Proven-wallet sizing override applied (bypasses WQS × confidence chain)"
             );
-            size = self.config.proven_size_sol;
+            size = (capital * self.config.proven_size_pct).min(self.config.max_size_sol);
         }
 
         // Min/max application (2026-08-18): under skip_below_min_size, a

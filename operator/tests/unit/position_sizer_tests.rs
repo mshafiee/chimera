@@ -486,18 +486,20 @@ async fn test_hybrid_sizing_eliminated_multiplier_drift() {
     };
 
     let size = sizer.calculate_size(factors).await.unwrap();
-    let base = Decimal::from_str("10.0").unwrap();
+    // Capital-relative base (2026-08-20): base = total_capital(10) × base_size_pct(0.15) = 1.5.
+    // This is the multiplicative reference for the drift check (previously base_size_sol=10).
+    let base = Decimal::from_str("10.0").unwrap() * Decimal::from_str("0.15").unwrap();
 
     // With hybrid sizing, the result should be closer to 0.8x of base, not 0.21x
     // Expected calculation:
     // - boost_multiplier = (1.0 + 1.0 + 1.0) / 3 = 1.0x
     // - penalty_multiplier = (1.0 + 0.8 + 0.8) / 3 ≈ 0.87x
-    // - Final: 10.0 * 1.0 * 0.87 * 1.0 ≈ 8.7x (before Kelly/WQS adjustments)
-    // - With Kelly fallback (5 trades): 10.0 * 0.5 * 0.33 ≈ 1.65x base
-    // - After hybrid sizing: 1.65 * 1.0 * 0.87 ≈ 1.44x
-    // - Ratio: 1.44 / 10.0 ≈ 0.144x
+    // - Final base: 1.5 * 1.0 * 0.87 ≈ 1.30x
+    // - With confidence seeding (5 closed trades): 1.5 * 0.5 * 0.5 ≈ 0.375x base
+    // - After hybrid sizing: 0.375 * 1.0 * 0.92 ≈ 0.345x
+    // - Ratio: 0.345 / 1.5 ≈ 0.23x
     //
-    // The key is that it should be MUCH higher than old compounding (0.021x vs 0.144x)
+    // The key is that it should be MUCH higher than old compounding (0.021x vs 0.23x)
 
     let ratio = size / base;
 
@@ -686,8 +688,8 @@ async fn test_conviction_cap_skipped_without_token_context() {
     let size = sizer.calculate_size(factors).await.unwrap();
     assert_eq!(
         size,
-        Decimal::from_str("0.5").unwrap(),
-        "no token context → full-size base unchanged (cap disabled)"
+        Decimal::from_str("1.5").unwrap(),
+        "no token context → capital-relative base unchanged: 10 * 0.15 * 1.0 * 1.0 = 1.5 (cap disabled)"
     );
 }
 
@@ -704,6 +706,9 @@ async fn test_proven_wallet_override_and_cap_exemptions() {
         min_size_sol: Decimal::from_str("0.25").unwrap(),
         proven_sizing_boost: true,
         proven_size_sol: Decimal::from_str("0.75").unwrap(),
+        // Capital-relative proven size: 10 * 0.075 = 0.75 (matches the
+        // pre-2026-08-20 absolute expectation).
+        proven_size_pct: Decimal::from_str("0.075").unwrap(),
         conviction_size_cap_enabled: true,
         conviction_size_default_cap_sol: Decimal::from_str("0.25").unwrap(),
         ..PositionSizingConfig::default()
@@ -721,16 +726,17 @@ async fn test_proven_wallet_override_and_cap_exemptions() {
     assert_eq!(
         size,
         Decimal::from_str("0.75").unwrap(),
-        "proven wallet must size at proven_size_sol, exempt from WQS micro-cap and conviction cap"
+        "proven wallet must size at proven_size_pct × capital, exempt from WQS micro-cap and conviction cap"
     );
 }
 
-/// Proven override respects the strategy max cap (Shield 2.0 default).
+/// Proven override respects the strategy max cap (Shield, capital-relative).
 #[tokio::test]
 async fn test_proven_override_respects_strategy_max() {
     let (db, _tmp) = create_test_db().await;
     let cfg = Arc::new(PositionSizingConfig {
-        shield_max_size_sol: Decimal::from_str("0.5").unwrap(),
+        // Strategy max = capital × shield_max_pct = 10 × 0.05 = 0.5 SOL.
+        shield_max_pct: Decimal::from_str("0.05").unwrap(),
         proven_size_sol: Decimal::from_str("0.75").unwrap(),
         ..PositionSizingConfig::default()
     });
@@ -742,7 +748,7 @@ async fn test_proven_override_respects_strategy_max() {
     assert_eq!(
         size,
         Decimal::from_str("0.5").unwrap(),
-        "strategy max caps the proven override"
+        "strategy max (capital × shield_max_pct) caps the proven override"
     );
 }
 
@@ -768,5 +774,120 @@ async fn test_proven_boost_disabled_rejects_low_wqs() {
     assert_eq!(
         size, Decimal::ZERO,
         "without the boost, a WQS-10 wallet's chain output (~0.04) must reject under skip semantics"
+    );
+}
+
+// ─── Capital-relative sizing (2026-08-20) ─────────────────────────────────────
+
+/// Position sizes scale linearly with `total_capital_sol`: identical factors at
+/// 10 / 100 / 1000 SOL yield ~×10 / ~×100 sizes, until the absolute `max_size_sol`
+/// ceiling (50) binds at 1000 SOL. Confirms the auto-scale requirement from the
+/// sizing plan (10 → 1.5, 100 → 15, 1000 → 50, capacity-neutral).
+#[tokio::test]
+async fn test_capital_relative_sizes_scale_with_capital() {
+    let (db, _tmp) = create_test_db().await;
+    let pool = pg_pool(&db);
+    // ≥15 closed trades → confidence = 1.0, so base = capital * base_size_pct * wqs/100.
+    insert_closed_trades(&pool, "scale_wallet", 15).await;
+    let sizer = PositionSizer::new(db, default_sizing_config());
+
+    async fn size_at_capital(sizer: &PositionSizer, capital: Decimal) -> Decimal {
+        let mut f = neutral_factors();
+        f.wallet_address = "scale_wallet".to_string();
+        f.wallet_wqs = 100.0; // wqs_factor = 1.0, neutral multipliers → size = base.
+        f.total_capital_sol = capital;
+        f.token_address = None; // skip conviction cap; isolate the %-of-capital scaling
+        sizer.calculate_size(f).await.unwrap()
+    }
+
+    let s10 = size_at_capital(&sizer, Decimal::from_str("10.0").unwrap()).await;
+    let s100 = size_at_capital(&sizer, Decimal::from_str("100.0").unwrap()).await;
+    let s1000 = size_at_capital(&sizer, Decimal::from_str("1000.0").unwrap()).await;
+
+    // base = capital * 0.15 * 1.0 * 1.0.
+    assert_eq!(s10, Decimal::from_str("1.5").unwrap(), "10 SOL → 15% = 1.5");
+    assert_eq!(s100, Decimal::from_str("15.0").unwrap(), "100 SOL → 15% = 15");
+    // 1000 * 0.15 = 150, but the absolute safety ceiling (max_size_sol = 50) binds.
+    assert_eq!(
+        s1000,
+        Decimal::from_str("50.0").unwrap(),
+        "1000 SOL capped at absolute 50 ceiling"
+    );
+
+    // Capacity-neutral: same fraction of capital deployed regardless of scale (before ceiling).
+    let ratio_100_over_10 = s100 / s10;
+    assert!(
+        (ratio_100_over_10 - Decimal::from_str("10.0").unwrap()).abs()
+            < Decimal::from_str("0.01").unwrap(),
+        "size must scale ~10x from 10→100 SOL capital, got {}x",
+        ratio_100_over_10
+    );
+}
+
+/// The proven-wallet override scales with capital too: proven = capital ×
+/// proven_size_pct, bounded by the Shield strategy max.
+#[tokio::test]
+async fn test_proven_wallet_scales_with_capital() {
+    let (db, _tmp) = create_test_db().await;
+    let pool = pg_pool(&db);
+    insert_closed_trades(&pool, "proven_wallet", 15).await;
+    let sizer = PositionSizer::new(db, default_sizing_config());
+
+    async fn proven_size(sizer: &PositionSizer, capital: Decimal) -> Decimal {
+        let mut f = neutral_factors();
+        f.wallet_address = "proven_wallet".to_string();
+        f.total_capital_sol = capital;
+        f.token_address = None;
+        f.is_proven = true;
+        sizer.calculate_size(f).await.unwrap()
+    }
+
+    // proven = capital * proven_size_pct (0.15); Shield strategy max = 0.30 capital > proven.
+    let p10 = proven_size(&sizer, Decimal::from_str("10.0").unwrap()).await;
+    let p100 = proven_size(&sizer, Decimal::from_str("100.0").unwrap()).await;
+    assert_eq!(p10, Decimal::from_str("1.5").unwrap(), "proven at 10 SOL = 1.5");
+    assert_eq!(p100, Decimal::from_str("15.0").unwrap(), "proven at 100 SOL = 15");
+}
+
+/// Capital-relative sizing still honours skip-below-min: a small capital that
+/// yields a sub-minimum size rejects (zero) rather than clamping up; legacy mode
+/// still clamps to the floor.
+#[tokio::test]
+async fn test_capital_relative_skip_below_min_preserved() {
+    let (db, _tmp) = create_test_db().await;
+    let pool = pg_pool(&db);
+    insert_closed_trades(&pool, "small_wallet", 15).await;
+
+    // min 0.25 (as configured in prod), base_size_pct 0.15 (default).
+    let cfg = Arc::new(PositionSizingConfig {
+        min_size_sol: Decimal::from_str("0.25").unwrap(),
+        ..PositionSizingConfig::default()
+    });
+    let sizer = PositionSizer::new(db.clone(), cfg);
+
+    let mut f = neutral_factors();
+    f.wallet_address = "small_wallet".to_string();
+    f.wallet_wqs = 100.0; // wqs_factor = 1.0
+    f.token_address = None;
+    f.total_capital_sol = Decimal::from_str("1.0").unwrap(); // base = 1 * 0.15 = 0.15 < 0.25
+    let size = sizer.calculate_size(f.clone()).await.unwrap();
+    assert_eq!(
+        size,
+        Decimal::ZERO,
+        "sub-minimum capital-relative size (0.15 < 0.25) must reject under skip-below-min"
+    );
+
+    // Legacy mode clamps up to the floor.
+    let cfg_legacy = Arc::new(PositionSizingConfig {
+        min_size_sol: Decimal::from_str("0.25").unwrap(),
+        skip_below_min_size: false,
+        ..PositionSizingConfig::default()
+    });
+    let sizer_legacy = PositionSizer::new(db, cfg_legacy);
+    let size_legacy = sizer_legacy.calculate_size(f.clone()).await.unwrap();
+    assert_eq!(
+        size_legacy,
+        Decimal::from_str("0.25").unwrap(),
+        "legacy mode must clamp up to min_size_sol"
     );
 }

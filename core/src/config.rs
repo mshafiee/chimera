@@ -2264,12 +2264,24 @@ impl Default for ProfitManagementConfig {
 /// Position sizing configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct PositionSizingConfig {
-    /// Base position size in SOL
+    /// Base position size in SOL (legacy absolute value; sizing is now
+    /// capital-relative via `base_size_pct` — 2026-08-20).
     #[serde(default = "default_base_size_sol")]
     pub base_size_sol: Decimal,
-    /// Maximum position size in SOL (legacy; overridden per-strategy by shield/spear max)
+    /// Base position size as a fraction of `total_capital_sol` (capital-relative
+    /// sizing, 2026-08-20). Default 15% of capital.
+    #[serde(default = "default_base_size_pct")]
+    pub base_size_pct: Decimal,
+    /// Absolute safety ceiling on any single position in SOL. `max_size_sol` is
+    /// no longer the per-strategy cap (that is now `*_max_pct` of capital); it is
+    /// the hard ceiling above which no position may ever grow (auto-scale caps:
+    /// 10 SOL → 3.0, 100 → 30, 1000 → 50). Default ~50 SOL.
     #[serde(default = "default_max_size_sol")]
     pub max_size_sol: Decimal,
+    /// Per-position size cap as a fraction of `total_capital_sol`. Default 30%
+    /// of capital (also feeds `SelectionConfig.max_position_sol`).
+    #[serde(default = "default_max_position_pct")]
+    pub max_position_pct: Decimal,
     /// Minimum position size in SOL (paper trading only)
     #[serde(default = "default_min_size_sol")]
     pub min_size_sol: Decimal,
@@ -2301,6 +2313,10 @@ pub struct PositionSizingConfig {
     /// would re-clamp proven entries on history-less fresh tokens).
     #[serde(default = "default_proven_size_sol")]
     pub proven_size_sol: Decimal,
+    /// Proven-wallet size as a fraction of `total_capital_sol` under the boost
+    /// (capital-relative, 2026-08-20). Default 15% of capital.
+    #[serde(default = "default_proven_size_pct")]
+    pub proven_size_pct: Decimal,
     /// Minimum position size in SOL for live trading (distinct from paper min_size_sol)
     /// Rejects trades below this threshold to avoid uneconomical execution due to fixed costs
     #[serde(default = "default_min_live_position_sol")]
@@ -2308,9 +2324,23 @@ pub struct PositionSizingConfig {
     /// Maximum position size for Shield strategy (conservative, larger allocation)
     #[serde(default = "default_shield_max_size_sol")]
     pub shield_max_size_sol: Decimal,
+    /// Maximum position size for Shield strategy as a fraction of capital
+    /// (capital-relative, 2026-08-20). Must be ≥ `max_position_pct`.
+    #[serde(default = "default_shield_max_pct")]
+    pub shield_max_pct: Decimal,
     /// Maximum position size for Spear strategy (aggressive, smaller allocation)
     #[serde(default = "default_spear_max_size_sol")]
     pub spear_max_size_sol: Decimal,
+    /// Maximum position size for Spear strategy as a fraction of capital
+    /// (capital-relative, 2026-08-20). Must be ≥ `max_position_pct`.
+    #[serde(default = "default_spear_max_pct")]
+    pub spear_max_pct: Decimal,
+    /// Portfolio heat ceiling as a fraction of capital (2026-08-20). Raised from
+    /// the historical 20%/30% so a single `max_position_pct` (30%) position fits
+    /// with room for concurrent exposure (~50–60% of capital). Drives
+    /// `PortfolioHeat.max_heat_percent` and the pipeline heat re-check.
+    #[serde(default = "default_portfolio_heat_percent")]
+    pub portfolio_heat_percent: Decimal,
     /// Consensus multiplier (when multiple wallets buy same token)
     #[serde(default = "default_consensus_multiplier")]
     pub consensus_multiplier: Decimal,
@@ -2362,8 +2392,32 @@ fn default_base_size_sol() -> Decimal {
     dec!(0.5)
 }
 
+fn default_base_size_pct() -> Decimal {
+    dec!(0.15)
+}
+
+fn default_max_position_pct() -> Decimal {
+    dec!(0.30)
+}
+
+fn default_proven_size_pct() -> Decimal {
+    dec!(0.15)
+}
+
+fn default_shield_max_pct() -> Decimal {
+    dec!(0.30)
+}
+
+fn default_spear_max_pct() -> Decimal {
+    dec!(0.25)
+}
+
+fn default_portfolio_heat_percent() -> Decimal {
+    dec!(0.60)
+}
+
 fn default_max_size_sol() -> Decimal {
-    dec!(2.0)
+    dec!(50.0)
 }
 
 fn default_min_size_sol() -> Decimal {
@@ -2446,14 +2500,20 @@ impl Default for PositionSizingConfig {
     fn default() -> Self {
         Self {
             base_size_sol: default_base_size_sol(),
+            base_size_pct: default_base_size_pct(),
             max_size_sol: default_max_size_sol(),
+            max_position_pct: default_max_position_pct(),
             min_size_sol: default_min_size_sol(),
             skip_below_min_size: true,
             proven_sizing_boost: true,
             proven_size_sol: default_proven_size_sol(),
+            proven_size_pct: default_proven_size_pct(),
             min_live_position_sol: default_min_live_position_sol(),
             shield_max_size_sol: default_shield_max_size_sol(),
+            shield_max_pct: default_shield_max_pct(),
             spear_max_size_sol: default_spear_max_size_sol(),
+            spear_max_pct: default_spear_max_pct(),
+            portfolio_heat_percent: default_portfolio_heat_percent(),
             consensus_multiplier: default_consensus_multiplier(),
             max_concurrent_positions: default_max_concurrent_positions(),
             use_kelly_sizing: default_use_kelly_sizing(),

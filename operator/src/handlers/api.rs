@@ -624,8 +624,15 @@ pub struct ProfitManagementConfigResponse {
 #[derive(Debug, Serialize)]
 pub struct PositionSizingConfigResponse {
     pub base_size_sol: f64,
+    pub base_size_pct: f64,
     pub max_size_sol: f64,
+    pub max_position_pct: f64,
     pub min_size_sol: f64,
+    pub shield_max_pct: f64,
+    pub spear_max_pct: f64,
+    pub proven_size_pct: f64,
+    pub portfolio_heat_percent: f64,
+    pub total_capital_sol: f64,
     pub consensus_multiplier: f64,
     pub max_concurrent_positions: usize,
 }
@@ -760,7 +767,13 @@ pub struct UpdateProfitManagementConfig {
 #[derive(Debug, Deserialize)]
 pub struct UpdatePositionSizingConfig {
     pub base_size_sol: Option<f64>,
+    pub base_size_pct: Option<f64>,
     pub max_size_sol: Option<f64>,
+    pub max_position_pct: Option<f64>,
+    pub shield_max_pct: Option<f64>,
+    pub spear_max_pct: Option<f64>,
+    pub proven_size_pct: Option<f64>,
+    pub portfolio_heat_percent: Option<f64>,
     pub min_size_sol: Option<f64>,
     pub consensus_multiplier: Option<f64>,
     pub max_concurrent_positions: Option<usize>,
@@ -919,8 +932,39 @@ pub async fn get_config(
         },
         position_sizing: PositionSizingConfigResponse {
             base_size_sol: config.position_sizing.base_size_sol.to_f64().unwrap_or(0.0),
+            base_size_pct: config.position_sizing.base_size_pct.to_f64().unwrap_or(0.0),
             max_size_sol: config.position_sizing.max_size_sol.to_f64().unwrap_or(0.0),
+            max_position_pct: config
+                .position_sizing
+                .max_position_pct
+                .to_f64()
+                .unwrap_or(0.0),
             min_size_sol: config.position_sizing.min_size_sol.to_f64().unwrap_or(0.0),
+            shield_max_pct: config
+                .position_sizing
+                .shield_max_pct
+                .to_f64()
+                .unwrap_or(0.0),
+            spear_max_pct: config
+                .position_sizing
+                .spear_max_pct
+                .to_f64()
+                .unwrap_or(0.0),
+            proven_size_pct: config
+                .position_sizing
+                .proven_size_pct
+                .to_f64()
+                .unwrap_or(0.0),
+            portfolio_heat_percent: config
+                .position_sizing
+                .portfolio_heat_percent
+                .to_f64()
+                .unwrap_or(0.0),
+            total_capital_sol: config
+                .position_sizing
+                .total_capital_sol
+                .to_f64()
+                .unwrap_or(0.0),
             consensus_multiplier: config
                 .position_sizing
                 .consensus_multiplier
@@ -1369,6 +1413,97 @@ pub async fn update_config(
                 config.position_sizing.max_concurrent_positions = v;
                 audit_entries.push((
                     "position_sizing.max_concurrent_positions".to_string(),
+                    Some(old.to_string()),
+                    v.to_string(),
+                ));
+            }
+            // Capital-relative pct fields (2026-08-20). Fractions in (0, 1].
+            if let Some(v) = ps.base_size_pct {
+                if !(0.0..=1.0).contains(&v) {
+                    return Err(AppError::Validation(
+                        "base_size_pct must be between 0.0 and 1.0".to_string(),
+                    ));
+                }
+                let old = config.position_sizing.base_size_pct;
+                config.position_sizing.base_size_pct =
+                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                audit_entries.push((
+                    "position_sizing.base_size_pct".to_string(),
+                    Some(old.to_string()),
+                    v.to_string(),
+                ));
+            }
+            if let Some(v) = ps.max_position_pct {
+                if !(0.0..=1.0).contains(&v) {
+                    return Err(AppError::Validation(
+                        "max_position_pct must be between 0.0 and 1.0".to_string(),
+                    ));
+                }
+                let old = config.position_sizing.max_position_pct;
+                config.position_sizing.max_position_pct =
+                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                audit_entries.push((
+                    "position_sizing.max_position_pct".to_string(),
+                    Some(old.to_string()),
+                    v.to_string(),
+                ));
+            }
+            if let Some(v) = ps.proven_size_pct {
+                if !(0.0..=1.0).contains(&v) {
+                    return Err(AppError::Validation(
+                        "proven_size_pct must be between 0.0 and 1.0".to_string(),
+                    ));
+                }
+                let old = config.position_sizing.proven_size_pct;
+                config.position_sizing.proven_size_pct =
+                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                audit_entries.push((
+                    "position_sizing.proven_size_pct".to_string(),
+                    Some(old.to_string()),
+                    v.to_string(),
+                ));
+            }
+            if let Some(v) = ps.shield_max_pct {
+                if !(0.0..=1.0).contains(&v) {
+                    return Err(AppError::Validation(
+                        "shield_max_pct must be between 0.0 and 1.0".to_string(),
+                    ));
+                }
+                let old = config.position_sizing.shield_max_pct;
+                config.position_sizing.shield_max_pct =
+                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                audit_entries.push((
+                    "position_sizing.shield_max_pct".to_string(),
+                    Some(old.to_string()),
+                    v.to_string(),
+                ));
+            }
+            if let Some(v) = ps.spear_max_pct {
+                if !(0.0..=1.0).contains(&v) {
+                    return Err(AppError::Validation(
+                        "spear_max_pct must be between 0.0 and 1.0".to_string(),
+                    ));
+                }
+                let old = config.position_sizing.spear_max_pct;
+                config.position_sizing.spear_max_pct =
+                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                audit_entries.push((
+                    "position_sizing.spear_max_pct".to_string(),
+                    Some(old.to_string()),
+                    v.to_string(),
+                ));
+            }
+            if let Some(v) = ps.portfolio_heat_percent {
+                if !(0.0..=1.0).contains(&v) {
+                    return Err(AppError::Validation(
+                        "portfolio_heat_percent must be between 0.0 and 1.0".to_string(),
+                    ));
+                }
+                let old = config.position_sizing.portfolio_heat_percent;
+                config.position_sizing.portfolio_heat_percent =
+                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                audit_entries.push((
+                    "position_sizing.portfolio_heat_percent".to_string(),
                     Some(old.to_string()),
                     v.to_string(),
                 ));

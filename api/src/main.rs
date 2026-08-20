@@ -514,7 +514,11 @@ async fn main() -> anyhow::Result<()> {
     // /health endpoint and the selection engine share the same run identity.
     let selection_config = chimera_operator::engine::SelectionConfig {
         total_capital_sol: config.position_sizing.total_capital_sol,
-        max_position_sol: config.position_sizing.max_size_sol,
+        // Capital-relative per-position ceiling (2026-08-20): % of capital,
+        // bounded by the absolute safety ceiling `max_size_sol` (50 SOL).
+        max_position_sol: (config.position_sizing.total_capital_sol
+            * config.position_sizing.max_position_pct)
+            .min(config.position_sizing.max_size_sol),
         shield_signal_quality_threshold: config.strategy.shield_signal_quality_threshold,
         spear_signal_quality_threshold: config.strategy.spear_signal_quality_threshold,
         shield_percent: config.strategy.shield_percent,
@@ -1083,8 +1087,16 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("State registry initialized");
 
     let portfolio_heat = Arc::new(
-        PortfolioHeat::new(db_pool.clone(), config.position_sizing.total_capital_sol)
-            .with_registry(Arc::clone(&state_registry)),
+        // Capital-relative heat ceiling (2026-08-20): driven by
+        // `position_sizing.portfolio_heat_percent` (fraction of capital),
+        // converted to the PortfolioHeat percent (0-100) form.
+        PortfolioHeat::with_max_heat(
+            db_pool.clone(),
+            config.position_sizing.total_capital_sol,
+            (config.position_sizing.portfolio_heat_percent
+                * rust_decimal::Decimal::from(100)),
+        )
+        .with_registry(Arc::clone(&state_registry)),
     );
     tracing::info!(
         total_capital_sol = ?config.position_sizing.total_capital_sol,
@@ -3383,7 +3395,9 @@ async fn main() -> anyhow::Result<()> {
         helius_client: helius_client.clone(),
         position_sizer: Some(position_sizer),
         total_capital_sol: config.position_sizing.total_capital_sol,
-        max_position_sol: config.position_sizing.max_size_sol,
+        max_position_sol: (config.position_sizing.total_capital_sol
+            * config.position_sizing.max_position_pct)
+            .min(config.position_sizing.max_size_sol),
         shield_signal_quality_threshold: config.strategy.shield_signal_quality_threshold,
         spear_signal_quality_threshold: config.strategy.spear_signal_quality_threshold,
         shield_percent: config.strategy.shield_percent,
