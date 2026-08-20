@@ -131,6 +131,7 @@ def _cmd_path(limit: int) -> int:
         "       EXTRACT(EPOCH FROM MIN(opened_at))::bigint AS tf, "
         "       EXTRACT(EPOCH FROM MAX(COALESCE(closed_at, NOW())))::bigint AS tt "
         "FROM shadow_positions WHERE token_address IS NOT NULL "
+        "AND token_address NOT IN (SELECT token_address FROM price_path_points) "
         "GROUP BY token_address LIMIT %s",
         (limit,),
     )
@@ -150,6 +151,9 @@ def _cmd_path(limit: int) -> int:
             in_window = [(ts, p) for ts, p in pts if tf <= ts <= tt]
             if in_window:
                 paths[addr] = in_window
+            # Pace public GeckoTerminal API requests to stay under the free
+            # tier's rate limit (~161ms/token measured; throttle to ~4/sec).
+            await asyncio.sleep(0.20)
         return paths
 
     paths = asyncio.run(_reconstruct())

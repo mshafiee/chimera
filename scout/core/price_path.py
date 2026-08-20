@@ -176,6 +176,24 @@ def parse_ohlcv_close(ohlcv_list: Sequence[Sequence]) -> List[Tuple[int, Decimal
     return _finalize(out)
 
 
+async def _gecko_get(session, url: str) -> Tuple[int, dict]:
+    """GET a GeckoTerminal URL with a 429 backoff/retry (public API can rate
+    limit a long reconstruction run). Returns (status, json_dict)."""
+    import asyncio
+    import aiohttp
+
+    for attempt in range(3):
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as r:
+            if r.status == 429 and attempt < 2:
+                await asyncio.sleep(0.8 * (attempt + 1))
+                continue
+            try:
+                return r.status, await r.json()
+            except Exception:
+                return r.status, {}
+    return 429, {}
+
+
 async def geckoterminal_ohlcv(token_address: str, timeframe: str = "hour") -> List[Tuple[int, Decimal]]:
     """Return a token's hourly OHLCV close series via GeckoTerminal, or [] if
     the token has no live pool."""
@@ -184,30 +202,28 @@ async def geckoterminal_ohlcv(token_address: str, timeframe: str = "hour") -> Li
     out: List[Tuple[int, Decimal]] = []
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get(
-                f"{GECKO_BASE}/networks/solana/tokens/{token_address}/pools",
-                timeout=aiohttp.ClientTimeout(total=20),
-            ) as r:
-                if r.status != 200:
-                    return out
-                pools = (await r.json()).get("data") or []
+            status, js = await _gecko_get(
+                s, f"{GECKO_BASE}/networks/solana/tokens/{token_address}/pools"
+            )
+            if status != 200:
+                return out
+            pools = js.get("data") or []
             if not pools:
                 return out
             pool_addr = str(pools[0]["id"]).replace("solana_", "")
             for tf in (timeframe, "hour", "day", "minute"):
-                async with s.get(
-                    f"{GECKO_BASE}/networks/solana/pools/{pool_addr}/ohlcv/{tf}",
-                    timeout=aiohttp.ClientTimeout(total=20),
-                ) as r:
-                    if r.status != 200:
-                        continue
-                    data = (await r.json()).get("data")
-                    items = _as_resource_list(data)
-                    for item in items:
-                        attrs = item.get("attributes") or {}
-                        out.extend(parse_ohlcv_close(attrs.get("ohlcv_list") or []))
-                    if out:
-                        break
+                status, js = await _gecko_get(
+                    s, f"{GECKO_BASE}/networks/solana/pools/{pool_addr}/ohlcv/{tf}"
+                )
+                if status != 200:
+                    continue
+                data = js.get("data")
+                items = _as_resource_list(data)
+                for item in items:
+                    attrs = item.get("attributes") or {}
+                    out.extend(parse_ohlcv_close(attrs.get("ohlcv_list") or []))
+                if out:
+                    break
     except Exception as e:  # noqa: BLE001 - provider errors are recoverable
         print(f"ERROR: geckoterminal_ohlcv {token_address}: {e}")
         return out
