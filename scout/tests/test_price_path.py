@@ -78,3 +78,12 @@ def test_parse_ohlcv_close_drops_bad_rows():
     got = pp.parse_ohlcv_close(rows)
     assert got == [(1700000200, Decimal("7"))]
 
+
+def test_as_resource_list_shapes():
+    assert pp._as_resource_list([{"id": "a"}]) == [{"id": "a"}]
+    assert pp._as_resource_list({"id": "a"}) == [{"id": "a"}]
+    assert pp._as_resource_list(["oops", {"id": "a"}]) == [{"id": "a"}]
+    assert pp._as_resource_list(None) == []
+    assert pp._as_resource_list({}) == [{}]
+
+

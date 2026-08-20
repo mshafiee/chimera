@@ -194,17 +194,31 @@ async def geckoterminal_ohlcv(token_address: str, timeframe: str = "hour") -> Li
             if not pools:
                 return out
             pool_addr = str(pools[0]["id"]).replace("solana_", "")
-            async with s.get(
-                f"{GECKO_BASE}/networks/solana/pools/{pool_addr}/ohlcv/{timeframe}",
-                timeout=aiohttp.ClientTimeout(total=20),
-            ) as r:
-                if r.status != 200:
-                    return out
-                data = (await r.json()).get("data") or []
-            for item in data:
-                attrs = item.get("attributes") or {}
-                out.extend(parse_ohlcv_close(attrs.get("ohlcv_list") or []))
+            for tf in (timeframe, "hour", "day", "minute"):
+                async with s.get(
+                    f"{GECKO_BASE}/networks/solana/pools/{pool_addr}/ohlcv/{tf}",
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as r:
+                    if r.status != 200:
+                        continue
+                    data = (await r.json()).get("data")
+                    items = _as_resource_list(data)
+                    for item in items:
+                        attrs = item.get("attributes") or {}
+                        out.extend(parse_ohlcv_close(attrs.get("ohlcv_list") or []))
+                    if out:
+                        break
     except Exception as e:  # noqa: BLE001 - provider errors are recoverable
         print(f"ERROR: geckoterminal_ohlcv {token_address}: {e}")
         return out
     return _finalize(out)
+
+
+def _as_resource_list(data) -> List[Dict]:
+    """Normalize GeckoTerminal `data` (a resource list, a single resource dict,
+    or an error/empty value) into a list of resource dicts."""
+    if isinstance(data, list):
+        return [d for d in data if isinstance(d, dict)]
+    if isinstance(data, dict):
+        return [data]
+    return []
