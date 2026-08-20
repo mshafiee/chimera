@@ -1104,6 +1104,137 @@ async fn test_mirror_gate_paths() {
     assert!(d.admitted, "positive mirror admits: {:?}", d.rejection_code);
 }
 
+/// Phase 2 of admission-gate recalibration: the entry-confirmation price-hold
+/// bypass (`decide_with_options(req, true)`) must admit a confirmable
+/// `SHADOW_MIRROR_INSUFFICIENT` signal that is otherwise rejected, while the
+/// non-bypass path stays fail-closed and token safety is never bypassed.
+#[tokio::test]
+async fn test_mirror_gate_bypass_admits_on_price_held() {
+    let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
+    seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
+    let mut cfg = base_config();
+    cfg.mirror_gate_enabled = true;
+
+    let service = build_service(
+        db.clone(),
+        seeded_parser(TOKEN, "SHIELD", "100000", true),
+        cfg.clone(),
+    );
+    let req = request(TOKEN, Action::Buy);
+
+    // No mirror samples for the token → the gate fails closed on the normal
+    // admission path, so a direct admit is still blocked ...
+    let gated = service.decide(&req).await;
+    assert_eq!(
+        gated.rejection_code,
+        Some("SHADOW_MIRROR_INSUFFICIENT"),
+        "without the bypass, insufficient mirror evidence must fail closed"
+    );
+
+    // ... but the entry-confirmation price-hold bypass skips the shadow-mirror
+    // gate (admission evidence comes from the live price-hold instead).
+    let bypassed = service.decide_with_options(&req, true).await;
+    assert!(
+        bypassed.admitted,
+        "price-held mirror-insufficient signal must admit via the bypass: {:?}",
+        bypassed.rejection_code
+    );
+    assert_ne!(
+        bypassed.rejection_code,
+        Some("SHADOW_MIRROR_INSUFFICIENT"),
+        "bypass must not re-apply the shadow-mirror insufficient gate"
+    );
+}
+
+/// The price-hold bypass also covers the negative-average mirror check, but the
+/// non-bypass path still fails closed on `SHADOW_MIRROR_NEGATIVE`.
+#[tokio::test]
+async fn test_mirror_gate_bypass_admits_negative_avg() {
+    let (db, _guard) = create_test_db().await;
+    let pool = pg_pool(&db);
+    seed_prior_shadow(&db, TOKEN, 1).await;
+    seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
+    let mut cfg = base_config();
+    cfg.mirror_gate_enabled = true;
+
+    async fn seed_mirror(pool: &sqlx::Pool<sqlx::Postgres>, token: &str, pnl_pcts: &[&str]) {
+        for (i, p) in pnl_pcts.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, strategy, main_admitted, entry_amount_sol, ingress, opened_at) \
+                 VALUES ($1, 'd', 'run', '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU', $2, 'SHIELD', true, 0.1, 'webhook', NOW() - make_interval(hours => $3::int))",
+            )
+            .bind(format!("mir-neg-{token}-{i}"))
+            .bind(token)
+            .bind(i as i32 + 1)
+            .execute(pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO shadow_exits (shadow_id, exit_strategy, pnl_pct, pnl_sol) VALUES ($1, 'mirror_main', $2, 0.0)",
+            )
+            .bind(format!("mir-neg-{token}-{i}"))
+            .bind(dec(p))
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    // Negative mirror average (10 samples) → gate rejects on the normal path ...
+    seed_mirror(&pool, TOKEN, &["-2.0"; 10]).await;
+    let service = build_service(
+        db.clone(),
+        seeded_parser(TOKEN, "SHIELD", "100000", true),
+        cfg.clone(),
+    );
+    let req = request(TOKEN, Action::Buy);
+    let gated = service.decide(&req).await;
+    assert_eq!(
+        gated.rejection_code,
+        Some("SHADOW_MIRROR_NEGATIVE"),
+        "negative-average mirror must fail closed without the bypass"
+    );
+
+    // ... but the price-hold bypass admits (the negative EV screen yields to
+    // the live price-hold as the admission evidence).
+    let bypassed = service.decide_with_options(&req, true).await;
+    assert!(
+        bypassed.admitted,
+        "price-held negative-avg signal must admit via the bypass: {:?}",
+        bypassed.rejection_code
+    );
+}
+
+/// The price-hold bypass must never skip token safety: an unsafe token is
+/// rejected even when the mirror-gate bypass is set (guardrail).
+#[tokio::test]
+async fn test_mirror_gate_bypass_never_skips_token_safety() {
+    let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
+    seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
+    let mut cfg = base_config();
+    cfg.mirror_gate_enabled = true;
+
+    let service = build_service(
+        db.clone(),
+        seeded_parser(TOKEN, "SHIELD", "100000", false), // unsafe token
+        cfg.clone(),
+    );
+    let req = request(TOKEN, Action::Buy);
+
+    let decision = service.decide_with_options(&req, true).await;
+    assert!(
+        !decision.admitted,
+        "unsafe token must not be admitted even with the bypass"
+    );
+    assert_eq!(
+        decision.rejection_code,
+        Some("TOKEN_UNSAFE"),
+        "bypass must never skip the token-safety gate"
+    );
+}
+
 #[tokio::test]
 async fn test_velocity_gate_paths() {
     // Mock RPC serving a bonding-curve account for PUMP_TOKEN.
