@@ -1036,6 +1036,7 @@ impl SignalProcessor {
             None => String::new(), // no cache → cannot be GO → fail-closed
         };
         if let Some(reason) = profitability_gate_blocks(
+            self.config.profitability_gate.enforce_on_live,
             self.config.trade_mode,
             signal.payload.action,
             signal.payload.strategy,
@@ -1765,15 +1766,19 @@ impl SignalProcessor {
 /// shadow evidence keeps accumulating and protective exits are never blocked.
 ///
 /// Live entries require a `"GO"` verdict; anything else (no verdict yet,
-/// INCONCLUSIVE, STOP, unknown) fails closed. See docs/profitability-gates.md.
+/// INCONCLUSIVE, STOP, unknown) fails closed. Enforcement is gated by
+/// `enforce`: when false, live entries are NOT blocked and behave identically
+/// to paper/devnet (the "live == paper" policy). See
+/// docs/profitability-gates.md.
 pub fn profitability_gate_blocks(
+    enforce: bool,
     trade_mode: crate::config::TradeMode,
     action: Action,
     strategy: Strategy,
     verdict: &str,
 ) -> Option<&'static str> {
     use crate::config::TradeMode;
-    if trade_mode != TradeMode::Live || action != Action::Buy || strategy == Strategy::Exit {
+    if !enforce || trade_mode != TradeMode::Live || action != Action::Buy || strategy == Strategy::Exit {
         return None;
     }
     match verdict {

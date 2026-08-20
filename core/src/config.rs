@@ -573,6 +573,13 @@ pub struct ProfitabilityGateConfig {
     /// Enable profitability gating (fail-open by default for safety)
     #[serde(default = "default_profitability_gate_enabled")]
     pub enabled: bool,
+    /// Enforce the GO/STOP verdict on live entry BUYs. When false (default),
+    /// live entries are NOT blocked by the verdict and behave identically to
+    /// paper/devnet — the "live == paper" policy. Set true to restore the
+    /// capital-preservation gate (live entry BUYs blocked unless verdict == GO;
+    /// paper/devnet and all exits always proceed).
+    #[serde(default)]
+    pub enforce_on_live: bool,
     /// Refresh interval in seconds (default 300s / 5 minutes)
     #[serde(default = "default_profitability_gate_refresh_interval")]
     pub refresh_interval_seconds: u64,
@@ -587,6 +594,7 @@ impl Default for ProfitabilityGateConfig {
     fn default() -> Self {
         Self {
             enabled: default_profitability_gate_enabled(),
+            enforce_on_live: false,
             refresh_interval_seconds: default_profitability_gate_refresh_interval(),
             inconclusive_size_factor: default_profitability_gate_inconclusive_factor(),
         }
