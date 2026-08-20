@@ -43,12 +43,15 @@ circuit_breakers:
   cooldown_minutes: 30
 
 strategy:
-  # 60/40 split (2026-08-18): Shield allocation = capital 10 × heat 20% × 60%
-  # = 1.2 SOL — admits one 0.75 SOL proven entry plus a small concurrent
-  # position, serializing concurrent proven entries during validation.
+  # 60/40 split (2026-08-18). Heat ceiling is now 60% of capital
+  # (position_sizing.portfolio_heat_percent) — raised 2026-08-20 so a single
+  # 30%-of-capital position fits with room for concurrent exposure.
   shield_percent: 60
   spear_percent: 40
-  max_position_sol: 1.0
+  # Executor hard ceiling (SOL). Raised 2026-08-20 to the absolute safety
+  # ceiling so it does not reject the new capital-relative sizes; the effective
+  # per-position cap is total_capital_sol * max_position_pct (min'd with 50).
+  max_position_sol: 50.0
   min_position_sol: 0.01
   shield_signal_quality_threshold: 0.40  # Raised from 0.30: data shows only the 0.50+ quality band is gross-profitable (+0.06 SOL); 0.30-0.50 lost -0.53 SOL. 0.40 drops the worst sub-0.40 band (-0.37 SOL).
   spear_signal_quality_threshold: 0.40  # Raised from 0.30: same data — sub-0.40 signals are net-negative.
@@ -288,12 +291,24 @@ profit_management:
 
 # Position sizing configuration
 position_sizing:
-  base_size_sol: 0.75        # Was 0.5: WQS-80 × confidence ≈ 0.30-0.38 clears min_size_sol instead of straddling it (2026-08-18)
-  max_size_sol: 2.0
-  min_size_sol: 0.25
+  # Capital-relative sizing (2026-08-20): position sizes are a % of
+  # total_capital_sol so they scale automatically with capital (10/100/1000 SOL).
+  # At 10 SOL: base 1.5 / proven 1.5 / per-position cap 3.0 (Shield), 2.5 (Spear).
+  base_size_sol: 0.75        # Legacy absolute base (retained for back-compat; sizing uses base_size_pct)
+  base_size_pct: 0.15        # Base position = 15% of total_capital_sol
+  max_size_sol: 50.0         # Absolute safety ceiling on any single position (SOL)
+  max_position_pct: 0.30     # Per-position cap = 30% of total_capital_sol
+  shield_max_pct: 0.30       # Shield strategy cap = 30% of capital (>= max_position_pct)
+  spear_max_pct: 0.25        # Spear strategy cap = 25% of capital
+  proven_size_pct: 0.15      # Proven-wallet fixed size = 15% of capital
+  min_size_sol: 0.25         # Absolute floor (paper): sizes below this reject (skip-below-min)
+  # Portfolio heat ceiling as a fraction of capital (2026-08-20). Raised from
+  # the historical 20%/30% so a single 30%-of-capital position fits with room
+  # for concurrent exposure (~50-60% of capital). Keep max_concurrent_positions=12.
+  portfolio_heat_percent: 0.60
   # Proven (waived) wallets route to SPEAR (WQS-floor quality scoring clears
-  # SPEAR's threshold, not SHIELD's) — raised 0.5 -> 1.0 so the 0.75 SOL
-  # proven size fits under the strategy cap. Unproven Spear flow is already
+  # SPEAR's threshold, not SHIELD's) — the pct-based proven size fits under the
+  # strategy cap at the configured capital. Unproven Spear flow is already
   # bounded by the WQS chain, spear_lite cap, and skip-below-min semantics.
   spear_max_size_sol: 1.0
   # Cost-ratio policy (2026-08-18): entries the sizer computes below
@@ -302,7 +317,7 @@ position_sizing:
   # sizes skip rather than trade at the minimum with the worst cost ratio.
   skip_below_min_size: true
   # Proven-wallet sizing (2026-08-18): wallets proven by deduped shadow stats
-  # (t-stat/shadow-total oracle) size at a fixed 0.75 SOL — the WQS ×
+  # (t-stat/shadow-total oracle) size at a fixed fraction of capital — the WQS ×
   # confidence chain crushes them (WQS ~10, own-PnL score anti-correlated
   # with copy-PnL) to ~0.025 SOL, which skip semantics would reject. Atomic
   # with skip_below_min_size. Caps still applied: strategy max, spear_lite,
@@ -313,7 +328,7 @@ position_sizing:
   min_live_position_sol: 0.02  # Minimum position size for live trading (distinct from paper)
   consensus_multiplier: 2.0  # Increased from 1.5x to 2.0x for stronger consensus signals
   max_concurrent_positions: 12  # Was 20: fewer simultaneous positions reduces exposure to negative-EV signals and churn costs
-  use_kelly_sizing: false  # Fixed sizing at base_size_sol for consistent cost ratios
+  use_kelly_sizing: false  # Fixed sizing at base_size for consistent cost ratios
   total_capital_sol: 10.0  # Total trading capital in SOL (adjust to actual wallet balance)
   off_hours_size_multiplier: 0.75  # Was 0.5; less penalization during off-hours for more trade volume
   # Phase 5 conviction-size cap: clamp to 75th percentile of the token's own
