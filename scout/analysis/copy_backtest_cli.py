@@ -61,18 +61,25 @@ def _cmd_build_replay_limit(limit: int) -> list:
 
     positions = []
     for r in rows:
-        pts = load_stored_paths(r["token_address"])
+        # Replay only from the position's own open time; shadow positions often
+        # lack a recorded USD entry price, so anchor entry to the reconstructed
+        # path's first in-window price (the standard relative-replay approach).
+        opened = int(r["opened_at"])
+        pts = [(ts, p) for ts, p in load_stored_paths(r["token_address"]) if ts >= opened]
         if len(pts) < 2:
             continue
+        entry = pts[0][1]
         positions.append(
             {
-                "entry_price": r["entry_price_usd"],
-                "opened_at": int(r["opened_at"]),
+                "entry_price": entry,
+                "opened_at": opened,
                 "strategy": r["strategy"],
                 "size_sol": r["entry_amount_sol"] or "1.0",
                 "points": pts,
             }
         )
+        if len(positions) >= limit:
+            break
     return positions
 
 
