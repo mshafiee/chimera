@@ -83,3 +83,24 @@ def test_stats_math(monkeypatch):
     assert mm.mean == 0.025
     assert abs(mm.median - 0.025) < 1e-9
     assert mm.win_rate == 0.5
+
+
+def test_fill_skew_report_distribution_and_bands(monkeypatch):
+    # Two SELL closes: amount 1.0 with slippage 0.15 (gap 15%) and 0.02 (gap 2%).
+    rows = [
+        {"amount_sol": 1.0, "slippage_cost_sol": 0.15, "side": "SELL"},
+        {"amount_sol": 1.0, "slippage_cost_sol": 0.02, "side": "SELL"},
+    ]
+    monkeypatch.setattr(cb, "execute_and_fetchone", lambda *a, **k: {"cost": 0.0, "amt": 1.0})
+    monkeypatch.setattr(
+        cb, "execute_and_fetchall",
+        lambda *a, **k: rows if "FROM trades" in (a[0] if a else "") else [],
+    )
+    bt = cb.CopyBacktest()
+    rep = bt.fill_skew_report(skew_bands=(2, 10))
+    assert rep["n"] == 2
+    assert rep["median_gap_pct"] == 8.5  # (2 + 15) / 2
+    # band=2: both gaps (2>2 false, 15>2 true) -> 1 trigger
+    assert rep["bands"]["2"]["trigger_frac"] == 0.5
+    # band=10: only 15>10 -> 1 trigger
+    assert rep["bands"]["10"]["trigger_frac"] == 0.5

@@ -7,6 +7,7 @@ Commands:
   gate      metric table per entry gate under a given exit strategy
   strategy  metric table split by Shield/Spear
   gap       predicted (shadow mirror_main) vs realized (closed trades) win rate
+  skew      realized live-vs-mark sell fill skew + defer-trigger bands
 
 Options:
   --cost X      override cost-per-SOL (default: observed from trades)
@@ -51,6 +52,8 @@ def main(argv: list[str]) -> int:
         print(format_report(f"by-strategy under {exit_strat} (cost-adjusted)", bt.by_strategy(exit_strat)))
     elif cmd == "gap":
         print(bt.realize_vs_price_gap())
+    elif cmd == "skew":
+        print(bt.fill_skew_report())
     else:
         print(_HELP, file=sys.stderr)
         return 2

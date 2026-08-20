@@ -176,6 +176,58 @@ class CopyBacktest:
             "realized_n": r_n,
         }
 
+    # ── realized fill-skew (the gap's cost component) ───────────────────────
+    def fill_skew_report(self, days: int = 90, skew_bands=(0, 2, 5, 8, 12)) -> dict:
+        """Measure the live-vs-mark fill skew on real closed sells.
+
+        `slippage_cost_sol / amount_sol * 100` is a direct proxy for the
+        `loss_pct_cache - loss_pct_live` gap that `should_defer_exit` keys on:
+        how much worse the live sell fill was than the price-cache mark. We
+        report its distribution and, for each candidate `skew_pct` band, the
+        share of exits that would (a) trigger a defer and (b) the slippage lying
+        beyond the band — i.e. what a smarter fill could recover IF the price
+        recovers to the mark (the recovery outcome itself is NOT observable from
+        the recorded single-exit data, so it is reported separately and not
+        assumed into the numbers).
+        """
+        rows = execute_and_fetchall(
+            "SELECT amount_sol, slippage_cost_sol, side "
+            "FROM trades WHERE status='CLOSED' AND pnl_data_valid=TRUE "
+            "  AND side='SELL' AND COALESCE(amount_sol,0) > 0 "
+            "  AND created_at > NOW() - (%s || ' days')::interval",
+            (str(days),),
+            db_path=self.db_path,
+        )
+        gaps: List[float] = []
+        for r in rows:
+            amt = float_to_decimal(r["amount_sol"] or 0)
+            slip = float_to_decimal(r["slippage_cost_sol"] or 0)
+            if amt > 0:
+                gaps.append(float(slip / amt * 100))
+        if not gaps:
+            return {"n": 0}
+        st = _stats(gaps)
+        s90 = sorted(gaps)[int(0.9 * (len(gaps) - 1))]
+        bands = {}
+        for band in skew_bands:
+            n_trig = sum(1 for g in gaps if g > band)
+            beyond = float(sum(Decimal(g) - Decimal(band) for g in gaps if g > band))
+            bands[str(band)] = {
+                "trigger_frac": n_trig / len(gaps),
+                "slippage_beyond_band_pct_total": beyond,
+            }
+        return {
+            "n": st["n"],
+            "mean_gap_pct": st["mean"],
+            "median_gap_pct": st["median"],
+            "p25_gap_pct": st["p25"],
+            "p75_gap_pct": st["p75"],
+            "p90_gap_pct": s90,
+            "max_gap_pct": max(gaps),
+            "bands": bands,
+        }
+
+
 
 ROWS_FORMAT = ["group", "n", "mean", "median", "p25", "p75", "stdev", "win_rate", "sum_pnl", "ci_margin"]
 
