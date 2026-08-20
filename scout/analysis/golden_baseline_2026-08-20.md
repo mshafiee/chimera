@@ -57,3 +57,21 @@ protective/neutral; keep.
   paths), so arbitrary parameter grid-search (e.g. different stop floors / defer
   ticks) cannot be replayed from this table alone — the harness measures the
   recorded strategies and the realize-vs-price gap.
+
+## Realized fill-skew (added 2026-08-20) — why the gap CANNOT be tuned yet
+`CopyBacktest.fill_skew_report()` over closed SELL trades:
+- **n = 4** real closed sells; realized live-vs-mark fill skew median ≈ **0.028%**
+  (max 0.045%). Negligible sample.
+- The copy engine has barely traded: **183 closed trades ever, 4 recent sells.**
+  The 62.4% predicted win rate comes from **16,391 shadow simulations**, not
+  realized fills.
+- **Conclusion:** the realize-vs-price gap (62.4% predicted vs 18.0% realized) is
+  real but the *realized* side is statistically meaningless (n≈183 / n=4 sells).
+  Tuning `smart_exit::should_defer_exit` (`skew_pct`, `defer_max_ticks`) against
+  4 fills is not data-driven — it is fabrication.
+- **Prerequisite to ever close the gap:** (1) let the engine trade at real
+  throughput so realized closes accumulate past a meaningful n, and (2) record a
+  per-position price-mark series going forward (the DB has no price history; only
+  entry/exit snapshots and `price_at_signal`). With both collected, re-run
+  `fill_skew_report` and a deferral grid-search.
+
