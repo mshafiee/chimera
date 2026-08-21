@@ -140,3 +140,45 @@ def test_mark_gap_report_empty(monkeypatch):
     rep = bt.mark_gap_report()
     assert rep["n_positions"] == 0
     assert rep["marks"] == 0
+
+
+def test_reconcile_shadow_realized_attributes_gap(monkeypatch):
+    # P1: shadow predicts +5%, realized gross -20%, net -25% (cost c. 5%).
+    # P2: shadow predicts +12%, realized gross +10%, net +7.5% (cost c. 2.5%).
+    closed = [
+        {
+            "wallet_address": "w1", "token_address": "t1",
+            "entry_price": 1.0, "exit_price": 0.8,
+            "entry_amount_sol": 1.0, "realized_pnl_sol": -0.20,
+            "realized_net_pnl_sol": -0.25, "opened_ts": 1000,
+        },
+        {
+            "wallet_address": "w2", "token_address": "t2",
+            "entry_price": 2.0, "exit_price": 2.2,
+            "entry_amount_sol": 1.0, "realized_pnl_sol": 0.20,
+            "realized_net_pnl_sol": 0.15, "opened_ts": 2000,
+        },
+    ]
+    shadows = [
+        {"wallet_address": "w1", "token_address": "t1", "opened_ts": 1010,
+         "shadow_pnl_pct": 5.0},
+        {"wallet_address": "w2", "token_address": "t2", "opened_ts": 2000,
+         "shadow_pnl_pct": 12.0},
+    ]
+    monkeypatch.setattr(
+        cb, "execute_and_fetchall",
+        lambda q, *a, **k: closed if "FROM positions" in q else shadows,
+    )
+    monkeypatch.setattr(cb, "execute_and_fetchone", lambda *a, **k: {"cost": 0.0, "amt": 1.0})
+    bt = cb.CopyBacktest()
+    rep = bt.reconcile_shadow_realized()
+    assert rep["n_positions"] == 2
+    assert rep["n_matched"] == 2
+    # win rates: shadow 2/2, gross 1/2 (only P2), net 1/2
+    assert rep["win_rates_pct"]["shadow"] == 100.0
+    assert rep["win_rates_pct"]["realized_gross"] == 50.0
+    assert rep["win_rates_pct"]["realized_net"] == 50.0
+    # gap_gross: P1 5-(-20)=25, P2 12-10=2 -> mean 13.5
+    assert abs(rep["gap_gross_pct"]["mean"] - 13.5) < 1e-6
+    # cost: P1 (gross - net): -0.20 -> -0.25 = 0.05 /1.0 = 5% ; P2 0.20-0.15=0.05/1.0=5% -> mean 5
+    assert abs(rep["mean_cost_pct"] - 5.0) < 1e-6

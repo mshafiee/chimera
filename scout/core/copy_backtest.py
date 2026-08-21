@@ -76,6 +76,21 @@ def _stats(values: List[float]) -> Dict[str, float]:
     }
 
 
+def _pearson(xs: List[float], ys: List[float]) -> Optional[float]:
+    """Pearson correlation; None when not computable (n<2 or flat series)."""
+    if len(xs) < 2 or len(xs) != len(ys):
+        return None
+    n = len(xs)
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    dx = math.sqrt(sum((x - mx) ** 2 for x in xs))
+    dy = math.sqrt(sum((y - my) ** 2 for y in ys))
+    if dx == 0 or dy == 0:
+        return 0.0
+    return num / (dx * dy)
+
+
 def _metric_row(group: str, values: List[float], sum_pnl: Decimal) -> MetricRow:
     st = _stats(values)
     return MetricRow(
@@ -294,6 +309,135 @@ class CopyBacktest:
             "final_pct": {"mean": round(t["mean"], 3), "median": round(t["median"], 3)},
             "worst_drawdown_pct": {"mean": round(m["mean"], 3), "median": round(m["median"], 3)},
             "recovery_from_dip_pct": {"mean": round(r["mean"], 3), "median": round(r["median"], 3)},
+        }
+
+    # ── per-trade shadow↔realized reconciliation (Phase 2F) ──────────────────
+    # Decides whether the 62.4%->18% win-rate divergence is an EXECUTION/fill
+    # problem (protective exits fire on stale marks and sell into bad fills)
+    # or a SHADOW-MODEL artifact (the simulator's price/fill assumptions are
+    # optimistic). Pairs each closed real position with its mirror_main shadow
+    # twin and decomposes the per-trade gap into price-basis (gap_gross) vs
+    # cost/slippage (mean_cost) and tests gap-vs-cost correlation.
+    def reconcile_shadow_realized(self, window_secs: int = 300) -> dict:
+        """Per-trade predicted (shadow mirror_main) vs realized price gap.
+
+        For every closed real position, find the shadow mirror_main exit for
+        the same (wallet, token) whose open time is nearest within
+        `window_secs`. `gap_gross` = shadow pnl_pct - realized gross price
+        pnl_pct (a large gap here = the shadow price model diverges from what
+        actually happened). `cost_pct` = realized gross-to-net drag. If the
+        divergence is execution-side, gap_gross is small and gap_net tracks
+        cost; if it is a modeling artifact, gap_gross is large and roughly
+        constant across costs.
+        """
+        closed = execute_and_fetchall(
+            "SELECT p.wallet_address, p.token_address, p.entry_price, p.exit_price, "
+            "       p.entry_amount_sol, p.realized_pnl_sol, p.realized_net_pnl_sol, "
+            "       EXTRACT(EPOCH FROM p.opened_at)::bigint AS opened_ts "
+            "FROM positions p "
+            "WHERE p.state = 'CLOSED' AND p.entry_price > 0 "
+            "  AND p.exit_price IS NOT NULL AND p.opened_at IS NOT NULL",
+            db_path=self.db_path,
+        )
+        shadows = execute_and_fetchall(
+            "SELECT sp.wallet_address, sp.token_address, "
+            "       EXTRACT(EPOCH FROM sp.opened_at)::bigint AS opened_ts, "
+            "       se.pnl_pct AS shadow_pnl_pct "
+            "FROM shadow_exits se "
+            "JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id "
+            "WHERE se.exit_strategy = 'mirror_main' AND sp.opened_at IS NOT NULL",
+            db_path=self.db_path,
+        )
+        if not closed:
+            return {"n_positions": 0, "n_matched": 0}
+
+        idx: Dict[Tuple[str, str], List[Tuple[int, float]]] = {}
+        for s in shadows:
+            if s["shadow_pnl_pct"] is None:
+                continue
+            idx.setdefault((s["wallet_address"], s["token_address"]), []).append(
+                (int(s["opened_ts"]), float(s["shadow_pnl_pct"]))
+            )
+        for lst in idx.values():
+            lst.sort(key=lambda x: x[0])
+
+        matched: List[dict] = []
+        for p in closed:
+            cands = idx.get((p["wallet_address"], p["token_address"]), [])
+            if not cands:
+                continue
+            opened = int(p["opened_ts"])
+            best = min(cands, key=lambda c: abs(c[0] - opened))
+            if abs(best[0] - opened) > window_secs:
+                continue
+            entry = float(p["entry_price"])
+            if entry <= 0:
+                continue
+            gross_pct = (float(p["exit_price"]) - entry) / entry * 100
+            amt = float(p["entry_amount_sol"] or 0) or 1.0
+            gross_sol = (
+                float(p["realized_pnl_sol"]) if p["realized_pnl_sol"] is not None else None
+            )
+            net = (
+                float(p["realized_net_pnl_sol"])
+                if p["realized_net_pnl_sol"] is not None
+                else None
+            )
+            net_pct = (net / amt * 100) if net is not None else None
+            cost_pct = (
+                ((gross_sol - net) / amt * 100)
+                if (gross_sol is not None and net is not None)
+                else None
+            )
+            matched.append(
+                {
+                    "shadow_pct": best[1],
+                    "gross_pct": gross_pct,
+                    "net_pct": net_pct,
+                    "cost_pct": cost_pct,
+                    "gap_gross": best[1] - gross_pct,
+                    "gap_net": (best[1] - net_pct) if net_pct is not None else None,
+                }
+            )
+
+        if not matched:
+            return {"n_positions": len(closed), "n_matched": 0}
+
+        n = len(matched)
+        shadow_wins = sum(1 for m in matched if m["shadow_pct"] > 0)
+        gross_wins = sum(1 for m in matched if m["gross_pct"] > 0)
+        net_wins = sum(1 for m in matched if (m["net_pct"] or 0) > 0)
+        gaps_gross = [m["gap_gross"] for m in matched]
+        gaps_net = [m["gap_net"] for m in matched if m["gap_net"] is not None]
+        costs = [m["cost_pct"] for m in matched if m["cost_pct"] is not None]
+        sg = _stats([m["shadow_pct"] for m in matched])
+        gg = _stats([m["gross_pct"] for m in matched])
+        ng = _stats([m["net_pct"] for m in matched if m["net_pct"] is not None])
+        return {
+            "n_positions": len(closed),
+            "n_matched": n,
+            "win_rates_pct": {
+                "shadow": round(shadow_wins / n * 100, 1),
+                "realized_gross": round(gross_wins / n * 100, 1),
+                "realized_net": round(net_wins / n * 100, 1),
+            },
+            "mean_pnl_pct": {
+                "shadow": round(sg["mean"], 3),
+                "realized_gross": round(gg["mean"], 3),
+                "realized_net": round(ng["mean"], 3),
+            },
+            "gap_gross_pct": {
+                "mean": round(sum(gaps_gross) / n, 3),
+                "median": round(_stats(gaps_gross)["median"], 3),
+            },
+            "gap_net_pct": {
+                "mean": round(sum(gaps_net) / len(gaps_net), 3) if gaps_net else None,
+                "median": round(_stats(gaps_net)["median"], 3) if gaps_net else None,
+            },
+            "mean_cost_pct": round(sum(costs) / len(costs), 3) if costs else None,
+            "gap_vs_cost_corr": (
+                round(_pearson(gaps_gross, costs), 3) if costs else None
+            ),
         }
 
 
