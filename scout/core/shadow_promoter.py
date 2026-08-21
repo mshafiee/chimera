@@ -311,6 +311,12 @@ def main(argv: list[str]) -> int:
         "(cost-burners). Default is dry-run; combine with --apply to commit.",
     )
     parser.add_argument(
+        "--promote-min-net-pct", type=float, default=PROMOTE_MIN_NET_PCT,
+        help="net-expectancy floor (%% of notional) for promotion. Default 1.5 "
+        "(CLEAR). Lower it toward 0 to grow signal volume: any net-positive "
+        "wallet becomes promotable (paper-volume mode).",
+    )
+    parser.add_argument(
         "--apply", action="store_true",
         help="commit the --optimize-paper roster changes",
     )
@@ -319,7 +325,9 @@ def main(argv: list[str]) -> int:
     if args.optimize_paper:
         perf = fetch_shadow_performance()
         cps = observed_cost_per_sol()
-        res = optimize_paper_roster(perf, cost_per_sol=cps)
+        res = optimize_paper_roster(
+            perf, cost_per_sol=cps, min_net_pct=args.promote_min_net_pct,
+        )
         print(
             f"paper roster rebalance: promote {len(res['promote'])}  "
             f"demote {len(res['demote'])}  apply={args.apply}"

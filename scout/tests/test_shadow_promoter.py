@@ -126,6 +126,17 @@ def test_optimize_paper_respects_rejected_status():
     assert res["promote"] == []
 
 
+def test_optimize_paper_volume_mode_promotes_marginal():
+    # cost 2%: net 1.0 on notional 200 = 0.5% net -> MARGINAL. Volume mode
+    # (min_net_pct=0) promotes it; the default CLEAR floor (1.5) does not.
+    marginal = _perf("MARGIN_CAND", "CANDIDATE", 30, 5.0, notional=200)
+    assert optimize_paper_roster([marginal], cost_per_sol=Decimal("0.02"))["promote"] == []
+    res = optimize_paper_roster(
+        [marginal], cost_per_sol=Decimal("0.02"), min_net_pct=0.0
+    )
+    assert {p.address for p in res["promote"]} == {"MARGIN_CAND"}
+
+
 def test_run_cycle_applies_paper_optimal_roster(monkeypatch):
     # The scheduled cycle keeps the paper copy set optimal: promote the CLEAR
     # candidate, demote the ACTIVE cost-burner (net <= 0), caps applied.
