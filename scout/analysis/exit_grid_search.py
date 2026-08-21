@@ -14,6 +14,17 @@ command uses, so results are directly comparable to its baseline). Use
 cost-per-SOL from closed trades, applied pro-rata to each position notional
 (mirrors CopyBacktest).
 
+Entry is ALWAYS anchored to the first in-window reconstructed price. The
+recorded `entry_price_usd` is deliberately NOT used as entry: Birdeye OHLCV
+closes are in the pool's quote currency (USDC/USDT — but SOL for SOL-quoted
+pools), so mixing them with a USD `entry_price_usd` produces unit-mismatched,
+astronomical PnL (measured: mean 4570 SOL/position). Anchoring keeps the entry
+and the path in the same unit. This is also the root of the +87 (shadow_exits,
+live USD ticks) vs -126 (replay, reconstructed paths) divergence the golden
+baseline vs replay comparison surfaced: the two measurements run the same
+evaluate_exit rules over different-fidelity price series, so they are not
+numerically comparable.
+
 Usage:
   python -m analysis.exit_grid_search [--limit N] [--binary /app/replay_exit]
                                       [--population {shadow,all,admitted}]
@@ -25,7 +36,6 @@ import argparse
 import json
 import subprocess
 import sys
-from decimal import Decimal
 from typing import Dict, List, Tuple
 
 from core.db import execute_and_fetchall
@@ -33,7 +43,7 @@ from core.replay_harness import load_stored_paths
 from core.copy_backtest import observed_cost_per_sol
 
 
-def load_positions(limit: int, population: str, entry_mode: str = "anchor") -> List[dict]:
+def load_positions(limit: int, population: str) -> List[dict]:
     if population == "admitted":
         extra = "AND COALESCE(sp.main_admitted, FALSE)"
     elif population == "shadow":
@@ -44,8 +54,7 @@ def load_positions(limit: int, population: str, entry_mode: str = "anchor") -> L
         "SELECT sp.token_address, "
         "       COALESCE(sp.strategy,'SHIELD') AS strategy, "
         "       EXTRACT(EPOCH FROM sp.opened_at)::bigint AS opened_at, "
-        "       sp.entry_amount_sol, "
-        "       COALESCE(sp.entry_price_usd, 0) AS entry_price_usd "
+        "       sp.entry_amount_sol "
         "FROM shadow_positions sp "
         "JOIN (SELECT token_address FROM price_path_points GROUP BY token_address "
         "      HAVING COUNT(*) >= 2) pp USING (token_address) "
@@ -59,9 +68,7 @@ def load_positions(limit: int, population: str, entry_mode: str = "anchor") -> L
         pts = [(ts, p) for ts, p in load_stored_paths(r["token_address"]) if ts >= opened]
         if len(pts) < 2:
             continue
-        rec = r["entry_price_usd"]
-        use_recorded = entry_mode == "recorded" and rec is not None and float(rec) > 0
-        entry = Decimal(str(rec)) if use_recorded else pts[0][1]
+        entry = pts[0][1]  # anchor entry to first in-window reconstructed price
         positions.append(
             {
                 "entry_price": str(entry),
@@ -171,24 +178,16 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=5000)
     ap.add_argument("--binary", default="/app/replay_exit")
     ap.add_argument("--population", default="shadow", choices=["shadow", "all", "admitted"])
-    ap.add_argument(
-        "--entry-mode",
-        default="anchor",
-        choices=["anchor", "recorded"],
-        help="anchor: use first in-window reconstructed price (default, matches the "
-        "replay CLI). recorded: use the position's true entry_price_usd when present "
-        "(reconciles against how shadow_exits.mirror_main is generated).",
-    )
     args = ap.parse_args()
 
     cost_per_sol = float(observed_cost_per_sol())
-    positions = load_positions(args.limit, args.population, args.entry_mode)
+    positions = load_positions(args.limit, args.population)
     if not positions:
         print("no positions with reconstructed paths", file=sys.stderr)
         return 1
     print(
-        f"population={args.population} entry_mode={args.entry_mode} "
-        f"positions={len(positions)} cost_per_sol={cost_per_sol:.4f}\n",
+        f"population={args.population} positions={len(positions)} "
+        f"cost_per_sol={cost_per_sol:.4f}\n",
         file=sys.stderr,
     )
 
