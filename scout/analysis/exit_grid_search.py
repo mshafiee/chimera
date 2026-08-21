@@ -97,7 +97,7 @@ def load_real_positions(limit: int) -> List[dict]:
     rows = execute_and_fetchall(
         "SELECT p.trade_uuid, "
         "       COALESCE(p.strategy,'SHIELD') AS strategy, "
-        "       EXTRACT(EPOCH FROM p.created_at)::bigint AS opened_at, "
+        "       EXTRACT(EPOCH FROM p.opened_at)::bigint AS opened_at, "
         "       p.entry_price, p.entry_amount_sol "
         "FROM positions p "
         "JOIN (SELECT trade_uuid FROM position_price_marks GROUP BY trade_uuid "
