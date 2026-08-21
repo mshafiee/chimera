@@ -409,7 +409,8 @@ class CopyBacktest:
         net_wins = sum(1 for m in matched if (m["net_pct"] or 0) > 0)
         gaps_gross = [m["gap_gross"] for m in matched]
         gaps_net = [m["gap_net"] for m in matched if m["gap_net"] is not None]
-        costs = [m["cost_pct"] for m in matched if m["cost_pct"] is not None]
+        pairs = [(m["gap_gross"], m["cost_pct"]) for m in matched if m["cost_pct"] is not None]
+        corr = _pearson([x for x, _ in pairs], [y for _, y in pairs]) if pairs else None
         sg = _stats([m["shadow_pct"] for m in matched])
         gg = _stats([m["gross_pct"] for m in matched])
         ng = _stats([m["net_pct"] for m in matched if m["net_pct"] is not None])
@@ -434,10 +435,10 @@ class CopyBacktest:
                 "mean": round(sum(gaps_net) / len(gaps_net), 3) if gaps_net else None,
                 "median": round(_stats(gaps_net)["median"], 3) if gaps_net else None,
             },
-            "mean_cost_pct": round(sum(costs) / len(costs), 3) if costs else None,
-            "gap_vs_cost_corr": (
-                round(_pearson(gaps_gross, costs), 3) if costs else None
+            "mean_cost_pct": (
+                round(sum(y for _, y in pairs) / len(pairs), 3) if pairs else None
             ),
+            "gap_vs_cost_corr": round(corr, 3) if corr is not None else None,
         }
 
 
