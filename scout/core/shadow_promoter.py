@@ -33,16 +33,21 @@ from typing import Optional
 
 from core.db import execute_and_fetchall
 from core.roster_writer_db import update_wallet_status
+from core.copy_backtest import observed_cost_per_sol
 
 logger = logging.getLogger(__name__)
 
 # --- Thresholds (data-driven, conservative) ---------------------------------
 MIN_SAMPLES = 20          # need enough shadow signals to trust the PnL
-PROMOTE_MIN_PNL = 2.0     # SOL of proven mirror_main profit before promoting
+PROMOTE_MIN_PNL = 2.0     # legacy SOL gross floor (used when cost basis unknown)
 DEMOTE_MAX_PNL = -1.0     # SOL of proven loss before demoting an ACTIVE wallet
 MAX_PROMOTIONS = 25       # safety cap per cycle (don't flood ACTIVE at once)
 MAX_DEMOTIONS = 50        # safety cap per cycle
 PRUNE_MIN_AGE_DAYS = 14   # only prune candidates idle this long
+# Post-cost gate (Phase 2G): recon showed the ~1.4% round-trip cost floor eats
+# thin gross edges, so promotion now requires NET expectancy that clears the
+# floor with margin (net_pct = net pnl / notional * 100).
+PROMOTE_MIN_NET_PCT = 1.5
 
 
 @dataclass(frozen=True)
@@ -53,17 +58,24 @@ class WalletPerf:
     total_pnl: Decimal
     avg_pnl: Decimal
     win_rate: float
+    notional: Decimal = Decimal("0")
+    max_win: Optional[Decimal] = None
 
 
 def fetch_shadow_performance() -> list[WalletPerf]:
-    """Per-wallet mirror_main shadow PnL joined to current roster status."""
+    """Per-wallet mirror_main shadow PnL joined to current roster status.
+
+    Also carries notional (for post-cost net expectancy) and max_win (for the
+    not-one-lucky-trade guard)."""
     rows = execute_and_fetchall(
         """
         SELECT sp.wallet_address, w.status,
                COUNT(*)                                   AS samples,
                SUM(se.pnl_sol)                            AS total_pnl,
                AVG(se.pnl_sol)                            AS avg_pnl,
-               COUNT(*) FILTER (WHERE se.pnl_sol > 0)::FLOAT / NULLIF(COUNT(*), 0) AS win_rate
+               COUNT(*) FILTER (WHERE se.pnl_sol > 0)::FLOAT / NULLIF(COUNT(*), 0) AS win_rate,
+               COALESCE(SUM(COALESCE(sp.entry_amount_sol, 0)), 0) AS notional,
+               MAX(se.pnl_sol)                            AS max_win
         FROM shadow_positions sp
         JOIN shadow_exits se ON se.shadow_id = sp.shadow_id
         LEFT JOIN wallets w ON w.address = sp.wallet_address
@@ -74,11 +86,11 @@ def fetch_shadow_performance() -> list[WalletPerf]:
     out: list[WalletPerf] = []
     for r in rows:
         if isinstance(r, dict):
-            addr, status, samples = r["wallet_address"], r.get("status"), r["samples"]
-            total, avg = r["total_pnl"], r["avg_pnl"]
-            win = r["win_rate"]
+            addr, status = r["wallet_address"], r.get("status")
+            samples, total, avg, win = r["samples"], r["total_pnl"], r["avg_pnl"], r["win_rate"]
+            notional, max_win = r["notional"], r["max_win"]
         else:  # tuple
-            addr, status, samples, total, avg, win = r
+            addr, status, samples, total, avg, win, notional, max_win = r
         out.append(
             WalletPerf(
                 address=addr,
@@ -87,50 +99,77 @@ def fetch_shadow_performance() -> list[WalletPerf]:
                 total_pnl=Decimal(total),
                 avg_pnl=Decimal(avg),
                 win_rate=float(win) if win is not None else 0.0,
+                notional=Decimal(notional or 0),
+                max_win=Decimal(max_win) if max_win is not None else None,
             )
         )
     return out
 
 
+def _net_pnl(w: WalletPerf, cost_per_sol: Decimal) -> Decimal:
+    """Post-cost shadow PnL = gross mirror_main PnL minus notional * cost."""
+    return w.total_pnl - (w.notional or Decimal("0")) * cost_per_sol
+
+
+def _not_tail_only(w: WalletPerf) -> bool:
+    """Guard: the edge must not be a single lucky trade. When max_win is
+    known, exclude the best exit — the wallet must still be gross-positive."""
+    if w.max_win is None:
+        return True
+    return (w.total_pnl - w.max_win) > Decimal("0")
+
+
 def select_promotions(
     perf: list[WalletPerf],
     min_samples: int = MIN_SAMPLES,
-    min_pnl: float = PROMOTE_MIN_PNL,
+    min_net_pct: float = PROMOTE_MIN_NET_PCT,
     max_promotions: int = MAX_PROMOTIONS,
+    cost_per_sol: Optional[Decimal] = None,
 ) -> list[WalletPerf]:
-    """CANDIDATE wallets with proven profit to promote to ACTIVE.
+    """CANDIDATE wallets with PROVEN POST-COST profit to promote to ACTIVE.
 
-    Gates on total PnL (expected value), not win rate — the biggest edges are
-    high-variance moonshot wallets (e.g. 8% win, +278% avg) that a win-rate gate
-    would wrongly reject.
+    With a known cost basis (notional > 0) a wallet must clear the cost floor
+    with margin: net_pct (net pnl / notional * 100) >= `min_net_pct`, AND the
+    edge must not be a single lucky trade. Without a cost basis (legacy data)
+    it falls back to the gross `PROMOTE_MIN_PNL` floor. Ranked by net PnL.
     """
-    candidates = [
-        p
-        for p in perf
-        if p.status == "CANDIDATE"
-        and p.samples >= min_samples
-        and p.total_pnl >= Decimal(str(min_pnl))
-    ]
-    candidates.sort(key=lambda p: p.total_pnl, reverse=True)
-    return candidates[:max_promotions]
+    cps = observed_cost_per_sol() if cost_per_sol is None else cost_per_sol
+    candidates: list[tuple[WalletPerf, Decimal]] = []
+    for p in perf:
+        if p.status != "CANDIDATE" or p.samples < min_samples or not _not_tail_only(p):
+            continue
+        notional = p.notional or Decimal("0")
+        if notional > 0:
+            net = _net_pnl(p, cps)
+            net_pct = net / notional * Decimal("100")
+            if net_pct < Decimal(str(min_net_pct)):
+                continue
+        else:
+            if p.total_pnl < Decimal(str(PROMOTE_MIN_PNL)):
+                continue
+        candidates.append((p, _net_pnl(p, cps)))
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    return [p for p, _ in candidates[:max_promotions]]
 
 
 def select_demotions(
     perf: list[WalletPerf],
     min_samples: int = MIN_SAMPLES,
-    max_pnl: float = DEMOTE_MAX_PNL,
+    max_net_pnl: float = DEMOTE_MAX_PNL,
     max_demotions: int = MAX_DEMOTIONS,
+    cost_per_sol: Optional[Decimal] = None,
 ) -> list[WalletPerf]:
-    """ACTIVE wallets with proven losses to demote to CANDIDATE."""
-    candidates = [
-        p
-        for p in perf
-        if p.status == "ACTIVE"
-        and p.samples >= min_samples
-        and p.total_pnl <= Decimal(str(max_pnl))
-    ]
-    candidates.sort(key=lambda p: p.total_pnl)  # worst first
-    return candidates[:max_demotions]
+    """ACTIVE wallets with proven POST-COST losses to demote to CANDIDATE."""
+    cps = observed_cost_per_sol() if cost_per_sol is None else cost_per_sol
+    candidates: list[tuple[WalletPerf, Decimal]] = []
+    for p in perf:
+        if p.status != "ACTIVE" or p.samples < min_samples:
+            continue
+        net = _net_pnl(p, cps)
+        if net <= Decimal(str(max_net_pnl)):
+            candidates.append((p, net))
+    candidates.sort(key=lambda x: x[1])  # worst first
+    return [p for p, _ in candidates[:max_demotions]]
 
 
 def fetch_idle_candidates(min_age_days: int = PRUNE_MIN_AGE_DAYS) -> list[str]:
@@ -165,8 +204,9 @@ def run_cycle(
     Returns a summary dict of actions taken/planned.
     """
     perf = fetch_shadow_performance()
-    promotions = select_promotions(perf)
-    demotions = select_demotions(perf)
+    cost_per_sol = observed_cost_per_sol()
+    promotions = select_promotions(perf, cost_per_sol=cost_per_sol)
+    demotions = select_demotions(perf, cost_per_sol=cost_per_sol)
 
     summary: dict = {
         "promote": [p.address for p in promotions],

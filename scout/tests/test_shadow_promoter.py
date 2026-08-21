@@ -2,10 +2,20 @@
 
 from decimal import Decimal
 
+import pytest
+
+import core.shadow_promoter as sp
 from core.shadow_promoter import WalletPerf, select_demotions, select_promotions
 
 
-def _perf(address, status, samples, total, win=0.5):
+@pytest.fixture(autouse=True)
+def _zero_cost(monkeypatch):
+    """No-cost default so legacy gross-semantics assertions hold; cost-aware
+    tests pass an explicit cost_per_sol."""
+    monkeypatch.setattr(sp, "observed_cost_per_sol", lambda: Decimal("0"))
+
+
+def _perf(address, status, samples, total, win=0.5, notional=0.0, max_win=None):
     return WalletPerf(
         address=address,
         status=status,
@@ -13,6 +23,8 @@ def _perf(address, status, samples, total, win=0.5):
         total_pnl=Decimal(str(total)),
         avg_pnl=Decimal(str(total)) / Decimal(samples),
         win_rate=win,
+        notional=Decimal(str(notional)),
+        max_win=Decimal(str(max_win)) if max_win is not None else None,
     )
 
 
@@ -62,3 +74,27 @@ def test_neither_promotes_nor_demotes_marginal_wallets():
     ]
     assert select_promotions(perf) == []
     assert select_demotions(perf) == []
+
+
+def test_promotion_requires_post_cost_clearance():
+    # cost 2% per 1 SOL notional.
+    thin = _perf("THIN", "CANDIDATE", 30, 5.0, notional=200)   # net 1.0 -> 0.5% < 1.5
+    clear = _perf("CLEAR", "CANDIDATE", 30, 8.0, notional=100)  # net 6.0 -> 6% >= 1.5
+    promos = select_promotions([thin, clear], cost_per_sol=Decimal("0.02"))
+    assert {p.address for p in promos} == {"CLEAR"}
+
+
+def test_promotion_rejects_single_lucky_trade():
+    # cost 2%: both net-clear, but TAIL's whole edge is one trade.
+    tail = _perf("TAIL", "CANDIDATE", 40, 20.0, notional=100, max_win=20.0)
+    spread = _perf("SPREAD", "CANDIDATE", 40, 20.0, notional=100, max_win=5.0)
+    promos = select_promotions([tail, spread], cost_per_sol=Decimal("0.02"))
+    assert {p.address for p in promos} == {"SPREAD"}
+
+
+def test_demotion_uses_post_cost_net():
+    # cost 2% per 1 SOL notional.
+    hidden = _perf("HIDDEN_LOSS", "ACTIVE", 30, -0.5, notional=100)  # net -2.5 -> demote
+    mild = _perf("TRUE_MILD", "ACTIVE", 30, -0.5, notional=1)        # net -0.52 -> keep
+    demos = select_demotions([hidden, mild], cost_per_sol=Decimal("0.02"))
+    assert {p.address for p in demos} == {"HIDDEN_LOSS"}
