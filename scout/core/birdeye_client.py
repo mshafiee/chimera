@@ -1,11 +1,12 @@
 """Birdeye API client for historical liquidity and price data."""
 
 import os
+from decimal import Decimal
 import asyncio
 import threading
 import time
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 import aiohttp
 from .models import LiquidityData
 
@@ -153,6 +154,34 @@ class BirdeyeClient:
                 return first.get("value") or first.get("price")
 
         return None
+
+    async def get_ohlcv_series(
+        self, token_address: str, time_from: int, time_to: int
+    ) -> List[Tuple[int, Decimal]]:
+        """Hourly (1H) close series for a token over [time_from, time_to] via
+        the keyed Birdeye OHLCV endpoint. Returns [] on failure or empty."""
+        params = {
+            "address": token_address,
+            "address_type": "token",
+            "type": "1H",
+            "time_from": int(time_from),
+            "time_to": int(time_to),
+        }
+        data = await self._make_request("/defi/ohlcv", params)
+        if not data or not data.get("success"):
+            return []
+        items = (data.get("data") or {}).get("items") or []
+        out: List[Tuple[int, Decimal]] = []
+        for it in items:
+            ts = it.get("unixTime")
+            close = it.get("c")
+            if ts is None or close is None:
+                continue
+            try:
+                out.append((int(ts), Decimal(str(close))))
+            except (TypeError, ValueError):
+                continue
+        return out
 
     async def get_historical_liquidity(
         self, token_address: str, timestamp: datetime

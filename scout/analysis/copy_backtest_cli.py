@@ -123,8 +123,14 @@ def main(argv: list[str]) -> int:
 
 
 def _cmd_path(limit: int) -> int:
-    from core.price_path import geckoterminal_ohlcv
+    from core.price_path import birdeye_ohlcv, geckoterminal_ohlcv
     from core.replay_harness import persist_paths
+
+    use_birdeye = bool(os.getenv("BIRDEYE_API_KEY"))
+    # Birdeye keyed plan caps at ~60 rpm (1 req/sec); GeckoTerminal free tier
+    # is paced to ~4/sec. The Birdeye client also enforces a 1.0s inter-request
+    # delay, so a 1.0s inter-token sleep keeps us safely under the limit.
+    inter_token_sleep = 1.0 if use_birdeye else 0.20
 
     tokens = execute_and_fetchall(
         "SELECT DISTINCT token_address, "
@@ -143,7 +149,10 @@ def _cmd_path(limit: int) -> int:
             tf = int(r["tf"])
             tt = int(r["tt"])
             try:
-                pts = await geckoterminal_ohlcv(addr, timeframe="hour")
+                if use_birdeye:
+                    pts = await birdeye_ohlcv(addr, tf, tt)
+                else:
+                    pts = await geckoterminal_ohlcv(addr, timeframe="hour")
             except Exception as e:  # noqa: BLE001
                 print(f"ERROR: path {addr}: {e}")
                 continue
@@ -151,14 +160,13 @@ def _cmd_path(limit: int) -> int:
             in_window = [(ts, p) for ts, p in pts if tf <= ts <= tt]
             if in_window:
                 paths[addr] = in_window
-            # Pace public GeckoTerminal API requests to stay under the free
-            # tier's rate limit (~161ms/token measured; throttle to ~4/sec).
-            await asyncio.sleep(0.20)
+            await asyncio.sleep(inter_token_sleep)
         return paths
 
+    src = "birdeye" if use_birdeye else "geckoterminal"
     paths = asyncio.run(_reconstruct())
     n = persist_paths(paths)
-    print(f"[path] reconstructed {len(paths)} tokens / {n} points persisted")
+    print(f"[path:{src}] reconstructed {len(paths)} tokens / {n} points persisted")
     return 0
 
 

@@ -230,6 +230,36 @@ async def geckoterminal_ohlcv(token_address: str, timeframe: str = "hour") -> Li
     return _finalize(out)
 
 
+# ── Birdeye OHLCV (keyed, higher rate limit) ────────────────────────────────
+# GeckoTerminal's public API is unkeyed and rate-limits a full reconstruction
+# run to a crawl (and cannot serve dead/delisted mints). Birdeye's keyed
+# `/defi/ohlcv` returns a full hourly candle series in one request, so a
+# cohort of N tokens costs ~N requests — feasible within a 60 rpm plan.
+
+async def birdeye_ohlcv(
+    token_address: str, time_from: int, time_to: int
+) -> List[Tuple[int, Decimal]]:
+    """Return a token's hourly close series via Birdeye's keyed OHLCV API.
+
+    One request per token (rate-limited to ~60 rpm by the BIRDEYE_API_KEY
+    plan via `BirdeyeClient`). Returns [] if the token is absent from Birdeye
+    or the request fails, so the caller can retry on a later batch."""
+    from core.birdeye_client import BirdeyeClient
+
+    client = BirdeyeClient()
+    try:
+        series = await client.get_ohlcv_series(token_address, time_from, time_to)
+    except Exception as e:  # noqa: BLE001 - provider errors are recoverable
+        print(f"ERROR: birdeye_ohlcv {token_address}: {e}")
+        return []
+    finally:
+        try:
+            await client.close()
+        except Exception:
+            pass
+    return _finalize(series)
+
+
 def _as_resource_list(data) -> List[Dict]:
     """Normalize GeckoTerminal `data` (a resource list, a single resource dict,
     or an error/empty value) into a list of resource dicts."""
