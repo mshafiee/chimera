@@ -24,7 +24,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .db import execute_and_fetchall, execute_and_fetchone
 from .decimal_utils import float_to_decimal
@@ -225,6 +225,75 @@ class CopyBacktest:
             "p90_gap_pct": s90,
             "max_gap_pct": max(gaps),
             "bands": bands,
+        }
+
+    # ── recorded price marks (Phase 2E) ─────────────────────────────────────
+    # `position_price_marks` (migration 0021) is the operator's recorded
+    # price-cache USD mark per open position per tick. Before it existed the
+    # realize-vs-price gap was tunable only against n=4 real sells; these marks
+    # are the forward data series that makes the gap measurable on recorded
+    # marks rather than snapshots.
+    def mark_gap_report(self, days: int = 90) -> dict:
+        """Summarize the recorded price-mark series (per-position geometry).
+
+        From the marks alone, and without assuming any post-close recovery
+        (marks stop when a position closes), report:
+          - coverage (positions with marks, total marks, marks/position, cadence);
+          - per-position intra-window geometry: worst drawdown the monitor saw,
+            final pct at the last recorded mark, and recovery from the dip within
+            the held window — the raw signal for whether deferring a protective
+            exit would have helped (dip-then-recover) vs hurt (dip that kept
+            falling).
+        """
+        rows = execute_and_fetchall(
+            "SELECT ppm.trade_uuid, ppm.ts_unix, ppm.price_usd "
+            "FROM position_price_marks ppm "
+            "WHERE ppm.ts_unix >= EXTRACT(EPOCH FROM NOW() - (%s || ' days')::interval) "
+            "ORDER BY ppm.trade_uuid, ppm.ts_unix",
+            (str(days),),
+            db_path=self.db_path,
+        )
+        if not rows:
+            return {"n_positions": 0, "marks": 0}
+
+        by_pos: Dict[str, List[Tuple[int, float]]] = {}
+        for r in rows:
+            by_pos.setdefault(r["trade_uuid"], []).append(
+                (int(r["ts_unix"]), float(r["price_usd"]))
+            )
+
+        totals: List[float] = []
+        mins: List[float] = []
+        recs: List[float] = []
+        counts: List[int] = []
+        deltas: List[float] = []
+        for pts in by_pos.values():
+            first = pts[0][1]
+            if first <= 0:
+                continue
+            last = pts[-1][1]
+            mn = min(p for _, p in pts)
+            totals.append((last - first) / first * 100)
+            mins.append((mn - first) / first * 100)
+            recs.append((last - mn) / first * 100)
+            counts.append(len(pts))
+            for (t0, _), (t1, _) in zip(pts, pts[1:]):
+                if t1 > t0:
+                    deltas.append(float(t1 - t0))
+
+        if not totals:
+            return {"n_positions": 0, "marks": len(rows)}
+        t = _stats(totals)
+        m = _stats(mins)
+        r = _stats(recs)
+        return {
+            "n_positions": len(totals),
+            "marks": len(rows),
+            "mean_marks_per_position": round(sum(counts) / len(counts), 1),
+            "median_tick_cadence_secs": float(sorted(deltas)[len(deltas) // 2]) if deltas else 0.0,
+            "final_pct": {"mean": round(t["mean"], 3), "median": round(t["median"], 3)},
+            "worst_drawdown_pct": {"mean": round(m["mean"], 3), "median": round(m["median"], 3)},
+            "recovery_from_dip_pct": {"mean": round(r["mean"], 3), "median": round(r["median"], 3)},
         }
 
 

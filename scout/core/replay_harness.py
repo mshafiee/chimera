@@ -46,6 +46,19 @@ def load_stored_paths(token_address: str) -> List[Tuple[int, Decimal]]:
     return [(int(r["ts_unix"]), Decimal(str(r["payable_sol"]))) for r in rows]
 
 
+def load_stored_marks(trade_uuid: str) -> List[Tuple[int, Decimal]]:
+    """Load a real position's recorded price-cache USD marks.
+
+    Backs the real-source replay: `position_price_marks` (migration 0021) is
+    the monitor's recorded per-tick mark, ordered by ts."""
+    rows = execute_and_fetchall(
+        "SELECT ts_unix, price_usd FROM position_price_marks "
+        "WHERE trade_uuid = %s ORDER BY ts_unix ASC",
+        (trade_uuid,),
+    )
+    return [(int(r["ts_unix"]), Decimal(str(r["price_usd"]))) for r in rows]
+
+
 def replay_input_json(positions: Sequence[dict]) -> dict:
     """Wrap a list of position dicts into the Rust replay_exit Input shape.
 

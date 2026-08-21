@@ -104,3 +104,39 @@ def test_fill_skew_report_distribution_and_bands(monkeypatch):
     assert rep["bands"]["2"]["trigger_frac"] == 0.5
     # band=10: only 15>10 -> 1 trigger
     assert rep["bands"]["10"]["trigger_frac"] == 0.5
+
+
+def test_mark_gap_report_geometry(monkeypatch):
+    # t1 dips (-10%) then recovers (+5%) within the held window; t2 falls (-10%).
+    rows = [
+        {"trade_uuid": "t1", "ts_unix": 100, "price_usd": 1.0},
+        {"trade_uuid": "t1", "ts_unix": 200, "price_usd": 0.9},
+        {"trade_uuid": "t1", "ts_unix": 300, "price_usd": 1.05},
+        {"trade_uuid": "t2", "ts_unix": 100, "price_usd": 2.0},
+        {"trade_uuid": "t2", "ts_unix": 400, "price_usd": 2.0},
+        {"trade_uuid": "t2", "ts_unix": 600, "price_usd": 1.8},
+    ]
+    monkeypatch.setattr(cb, "execute_and_fetchall", lambda *a, **k: rows)
+    monkeypatch.setattr(cb, "execute_and_fetchone", lambda *a, **k: {"cost": 0.0, "amt": 1.0})
+    bt = cb.CopyBacktest()
+    rep = bt.mark_gap_report()
+    assert rep["n_positions"] == 2
+    assert rep["marks"] == 6
+    assert rep["mean_marks_per_position"] == 3.0
+    # deltas: t1 100,100 ; t2 300,200 -> sorted [100,100,200,300] -> left-median 200
+    assert rep["median_tick_cadence_secs"] == 200.0
+    # final_pct: t1 +5%, t2 -10% -> mean -2.5%
+    assert abs(rep["final_pct"]["mean"] - (-2.5)) < 1e-6
+    # worst_drawdown: both -10% -> mean -10%
+    assert abs(rep["worst_drawdown_pct"]["mean"] - (-10.0)) < 1e-6
+    # recovery: t1 (1.05-0.9)/1.0=15% ; t2 (1.8-1.8)/2.0=0% -> mean 7.5%
+    assert abs(rep["recovery_from_dip_pct"]["mean"] - 7.5) < 1e-6
+
+
+def test_mark_gap_report_empty(monkeypatch):
+    monkeypatch.setattr(cb, "execute_and_fetchall", lambda *a, **k: [])
+    monkeypatch.setattr(cb, "execute_and_fetchone", lambda *a, **k: {"cost": 0.0, "amt": 1.0})
+    bt = cb.CopyBacktest()
+    rep = bt.mark_gap_report()
+    assert rep["n_positions"] == 0
+    assert rep["marks"] == 0

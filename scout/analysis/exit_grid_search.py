@@ -28,6 +28,12 @@ numerically comparable.
 Usage:
   python -m analysis.exit_grid_search [--limit N] [--binary /app/replay_exit]
                                       [--population {shadow,all,admitted}]
+                                      [--source {shadow,real}]
+
+source=shadow uses reconstructed Birdeye paths for shadow positions (the
+default); source=real uses the operator's recorded monitor price marks
+(position_price_marks, migration 0021) for real positions, with the true
+recorded entry_price — the exact series the realized gap must be tuned against.
 """
 
 from __future__ import annotations
@@ -36,10 +42,11 @@ import argparse
 import json
 import subprocess
 import sys
+from decimal import Decimal
 from typing import Dict, List, Tuple
 
 from core.db import execute_and_fetchall
-from core.replay_harness import load_stored_paths
+from core.replay_harness import load_stored_marks, load_stored_paths
 from core.copy_backtest import observed_cost_per_sol
 
 
@@ -69,6 +76,43 @@ def load_positions(limit: int, population: str) -> List[dict]:
         if len(pts) < 2:
             continue
         entry = pts[0][1]  # anchor entry to first in-window reconstructed price
+        positions.append(
+            {
+                "entry_price": str(entry),
+                "opened_at": opened,
+                "strategy": r["strategy"],
+                "size_sol": str(r["entry_amount_sol"] or "1.0"),
+                "points": [[ts, str(p)] for ts, p in pts],
+                "_notional": float(r["entry_amount_sol"] or 1.0),
+            }
+        )
+    return positions
+
+
+def load_real_positions(limit: int) -> List[dict]:
+    """Load REAL positions (`positions`) that have recorded price marks
+    (`position_price_marks`, migration 0021) and replay their recorded
+    monitor marks through the exit rules. Entry = the true recorded
+    `positions.entry_price`. Returns [] until real positions accrue ≥2 marks."""
+    rows = execute_and_fetchall(
+        "SELECT p.trade_uuid, "
+        "       COALESCE(p.strategy,'SHIELD') AS strategy, "
+        "       EXTRACT(EPOCH FROM p.created_at)::bigint AS opened_at, "
+        "       p.entry_price, p.entry_amount_sol "
+        "FROM positions p "
+        "JOIN (SELECT trade_uuid FROM position_price_marks GROUP BY trade_uuid "
+        "      HAVING COUNT(*) >= 2) m USING (trade_uuid) "
+        "LIMIT %s",
+        (limit,),
+    )
+    positions = []
+    for r in rows:
+        opened = int(r["opened_at"])
+        pts = [(ts, p) for ts, p in load_stored_marks(r["trade_uuid"]) if ts >= opened]
+        if len(pts) < 2:
+            continue
+        rec = r["entry_price"]
+        entry = Decimal(str(rec)) if rec is not None and float(rec) > 0 else pts[0][1]
         positions.append(
             {
                 "entry_price": str(entry),
@@ -178,15 +222,26 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=5000)
     ap.add_argument("--binary", default="/app/replay_exit")
     ap.add_argument("--population", default="shadow", choices=["shadow", "all", "admitted"])
+    ap.add_argument(
+        "--source",
+        default="shadow",
+        choices=["shadow", "real"],
+        help="shadow: reconstructed Birdeye OHLCV paths for shadow positions "
+        "(price_path_points). real: recorded monitor price marks for real "
+        "positions (position_price_marks, migration 0021).",
+    )
     args = ap.parse_args()
 
     cost_per_sol = float(observed_cost_per_sol())
-    positions = load_positions(args.limit, args.population)
+    if args.source == "real":
+        positions = load_real_positions(args.limit)
+    else:
+        positions = load_positions(args.limit, args.population)
     if not positions:
-        print("no positions with reconstructed paths", file=sys.stderr)
+        print(f"no positions with a price series (source={args.source})", file=sys.stderr)
         return 1
     print(
-        f"population={args.population} positions={len(positions)} "
+        f"source={args.source} population={args.population} positions={len(positions)} "
         f"cost_per_sol={cost_per_sol:.4f}\n",
         file=sys.stderr,
     )
