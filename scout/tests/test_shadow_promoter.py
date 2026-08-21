@@ -124,3 +124,23 @@ def test_optimize_paper_respects_rejected_status():
     rejected_clear = _perf("REJ_CLEAR", "REJECTED", 30, 8.0, notional=100)
     res = optimize_paper_roster([rejected_clear], cost_per_sol=Decimal("0.02"))
     assert res["promote"] == []
+
+
+def test_run_cycle_applies_paper_optimal_roster(monkeypatch):
+    # The scheduled cycle keeps the paper copy set optimal: promote the CLEAR
+    # candidate, demote the ACTIVE cost-burner (net <= 0), caps applied.
+    perf = [
+        _perf("CLEAR_CAND", "CANDIDATE", 30, 5.0, notional=100),   # net 3 -> 3% -> promote
+        _perf("BURNER_ACT", "ACTIVE", 30, 0.5, notional=100),      # net -1.5 <= 0 -> demote
+        _perf("BELOW_SAMPLES", "ACTIVE", 9, -5.0, notional=100),   # under min samples
+    ]
+    monkeypatch.setattr(sp, "fetch_shadow_performance", lambda: perf)
+    monkeypatch.setattr(sp, "observed_cost_per_sol", lambda: Decimal("0.02"))
+    applied = []
+    monkeypatch.setattr(sp, "update_wallet_status", lambda addr, status: applied.append((addr, status)))
+    summary = sp.run_cycle(dry_run=False)
+    assert ("CLEAR_CAND", "ACTIVE") in applied
+    assert ("BURNER_ACT", "CANDIDATE") in applied
+    assert ("BELOW_SAMPLES", "CANDIDATE") not in applied
+    assert summary["promote"] == ["CLEAR_CAND"]
+    assert summary["demote"] == ["BURNER_ACT"]

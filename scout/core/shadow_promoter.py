@@ -248,8 +248,12 @@ def run_cycle(
     """
     perf = fetch_shadow_performance()
     cost_per_sol = observed_cost_per_sol()
-    promotions = select_promotions(perf, cost_per_sol=cost_per_sol)
-    demotions = select_demotions(perf, cost_per_sol=cost_per_sol)
+    # Keep the PAPER copy set at the post-cost-CLEAR optimum every scheduled
+    # cycle (Phase 2H): promote CLEAR candidates, demote ACTIVE cost-burners
+    # (net <= 0). Caps remain as guardrails against roster flapping.
+    roster = optimize_paper_roster(perf, cost_per_sol=cost_per_sol)
+    promotions = roster["promote"][:MAX_PROMOTIONS]
+    demotions = roster["demote"][:MAX_DEMOTIONS]
 
     summary: dict = {
         "promote": [p.address for p in promotions],
