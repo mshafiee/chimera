@@ -172,6 +172,49 @@ def select_demotions(
     return [p for p, _ in candidates[:max_demotions]]
 
 
+def optimize_paper_roster(
+    perf: list[WalletPerf],
+    min_samples: int = MIN_SAMPLES,
+    min_net_pct: float = PROMOTE_MIN_NET_PCT,
+    cost_per_sol: Optional[Decimal] = None,
+) -> dict:
+    """Roster rebalance that maximizes PAPER copy profitability (Phase 2H).
+
+    Paper PnL is dominated by WHICH wallets are copied (entry selection), not
+    by exit logic: reconciliation proved the shadow price basis is faithful, so
+    the post-cost-CLEAR wallets (net_pct >= min_net_pct, not one lucky trade)
+    are the profitable copy set, while ACTIVE wallets whose post-cost net <= 0
+    are guaranteed cost-burners (gross edge below the ~1.4% cost floor).
+
+      promote : every CLEAR candidate -> ACTIVE (no 25-rollover cap)
+      demote  : ACTIVE with post-cost net <= 0 -> CANDIDATE (cut burners now)
+
+    REJECTED status is respected (never resurrected by this path)."""
+    cps = observed_cost_per_sol() if cost_per_sol is None else cost_per_sol
+    to_promote: list[tuple[WalletPerf, Decimal]] = []
+    to_demote: list[tuple[WalletPerf, Decimal]] = []
+    for p in perf:
+        if p.samples < min_samples:
+            continue
+        notional = p.notional or Decimal("0")
+        net = _net_pnl(p, cps)
+        net_pct = (net / notional * Decimal("100")) if notional > 0 else None
+        clear = (
+            (net_pct is not None and net_pct >= Decimal(str(min_net_pct)))
+            or (net_pct is None and p.total_pnl >= Decimal(str(PROMOTE_MIN_PNL)))
+        ) and _not_tail_only(p)
+        if clear and p.status in ("CANDIDATE", None):
+            to_promote.append((p, net))
+        elif p.status == "ACTIVE" and net <= Decimal("0"):
+            to_demote.append((p, net))
+    to_promote.sort(key=lambda x: x[1], reverse=True)
+    to_demote.sort(key=lambda x: x[1])  # worst first
+    return {
+        "promote": [p for p, _ in to_promote],
+        "demote": [p for p, _ in to_demote],
+    }
+
+
 def fetch_idle_candidates(min_age_days: int = PRUNE_MIN_AGE_DAYS) -> list[str]:
     """CANDIDATE wallets with zero shadow signals, older than min_age_days.
 
@@ -257,7 +300,36 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--dry-run", action="store_true", help="show actions without applying")
     parser.add_argument("--prune", action="store_true", help="also reject idle CANDIDATE wallets")
     parser.add_argument("--max-prune", type=int, default=2000, help="cap on pruned wallets")
+    parser.add_argument(
+        "--optimize-paper", action="store_true",
+        help="roster rebalance for paper profitability: promote every post-cost "
+        "CLEAR wallet -> ACTIVE, demote ACTIVE wallets with post-cost net <= 0 "
+        "(cost-burners). Default is dry-run; combine with --apply to commit.",
+    )
+    parser.add_argument(
+        "--apply", action="store_true",
+        help="commit the --optimize-paper roster changes",
+    )
     args = parser.parse_args(argv)
+
+    if args.optimize_paper:
+        perf = fetch_shadow_performance()
+        cps = observed_cost_per_sol()
+        res = optimize_paper_roster(perf, cost_per_sol=cps)
+        print(
+            f"paper roster rebalance: promote {len(res['promote'])}  "
+            f"demote {len(res['demote'])}  apply={args.apply}"
+        )
+        for p in res["promote"]:
+            print(f"  PROMOTE -> ACTIVE    {p.address}  n={p.samples} net={float(_net_pnl(p, cps)):.2f}")
+        for p in res["demote"]:
+            print(f"  DEMOTE -> CANDIDATE  {p.address}  n={p.samples} net={float(_net_pnl(p, cps)):.2f}")
+        if args.apply:
+            for p in res["promote"]:
+                update_wallet_status(p.address, "ACTIVE")
+            for p in res["demote"]:
+                update_wallet_status(p.address, "CANDIDATE")
+        return 0
 
     summary = run_cycle(dry_run=args.dry_run, prune=args.prune, max_prune=args.max_prune)
     print(f"promote: {len(summary['promote'])}  demote: {len(summary['demote'])}  "

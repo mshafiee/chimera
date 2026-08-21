@@ -5,7 +5,12 @@ from decimal import Decimal
 import pytest
 
 import core.shadow_promoter as sp
-from core.shadow_promoter import WalletPerf, select_demotions, select_promotions
+from core.shadow_promoter import (
+    WalletPerf,
+    optimize_paper_roster,
+    select_demotions,
+    select_promotions,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -98,3 +103,24 @@ def test_demotion_uses_post_cost_net():
     mild = _perf("TRUE_MILD", "ACTIVE", 30, -0.5, notional=1)        # net -0.52 -> keep
     demos = select_demotions([hidden, mild], cost_per_sol=Decimal("0.02"))
     assert {p.address for p in demos} == {"HIDDEN_LOSS"}
+
+
+def test_optimize_paper_promotes_clears_and_demotes_burners():
+    # cost 2% per 1 SOL notional.
+    clearc = _perf("CLEAR_CAND", "CANDIDATE", 30, 5.0, notional=100)  # net 3 -> 3% -> promote
+    burner = _perf("BURNER_ACT", "ACTIVE", 30, 0.5, notional=100)    # net -1.5 <= 0 -> demote
+    clear_active = _perf("CLEAR_ACT", "ACTIVE", 30, 8.0, notional=100)  # net 6 -> stays ACTIVE
+    few = _perf("TOO_FEW", "CANDIDATE", 5, 50.0, notional=100)       # under min samples
+    res = optimize_paper_roster(
+        [clearc, burner, clear_active, few], cost_per_sol=Decimal("0.02")
+    )
+    assert {p.address for p in res["promote"]} == {"CLEAR_CAND"}
+    assert {p.address for p in res["demote"]} == {"BURNER_ACT"}
+    assert "CLEAR_ACT" not in [p.address for p in res["demote"]]
+
+
+def test_optimize_paper_respects_rejected_status():
+    # cost 2%; a CLEAR wallet that was REJECTED is never resurrected.
+    rejected_clear = _perf("REJ_CLEAR", "REJECTED", 30, 8.0, notional=100)
+    res = optimize_paper_roster([rejected_clear], cost_per_sol=Decimal("0.02"))
+    assert res["promote"] == []
