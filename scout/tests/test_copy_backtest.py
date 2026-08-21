@@ -174,7 +174,6 @@ def test_reconcile_shadow_realized_attributes_gap(monkeypatch):
     rep = bt.reconcile_shadow_realized()
     assert rep["n_positions"] == 2
     assert rep["n_matched"] == 2
-    # win rates: shadow 2/2, gross 1/2 (only P2), net 1/2
     assert rep["win_rates_pct"]["shadow"] == 100.0
     assert rep["win_rates_pct"]["realized_gross"] == 50.0
     assert rep["win_rates_pct"]["realized_net"] == 50.0
@@ -182,3 +181,36 @@ def test_reconcile_shadow_realized_attributes_gap(monkeypatch):
     assert abs(rep["gap_gross_pct"]["mean"] - 13.5) < 1e-6
     # cost: P1 (gross - net): -0.20 -> -0.25 = 0.05 /1.0 = 5% ; P2 0.20-0.15=0.05/1.0=5% -> mean 5
     assert abs(rep["mean_cost_pct"] - 5.0) < 1e-6
+
+
+def test_cost_aware_screen_verdicts(monkeypatch):
+    # cost_per_sol = 0.02 (2% per 1 SOL notional).
+    realized = [
+        {"wallet_address": "w1", "n": 10, "notional": 10.0, "gross_sol": 1.0, "net_sol": 0.4},
+        {"wallet_address": "w2", "n": 10, "notional": 10.0, "gross_sol": 0.5, "net_sol": 0.05},
+        {"wallet_address": "w3", "n": 10, "notional": 10.0, "gross_sol": 0.0, "net_sol": -0.2},
+    ]
+    shadow = [
+        {"wallet_address": "w4", "n": 10, "notional": 10.0, "gross_sol": 1.0},
+        {"wallet_address": "w5", "n": 10, "notional": 10.0, "gross_sol": 0.1},
+    ]
+    monkeypatch.setattr(
+        cb, "execute_and_fetchall",
+        lambda q, *a, **k: realized if "FROM positions" in q else shadow,
+    )
+    monkeypatch.setattr(cb, "execute_and_fetchone", lambda *a, **k: {"cost": 0.02, "amt": 1.0})
+    bt = cb.CopyBacktest()
+    sc = bt.cost_aware_screen(min_positions=5)
+
+    rv = {w["wallet"]: w for w in sc["realized_book"]}
+    # realized net is already net-of-cost: w1 4% -> CLEAR, w2 0.5% -> MARGINAL, w3 -2% -> NEGATIVE
+    assert rv["w1"]["net_pct"] == 4.0 and rv["w1"]["verdict"] == "CLEAR"
+    assert rv["w1"]["gross_pct"] == 10.0
+    assert rv["w2"]["verdict"] == "MARGINAL"
+    assert rv["w3"]["verdict"] == "NEGATIVE"
+
+    sv = {w["wallet"]: w for w in sc["shadow_history"]}
+    # shadow cost-adjusted: w4 net=(1.0-10*0.02)/10*100=8% -> CLEAR; w5 net=(0.1-0.2)/10*100=-1% -> NEGATIVE
+    assert sv["w4"]["verdict"] == "CLEAR"
+    assert sv["w5"]["verdict"] == "NEGATIVE"
+    assert sc["min_positions"] == 5

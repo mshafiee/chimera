@@ -441,6 +441,91 @@ class CopyBacktest:
             "gap_vs_cost_corr": round(corr, 3) if corr is not None else None,
         }
 
+    # ── post-cost entry screen (Phase 2G) ───────────────────────────────────
+    # Reconciliation (Phase 2F) showed the shadow price basis is faithful and
+    # the realized net underperformance is the ~1.5% round-trip cost floor.
+    # So the decision input is NET expectancy: promote/keep only wallets whose
+    # post-cost edge is positive, and treat gross-positive/shadow winners as
+    # insufficient to clear the floor.
+    def cost_aware_screen(self, min_positions: int = 8) -> dict:
+        """Post-cost per-wallet PnL screen.
+
+        Returns per-wallet net expectancy % (net pnl / notional * 100) from
+        (a) the realized closed book (`positions.realized_net_pnl_sol`, already
+        net of costs) and (b) the cost-adjusted shadow `mirror_main` history.
+        Verdict: CLEAR = net_pct > 1.5 (gross edge clears the observed cost
+        floor with margin); MARGINAL = 0 < net_pct <= 1.5; NEGATIVE <= 0.
+        Wallets below `min_positions` closed positions are excluded.
+        """
+        realized_rows = execute_and_fetchall(
+            "SELECT p.wallet_address, COUNT(*) AS n, "
+            "       COALESCE(SUM(p.entry_amount_sol), 0) AS notional, "
+            "       COALESCE(SUM(p.realized_pnl_sol), 0) AS gross_sol, "
+            "       COALESCE(SUM(p.realized_net_pnl_sol), 0) AS net_sol "
+            "FROM positions p "
+            "WHERE p.state = 'CLOSED' AND p.realized_net_pnl_sol IS NOT NULL "
+            "GROUP BY p.wallet_address",
+            db_path=self.db_path,
+        )
+        shadow_rows = execute_and_fetchall(
+            "SELECT sp.wallet_address, COUNT(*) AS n, "
+            "       COALESCE(SUM(sp.entry_amount_sol), 0) AS notional, "
+            "       COALESCE(SUM(se.pnl_sol), 0) AS gross_sol "
+            "FROM shadow_exits se "
+            "JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id "
+            "WHERE se.exit_strategy = 'mirror_main' AND se.pnl_sol IS NOT NULL "
+            "  AND COALESCE(sp.entry_amount_sol, 0) > 0 "
+            "GROUP BY sp.wallet_address",
+            db_path=self.db_path,
+        )
+
+        def _verdict(net_pct: float) -> str:
+            if net_pct > 1.5:
+                return "CLEAR"
+            if net_pct > 0.0:
+                return "MARGINAL"
+            return "NEGATIVE"
+
+        def _screen(rows: List[dict], cost_adjust: bool) -> List[dict]:
+            out: List[dict] = []
+            for r in rows:
+                notional = float(r["notional"] or 0)
+                if notional <= 0:
+                    continue
+                n = int(r["n"])
+                if n < min_positions:
+                    continue
+                gross_sol = float(r["gross_sol"] or 0)
+                net_sol = (
+                    gross_sol - notional * float(self.cost_per_sol)
+                    if cost_adjust
+                    else float(r["net_sol"] or 0)
+                )
+                gross_pct = gross_sol / notional * 100
+                net_pct = net_sol / notional * 100
+                out.append(
+                    {
+                        "wallet": r["wallet_address"],
+                        "n": n,
+                        "gross_pct": round(gross_pct, 3),
+                        "net_pct": round(net_pct, 3),
+                        "verdict": _verdict(net_pct),
+                    }
+                )
+            out.sort(key=lambda x: x["net_pct"], reverse=True)
+            return out
+
+        realized = _screen(realized_rows, cost_adjust=False)
+        shadow = _screen(shadow_rows, cost_adjust=True)
+        return {
+            "cost_per_sol": str(self.cost_per_sol),
+            "min_positions": min_positions,
+            "realized_book": realized,
+            "shadow_history": shadow,
+            "realized_clear": sum(1 for w in realized if w["verdict"] == "CLEAR"),
+            "shadow_clear": sum(1 for w in shadow if w["verdict"] == "CLEAR"),
+        }
+
 
 
 ROWS_FORMAT = ["group", "n", "mean", "median", "p25", "p75", "stdev", "win_rate", "sum_pnl", "ci_margin"]

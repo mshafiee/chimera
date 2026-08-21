@@ -11,6 +11,7 @@ Commands:
   skew      realized live-vs-mark sell fill skew + defer-trigger bands
   mark      summarize recorded per-position price marks (position_price_marks)
   reconcile  per-trade shadow mirror_main vs realized price gap (Phase 2F)
+  screen     post-cost per-wallet entry screen (Phase 2G — clear the cost floor)
   path      reconstruct+store on-chain price paths for up to --limit shadow tokens
   replay    run the Rust replay_exit binary over stored paths (--limit)
 
@@ -115,6 +116,8 @@ def main(argv: list[str]) -> int:
         print(bt.mark_gap_report())
     elif cmd == "reconcile":
         print(bt.reconcile_shadow_realized())
+    elif cmd == "screen":
+        print(bt.cost_aware_screen())
     elif cmd == "path":
         return _cmd_path(limit)
     elif cmd == "replay":
