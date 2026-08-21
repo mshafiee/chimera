@@ -2048,6 +2048,42 @@ async fn main() -> anyhow::Result<()> {
                                     "position_monitor: no price available this tick (stale or untracked feed)"
                                 );
                             }
+
+                            // Record a price mark (Phase 2E): the DB keeps no price
+                            // history — only entry/exit snapshots — which is why the
+                            // realize-vs-price gap (62.4% predicted vs 18% realized
+                            // win) could not be tuned (fill_skew_report ran on n=4
+                            // sells). Append the monitor's USD mark each evaluation
+                            // tick so the recorded series makes the realized gap and
+                            // smart-exit (deferral) params tunable going forward.
+                            // Observability only: a failed insert must never affect
+                            // exits, so failures are logged and ignored.
+                            if let Some(cp) = current_price {
+                                if let chimera_operator::db_abstraction::DbPool::PostgreSQL(ref pool) =
+                                    monitor_db.pool()
+                                {
+                                    let now_ts = chrono::Utc::now().timestamp();
+                                    if let Err(e) = sqlx::query(
+                                        "INSERT INTO position_price_marks \
+                                         (trade_uuid, token_address, ts_unix, price_usd, source) \
+                                         VALUES ($1, $2, $3, $4, 'monitor')",
+                                    )
+                                    .bind(&pos.trade_uuid)
+                                    .bind(&pos.token_address)
+                                    .bind(now_ts)
+                                    .bind(cp)
+                                    .execute(pool)
+                                    .await
+                                    {
+                                        tracing::warn!(
+                                            error = %e,
+                                            trade_uuid = %pos.trade_uuid,
+                                            "position_monitor: failed to record price mark"
+                                        );
+                                    }
+                                }
+                            }
+
                             let pnl_pct = match (current_price, pos.entry_price.is_zero()) {
                                 (Some(cp), false) => Some(
                                     ((cp - pos.entry_price) / pos.entry_price)
