@@ -169,20 +169,20 @@ services:
        # Single-wallet signals from unproven wallets were the negative-EV class.
        - CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN=true
        - CHIMERA_SELECTION__MIN_PROVEN_TRADES=10
-- CHIMERA_SELECTION__REQUIRE_PROVEN_POSITIVE_PNL=true
-        # Entry confirmation (2026-08-06): single-wallet unproven BUYs are
-        # deferred and admitted only if the whale's entry price holds within
-        # the drawdown tolerance for the wait window — stops buying the top of
-        # fresh pumps (the pattern behind all 134 historical losing trades).
-        # Recalibrated 2026-08-21 (entry-gap investigation): WAIT_SECS 300 -> 30.
-        # The 3% max-drawdown check only filters DUMPS (a run-up never draws
-        # down), so 300s added a ~5-min fill lag buying pump tops with zero
-        # extra protection — measured 3.4-min mean whale->fill lag, 14% of
-        # entries >5% above the whale, one loser at +14.5%. 30s keeps instant-
-        # rug filtering; the adaptive stop/recovery gates cover the rest.
-        - CHIMERA_ENTRY_CONFIRMATION__ENABLED=true
-        - CHIMERA_ENTRY_CONFIRMATION__WAIT_SECS=30
-        - CHIMERA_ENTRY_CONFIRMATION__MAX_DRAWDOWN_PCT=3.0
+       - CHIMERA_SELECTION__REQUIRE_PROVEN_POSITIVE_PNL=true
+       # Entry confirmation (2026-08-06): single-wallet unproven BUYs are
+       # deferred and admitted only if the whale's entry price holds within
+       # the drawdown tolerance for the wait window — stops buying the top of
+       # fresh pumps (the pattern behind all 134 historical losing trades).
+       # Recalibrated 2026-08-21 (entry-gap investigation): WAIT_SECS 300 -> 30.
+       # The 3% max-drawdown check only filters DUMPS (a run-up never draws
+       # down), so 300s added a ~5-min fill lag buying pump tops with zero
+       # extra protection — measured 3.4-min mean whale->fill lag, 14% of
+       # entries >5% above the whale, one loser at +14.5%. 30s keeps instant-
+       # rug filtering; the adaptive stop/recovery gates cover the rest.
+       - CHIMERA_ENTRY_CONFIRMATION__ENABLED=true
+       - CHIMERA_ENTRY_CONFIRMATION__WAIT_SECS=30
+       - CHIMERA_ENTRY_CONFIRMATION__MAX_DRAWDOWN_PCT=3.0
        # Shadow-mirror token gate (2026-08-06): admit only tokens whose whale
        # round-trips (mirror_main shadow avg) clear the post-cost breakeven.
        # Recalibrated 2026-08-20 on DEDUPED shadow data (fix 8f3a728 removed the
