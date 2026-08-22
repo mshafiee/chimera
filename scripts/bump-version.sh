@@ -129,9 +129,13 @@ fi
 
 set_version() {
   local file="$1"
-  local pattern="$2"
-  local replacement="$3"
-  sed -i.bak "s${pattern}${replacement}${pattern:0:1}" "$file" && rm -f "${file}.bak"
+  local expression="$2"
+  # $2 is the delimiter-wrapped substitution body, e.g.
+  #   |^version = ".*"|version = "1.0.1"|
+  # The `s` command letter is prepended here. (The previous form appended a
+  # stray trailing delimiter, producing `s|A|B||` and failing with
+  # "bad flag in substitute command".)
+  sed -i.bak "s${expression}" "$file" && rm -f "${file}.bak"
 }
 
 echo "Updating VERSION file..."
