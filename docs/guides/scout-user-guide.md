@@ -1,6 +1,6 @@
 # Scout Module User Guide
 
-**Version:** 1.0.0  
+**Version:** 1.0.1  
 **Last Updated:** 2025-12-06
 
 ---

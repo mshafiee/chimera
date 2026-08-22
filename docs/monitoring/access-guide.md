@@ -477,5 +477,5 @@ curl -X POST http://localhost:8003/policies/reload
 ---
 
 **Last Updated:** 2026-06-20
-**Version:** 1.0.0
+**Version:** 1.0.1
 **Maintained By:** Chimera Infrastructure Team

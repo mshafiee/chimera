@@ -1,6 +1,6 @@
 # Scout Module Deployment Guide
 
-**Version:** 1.0.0  
+**Version:** 1.0.1  
 **Date:** 2025-12-06
 
 ---

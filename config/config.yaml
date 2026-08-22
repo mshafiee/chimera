@@ -1,5 +1,5 @@
 # Chimera Operator Configuration
-# v1.0.0
+# v1.0.1
 
 server:
   host: "0.0.0.0"
