@@ -29,7 +29,7 @@ docker exec -i chimera-scout sh -c 'cd /app && python -m ...'
 
 | Command | Report | Reads from | Measures |
 |---|---|---|---|
-| `copy_backtest_cli exit` | per-exit-strategy | `shadow_exits`, `shadow_positions` | cost-adjusted PnL for each closing algorithm (mirror_main, fixed_1h/4h/24h, wallet_sell, dune_wallet) |
+| `copy_backtest_cli exit` | per-exit-strategy | `shadow_exits`, `shadow_positions` | cost-adjusted PnL for each closing algorithm (mirror_main, fixed_1h/4h/24h, wallet_sell). `dune_wallet` is excluded — it is a bootstrap reference set, not a live exit algorithm. |
 | `copy_backtest_cli gate` | per-gate under mirror_main | `shadow_exits` + rejection codes | cost-adjusted PnL of each entry filter bucket (ADMITTED vs every rejection reason) |
 | `copy_backtest_cli strategy` | by-strategy | `shadow_exits` | SHIELD vs SPEAR split |
 | `copy_backtest_cli gap` | predicted vs realized | `shadow_exits` + `trades` | predicted win rate (shadow mirror_main) vs realized win rate (closed trades) |
@@ -49,8 +49,14 @@ docker exec -i chimera-scout sh -c 'cd /app && python -m ...'
 docker exec -i chimera-scout sh -c 'cd /app && python -m analysis.copy_backtest_cli exit'
 ```
 
+Every report accepts `--since H` to scope to trades opened in the last H hours
+(e.g. `--since 48` to backtest the last 48h of trades). Without it the report
+reads all history. Note `dune_wallet` is no longer listed in the exit ranking:
+it is a bootstrap reference set (historical Dune-verified wallet PnL), not a
+live exit algorithm, so it must not be ranked alongside `mirror_main`.
+
 Interpret (current reference, 2026-08-21): only **mirror_main** (+97.5 SOL,
-n=16,554) and **dune_wallet** (+152.4, n=3,000) are cost-adjusted positive.
+n=16,554) are cost-adjusted positive among the live exit algorithms. (`dune_wallet` (+152.4, n=3,000) is bootstrap evidence, not a live exit algorithm, so it is no longer shown in this ranking.)
 `fixed_4h` (-515), `fixed_24h` (-454), `wallet_sell` (-354), `fixed_1h` (+66)
 are not. **Policy: keep mirror_main; drop the fixed/wallet-sell variants.**
 

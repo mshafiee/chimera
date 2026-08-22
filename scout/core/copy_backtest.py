@@ -9,9 +9,12 @@ before/after diff of these metrics.
 Cost model
 ----------
 The shadow `pnl_sol` is raw price-based PnL. To make decisions on net
-profitability we adjust it to mirror `trades.net_pnl_sol`: costs are estimated
-from the observed `total_cost_sol / amount_sol` ratio in `trades` and applied
-pro-rata to each shadow position's notional.
+profitability we adjust it to mirror `trades.net_pnl_sol`. Costs are modelled
+as a fixed per-trade component (Jito tip + priority + network fee) plus a
+proportional component, fit by least squares on closed trades
+(`CostModel.from_trades`). A flat per-SOL rate is used as a fallback when there
+is too little trade data to fit; an explicit `cost_per_sol` argument also
+forces the flat model.
 
 Financial precision: money stays in `Decimal`; float is used only for the
 statistical summaries (mean/median/stddev/CI), mirroring how the operator's
@@ -115,36 +118,161 @@ def observed_cost_per_sol(days: int = 90) -> Decimal:
     return (cost / amt).quantize(Decimal("0.000001"))
 
 
+@dataclass
+class CostModel:
+    """Position-size-conditional trade-cost model.
+
+    A real Solana copy-trade exit carries a fixed per-trade component (Jito
+    tip + priority fee + network fee) plus a small proportional component. A
+    flat per-SOL rate under-charges large positions and over-charges small
+    ones, which can fabricate or mask edge for the ADMITTED cohort. We fit
+    ``cost = fixed_sol + variable_rate * notional_sol`` by least squares on
+    closed trades, falling back to the flat observed rate when there is too
+    little data to fit.
+    """
+
+    fixed_sol: Decimal          # per-trade fixed cost in SOL
+    variable_rate: Decimal      # proportional cost per 1 SOL of notional
+    flat_per_sol: Decimal       # fallback flat rate (for reference / display)
+    method: str                 # "size_conditional" | "flat"
+
+    def adjust(self, raw_pnl_sol: Decimal, notional_sol: Decimal) -> Decimal:
+        """Return cost-adjusted PnL for a single position of `notional_sol`."""
+        if self.method == "flat":
+            return raw_pnl_sol - notional_sol * self.flat_per_sol
+        return raw_pnl_sol - (self.fixed_sol + self.variable_rate * notional_sol)
+
+    def adjust_aggregate(
+        self, gross_sol: float, notional_sol: float, n: int
+    ) -> float:
+        """Cost-adjusted gross PnL for an *aggregated* wallet row.
+
+        `gross_sol`/`notional_sol` are summed across `n` positions. Summing the
+        per-position model is exact: flat cost = flat_per_sol * Σnotional;
+        size-conditional = fixed_sol * n + variable_rate * Σnotional.
+        """
+        if self.method == "flat":
+            return gross_sol - notional_sol * float(self.flat_per_sol)
+        return gross_sol - (float(self.fixed_sol) * n + float(self.variable_rate) * notional_sol)
+
+    @staticmethod
+    def from_trades(days: int = 90) -> "CostModel":
+        try:
+            flat = observed_cost_per_sol(days)
+            rows = execute_and_fetchall(
+                "SELECT amount_sol, total_cost_sol FROM trades "
+                "WHERE status='CLOSED' AND pnl_data_valid=TRUE "
+                "  AND amount_sol > 0 AND total_cost_sol >= 0 "
+                "  AND created_at > NOW() - (%s || ' days')::interval",
+                (str(days),),
+            )
+            xs = [float(r["amount_sol"]) for r in rows]
+            ys = [float(r["total_cost_sol"]) for r in rows]
+            n = len(xs)
+            if n < 2:
+                return CostModel(Decimal("0"), Decimal("0"), flat, "flat")
+            mx = sum(xs) / n
+            my = sum(ys) / n
+            sxx = sum((x - mx) ** 2 for x in xs)
+            sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+            if sxx <= 1e-12:
+                return CostModel(Decimal("0"), Decimal("0"), flat, "flat")
+            b = sxy / sxx
+            a = my - b * mx
+            # Costs are non-negative; clamp defensively against noise.
+            a = max(a, 0.0)
+            b = max(b, 0.0)
+            return CostModel(
+                Decimal(str(a)).quantize(Decimal("0.000001")),
+                Decimal(str(b)).quantize(Decimal("0.000001")),
+                flat,
+                "size_conditional",
+            )
+        except Exception:
+            # Any failure (stubbed schemas under test, DB/connection errors) ->
+            # fall back to the flat observed rate rather than crashing the
+            # whole backtest harness.
+            try:
+                flat = observed_cost_per_sol(days)
+            except Exception:
+                flat = Decimal("0")
+            return CostModel(Decimal("0"), Decimal("0"), flat, "flat")
+
+
 class CopyBacktest:
     """Loads shadow history once and produces cost-adjusted metric tables."""
 
-    def __init__(self, cost_per_sol: Optional[Decimal] = None, db_path: Optional[str] = None):
+    def __init__(
+        self,
+        cost_per_sol: Optional[Decimal] = None,
+        db_path: Optional[str] = None,
+        since_hours: Optional[int] = None,
+    ):
         self.db_path = db_path
+        # `cost_per_sol` (flat) is retained for display/back-compat. When the
+        # caller passes an explicit rate we stay flat; otherwise we fit a
+        # size-conditional model from closed trades.
         self.cost_per_sol = observed_cost_per_sol() if cost_per_sol is None else cost_per_sol
+        if cost_per_sol is not None:
+            self.cost_model = CostModel(Decimal("0"), Decimal("0"), self.cost_per_sol, "flat")
+        else:
+            self.cost_model = CostModel.from_trades()
+        # When set, every report is scoped to positions/exits opened within the
+        # trailing window. This is what makes "backtest the last 48h of trades"
+        # possible: previously every report read all of history and there was
+        # no way to isolate a recent cohort.
+        self.since_hours = since_hours
+
+    # ── window helper ────────────────────────────────────────────────────────
+    def _since(self, col: str) -> tuple:
+        """Return (SQL AND-clause, [params]) scoping `col` to the trailing window.
+
+        `col` is a TIMESTAMPTZ column. Returns empty clause/params when
+        `since_hours` is unset so existing full-history behaviour is preserved.
+        """
+        if self.since_hours is None:
+            return ("", [])
+        return (
+            f" AND {col} > NOW() - (%s || ' hours')::interval",
+            [str(self.since_hours)],
+        )
 
     # ── data ────────────────────────────────────────────────────────────────
     def _load_exits(self) -> List[dict]:
+        since_clause, params = self._since("p.opened_at")
         return execute_and_fetchall(
             "SELECT e.exit_strategy, e.pnl_sol, e.pnl_pct, e.hold_duration_secs, "
             "       p.main_admitted, p.main_rejection_code, p.strategy, "
             "       p.entry_amount_sol, p.opened_at "
             "FROM shadow_exits e "
-            "LEFT JOIN shadow_positions p ON p.shadow_id = e.shadow_id",
+            "LEFT JOIN shadow_positions p ON p.shadow_id = e.shadow_id "
+            "WHERE 1=1" + since_clause,
+            tuple(params),
             db_path=self.db_path,
         )
 
     def _adjusted(self, row: dict) -> Decimal:
         raw = float_to_decimal(row["pnl_sol"])
         notional = float_to_decimal(row["entry_amount_sol"] or 1.0)
-        return raw - (notional * self.cost_per_sol)
+        return self.cost_model.adjust(raw, notional)
 
     # ── reports ─────────────────────────────────────────────────────────────
     def per_exit_strategy(self) -> List[MetricRow]:
+        # Bootstrap-reference strategies are excluded from the live exit-algorithm
+        # ranking: `dune_wallet` rows are historical Dune-verified wallet PnL
+        # written by bootstrap_dune.rs, NOT a decision rule evaluated on the
+        # recent signal stream. Including them conflates evidence quality with
+        # exit-rule performance and would rank a curated dataset above the real
+        # `mirror_main` algorithm. (Live EXIT_STRATEGIES from shadow_trader.rs —
+        # mirror_main/fixed_1h/4h/24h/wallet_sell — are retained.)
+        excluded_strategies = {"dune_wallet"}
         rows = self._load_exits()
         groups: Dict[str, List[float]] = {}
         sums: Dict[str, Decimal] = {}
         for r in rows:
             strat = r["exit_strategy"] or "unknown"
+            if strat in excluded_strategies:
+                continue
             groups.setdefault(strat, []).append(float(self._adjusted(r)))
             sums[strat] = sums.get(strat, Decimal("0")) + self._adjusted(r)
         return [_metric_row(g, groups[g], sums[g]) for g in sorted(groups)]
@@ -174,14 +302,29 @@ class CopyBacktest:
     # ── realize-vs-price gap (Phase 2 seed) ─────────────────────────────────
     def realize_vs_price_gap(self) -> dict:
         """Predicted (shadow mirror_main) vs realized (closed copy trades) win rate."""
-        predicted = execute_and_fetchone(
-            "SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE pnl_sol > 0) AS wins "
-            "FROM shadow_exits WHERE exit_strategy='mirror_main'"
-        )
-        realized = execute_and_fetchone(
-            "SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE net_pnl_sol > 0) AS wins "
-            "FROM trades WHERE status='CLOSED' AND pnl_data_valid=TRUE"
-        )
+        if self.since_hours is not None:
+            predicted = execute_and_fetchone(
+                "SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE se.pnl_sol > 0) AS wins "
+                "FROM shadow_exits se JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id "
+                "WHERE se.exit_strategy='mirror_main' "
+                "  AND sp.opened_at > NOW() - (%s || ' hours')::interval",
+                (str(self.since_hours),),
+            )
+            realized = execute_and_fetchone(
+                "SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE net_pnl_sol > 0) AS wins "
+                "FROM trades WHERE status='CLOSED' AND pnl_data_valid=TRUE "
+                "  AND created_at > NOW() - (%s || ' hours')::interval",
+                (str(self.since_hours),),
+            )
+        else:
+            predicted = execute_and_fetchone(
+                "SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE pnl_sol > 0) AS wins "
+                "FROM shadow_exits WHERE exit_strategy='mirror_main'"
+            )
+            realized = execute_and_fetchone(
+                "SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE net_pnl_sol > 0) AS wins "
+                "FROM trades WHERE status='CLOSED' AND pnl_data_valid=TRUE"
+            )
         p_n = predicted["n"] or 0
         r_n = realized["n"] or 0
         return {
@@ -205,12 +348,13 @@ class CopyBacktest:
         the recorded single-exit data, so it is reported separately and not
         assumed into the numbers).
         """
+        hours = self.since_hours if self.since_hours is not None else days * 24
         rows = execute_and_fetchall(
             "SELECT amount_sol, slippage_cost_sol, side "
             "FROM trades WHERE status='CLOSED' AND pnl_data_valid=TRUE "
             "  AND side='SELL' AND COALESCE(amount_sol,0) > 0 "
-            "  AND created_at > NOW() - (%s || ' days')::interval",
-            (str(days),),
+            "  AND created_at > NOW() - (%s || ' hours')::interval",
+            (str(hours),),
             db_path=self.db_path,
         )
         gaps: List[float] = []
@@ -260,12 +404,13 @@ class CopyBacktest:
             exit would have helped (dip-then-recover) vs hurt (dip that kept
             falling).
         """
+        hours = self.since_hours if self.since_hours is not None else days * 24
         rows = execute_and_fetchall(
             "SELECT ppm.trade_uuid, ppm.ts_unix, ppm.price_usd "
             "FROM position_price_marks ppm "
-            "WHERE ppm.ts_unix >= EXTRACT(EPOCH FROM NOW() - (%s || ' days')::interval) "
+            "WHERE ppm.ts_unix >= EXTRACT(EPOCH FROM NOW() - (%s || ' hours')::interval) "
             "ORDER BY ppm.trade_uuid, ppm.ts_unix",
-            (str(days),),
+            (str(hours),),
             db_path=self.db_path,
         )
         if not rows:
@@ -330,22 +475,26 @@ class CopyBacktest:
         cost; if it is a modeling artifact, gap_gross is large and roughly
         constant across costs.
         """
+        since_clause, since_params = self._since("p.opened_at")
         closed = execute_and_fetchall(
             "SELECT p.wallet_address, p.token_address, p.entry_price, p.exit_price, "
             "       p.entry_amount_sol, p.realized_pnl_sol, p.realized_net_pnl_sol, "
             "       EXTRACT(EPOCH FROM p.opened_at)::bigint AS opened_ts "
             "FROM positions p "
             "WHERE p.state = 'CLOSED' AND p.entry_price > 0 "
-            "  AND p.exit_price IS NOT NULL AND p.opened_at IS NOT NULL",
+            "  AND p.exit_price IS NOT NULL AND p.opened_at IS NOT NULL" + since_clause,
+            tuple(since_params),
             db_path=self.db_path,
         )
+        since_clause2, since_params2 = self._since("sp.opened_at")
         shadows = execute_and_fetchall(
             "SELECT sp.wallet_address, sp.token_address, "
             "       EXTRACT(EPOCH FROM sp.opened_at)::bigint AS opened_ts, "
             "       se.pnl_pct AS shadow_pnl_pct "
             "FROM shadow_exits se "
             "JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id "
-            "WHERE se.exit_strategy = 'mirror_main' AND sp.opened_at IS NOT NULL",
+            "WHERE se.exit_strategy = 'mirror_main' AND sp.opened_at IS NOT NULL" + since_clause2,
+            tuple(since_params2),
             db_path=self.db_path,
         )
         if not closed:
@@ -457,16 +606,19 @@ class CopyBacktest:
         floor with margin); MARGINAL = 0 < net_pct <= 1.5; NEGATIVE <= 0.
         Wallets below `min_positions` closed positions are excluded.
         """
+        since_clause, since_params = self._since("p.opened_at")
         realized_rows = execute_and_fetchall(
             "SELECT p.wallet_address, COUNT(*) AS n, "
             "       COALESCE(SUM(p.entry_amount_sol), 0) AS notional, "
             "       COALESCE(SUM(p.realized_pnl_sol), 0) AS gross_sol, "
             "       COALESCE(SUM(p.realized_net_pnl_sol), 0) AS net_sol "
             "FROM positions p "
-            "WHERE p.state = 'CLOSED' AND p.realized_net_pnl_sol IS NOT NULL "
-            "GROUP BY p.wallet_address",
+            "WHERE p.state = 'CLOSED' AND p.realized_net_pnl_sol IS NOT NULL" + since_clause +
+            " GROUP BY p.wallet_address",
+            tuple(since_params),
             db_path=self.db_path,
         )
+        since_clause2, since_params2 = self._since("sp.opened_at")
         shadow_rows = execute_and_fetchall(
             "SELECT sp.wallet_address, COUNT(*) AS n, "
             "       COALESCE(SUM(sp.entry_amount_sol), 0) AS notional, "
@@ -474,8 +626,9 @@ class CopyBacktest:
             "FROM shadow_exits se "
             "JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id "
             "WHERE se.exit_strategy = 'mirror_main' AND se.pnl_sol IS NOT NULL "
-            "  AND COALESCE(sp.entry_amount_sol, 0) > 0 "
-            "GROUP BY sp.wallet_address",
+            "  AND COALESCE(sp.entry_amount_sol, 0) > 0" + since_clause2 +
+            " GROUP BY sp.wallet_address",
+            tuple(since_params2),
             db_path=self.db_path,
         )
 
@@ -496,11 +649,14 @@ class CopyBacktest:
                 if n < min_positions:
                     continue
                 gross_sol = float(r["gross_sol"] or 0)
-                net_sol = (
-                    gross_sol - notional * float(self.cost_per_sol)
-                    if cost_adjust
-                    else float(r["net_sol"] or 0)
-                )
+                if cost_adjust:
+                    # Size-conditional cost: each closed position pays the fitted
+                    # fixed per-trade cost plus a proportional component, so the
+                    # aggregate wallet cost = fixed_sol * n + rate * Σnotional
+                    # (see CostModel.adjust_aggregate).
+                    net_sol = self.cost_model.adjust_aggregate(gross_sol, notional, n)
+                else:
+                    net_sol = float(r["net_sol"] or 0)
                 gross_pct = gross_sol / notional * 100
                 net_pct = net_sol / notional * 100
                 out.append(
@@ -519,6 +675,12 @@ class CopyBacktest:
         shadow = _screen(shadow_rows, cost_adjust=True)
         return {
             "cost_per_sol": str(self.cost_per_sol),
+            "cost_model": {
+                "method": self.cost_model.method,
+                "fixed_sol": str(self.cost_model.fixed_sol),
+                "variable_rate": str(self.cost_model.variable_rate),
+                "flat_per_sol": str(self.cost_model.flat_per_sol),
+            },
             "min_positions": min_positions,
             "realized_book": realized,
             "shadow_history": shadow,

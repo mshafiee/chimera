@@ -1,7 +1,19 @@
 //! Shared exit-rule evaluation used by BOTH the live shadow mirror
 //! (`shadow_trader`) and the offline price-path replay harness
-//! (`bin/replay_exit.rs`). Single source of truth for the exit decision so a
-//! grid-search over these rules can never drift from what the monitor runs.
+//! (`bin/replay_exit.rs`). This is the single source of truth for the
+//! *stop / recovery / trailing / time* rails, so a grid-search over those rules
+//! cannot drift from what the monitor runs.
+//!
+//! IMPORTANT — profit-target divergence: this function records exactly ONE exit
+//! per (position, strategy). It therefore returns a **full exit** on the first
+//! crossed profit target (`profit_target_<x>`). The live monitor
+//! (`profit_targets.rs`) instead performs **tiered PARTIAL** sells (e.g. 33% at
+//! each tier) and lets the remainder trail. So `mirror_main` shadow PnL is a
+//! *full-exit proxy* at the first target, NOT a byte-identical replica of live
+//! behavior — a grid-search over profit targets here does NOT model the live
+//! partial-then-trail path. (`config.targets` is populated in every deployed
+//! config: prod `config.yaml` sets `[5.0]`, the code default is
+//! `[25,50,100,200]`.)
 //!
 //! Order mirrors the real position monitor (`stop_loss.rs` + `profit_targets.rs`):
 //! hard stop, recovery gate, adaptive stop, wick window, trailing stop, profit
@@ -73,7 +85,15 @@ pub fn evaluate_exit(
         }
     }
 
-    // 6. Profit targets (currently empty in the trailing-only regime).
+    // 6. Profit targets. NOTE: `config.targets` is NOT empty in any deployed
+    //    config (prod `config.yaml` sets `[5.0]`; code default is
+    //    `[25,50,100,200]`), and the live monitor (`profit_targets.rs`) uses
+    //    them for tiered PARTIAL sells. Here we emit a FULL exit on the first
+    //    crossed target — the single-exit-per-position proxy described in the
+    //    module docstring. This branch is live, not dead code; it diverges from
+    //    live only in full-vs-partial exit semantics.
+    // TODO(perf-parity): if `mirror_main` must predict live PnL, model the
+    //    partial-then-trail path instead of a single full exit at the first tier.
     for target in &config.targets {
         if profit_pct >= *target {
             return Some(format!("profit_target_{}", target));

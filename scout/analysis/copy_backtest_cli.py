@@ -20,7 +20,9 @@ Options:
   --exit STRAT   exit strategy for gate/strategy reports (default mirror_main)
   --limit N      cap positions/tokens for path|replay (default 100)
   --binary PATH  path to replay_exit binary (default from env REPLAY_EXIT_BIN)
-"""
+  --since H      scope every report to trades opened in the last H hours
+                 (e.g. --since 48 to backtest the last 48h of trades)
+ """
 
 import asyncio
 import json
@@ -97,11 +99,13 @@ def main(argv: list[str]) -> int:
     exit_strat = _opt(rest, "--exit") or "mirror_main"
     limit_s = _opt(rest, "--limit")
     binary = _opt(rest, "--binary") or os.getenv("REPLAY_EXIT_BIN")
+    since_s = _opt(rest, "--since")
 
     limit = int(limit_s) if limit_s else 100
     cost = Decimal(cost_s) if cost_s else None
+    since = int(since_s) if since_s else None
 
-    bt = CopyBacktest(cost_per_sol=cost)
+    bt = CopyBacktest(cost_per_sol=cost, since_hours=since)
     if cmd == "exit":
         print(format_report("per-exit-strategy (cost-adjusted)", bt.per_exit_strategy()))
     elif cmd == "gate":
