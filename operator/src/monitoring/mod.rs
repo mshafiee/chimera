@@ -262,6 +262,7 @@ pub use chimera_infra::monitoring::exit_detector::*;
 pub use chimera_infra::monitoring::helius_wss_subscription::SubscriptionManager;
 pub use chimera_infra::monitoring::nav_snapshot::*;
 pub use chimera_infra::monitoring::pre_validator::*;
+pub use chimera_infra::monitoring::shadow_gap_alarm::*;
 pub use chimera_infra::monitoring::signal_aggregator::*;
 pub use chimera_infra::monitoring::transaction_parser::*;
 pub use chimera_infra::monitoring::wallet_performance::*;
@@ -269,6 +270,6 @@ pub use chimera_infra::monitoring::webhook_health_task::*;
 pub use chimera_infra::monitoring::webhook_lifecycle::*;
 pub use chimera_infra::monitoring::{
     dexscreener, exit_detector, helius_wss_subscription, nav_snapshot, pre_validator,
-    signal_aggregator, transaction_parser, wallet_performance, webhook_health_task,
-    webhook_lifecycle,
+    shadow_gap_alarm, signal_aggregator, transaction_parser, wallet_performance,
+    webhook_health_task, webhook_lifecycle,
 };

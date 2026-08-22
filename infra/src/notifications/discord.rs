@@ -96,6 +96,7 @@ impl RateLimiter {
             NotificationEvent::JitoFallbackTriggered { .. } => "jito_fallback".to_string(),
             NotificationEvent::JitoRecovered { .. } => "jito_recovered".to_string(),
             NotificationEvent::JitoHealthChanged { .. } => "jito_health".to_string(),
+            NotificationEvent::ShadowRecordingGap { .. } => "shadow_recording_gap".to_string(),
         }
     }
 }

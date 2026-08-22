@@ -165,10 +165,13 @@ services:
        - CHIMERA_SELECTION__SPEAR_LITE_MAX_SIZE_SOL=0.25
        - CHIMERA_SELECTION__SPEAR_LITE_WQS_THRESHOLD=40.0
        # Profitability gate (2026-08-06): BUY requires consensus (≥2 wallets)
-       # OR a wallet with ≥10 closed copy-trades and positive 30d copy PnL.
+       # OR a wallet with >=5 closed copy-trades and positive 30d copy PnL
+       # (lowered from 10 on 2026-08-22: proven-positive wallets like ArcebC
+       # at 8 closed trades were stuck in the consensus wait — the 33-310s
+       # entry lag behind the measured execution gap).
        # Single-wallet signals from unproven wallets were the negative-EV class.
        - CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN=true
-       - CHIMERA_SELECTION__MIN_PROVEN_TRADES=10
+       - CHIMERA_SELECTION__MIN_PROVEN_TRADES=5
        - CHIMERA_SELECTION__REQUIRE_PROVEN_POSITIVE_PNL=true
        # Entry confirmation (2026-08-06): single-wallet unproven BUYs are
        # deferred and admitted only if the whale's entry price holds within
@@ -224,12 +227,22 @@ services:
        # — the pump top — and stopped out 2s later).
        - CHIMERA_SELECTION__PUMP_CHASE_ENABLED=true
        - CHIMERA_SELECTION__PUMP_CHASE_MAX_DELTA_PCT=10
-       # Stop-loss re-entry cooldown (2026-08-08): after a >= 5% net loss on a
-       # token, block re-entries for 12h (9p84TE2Z was re-entered 3x after
-       # losses and shadow-closed at -83%).
+       # Stop-loss re-entry cooldown (2026-08-08). Retuned 2026-08-22 (profit
+       # fix Phase 4): 12h/5% let the churn class through — 72% of positions
+       # were re-entries (141/197) with per-exit losses under 5% (EjD5Y9:
+       # 3 entries, -0.22 SOL). Now ANY realized loss-exit (>=0.5%) blocks
+       # that token for 24h; profitable exits never trigger it.
        - CHIMERA_SELECTION__SL_COOLDOWN_ENABLED=true
-       - CHIMERA_SELECTION__SL_COOLDOWN_HOURS=12
-       - CHIMERA_SELECTION__SL_COOLDOWN_LOSS_PCT=5
+       - CHIMERA_SELECTION__SL_COOLDOWN_HOURS=24
+       - CHIMERA_SELECTION__SL_COOLDOWN_LOSS_PCT=0.5
+       # Entry drift guard (2026-08-22, profit fix Phase 3): reject BUYs when
+       # the current price drifted >3% (EITHER direction) from the whale's
+       # signal-time entry — re-admitted signals filled ~2-3% net worse than
+       # the shadow mark by copying into matured pumps. Fails open when the
+       # price/decimals are unknown (same fail-open as the pump-since-whale
+       # guard it shares the unit-verified conversion with).
+       - CHIMERA_SELECTION__ENTRY_DRIFT_GUARD_ENABLED=true
+       - CHIMERA_SELECTION__MAX_ENTRY_DRIFT_PCT=3.0
         # Paper trading mode (simulated execution, no real SOL)
        - CHIMERA_TRADE_MODE=paper
         # Profitability verdict enforcement (Phase C): populate the verdict

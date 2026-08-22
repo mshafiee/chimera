@@ -40,10 +40,7 @@ pub struct ShadowConfig {
 }
 
 impl ShadowConfig {
-    pub fn from_env(
-        profit_config: Arc<ProfitManagementConfig>,
-        run_id: String,
-    ) -> Self {
+    pub fn from_env(profit_config: Arc<ProfitManagementConfig>, run_id: String) -> Self {
         let enabled = std::env::var("CHIMERA_SHADOW_TRADER_ENABLED")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(true);
@@ -123,7 +120,8 @@ impl ShadowTrader {
         tokio::spawn(async move {
             match req.action {
                 Action::Buy => {
-                    Self::open_shadow_position(db, price_cache, &config, &decision, &req, &peaks).await;
+                    Self::open_shadow_position(db, price_cache, &config, &decision, &req, &peaks)
+                        .await;
                 }
                 Action::Sell => {
                     Self::on_wallet_sell(db, price_cache, &config, &req).await;
@@ -143,14 +141,24 @@ impl ShadowTrader {
         let shadow_id = uuid::Uuid::new_v4().to_string();
         let sol_price = price_cache.get_sol_price_usd();
 
-        // Write-time dedup (2026-08-14): skip if this wallet already opened a
-        // real (priced) shadow position for this token inside the dedup
-        // window. See DEDUP_WINDOW_SECS. no_price positions do not block —
-        // they book zero PnL and a later priced signal must still open one.
+        // Write-time dedup (2026-08-14): at most one real (priced) shadow
+        // position per (wallet, token) inside DEDUP_WINDOW_SECS. no_price
+        // positions do not block — they book zero PnL and a later priced
+        // signal must still open one.
+        //
+        // Admitted-twin repair (2026-08-22): when the incoming signal was
+        // ADMITTED by the real system, the duplicate must not be silently
+        // skipped — the earlier twin was opened by a REJECTED signal, so the
+        // admitted cohort lost this stream entirely (the ADMITTED gate-report
+        // row measured empty/wrong). The real system DID trade here: UPDATE
+        // the twin in place (main_admitted=true, link the admitted
+        // decision_id, adopt its strategy) instead of inserting a second row,
+        // so every read-side hour-bucket dedup still sees exactly one row.
+        // Only non-admitted duplicates stay deduped.
         {
             let DbPool::PostgreSQL(pool) = db.pool();
-            let duplicate: Result<Option<i32>, _> = sqlx::query_scalar(
-                r#"SELECT 1 FROM shadow_positions
+            let duplicate: Result<Option<String>, _> = sqlx::query_scalar(
+                r#"SELECT shadow_id FROM shadow_positions
                    WHERE wallet_address = $1
                      AND token_address = $2
                      AND entry_price_usd IS NOT NULL
@@ -163,13 +171,56 @@ impl ShadowTrader {
             .fetch_optional(&pool)
             .await;
             match duplicate {
-                Ok(Some(_)) => {
-                    tracing::debug!(
-                        wallet = %req.wallet_address,
-                        token = %req.token_address,
-                        window_secs = DEDUP_WINDOW_SECS,
-                        "Shadow: duplicate (wallet, token) within dedup window — skipping position"
-                    );
+                Ok(Some(twin_id)) => {
+                    if decision.admitted {
+                        let strategy_str = decision.strategy.map(|s| s.to_string());
+                        let updated = sqlx::query(
+                            r#"UPDATE shadow_positions
+                               SET main_admitted = TRUE,
+                                   decision_id = $2,
+                                   strategy = COALESCE($3, strategy)
+                               WHERE shadow_id = $1
+                                 AND main_admitted = FALSE"#,
+                        )
+                        .bind(&twin_id)
+                        .bind(&decision.decision_id)
+                        .bind(&strategy_str)
+                        .execute(&pool)
+                        .await;
+                        match updated {
+                            Ok(r) if r.rows_affected() > 0 => {
+                                tracing::info!(
+                                    shadow_id = %twin_id,
+                                    decision_id = %decision.decision_id,
+                                    wallet = %req.wallet_address,
+                                    token = %req.token_address,
+                                    "Shadow: admitted signal repaired rejected twin (main_admitted=true, decision linked)"
+                                );
+                            }
+                            Ok(_) => {
+                                tracing::debug!(
+                                    shadow_id = %twin_id,
+                                    wallet = %req.wallet_address,
+                                    token = %req.token_address,
+                                    "Shadow: twin already admitted — keeping first"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    shadow_id = %twin_id,
+                                    error = %e,
+                                    "Shadow: failed to repair admitted twin"
+                                );
+                            }
+                        }
+                    } else {
+                        tracing::debug!(
+                            wallet = %req.wallet_address,
+                            token = %req.token_address,
+                            window_secs = DEDUP_WINDOW_SECS,
+                            "Shadow: duplicate (wallet, token) within dedup window — skipping position"
+                        );
+                    }
                     return;
                 }
                 Ok(None) => {}
@@ -212,7 +263,15 @@ impl ShadowTrader {
                     wallet = %req.wallet_address,
                     "Shadow: no price available even after eager fetch, skipping position"
                 );
-                Self::insert_no_price_exits(&db, &shadow_id, decision, req, &config.run_id, config.position_size_sol).await;
+                Self::insert_no_price_exits(
+                    &db,
+                    &shadow_id,
+                    decision,
+                    req,
+                    &config.run_id,
+                    config.position_size_sol,
+                )
+                .await;
                 return;
             }
         };
@@ -221,9 +280,9 @@ impl ShadowTrader {
         let wqs = decision.wqs;
         let quality_score = decision.quality_score;
         let liquidity_usd = decision.liquidity_usd;
-        let consensus_count = decision.consensus_wallet_count.and_then(|c| {
-            i32::try_from(c).ok()
-        });
+        let consensus_count = decision
+            .consensus_wallet_count
+            .and_then(|c| i32::try_from(c).ok());
 
         {
             let mut peaks = peaks.lock().await;
@@ -336,7 +395,8 @@ impl ShadowTrader {
             }
 
             let elapsed_secs = (Utc::now() - opened_at).num_seconds();
-            let (pnl_pct, pnl_sol) = Self::compute_pnl(entry_price, exit_price, config.position_size_sol);
+            let (pnl_pct, pnl_sol) =
+                Self::compute_pnl(entry_price, exit_price, config.position_size_sol);
 
             let insert = sqlx::query(
                 r#"INSERT INTO shadow_exits (shadow_id, exit_strategy, exit_price_usd, exit_sol_price_usd, pnl_pct, pnl_sol, exit_reason, hold_duration_secs)
@@ -445,11 +505,7 @@ impl ShadowTrader {
         self.cleanup_peaks(&pool).await;
     }
 
-    async fn check_position_exits(
-        &self,
-        pool: &sqlx::PgPool,
-        pos: &ShadowPositionRow,
-    ) {
+    async fn check_position_exits(&self, pool: &sqlx::PgPool, pos: &ShadowPositionRow) {
         // NOTE: shadow tokens are deliberately NOT added to the live price
         // cache's tracked set (2026-08-06). Hundreds of shadow positions were
         // pushed into the 5s background updater, re-queried forever, burning
@@ -661,13 +717,12 @@ impl ShadowTrader {
     }
 
     async fn check_fully_closed(pool: &sqlx::PgPool, shadow_id: &str) {
-        let exit_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM shadow_exits WHERE shadow_id = $1",
-        )
-        .bind(shadow_id)
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0);
+        let exit_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM shadow_exits WHERE shadow_id = $1")
+                .bind(shadow_id)
+                .fetch_one(pool)
+                .await
+                .unwrap_or(0);
 
         if exit_count >= EXIT_STRATEGIES.len() as i64 {
             let _ = sqlx::query(
@@ -682,11 +737,10 @@ impl ShadowTrader {
     /// Remove peak-tracking entries for positions that are now fully closed.
     /// Called periodically from check_exits to prevent unbounded memory growth.
     async fn cleanup_peaks(&self, pool: &sqlx::PgPool) {
-        let closed_ids: Result<Vec<String>, _> = sqlx::query_scalar(
-            "SELECT shadow_id FROM shadow_positions WHERE fully_closed = TRUE",
-        )
-        .fetch_all(pool)
-        .await;
+        let closed_ids: Result<Vec<String>, _> =
+            sqlx::query_scalar("SELECT shadow_id FROM shadow_positions WHERE fully_closed = TRUE")
+                .fetch_all(pool)
+                .await;
 
         if let Ok(ids) = closed_ids {
             if ids.is_empty() {

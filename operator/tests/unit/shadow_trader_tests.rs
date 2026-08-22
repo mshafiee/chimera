@@ -952,12 +952,7 @@ async fn test_open_shadow_position_dedups_repeat_signals() {
     // A DIFFERENT token is unaffected by the dedup window.
     let mut other = request(Action::Buy);
     other.token_address = "DiffToken11111111111111111111111111111111111111".to_string();
-    cache.set_price(
-        &other.token_address,
-        dec("2.0"),
-        PriceSource::Cached,
-        None,
-    );
+    cache.set_price(&other.token_address, dec("2.0"), PriceSource::Cached, None);
     trader.on_signal(&decision(true, Some(Strategy::Shield)), &other);
     tokio::time::sleep(Duration::from_millis(400)).await;
     let count: i64 =
@@ -1046,4 +1041,119 @@ async fn test_wallet_pnl_statistics_dedups_duplicate_positions() {
         .expect("stats must exist");
     assert_eq!(n, 3, "3 hour-buckets (dup earliest + B + C), not 5 exits");
     assert_eq!(mean, dec("20"), "mean over deduped set: (10+20+30)/3");
+}
+
+// ── Admitted-twin repair (2026-08-22) ────────────────────────────────────────
+// The write-time dedup used to swallow ADMITTED signals whenever an earlier
+// REJECTED signal had opened the priced (wallet, token) twin — the real
+// system DID trade that stream, so the gate report's ADMITTED cohort measured
+// empty/wrong. Now the admitted duplicate UPDATEs the twin in place instead
+// of inserting a second row.
+
+/// Rejected-then-admitted pair inside the dedup window: exactly ONE row,
+/// promoted to main_admitted=true with the ADMITTED decision linked.
+#[tokio::test]
+async fn test_dedup_admitted_signal_repairs_rejected_twin() {
+    let (db, _guard) = create_test_db().await;
+    let pool = pg_pool(&db);
+    let cache = price_cache();
+    seed_prices(&cache, "1.0");
+    let trader = ShadowTrader::new(db.clone(), cache, shadow_config(), None);
+
+    // First signal: REJECTED — opens the priced twin.
+    let rejected = decision(false, None);
+    trader.on_signal(&rejected, &request(Action::Buy));
+    wait_for_position(&pool, None).await;
+
+    // Second signal minutes later (inside the window): ADMITTED.
+    let admitted = decision(true, Some(Strategy::Shield));
+    trader.on_signal(&admitted, &request(Action::Buy));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM shadow_positions WHERE wallet_address = $1")
+            .bind(WALLET)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        count, 1,
+        "admitted duplicate must repair the twin, not open a second row"
+    );
+
+    let (main_admitted, decision_id, strategy): (bool, String, Option<String>) = sqlx::query_as(
+        "SELECT main_admitted, decision_id, strategy FROM shadow_positions WHERE wallet_address = $1",
+    )
+    .bind(WALLET)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(main_admitted, "twin must be promoted to admitted");
+    assert_eq!(
+        decision_id, admitted.decision_id,
+        "twin must link the admitted decision"
+    );
+    assert_eq!(
+        strategy.as_deref(),
+        Some("SHIELD"),
+        "twin must adopt the admitted decision's strategy"
+    );
+}
+
+/// Two non-admitted duplicates stay deduped: one row, still rejected.
+#[tokio::test]
+async fn test_dedup_non_admitted_duplicates_stay_deduped() {
+    let (db, _guard) = create_test_db().await;
+    let pool = pg_pool(&db);
+    let cache = price_cache();
+    seed_prices(&cache, "1.0");
+    let trader = ShadowTrader::new(db.clone(), cache, shadow_config(), None);
+
+    trader.on_signal(&decision(false, None), &request(Action::Buy));
+    wait_for_position(&pool, None).await;
+
+    trader.on_signal(&decision(false, None), &request(Action::Buy));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let (count, admitted): (i64, bool) = sqlx::query_as(
+        "SELECT COUNT(*), BOOL_OR(main_admitted) FROM shadow_positions WHERE wallet_address = $1",
+    )
+    .bind(WALLET)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1, "non-admitted duplicates must dedup to one row");
+    assert!(!admitted, "deduped row must keep its rejected status");
+}
+
+/// An admitted signal whose already-admitted twin is duplicated keeps the
+/// first row untouched (no relink churn, no second row).
+#[tokio::test]
+async fn test_dedup_admitted_duplicate_keeps_first_twin() {
+    let (db, _guard) = create_test_db().await;
+    let pool = pg_pool(&db);
+    let cache = price_cache();
+    seed_prices(&cache, "1.0");
+    let trader = ShadowTrader::new(db.clone(), cache, shadow_config(), None);
+
+    let first = decision(true, Some(Strategy::Shield));
+    trader.on_signal(&first, &request(Action::Buy));
+    wait_for_position(&pool, None).await;
+
+    let second = decision(true, Some(Strategy::Spear));
+    trader.on_signal(&second, &request(Action::Buy));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let (count, decision_id): (i64, String) = sqlx::query_as(
+        "SELECT COUNT(*), MIN(decision_id) FROM shadow_positions WHERE wallet_address = $1",
+    )
+    .bind(WALLET)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(
+        decision_id, first.decision_id,
+        "already-admitted twin must keep its original decision link"
+    );
 }

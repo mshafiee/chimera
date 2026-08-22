@@ -224,6 +224,16 @@ pub struct SelectionConfig {
     /// avg win move.
     pub repeat_signal_gate_enabled: bool,
     pub repeat_signal_min_prior: i64,
+    /// Entry drift guard (2026-08-22): reject BUYs when the current tradable
+    /// price has drifted more than `max_entry_drift_pct` in EITHER direction
+    /// from the signal-time reference price (the whale's entry). Measured
+    /// execution gap (reconcile n=88): shadow marks +0.04%/trade at decision
+    /// time vs realized -1.98% gross / -2.99% net — entries re-admitted
+    /// 33-310s late (consensus wait, entry-confirmation hold) buy matured
+    /// pumps. Shares the pump-since-whale unit conversion (decimals +
+    /// plausibility clamp) and fails open with it when prices are unknown.
+    pub entry_drift_guard_enabled: bool,
+    pub max_entry_drift_pct: Decimal,
 }
 
 impl SelectionConfig {
@@ -284,6 +294,8 @@ impl SelectionConfig {
         hasher.update(self.max_pump_since_whale_pct.to_string().as_bytes());
         hasher.update(u8::from(self.repeat_signal_gate_enabled).to_le_bytes());
         hasher.update(self.repeat_signal_min_prior.to_le_bytes());
+        hasher.update(u8::from(self.entry_drift_guard_enabled).to_le_bytes());
+        hasher.update(self.max_entry_drift_pct.to_string().as_bytes());
         hex::encode(&hasher.finalize()[..8])
     }
 }
@@ -905,8 +917,7 @@ impl SelectionService {
             // wallet is rejected here regardless, so Some(false) is exact.
             wallet_proven = Some(proven_waiver);
             if !proven_waiver {
-                let reason =
-                    format!("Wallet WQS {:.1} below minimum {:.1}", wallet_wqs, min_wqs);
+                let reason = format!("Wallet WQS {:.1} below minimum {:.1}", wallet_wqs, min_wqs);
                 tracing::info!(
                     ingress = ?req.ingress,
                     decision = "BUY",
@@ -1356,9 +1367,7 @@ impl SelectionService {
                                         if oldest > Decimal::ZERO {
                                             let momentum_pct =
                                                 ((latest - oldest) / oldest) * Decimal::from(100);
-                                            if momentum_pct
-                                                >= self.config.momentum_bypass_min_pct
-                                            {
+                                            if momentum_pct >= self.config.momentum_bypass_min_pct {
                                                 momentum_bypassed = true;
                                                 tracing::info!(
                                                     ingress = ?req.ingress,
@@ -1379,7 +1388,8 @@ impl SelectionService {
                     if !momentum_bypassed {
                         let reason = format!(
                             "Token has <{} shadow-mirror samples in {}h — insufficient evidence",
-                            self.config.mirror_gate_min_samples, self.config.mirror_gate_window_hours
+                            self.config.mirror_gate_min_samples,
+                            self.config.mirror_gate_window_hours
                         );
                         tracing::info!(
                             ingress = ?req.ingress,
@@ -1678,7 +1688,7 @@ impl SelectionService {
         //      mismatch, Jupiter quoting an illiquid fresh pair), not a real
         //      move. Skip the gate and let the remaining gates decide.
         let mut pump_pct_computed: Option<(Decimal, u8)> = None;
-        if self.config.pump_since_whale_guard_enabled {
+        if self.config.pump_since_whale_guard_enabled || self.config.entry_drift_guard_enabled {
             if let Some(ref price_cache) = self.price_cache {
                 if let Some(whale_price) = req.whale_entry_price {
                     if whale_price > Decimal::ZERO {
@@ -1741,12 +1751,45 @@ impl SelectionService {
                     pump_since_whale_pct = %pump_pct,
                     "selection: BUY rejected by gate"
                 );
-                return BuyDecision::rejected(
-                    req,
-                    &self.config_hash,
-                    "ALREADY_PUMPED",
-                    reason,
-                );
+                return BuyDecision::rejected(req, &self.config_hash, "ALREADY_PUMPED", reason);
+            }
+        }
+
+        // ── 7h'. Entry drift guard (2026-08-22) ────────────────────────────
+        // Reject when the price has moved more than `max_entry_drift_pct` in
+        // either direction since the whale's entry — the signal-time
+        // reference. Closes the measured execution gap: re-admitted signals
+        // (consensus wait, entry-confirmation hold, queue) filled -1.98%
+        // gross / -2.99% net worse than the decision-time shadow mark because
+        // they copied into matured pumps 33-310s after the signal. Uses the
+        // same unit-verified comparison as the guard above; fails open with
+        // it (no prices / unknown decimals / implausible conversion).
+        if self.config.entry_drift_guard_enabled {
+            if let Some((pump_pct, _)) = pump_pct_computed {
+                let drift_pct = pump_pct.abs();
+                if drift_pct > self.config.max_entry_drift_pct {
+                    let reason = format!(
+                        "Entry drift {:.1}% since whale entry exceeds max {:.1}% — late fill into a matured move",
+                        drift_pct, self.config.max_entry_drift_pct
+                    );
+                    tracing::info!(
+                        ingress = ?req.ingress,
+                        decision = "BUY",
+                        token = %req.token_address,
+                        wallet = %req.wallet_address,
+                        rejection_code = "ENTRY_DRIFT_EXCEEDED",
+                        reason = %reason,
+                        entry_drift_pct = %drift_pct,
+                        max_entry_drift_pct = %self.config.max_entry_drift_pct,
+                        "selection: BUY rejected by gate"
+                    );
+                    return BuyDecision::rejected(
+                        req,
+                        &self.config_hash,
+                        "ENTRY_DRIFT_EXCEEDED",
+                        reason,
+                    );
+                }
             }
         }
 
@@ -1757,7 +1800,11 @@ impl SelectionService {
         // least `repeat_signal_min_prior` prior shadow signals on the token.
         // Fails OPEN on DB errors (don't block trading on infra issues).
         if self.config.repeat_signal_gate_enabled && !is_consensus && !is_smart_money_cluster {
-            match self.db.count_shadow_positions_by_token(&req.token_address).await {
+            match self
+                .db
+                .count_shadow_positions_by_token(&req.token_address)
+                .await
+            {
                 Ok(prior) if prior < self.config.repeat_signal_min_prior => {
                     let reason = format!(
                         "First signal on this token ({} prior shadow signals, need {}) — shadow-trading only; wait for repeat signal to confirm genuine interest",
@@ -2278,8 +2325,8 @@ impl SelectionService {
             return false;
         }
         let total = mean * Decimal::from(n);
-        let min_total = Decimal::from_f64(self.config.shadow_proven_min_total_pnl_sol)
-            .unwrap_or(Decimal::ZERO);
+        let min_total =
+            Decimal::from_f64(self.config.shadow_proven_min_total_pnl_sol).unwrap_or(Decimal::ZERO);
         let passes = total >= min_total;
         if passes {
             tracing::info!(
@@ -2469,6 +2516,8 @@ mod tests {
             max_pump_since_whale_pct: rust_decimal::Decimal::new(15, 0),
             repeat_signal_gate_enabled: true,
             repeat_signal_min_prior: 1,
+            entry_drift_guard_enabled: true,
+            max_entry_drift_pct: rust_decimal::Decimal::new(30, 1),
             momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
             momentum_bypass_enabled: false,
             wqs_proven_waiver_enabled: true,

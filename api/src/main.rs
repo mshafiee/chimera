@@ -555,7 +555,11 @@ async fn main() -> anyhow::Result<()> {
         min_proven_trades: std::env::var("CHIMERA_SELECTION__MIN_PROVEN_TRADES")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(10),
+            // Lowered 10 → 5 (2026-08-22): proven-positive wallets like ArcebC
+            // (8 closed trades) were excluded by the old floor and stuck in
+            // the consensus wait — the 33-310s entry lag behind the execution
+            // gap. Proven wallets now admit on the first signal.
+            .unwrap_or(5),
         require_proven_positive_pnl: std::env::var(
             "CHIMERA_SELECTION__REQUIRE_PROVEN_POSITIVE_PNL",
         )
@@ -704,9 +708,12 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(rust_decimal::Decimal::new(10, 0)), // 10%
-        // Stop-loss re-entry cooldown (2026-08-08): after a >= 5% net loss on
-        // a token, block re-entries for 12h. Verified: 9p84TE2Z re-entered 3x
-        // after losses (-3.7% then -12.2%); shadow closed at -83%.
+        // Stop-loss re-entry cooldown (2026-08-08): after a net loss on a
+        // token, block re-entries for the window. Tuned 2026-08-22 (profit
+        // fix Phase 4): 12h/5% let the churn class through — 72% of positions
+        // were re-entries (141/197) with per-exit losses under 5% (EjD5Y9:
+        // 3 entries, -0.22 SOL). Now ANY realized loss-exit (>=0.5%) blocks
+        // that token for 24h; profitable exits never trigger it.
         stop_loss_cooldown_enabled: std::env::var("CHIMERA_SELECTION__SL_COOLDOWN_ENABLED")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -714,11 +721,11 @@ async fn main() -> anyhow::Result<()> {
         stop_loss_cooldown_hours: std::env::var("CHIMERA_SELECTION__SL_COOLDOWN_HOURS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(12),
+            .unwrap_or(24),
         stop_loss_cooldown_loss_pct: std::env::var("CHIMERA_SELECTION__SL_COOLDOWN_LOSS_PCT")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(rust_decimal::Decimal::new(5, 0)), // 5%
+            .unwrap_or(rust_decimal::Decimal::new(5, 1)), // 0.5%
         pump_since_whale_guard_enabled: std::env::var(
             "CHIMERA_SELECTION__PUMP_SINCE_WHALE_GUARD_ENABLED",
         )
@@ -737,6 +744,18 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1),
+        // Entry drift guard (2026-08-22, profit fix Phase 3): reject BUYs
+        // when the current price drifted >3% (either direction) from the
+        // whale's signal-time entry — late re-admissions filled ~2-3% net
+        // worse than the shadow mark. Fail-open when prices are unavailable.
+        entry_drift_guard_enabled: std::env::var("CHIMERA_SELECTION__ENTRY_DRIFT_GUARD_ENABLED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(true),
+        max_entry_drift_pct: std::env::var("CHIMERA_SELECTION__MAX_ENTRY_DRIFT_PCT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(rust_decimal::Decimal::new(30, 1)), // 3.0%
     };
     let roster_addresses: Vec<String> = db_pool
         .get_active_wallets()
@@ -940,6 +959,30 @@ async fn main() -> anyhow::Result<()> {
     };
     tracing::info!("Notification service initialized");
 
+    // Shadow recording-gap alarm (2026-08-22, profitability fix Phase 2):
+    // alerts when admitted BUY decisions in the trailing 24h have no linked
+    // shadow position — the silent-measurement-failure mode where the shadow
+    // dedup swallowed admitted signals and the gate report's ADMITTED row
+    // measured empty. Sustained-gap detection + hourly re-alert cadence.
+    {
+        let alarm_interval_secs = std::env::var("CHIMERA_SHADOW_GAP_ALARM_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(600_u64);
+        let alarm_db = db_pool.clone();
+        let alarm_notifier = notifier.clone();
+        let alarm_token = cancel_token.clone();
+        tokio::spawn(async move {
+            chimera_operator::monitoring::shadow_gap_alarm::start_shadow_gap_alarm(
+                alarm_db,
+                alarm_notifier,
+                alarm_interval_secs,
+                alarm_token,
+            )
+            .await;
+        });
+    }
+
     // Initialize circuit breaker
     let circuit_breaker = Arc::new(
         CircuitBreaker::new_with_ws(
@@ -1093,8 +1136,7 @@ async fn main() -> anyhow::Result<()> {
         PortfolioHeat::with_max_heat(
             db_pool.clone(),
             config.position_sizing.total_capital_sol,
-            (config.position_sizing.portfolio_heat_percent
-                * rust_decimal::Decimal::from(100)),
+            (config.position_sizing.portfolio_heat_percent * rust_decimal::Decimal::from(100)),
         )
         .with_registry(Arc::clone(&state_registry)),
     );
@@ -1118,19 +1160,18 @@ async fn main() -> anyhow::Result<()> {
             config.rejection_mute.clone(),
         ),
     );
-    let mut dune_pnl_monitor =
-        chimera_operator::engine::dune_monitor::DunePnlMonitor::new(
-            &config.dune,
-            db_pool.clone(),
-            // Grade wallet quality on the exit strategy actually in force, so
-            // demotion/keep decisions match how the system really exits. With
-            // copy_wallet_sells=true the live exit is the wallet's own SELL.
-            if config.strategy.copy_wallet_sells {
-                "wallet_sell".to_string()
-            } else {
-                "mirror_main".to_string()
-            },
-        );
+    let mut dune_pnl_monitor = chimera_operator::engine::dune_monitor::DunePnlMonitor::new(
+        &config.dune,
+        db_pool.clone(),
+        // Grade wallet quality on the exit strategy actually in force, so
+        // demotion/keep decisions match how the system really exits. With
+        // copy_wallet_sells=true the live exit is the wallet's own SELL.
+        if config.strategy.copy_wallet_sells {
+            "wallet_sell".to_string()
+        } else {
+            "mirror_main".to_string()
+        },
+    );
     tracing::info!(
         toxic_threshold = config.experiment.toxic_threshold_percent,
         dune_enabled = config.dune.enabled,
@@ -4267,7 +4308,7 @@ mod tests {
         assert_eq!(sig.payload.trade_uuid.as_deref(), Some("trade-1"));
         assert_eq!(sig.payload.exit_fraction, Some(fraction));
         assert_eq!(sig.payload.amount_sol, rust_decimal::Decimal::ONE); // 2.0 * 0.5
-        // Exit signals use the trade UUID in the Signal wrapper too.
+                                                                        // Exit signals use the trade UUID in the Signal wrapper too.
         assert_eq!(sig.trade_uuid, "trade-1");
     }
 
@@ -4306,11 +4347,11 @@ mod tests {
         // (prevents oversell against entry amount).
         let pos = sample_position(rust_decimal::Decimal::from_f64(1.0).unwrap());
         let sig = build_exit_signal_amount(&pos, rust_decimal::Decimal::from_f64(5.0).unwrap());
-        assert_eq!(sig.payload.amount_sol, rust_decimal::Decimal::from_f64(5.0).unwrap());
         assert_eq!(
-            sig.payload.exit_fraction,
-            Some(rust_decimal::Decimal::ONE)
+            sig.payload.amount_sol,
+            rust_decimal::Decimal::from_f64(5.0).unwrap()
         );
+        assert_eq!(sig.payload.exit_fraction, Some(rust_decimal::Decimal::ONE));
     }
 
     #[test]
@@ -4332,9 +4373,6 @@ mod tests {
         // against that floor caps the fraction at 1.0 (never > 1).
         let pos = sample_position(rust_decimal::Decimal::ZERO);
         let sig = build_exit_signal_amount(&pos, rust_decimal::Decimal::ONE);
-        assert_eq!(
-            sig.payload.exit_fraction,
-            Some(rust_decimal::Decimal::ONE)
-        );
+        assert_eq!(sig.payload.exit_fraction, Some(rust_decimal::Decimal::ONE));
     }
 }

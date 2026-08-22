@@ -109,6 +109,8 @@ fn base_config() -> SelectionConfig {
         max_pump_since_whale_pct: rust_decimal::Decimal::new(15, 0),
         repeat_signal_gate_enabled: true,
         repeat_signal_min_prior: 1,
+        entry_drift_guard_enabled: true,
+        max_entry_drift_pct: rust_decimal::Decimal::new(30, 1),
         momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
         momentum_bypass_enabled: false,
         wqs_proven_waiver_enabled: true,
@@ -2032,4 +2034,84 @@ fn test_config_hash_and_signal_quality() {
     let q = SignalQuality::calculate(80.0, Some(1), dec("100000"), Some(12.0));
     assert!(q.score > 0.5);
     assert!(q.should_enter(0.55));
+}
+
+// ── Entry drift guard (2026-08-22) ───────────────────────────────────────────
+// Closes the measured execution gap: signals re-admitted 33-310s late
+// (consensus wait, entry-confirmation hold) filled ~2-3% net worse than the
+// decision-time shadow mark because they copied into matured pumps. Rejects
+// when the current price drifted > max_entry_drift_pct (EITHER direction)
+// from the whale's signal-time entry; fails open when prices are unknown.
+
+/// Same harness as the pump-since-whale regression test: SOL @ 200 USD,
+/// token decimals 6, whale entry 1e-9 SOL/raw. price_usd = sol_per_raw ×
+/// 200 × 1e6, so 0.21 USD = +5% and 0.18 USD = -10% vs the whale entry.
+#[tokio::test]
+async fn test_entry_drift_guard_rejects_matured_moves() {
+    let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
+    seed_wallet(&db, WALLET, "ACTIVE", 85.0).await;
+
+    let (_hel, helius) = helius_mock_with_txs(vec![old_tx()]).await;
+    let make_service = |price_usd: &str, cfg: SelectionConfig| {
+        let cache = Arc::new(
+            chimera_core::price_cache::PriceCache::with_jupiter_price_api(
+                "http://127.0.0.1:1".to_string(),
+            )
+            .expect("price cache"),
+        );
+        cache.set_price(SOL_MINT, dec("200"), PriceSource::Jupiter, Some(9));
+        cache.set_price(TOKEN, dec(price_usd), PriceSource::Jupiter, Some(6));
+        build_service_full(
+            db.clone(),
+            seeded_parser(TOKEN, "SHIELD", "100000", true),
+            cfg,
+            None,
+            None,
+            None,
+            Some(helius.clone()),
+            None,
+        )
+        .with_price_cache(cache)
+    };
+    let mut req = request(TOKEN, Action::Buy);
+    req.whale_entry_price = Some(dec("0.000000001"));
+
+    // Case A — +5% since whale entry (> 3% default): drift rejection.
+    let d = make_service("0.21", base_config()).decide(&req).await;
+    assert_eq!(
+        d.rejection_code,
+        Some("ENTRY_DRIFT_EXCEEDED"),
+        "+5% drift must reject, got {:?}",
+        d.rejection_reason
+    );
+
+    // Case B — -10% since whale entry: drift is direction-agnostic.
+    let d = make_service("0.18", base_config()).decide(&req).await;
+    assert_eq!(
+        d.rejection_code,
+        Some("ENTRY_DRIFT_EXCEEDED"),
+        "-10% drift must also reject, got {:?}",
+        d.rejection_reason
+    );
+
+    // Case C — +2% inside tolerance: gate passes (admitted).
+    let d = make_service("0.204", base_config()).decide(&req).await;
+    assert_ne!(
+        d.rejection_code,
+        Some("ENTRY_DRIFT_EXCEEDED"),
+        "in-tolerance drift must pass, got {:?}",
+        d.rejection_reason
+    );
+    assert!(d.admitted, "clean in-tolerance signal should admit");
+
+    // Case D — guard disabled: the same +5% price no longer rejects.
+    let mut off = base_config();
+    off.entry_drift_guard_enabled = false;
+    let d = make_service("0.21", off).decide(&req).await;
+    assert_ne!(
+        d.rejection_code,
+        Some("ENTRY_DRIFT_EXCEEDED"),
+        "disabled guard must not reject"
+    );
 }

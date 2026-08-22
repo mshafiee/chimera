@@ -23,6 +23,7 @@ pub mod monitoring {
     pub mod nav_snapshot;
     pub mod pre_validator;
     pub mod rate_limiter;
+    pub mod shadow_gap_alarm;
     pub mod signal_aggregator;
     pub mod transaction_parser;
     pub mod wallet_performance;

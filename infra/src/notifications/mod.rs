@@ -85,6 +85,9 @@ pub enum NotificationEvent {
         latency_ms: Option<u64>,
         success_rate: f64,
     },
+    /// Admitted decisions recorded without a linked shadow position — the
+    /// shadow-measurement loop is silently losing admitted signals.
+    ShadowRecordingGap { missing: i64 },
 }
 
 impl NotificationEvent {
@@ -108,6 +111,7 @@ impl NotificationEvent {
                     AlertLevel::Important
                 }
             }
+            NotificationEvent::ShadowRecordingGap { .. } => AlertLevel::Important,
         }
     }
 
@@ -220,6 +224,12 @@ impl NotificationEvent {
                     status,
                     latency,
                     success_rate * 100.0
+                )
+            }
+            NotificationEvent::ShadowRecordingGap { missing } => {
+                format!(
+                    "{prefix}🕳️ Shadow recording gap: {} admitted decision(s) in the last 24h have no shadow position — measurement loop is blind",
+                    missing
                 )
             }
         }

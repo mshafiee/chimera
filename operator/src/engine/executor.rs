@@ -496,6 +496,9 @@ impl Executor {
                 NotificationEvent::JitoFallbackTriggered { .. } => rules.rpc_fallback,
                 NotificationEvent::JitoRecovered { .. } => rules.rpc_fallback,
                 NotificationEvent::JitoHealthChanged { .. } => rules.rpc_fallback,
+                // Infra-health alarm (shadow measurement loop) shares the
+                // rpc_fallback rule
+                NotificationEvent::ShadowRecordingGap { .. } => rules.rpc_fallback,
             };
 
             if should_send {

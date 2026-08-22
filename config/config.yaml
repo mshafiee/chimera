@@ -61,7 +61,14 @@ strategy:
   slippage_fallback_small_percent: 0.005   # 0.5% slippage estimate for trades < threshold when Jupiter impact unavailable
   slippage_fallback_large_percent: 0.01    # 1.0% slippage estimate for trades >= threshold
   slippage_fallback_threshold_sol: 0.5     # SOL boundary between small/large for slippage fallback
-  copy_wallet_sells: true  # Exit on the copied wallet's SELL signal. Shadow comparison on the SAME 183 admitted positions: wallet_sell +13.20 SOL vs exit-system (mirror_main) -0.16 SOL, balanced 92W/91L @ +7.15% avg. The stop/trailing/time ladder cut would-be winners into quick losses (17% realized win rate). Flipped 2026-08-19 — revert if realized post-cost net return stays negative (guardrail).
+  # REVERTED 2026-08-22 back to false. The Aug-19 flip failed its own
+  # guardrail: live wallet_sell exits went negative everywhere (-1.55 SOL/48h
+  # realized, -106.7/7d shadow) while mirror_main (targets [5.0] + trailing +
+  # -8 hard stop) stayed positive in ALL windows (+8.3/48h, +17.0/7d, +224/all).
+  # Live exits return to the profit_management rails below; those exit params
+  # are intentionally untouched (price-path marks show dips recover: +3.05%
+  # avg recovery vs -1.73% max drawdown).
+  copy_wallet_sells: false
 
 jito:
   enabled: true  # Overridden by CHIMERA_JITO__ENABLED env var for mainnet-paper
@@ -293,9 +300,14 @@ profit_management:
 position_sizing:
   # Capital-relative sizing (2026-08-20): position sizes are a % of
   # total_capital_sol so they scale automatically with capital (10/100/1000 SOL).
-  # At 10 SOL: base 1.5 / proven 1.5 / per-position cap 3.0 (Shield), 2.5 (Spear).
+  # At 10 SOL: base 0.75 / proven 1.5 / per-position cap 3.0 (Shield), 2.5 (Spear).
+  # base halved 2026-08-22 — see base_size_pct below.
   base_size_sol: 0.75        # Legacy absolute base (retained for back-compat; sizing uses base_size_pct)
-  base_size_pct: 0.15        # Base position = 15% of total_capital_sol
+  # Halved 2026-08-22 (profitability fix Phase 1): ≥1 SOL entries averaged
+  # -2.12% vs +0.79% for <0.5 SOL entries since capital-relative sizing landed.
+  # Non-proven wallets now enter at half size (0.75 SOL @ 10 SOL capital);
+  # proven wallets keep the full 15% via proven_size_pct below.
+  base_size_pct: 0.075       # Base position = 7.5% of total_capital_sol (halved from 15%)
   max_size_sol: 50.0         # Absolute safety ceiling on any single position (SOL)
   max_position_pct: 0.30     # Per-position cap = 30% of total_capital_sol
   shield_max_pct: 0.30       # Shield strategy cap = 30% of capital (>= max_position_pct)
