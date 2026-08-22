@@ -132,7 +132,8 @@ token_safety:
   min_token_age_proven_hours: 0.1
   # Allow pump.fun tokens with real DEX liquidity (graduated). Bonding-curve
   # tokens stay blocked: they have $0 DEX liquidity and fail the $15K pumpfun
-  # floor below. Positions exit on the copied wallet's SELL (copy_wallet_sells: true).
+  # floor below. Positions exit via profit_management rails (copy_wallet_sells
+  # was reverted 2026-08-22 — see strategy.copy_wallet_sells).
   # Re-enabled 2026-08-06 (was false since 70% of trades / 17% win rate / negative EV
   # — that data predates the $15K graduated liquidity floor).
   allow_graduated_pumpfun: true
