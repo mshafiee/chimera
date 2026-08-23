@@ -88,6 +88,11 @@ mod jito_integration_tests;
 #[path = "integration/friction_gating_tests.rs"]
 mod friction_gating_tests;
 
+// ── DLQ terminal risk-gate rejections (2026-08-23) ────────────────────────────
+
+#[path = "integration/dlq_terminal_rejection_tests.rs"]
+mod dlq_terminal_rejection_tests;
+
 // ── Profitability verdict gate tests (Phase C4 go/no-go) ──────────────────────
 
 #[path = "integration/profitability_verdict_tests.rs"]

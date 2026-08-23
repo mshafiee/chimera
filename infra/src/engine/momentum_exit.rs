@@ -15,9 +15,9 @@
 //! secondary, not primary, defense.
 
 use crate::db_abstraction::Database;
+use crate::token::TokenParser;
 use chimera_core::engine::volume_cache::VolumeCache;
 use chimera_core::price_cache::PriceCache;
-use crate::token::TokenParser;
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use std::sync::Arc;
@@ -112,11 +112,7 @@ impl MomentumExit {
     /// profit-side exit must clear the cost breakeven on a live quote before
     /// firing. Defensive (loss-side) exits must NOT be blocked: on any error
     /// or missing data this returns `true` (proceed with the exit).
-    async fn quote_confirms_profit(
-        &self,
-        token_address: &str,
-        entry_price_usd: Decimal,
-    ) -> bool {
+    async fn quote_confirms_profit(&self, token_address: &str, entry_price_usd: Decimal) -> bool {
         let Some(parser) = &self.quote_client else {
             return true;
         };
@@ -135,7 +131,11 @@ impl MomentumExit {
         let test_amount = match 10u64.checked_pow(decimals as u32) {
             Some(a) => a,
             None => {
-                tracing::warn!(token = token_address, decimals, "Exit quote confirmation: decimal exponent overflow — proceeding with exit");
+                tracing::warn!(
+                    token = token_address,
+                    decimals,
+                    "Exit quote confirmation: decimal exponent overflow — proceeding with exit"
+                );
                 return true;
             }
         };
@@ -297,9 +297,7 @@ impl MomentumExit {
         // by min_hold_secs (2026-08-11): pump.fun tokens wick 5%+ within seconds,
         // and the tight base-drop threshold (5%) kills positions before they develop.
         // The stop-loss (separate system) stays active and provides downside protection.
-        let effective_grace = self
-            .wick_protection_secs
-            .max(self.min_hold_secs);
+        let effective_grace = self.wick_protection_secs.max(self.min_hold_secs);
         let in_wick_window = elapsed.as_secs() < effective_grace;
 
         if !in_wick_window {
@@ -415,15 +413,34 @@ impl MomentumExit {
         // after entry may reflect normal post-entry price action, not genuine breakdown.
         if !in_wick_window {
             if let Some((current_rsi, previous_rsi)) = self.calculate_rsi(token_address).await {
-                if current_rsi < 35.0 && current_rsi < previous_rsi {
+                // RSI warmup/degenerate-window guard (2026-08-23): a
+                // previous_rsi >= 99 means the lookback window contained zero
+                // (or near-zero) losses — typically Wilder smoothing still
+                // saturated at 100 from the pump run-up BEFORE our entry. One
+                // ordinary pullback then crashes RSI from ~100 to <35 in a
+                // single tick, which reads as "momentum breakdown" but is a
+                // smoothing artifact of an un-warmed window. Observed live
+                // 2026-08-22: two positions (EjD5Y9 -6.9%, EN2nnx -2.3%) were
+                // dumped by exactly this transition (previous_rsi=100.0 →
+                // current 16.9) while shadow mirror_main rode both streams to
+                // +5%. Never seed an exit from a degenerate window — the
+                // price-drop rails (-5%/-8% base, -25% hard stop) still
+                // protect genuine crashes.
+                if current_rsi < 35.0 && previous_rsi >= 99.0 {
+                    tracing::warn!(
+                        trade_uuid = %trade_uuid,
+                        token_address = token_address,
+                        current_rsi = current_rsi,
+                        previous_rsi = previous_rsi,
+                        "RSI crash from degenerate zero-loss window suppressed — holding"
+                    );
+                } else if current_rsi < 35.0 && current_rsi < previous_rsi {
                     // If the position is nominally profitable per the cache, confirm the
                     // executable sell quote actually clears cost breakeven before exiting
                     // "into profit" — cache and fill diverged (2026-08-06: +0.286% cache
                     // "profit" filled at -0.35%). Loss-side exits are never blocked here.
                     if price_drop_percent < Decimal::ZERO
-                        && !self
-                            .quote_confirms_profit(token_address, entry_price)
-                            .await
+                        && !self.quote_confirms_profit(token_address, entry_price).await
                     {
                         return MomentumExitAction::None;
                     }
@@ -644,6 +661,42 @@ mod tests {
         assert!(compute_rsi_from_prices(&[1.0; 16]).is_some());
     }
 
+    #[test]
+    fn test_compute_rsi_pump_runup_then_crash_is_degenerate_window() {
+        // Chronological: 28 gains of 0.01, then one -0.50 drop (30 points).
+        // The initial SMA window (oldest 14 changes) is all-gains -> RSI 100,
+        // and Wilder smoothing carries the zero-loss average forward until
+        // the final drop crashes RSI to ~21 in a single tick. This is the
+        // exact degenerate (previous=100) shape the Check-4 guard must
+        // suppress — observed live 2026-08-22 on EjD5Y9/EN2nnx.
+        let mut chrono_prices: Vec<f64> = (0..29).map(|i| 1.0 + i as f64 * 0.01).collect();
+        chrono_prices.push(chrono_prices[28] - 0.50);
+        let prices: Vec<f64> = chrono_prices.iter().rev().copied().collect();
+        let (current, previous) = compute_rsi_from_prices(&prices).expect("30 samples");
+        assert_eq!(previous, 100.0, "zero-loss lookback saturates at 100");
+        assert!(
+            current < 35.0,
+            "a single pullback crashes RSI below 35, got {current}"
+        );
+    }
+
+    #[test]
+    fn test_compute_rsi_healthy_window_not_flagged_degenerate() {
+        // Mixed gains/losses in the lookback keep previous RSI well below
+        // the 99 degenerate bound, so genuine declines still exit.
+        let mut chrono_prices: Vec<f64> = Vec::with_capacity(30);
+        let mut p = 1.0_f64;
+        for i in 0..29 {
+            chrono_prices.push(p);
+            p += if i % 2 == 0 { 0.02 } else { -0.01 };
+        }
+        chrono_prices.push(p - 0.30);
+        let prices: Vec<f64> = chrono_prices.iter().rev().copied().collect();
+        let (current, previous) = compute_rsi_from_prices(&prices).expect("30 samples");
+        assert!(previous < 99.0, "mixed window must not be degenerate");
+        assert!(current < previous, "declining series must decline");
+    }
+
     // ==========================================================================
     // MOMENTUM EXIT DETECTION TESTS
     // ==========================================================================
@@ -652,7 +705,10 @@ mod tests {
         Arc::new(crate::engine::kelly_sizer::tests::MockDatabase::default())
     }
 
-    fn price_cache_with(token: &str, prices: &[(Decimal, chimera_core::price_cache::PriceSource)]) -> Arc<PriceCache> {
+    fn price_cache_with(
+        token: &str,
+        prices: &[(Decimal, chimera_core::price_cache::PriceSource)],
+    ) -> Arc<PriceCache> {
         let cache = Arc::new(PriceCache::new().unwrap());
         for (price, source) in prices {
             cache.set_price(token, *price, *source, None);
@@ -673,7 +729,12 @@ mod tests {
         let cache = Arc::new(PriceCache::new().unwrap());
         let exit = detector(cache);
         let action = exit
-            .check_momentum("t1", "TOKEN11111111111111111111111111111111111111", dec!(1.0), SystemTime::now())
+            .check_momentum(
+                "t1",
+                "TOKEN11111111111111111111111111111111111111",
+                dec!(1.0),
+                SystemTime::now(),
+            )
             .await;
         assert_eq!(action, MomentumExitAction::None);
     }
@@ -700,7 +761,10 @@ mod tests {
     async fn test_corrupt_zero_current_price_skips() {
         let cache = price_cache_with(
             "TOKEN11111111111111111111111111111111111111",
-            &[(Decimal::ZERO, chimera_core::price_cache::PriceSource::Jupiter)],
+            &[(
+                Decimal::ZERO,
+                chimera_core::price_cache::PriceSource::Jupiter,
+            )],
         );
         let exit = detector(cache);
         let action = exit
@@ -823,14 +887,8 @@ mod tests {
             &[(dec!(0.98), chimera_core::price_cache::PriceSource::Jupiter)],
         );
         let volume = Arc::new(VolumeCache::new());
-        volume.record_volume(
-            "TOKEN11111111111111111111111111111111111111",
-            dec!(100),
-        );
-        volume.record_volume(
-            "TOKEN11111111111111111111111111111111111111",
-            dec!(95),
-        );
+        volume.record_volume("TOKEN11111111111111111111111111111111111111", dec!(100));
+        volume.record_volume("TOKEN11111111111111111111111111111111111111", dec!(95));
         let exit = MomentumExit::with_volume_cache(db_mock(), cache, volume, 10);
         let action = exit
             .check_momentum(
@@ -869,6 +927,83 @@ mod tests {
         assert_eq!(action, MomentumExitAction::None);
     }
 
+    /// Reproduction of the 2026-08-22 prod incident (EjD5Y9 -6.9%,
+    /// EN2nnx -2.3%): a pump run-up before entry saturates the RSI window
+    /// at 100; one ordinary pullback crashes it below 35 and the old logic
+    /// dumped the position while shadow mirror_main rode both streams to
+    /// +5%. The degenerate-window guard must HOLD here — the price-drop
+    /// check alone cannot fire either (2.4% < 8% base for an 8+ min hold).
+    #[tokio::test]
+    async fn test_rsi_crash_from_degenerate_window_holds() {
+        let token = "TOKEN11111111111111111111111111111111111111";
+        let cache = Arc::new(PriceCache::new().unwrap());
+        let start = chrono::Utc::now() - chrono::Duration::seconds(18 * 60);
+        for i in 0..17 {
+            cache.set_price_with_time(
+                token,
+                dec!(1.0) + dec!(0.01) * Decimal::from(i),
+                chimera_core::price_cache::PriceSource::Jupiter,
+                start + chrono::Duration::seconds(60 * i),
+                None,
+            );
+        }
+        cache.set_price_with_time(
+            token,
+            dec!(0.80),
+            chimera_core::price_cache::PriceSource::Jupiter,
+            start + chrono::Duration::seconds(60 * 17),
+            None,
+        );
+        let exit = detector(cache);
+        let action = exit
+            .check_momentum("t1", token, dec!(0.82), seconds_ago(600))
+            .await;
+        assert_eq!(
+            action,
+            MomentumExitAction::None,
+            "RSI crash from a zero-loss warmup window must not exit"
+        );
+    }
+
+    /// Control: the same final crash out of a HEALTHY lookback (real losses
+    /// present, previous_rsi well under 99) still exits on genuine
+    /// breakdown — the guard only suppresses degenerate windows.
+    #[tokio::test]
+    async fn test_rsi_decline_from_healthy_window_still_exits() {
+        let token = "TOKEN11111111111111111111111111111111111111";
+        let cache = Arc::new(PriceCache::new().unwrap());
+        let start = chrono::Utc::now() - chrono::Duration::seconds(18 * 60);
+        let mut p = dec!(1.00);
+        for i in 0..17 {
+            cache.set_price_with_time(
+                token,
+                p,
+                chimera_core::price_cache::PriceSource::Jupiter,
+                start + chrono::Duration::seconds(60 * i),
+                None,
+            );
+            p += if i % 2 == 0 { dec!(0.02) } else { dec!(-0.01) };
+        }
+        cache.set_price_with_time(
+            token,
+            dec!(0.74),
+            chimera_core::price_cache::PriceSource::Jupiter,
+            start + chrono::Duration::seconds(60 * 17),
+            None,
+        );
+        let exit = detector(cache);
+        // Entry 0.76 vs current 0.74: 2.6% drop < 8% base — only the RSI
+        // branch can fire.
+        let action = exit
+            .check_momentum("t1", token, dec!(0.76), seconds_ago(600))
+            .await;
+        assert_eq!(
+            action,
+            MomentumExitAction::Exit,
+            "genuine breakdown out of a healthy window must still exit"
+        );
+    }
+
     #[tokio::test]
     async fn test_should_exit_wraps_check() {
         let cache = price_cache_with(
@@ -876,25 +1011,28 @@ mod tests {
             &[(dec!(0.5), chimera_core::price_cache::PriceSource::Jupiter)],
         );
         let exit = detector(cache);
-        assert!(exit
-            .should_exit(
+        assert!(
+            exit.should_exit(
                 "t1",
                 "TOKEN11111111111111111111111111111111111111",
                 Decimal::ONE,
                 seconds_ago(60),
             )
-            .await);
+            .await
+        );
         // No price -> hold.
         let cache = Arc::new(PriceCache::new().unwrap());
         let exit = detector(cache);
-        assert!(!exit
-            .should_exit(
-                "t1",
-                "TOKEN11111111111111111111111111111111111111",
-                Decimal::ONE,
-                seconds_ago(60),
-            )
-            .await);
+        assert!(
+            !exit
+                .should_exit(
+                    "t1",
+                    "TOKEN11111111111111111111111111111111111111",
+                    Decimal::ONE,
+                    seconds_ago(60),
+                )
+                .await
+        );
     }
 
     #[tokio::test]

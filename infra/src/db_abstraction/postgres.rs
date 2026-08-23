@@ -2309,10 +2309,12 @@ impl Database for PostgresBackend {
     }
 
     async fn count_shadow_positions_by_token(&self, token_address: &str) -> AppResult<i64> {
-        let row = sqlx::query("SELECT COUNT(*)::bigint AS count FROM shadow_positions WHERE token_address = $1")
-            .bind(token_address)
-            .fetch_one(&self.pool)
-            .await?;
+        let row = sqlx::query(
+            "SELECT COUNT(*)::bigint AS count FROM shadow_positions WHERE token_address = $1",
+        )
+        .bind(token_address)
+        .fetch_one(&self.pool)
+        .await?;
         Ok(row.get::<i64, _>("count"))
     }
 
@@ -3930,7 +3932,18 @@ impl Database for PostgresBackend {
                   OR $3 ILIKE '%Cost efficiency%'
                   OR $3 ILIKE '%total exposure%'
                   OR $3 ILIKE '%portfolio heat%'
-                  OR $3 ILIKE '%Missing token_address%'))
+                  OR $3 ILIKE '%Missing token_address%'
+                  -- Risk-gate rejections are TERMINAL (2026-08-23): the DLQ
+                  -- retry worker re-injected gate-rejected BUYs every 5 min
+                  -- until their short cooldown expired and executed them
+                  -- anyway — measured -0.126 SOL on EjD5Y9 2026-08-22 (a
+                  -- "duplicate token"-rejected signal replayed 35 min later,
+                  -- past the 30-min loss cooldown, into the same dump). A
+                  -- fresh signal re-decides through decide_buy with current
+                  -- gates; replaying a stale admitted payload bypasses them.
+                  OR $3 ILIKE '%Duplicate token%'
+                  OR $3 ILIKE '%30min cooldown%'
+                  OR $3 ILIKE '%shadow blacklist%'))
             "#,
         )
         .bind(trade_uuid)
