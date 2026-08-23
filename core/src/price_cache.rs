@@ -49,6 +49,13 @@ pub const STALENESS_THRESHOLD_SECS: i64 = 90;
 /// prices are not fed into market-condition checks.
 const FALLBACK_MAX_AGE_SECS: i64 = 3600;
 
+/// How long a token confirmed unpriceable by Jupiter (response OK but no
+/// `usdPrice` — dead/untradeable) is excluded from all Jupiter requests.
+/// 10 minutes bounds blindness for tokens that later become tradeable while
+/// eliminating the every-5s re-poll that produced ~13.8k warns/12h in prod
+/// (2026-08-22). Cleared early the moment any price for the token arrives.
+const UNPRICEABLE_TTL_SECS: u64 = 600;
+
 /// Price entry in cache
 #[derive(Debug, Clone)]
 pub struct PriceEntry {
@@ -71,6 +78,10 @@ pub enum PriceSource {
     Pyth,
     /// Fallback/cached value
     Cached,
+    /// DexScreener (third fallback for held positions when Jupiter is
+    /// rate-limited or the token is unpriced; 2026-08-23 price-feed
+    /// resilience plan)
+    DexScreener,
 }
 
 impl std::fmt::Display for PriceSource {
@@ -79,6 +90,7 @@ impl std::fmt::Display for PriceSource {
             Self::Jupiter => write!(f, "Jupiter"),
             Self::Pyth => write!(f, "Pyth"),
             Self::Cached => write!(f, "Cached"),
+            Self::DexScreener => write!(f, "DexScreener"),
         }
     }
 }
@@ -119,6 +131,12 @@ pub struct PriceCache {
     http_client: reqwest::Client,
     /// Jupiter Price API base URL (configurable)
     jupiter_price_api_url: String,
+    /// Unpriceable tombstones (2026-08-23): tokens Jupiter responded for but
+    /// without a tradeable `usdPrice` (dead/untradeable). While tombstoned,
+    /// no HTTP request is made for the token at all — the background updater
+    /// drops it from the batch and eager callers short-circuit. Own mutex so
+    /// checks never contend with the price-map read lock on hot paths.
+    unpriceable: Arc<std::sync::Mutex<HashMap<String, std::time::Instant>>>,
 }
 
 impl PriceCache {
@@ -153,6 +171,7 @@ impl PriceCache {
             sol_mint: "So11111111111111111111111111111111111111112".to_string(),
             http_client: Self::build_http_client()?,
             jupiter_price_api_url: "https://api.jup.ag/price".to_string(),
+            unpriceable: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
 
@@ -176,6 +195,7 @@ impl PriceCache {
             sol_mint: "So11111111111111111111111111111111111111112".to_string(),
             http_client: Self::build_http_client()?,
             jupiter_price_api_url,
+            unpriceable: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
 
@@ -208,6 +228,7 @@ impl PriceCache {
             sol_mint: "So11111111111111111111111111111111111111112".to_string(),
             http_client: Self::build_http_client()?,
             jupiter_price_api_url: "https://api.jup.ag/price".to_string(),
+            unpriceable: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
 
@@ -290,6 +311,9 @@ impl PriceCache {
         source: PriceSource,
         decimals: Option<u8>,
     ) {
+        // A real price for a previously-unpriceable token clears its tombstone
+        // (recovery is logged once inside).
+        self.clear_unpriceable_on_price(token_address);
         let now = Utc::now();
         // Acquire a single write lock and update both maps atomically.
         let mut inner = self.inner.write();
@@ -330,6 +354,9 @@ impl PriceCache {
         time: DateTime<Utc>,
         decimals: Option<u8>,
     ) {
+        // A real price for a previously-unpriceable token clears its tombstone
+        // (recovery is logged once inside).
+        self.clear_unpriceable_on_price(token_address);
         let mut inner = self.inner.write();
         inner.prices.insert(
             token_address.to_string(),
@@ -493,13 +520,27 @@ impl PriceCache {
         if self.get_price_usd(token_address).is_some() {
             return;
         }
+        // Tombstoned as unpriceable: skip the HTTP request entirely. This is
+        // the hot loop that re-requested dead tokens on every monitor tick
+        // (4.3k+ "Eager price fetch failed"/12h in prod before the fix).
+        if self.is_unpriceable(token_address) {
+            tracing::debug!(
+                token = token_address,
+                "Eager fetch skipped: token tombstoned unpriceable"
+            );
+            return;
+        }
         let tokens = vec![token_address.to_string()];
         match self.fetch_prices_jupiter(&tokens, None).await {
             Ok((prices, decimals_map)) if !prices.is_empty() => {
                 let _ = self.apply_price_updates(prices, decimals_map);
             }
             Ok(_) => {
-                tracing::warn!(token = token_address, "Eager price fetch returned 0 prices");
+                tracing::debug!(token = token_address, "Eager price fetch returned 0 prices");
+            }
+            Err(PriceCacheError::Unpriceable(_)) => {
+                // Tombstone was just set by the fetch itself; the transition
+                // warn already fired inside mark_unpriceable.
             }
             Err(PriceCacheError::RateLimited) => {
                 // Primary API is rate-limited (position opens coincide with
@@ -539,6 +580,15 @@ impl PriceCache {
     /// fetch failed (both primary and lite-api fallback) — callers keep the
     /// cached mark and may still exit, staying fail-safe.
     pub async fn refresh_price_usd(&self, token_address: &str) -> Option<Decimal> {
+        // Tombstoned as unpriceable: no HTTP request, serve whatever the
+        // cache holds (None if nothing).
+        if self.is_unpriceable(token_address) {
+            tracing::debug!(
+                token = token_address,
+                "Refresh skipped: token tombstoned unpriceable"
+            );
+            return self.get_price_usd(token_address);
+        }
         let tokens = vec![token_address.to_string()];
         let fetch = async {
             match self.fetch_prices_jupiter(&tokens, None).await {
@@ -546,10 +596,13 @@ impl PriceCache {
                     let _ = self.apply_price_updates(prices, decimals_map);
                 }
                 Ok(_) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         token = token_address,
                         "Refresh price fetch returned 0 prices"
                     );
+                }
+                Err(PriceCacheError::Unpriceable(_)) => {
+                    // Transition warn already fired in mark_unpriceable.
                 }
                 Err(PriceCacheError::RateLimited) => {
                     let lite_url = "https://lite-api.jup.ag/price";
@@ -589,6 +642,63 @@ impl PriceCache {
     pub fn untrack_token(&self, token_address: &str) {
         let mut tokens = self.active_tokens.write();
         tokens.retain(|t| t != token_address);
+    }
+
+    /// True while the token is tombstoned as unpriceable (within TTL).
+    /// Lazily prunes expired entries.
+    pub fn is_unpriceable(&self, token_address: &str) -> bool {
+        let mut map = self.unpriceable.lock().expect("unpriceable mutex poisoned");
+        match map.get(token_address) {
+            Some(until) if *until > std::time::Instant::now() => true,
+            Some(_) => {
+                // Expired — prune so the token gets a fresh chance.
+                map.remove(token_address);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Tombstone tokens confirmed unpriceable by Jupiter. Logs at WARN only
+    /// on the state TRANSITION (first failure per window) — the repeat
+    /// failures that follow are silent, which is what de-duplicates the
+    /// ~13.8k warns/12h observed in prod.
+    fn mark_unpriceable(&self, tokens: &[String]) {
+        let mut map = self.unpriceable.lock().expect("unpriceable mutex poisoned");
+        for token in tokens {
+            match map.get(token) {
+                Some(until) if *until > std::time::Instant::now() => {}
+                _ => {
+                    tracing::warn!(
+                        token = %token,
+                        ttl_secs = UNPRICEABLE_TTL_SECS,
+                        "Token has no tradeable price on Jupiter — tombstoned, backing off"
+                    );
+                    map.insert(
+                        token.clone(),
+                        std::time::Instant::now()
+                            + std::time::Duration::from_secs(UNPRICEABLE_TTL_SECS),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Clear a token's tombstone when a price for it arrives. Info-level on
+    /// recovery (tombstone actually existed), silent otherwise.
+    fn clear_unpriceable_on_price(&self, token_address: &str) {
+        let recovered = self
+            .unpriceable
+            .lock()
+            .expect("unpriceable mutex poisoned")
+            .remove(token_address)
+            .is_some();
+        if recovered {
+            tracing::info!(
+                token = %token_address,
+                "Unpriceable token now has a price — cleared tombstone"
+            );
+        }
     }
 
     /// Get list of tracked tokens
@@ -639,7 +749,11 @@ impl PriceCache {
         let mut update_interval =
             interval(std::time::Duration::from_secs(PRICE_UPDATE_INTERVAL_SECS));
 
-        let mut rate_limit_cooldown = false;
+        // Exponential rate-limit backoff (2026-08-23): after consecutive 429s
+        // skip 1, 2, 4, 8… ticks (capped at 12 = ~3 min at the 15s cadence)
+        // instead of hammering a rate-limited bucket every single cycle.
+        let mut rate_limit_streak: u32 = 0;
+        let mut skip_ticks: u64 = 0;
 
         loop {
             update_interval.tick().await;
@@ -649,18 +763,25 @@ impl PriceCache {
                 continue;
             }
 
-            // After a 429, skip one tick to let the API rate-limit window reset.
-            if rate_limit_cooldown {
-                rate_limit_cooldown = false;
-                tracing::debug!("Skipping price update (rate-limit cooldown)");
+            if skip_ticks > 0 {
+                skip_ticks -= 1;
+                tracing::debug!(
+                    remaining_ticks = skip_ticks,
+                    "Skipping price update (rate-limit backoff)"
+                );
                 continue;
             }
 
             match self.update_prices(&tokens).await {
+                Err(PriceCacheError::Unpriceable(_)) => {
+                    // Tombstones were set inside the fetch; nothing to do
+                    // until they expire or a price arrives from elsewhere.
+                    tracing::debug!("Price update: all tracked tokens unpriceable — skipped");
+                }
                 Err(PriceCacheError::RateLimited) => {
                     // Try lite-api fallback so the cache doesn't go stale during cooldown.
-                    // Only skip the next cycle if BOTH the primary AND the fallback fail:
-                    // the cooldown exists to stop hammering a rate-limited endpoint, but
+                    // Only enter backoff if BOTH the primary AND the fallback fail:
+                    // the backoff exists to stop hammering a rate-limited endpoint, but
                     // if lite-api delivered fresh prices we have no reason to stall a cycle.
                     let lite_url = "https://lite-api.jup.ag/price";
                     match self.fetch_prices_jupiter(&tokens, Some(lite_url)).await {
@@ -670,26 +791,36 @@ impl PriceCache {
                                 prices.len()
                             );
                             let _ = self.apply_price_updates(prices, decimals_map);
+                            rate_limit_streak = 0;
+                            skip_ticks = 0;
                         }
                         Ok((_, _)) => {
-                            tracing::warn!(
+                            tracing::debug!(
                                 "Lite-api fallback returned 0 prices during rate-limit cooldown"
                             );
-                            rate_limit_cooldown = true;
+                            rate_limit_streak = rate_limit_streak.saturating_add(1);
+                            skip_ticks = rate_limit_backoff_ticks(rate_limit_streak);
                         }
                         Err(fallback_err) => {
                             tracing::warn!(
                                 error = %fallback_err,
-                                "Lite-api fallback unavailable during rate-limit cooldown"
+                                streak = rate_limit_streak + 1,
+                                next_skip_ticks = rate_limit_backoff_ticks(rate_limit_streak + 1),
+                                "Lite-api fallback unavailable during rate-limit backoff"
                             );
-                            rate_limit_cooldown = true;
+                            rate_limit_streak = rate_limit_streak.saturating_add(1);
+                            skip_ticks = rate_limit_backoff_ticks(rate_limit_streak);
                         }
                     }
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "Failed to update prices");
                 }
-                Ok(_) => {}
+                Ok(_) => {
+                    // Any successful fetch resets the 429 streak.
+                    rate_limit_streak = 0;
+                    skip_ticks = 0;
+                }
             }
         }
     }
@@ -737,6 +868,12 @@ impl PriceCache {
                     return self.apply_price_updates(prices, decimals_map);
                 }
                 Err(e) => {
+                    // Unpriceable tokens are hopeless until their tombstone
+                    // TTL expires — no retry storm, no lite-api fallback
+                    // (2026-08-23 price-feed resilience).
+                    if matches!(e, PriceCacheError::Unpriceable(_)) {
+                        return Err(e);
+                    }
                     if matches!(e, PriceCacheError::HttpError(_)) && attempt < 2 {
                         let delay = [250, 500][attempt];
                         tracing::warn!(
@@ -819,8 +956,20 @@ impl PriceCache {
             return Ok((Vec::new(), HashMap::new()));
         }
 
+        // Drop tombstoned tokens from the request (2026-08-23): a token
+        // Jupiter already confirmed unpriceable gets no HTTP call until its
+        // TTL expires or a price arrives from another source.
+        let requested: Vec<String> = tokens
+            .iter()
+            .filter(|t| !self.is_unpriceable(t))
+            .cloned()
+            .collect();
+        if requested.is_empty() {
+            return Err(PriceCacheError::Unpriceable(tokens.len()));
+        }
+
         // Build URL with comma-separated token addresses
-        let token_list = tokens.join(",");
+        let token_list = requested.join(",");
         let url = format!(
             "{}/v3?ids={}",
             url_override.unwrap_or(self.jupiter_price_api_url.trim_end_matches('/')),
@@ -861,7 +1010,10 @@ impl PriceCache {
         // Extract prices from response and convert to Decimal
         let mut results = Vec::new();
         let mut decimals_map = HashMap::new();
-        for token in tokens {
+        // Tokens Jupiter responded for WITHOUT a tradeable price — these get
+        // tombstoned after the loop (2026-08-23).
+        let mut unpriced: Vec<String> = Vec::new();
+        for token in &requested {
             if let Some(value) = data.data.get(token) {
                 // Per-token parse: an unparseable entry only skips that token
                 // (and is logged) instead of failing the whole batch.
@@ -869,6 +1021,7 @@ impl PriceCache {
                     Ok(pd) => pd,
                     Err(e) => {
                         tracing::warn!(token = token, error = %e, "Token entry in Jupiter price response failed to parse — skipping");
+                        unpriced.push(token.clone());
                         continue;
                     }
                 };
@@ -882,6 +1035,7 @@ impl PriceCache {
                         token = token,
                         "No tradeable price for token (dead/untradeable) — skipping"
                     );
+                    unpriced.push(token.clone());
                     continue;
                 };
                 // Jupiter returns price in USD as f64, convert to Decimal for precision
@@ -914,7 +1068,7 @@ impl PriceCache {
                 );
                 results.push((token.clone(), price, Some(price_data.decimals.unwrap_or(9))));
             } else {
-                tracing::warn!(token = token, "Token not found in Jupiter price response");
+                tracing::debug!(token = token, "Token not found in Jupiter price response");
                 // UNTRACK absent tokens (2026-08-06): Jupiter's price API
                 // doesn't list new/small tokens. Re-querying them every 5s
                 // cycle burned the keyless rate quota (53K 'not found' lines
@@ -923,35 +1077,36 @@ impl PriceCache {
                 // every admitted signal dead-lettered). The token can be
                 // re-tracked if it later appears (e.g. a new signal).
                 {
-                    let mut tokens = self.active_tokens.write();
-                    tokens.retain(|t| t != token);
+                    let mut active = self.active_tokens.write();
+                    active.retain(|t| t != token);
                 }
+                // And TOMBSTONE it (2026-08-23): untracking alone stopped the
+                // background poller but not the eager/refresh paths, which
+                // kept requesting absent tokens per monitor tick. Same
+                // recovery semantics as the no-usdPrice tombstone.
+                unpriced.push(token.clone());
                 // Skip tokens not found in response
             }
         }
 
+        // Tombstone tokens Jupiter responded for but did not price (WARN only
+        // on the state transition inside mark_unpriceable — this is what
+        // de-duplicates the ~13.8k warns/12h seen in prod on 2026-08-22).
+        if !unpriced.is_empty() {
+            self.mark_unpriceable(&unpriced);
+        }
+
         tracing::trace!(
             fetched_count = results.len(),
-            total_requested = tokens.len(),
+            total_requested = requested.len(),
             "Fetched prices from Jupiter"
         );
 
-        // If we got 0 prices but requested >0, report it so the caller can
-        // retry/fall back instead of silently letting the cache go stale.
-        // NOTE: this is normal for dead/untradeable tokens (Jupiter omits
-        // usdPrice) — the message must not blame the API key.
-        if results.is_empty() && !tokens.is_empty() {
-            tracing::warn!(
-                token_count = tokens.len(),
-                url = %url,
-                "Jupiter price API returned 0 prices for {} requested tokens — \
-                 all lacked a tradeable price (dead/untradeable) or failed to parse",
-                tokens.len()
-            );
-            return Err(PriceCacheError::HttpError(format!(
-                "Jupiter price API returned 0 prices for {} requested tokens",
-                tokens.len()
-            )));
+        // If EVERY requested token came back unpriceable, surface a distinct
+        // error so callers skip retries and the lite-api fallback — re-asking
+        // a dead token through another endpoint just burns quota.
+        if results.is_empty() && !requested.is_empty() {
+            return Err(PriceCacheError::Unpriceable(requested.len()));
         }
 
         Ok((results, decimals_map))
@@ -1164,6 +1319,25 @@ pub enum PriceCacheError {
     /// Rate limited
     #[error("Rate limited by price API")]
     RateLimited,
+
+    /// The requested token(s) have NO tradeable price on Jupiter (Jupiter
+    /// omits `usdPrice` for dead/untradeable tokens). Distinct from
+    /// HttpError/RateLimited so callers do NOT retry or burn the lite-api
+    /// fallback on a hopeless request — the token is tombstoned for
+    /// UNPRICEABLE_TTL_SECS instead (2026-08-23 price-feed resilience:
+    /// 13.8k warns/12h from re-requesting dead tokens every cycle).
+    #[error("{0} requested token(s) have no tradeable price on Jupiter (tombstoned)")]
+    Unpriceable(usize),
+}
+
+/// Ticks to skip after `streak` consecutive rate-limited cycles:
+/// 1 → 1, 2 → 2, 3 → 4, 4 → 8, 5+ → 12 (capped ≈ 3 min at the 15s cadence).
+/// Pure so the sequence is unit-testable without an API.
+fn rate_limit_backoff_ticks(streak: u32) -> u64 {
+    if streak == 0 {
+        return 0;
+    }
+    (1u64 << (streak - 1).min(30)).min(12)
 }
 
 #[cfg(test)]
@@ -1671,6 +1845,156 @@ mod tests {
         assert!(cache.get_price_usd("tok-eager-zero").is_none());
     }
 
+    // ==========================================================================
+    // UNPRICEABLE TOMBSTONE (2026-08-23 price-feed resilience)
+    // ==========================================================================
+
+    #[test]
+    fn test_rate_limit_backoff_ticks_sequence() {
+        assert_eq!(rate_limit_backoff_ticks(0), 0);
+        assert_eq!(rate_limit_backoff_ticks(1), 1);
+        assert_eq!(rate_limit_backoff_ticks(2), 2);
+        assert_eq!(rate_limit_backoff_ticks(3), 4);
+        assert_eq!(rate_limit_backoff_ticks(4), 8);
+        assert_eq!(rate_limit_backoff_ticks(5), 12, "capped at 12 ticks");
+        assert_eq!(rate_limit_backoff_ticks(50), 12, "stays capped");
+    }
+
+    #[test]
+    fn test_unpriceable_tombstone_lifecycle() {
+        install_trace_subscriber();
+        let cache = PriceCache::new().expect("cache");
+        assert!(!cache.is_unpriceable("tok-t"));
+
+        // Marked (transition) → tombstoned.
+        cache.mark_unpriceable(&["tok-t".to_string()]);
+        assert!(cache.is_unpriceable("tok-t"));
+
+        // Repeat marks inside the window are silent refreshes, not errors.
+        cache.mark_unpriceable(&["tok-t".to_string()]);
+        assert!(cache.is_unpriceable("tok-t"));
+
+        // A real price clears the tombstone (recovery).
+        cache.set_price("tok-t", Decimal::ONE, PriceSource::Jupiter, Some(9));
+        assert!(!cache.is_unpriceable("tok-t"));
+    }
+
+    #[test]
+    fn test_unpriceable_tombstone_expires() {
+        install_trace_subscriber();
+        let cache = PriceCache::new().expect("cache");
+        // Inject an already-expired entry (tests share the module: private
+        // field access is fine here).
+        {
+            let mut map = cache.unpriceable.lock().expect("poisoned");
+            map.insert(
+                "tok-expired".to_string(),
+                std::time::Instant::now() - std::time::Duration::from_secs(1),
+            );
+        }
+        // The expired entry is pruned and the token gets a fresh chance.
+        assert!(!cache.is_unpriceable("tok-expired"));
+        let map = cache.unpriceable.lock().expect("poisoned");
+        assert!(!map.contains_key("tok-expired"), "expired entry pruned");
+    }
+
+    /// Reproduction of the prod noise pattern (13.8k warns/12h): a token
+    /// Jupiter answers for WITHOUT a price must be requested exactly ONCE —
+    /// the tombstone then short-circuits every eager/refresh retry until a
+    /// price arrives or the TTL expires.
+    #[tokio::test]
+    async fn test_eager_fetch_zero_prices_tombstones_and_short_circuits() {
+        install_trace_subscriber();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let hits_c = hits.clone();
+        let base = mock_price_api(move |_| {
+            hits_c.fetch_add(1, Ordering::Relaxed);
+            (200, "{}".to_string())
+        })
+        .await;
+        let cache = PriceCache::with_jupiter_price_api(base).expect("cache");
+
+        // First eager fetch hits the API once and tombs the token.
+        cache.eager_fetch_token("tok-dead").await;
+        assert_eq!(hits.load(Ordering::Relaxed), 1, "exactly one HTTP request");
+        assert!(
+            cache.is_unpriceable("tok-dead"),
+            "tombstone set on 0-prices"
+        );
+
+        // Subsequent eager fetches make NO further requests.
+        cache.eager_fetch_token("tok-dead").await;
+        cache.eager_fetch_token("tok-dead").await;
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            1,
+            "tombstone must suppress re-request"
+        );
+
+        // A price from another source clears the tombstone…
+        cache.set_price("tok-dead", Decimal::ONE, PriceSource::Cached, None);
+        assert!(!cache.is_unpriceable("tok-dead"));
+        // …and a subsequent eager call short-circuits on the FRESH cached
+        // price (that guard runs before any fetch), so still exactly one
+        // HTTP request total.
+        cache.eager_fetch_token("tok-dead").await;
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            1,
+            "fresh-price short-circuit takes precedence"
+        );
+    }
+
+    /// The refresh path (stop-loss mark validation) must also give up after
+    /// ONE request for an unpriced token — no retry loop (3x primary) and no
+    /// lite-api fallback burning quota behind it.
+    #[tokio::test]
+    async fn test_refresh_unpriceable_single_request_no_retry() {
+        install_trace_subscriber();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let hits_c = hits.clone();
+        let base = mock_price_api(move |_| {
+            hits_c.fetch_add(1, Ordering::Relaxed);
+            (200, "{}".to_string())
+        })
+        .await;
+        let cache = PriceCache::with_jupiter_price_api(base).expect("cache");
+
+        let got = cache.refresh_price_usd("tok-refresh-dead").await;
+        assert!(got.is_none());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            1,
+            "Unpriceable must break the retry loop after one request"
+        );
+    }
+
+    /// Batch path: a batch mixing priced and unpriced tokens still applies
+    /// the priced ones AND tombs only the unpriced ones.
+    #[tokio::test]
+    async fn test_mixed_batch_prices_live_and_tombs_dead() {
+        install_trace_subscriber();
+        let body = serde_json::json!({
+            "tok-live": { "usdPrice": 2.5, "decimals": 9, "blockId": 7 },
+            "tok-dead-mix": {}
+        })
+        .to_string();
+        let base = mock_price_api(move |_| (200, body.clone())).await;
+        let cache = PriceCache::with_jupiter_price_api(base).expect("cache");
+
+        let tokens = vec!["tok-live".to_string(), "tok-dead-mix".to_string()];
+        cache.update_prices(&tokens).await.expect("partial success");
+
+        assert_eq!(
+            cache.get_price_usd("tok-live"),
+            Some(Decimal::from_str("2.5").unwrap()),
+            "live token in mixed batch gets its price"
+        );
+        assert!(cache.is_unpriceable("tok-dead-mix"), "dead token tombed");
+        assert!(!cache.is_unpriceable("tok-live"), "live token NOT tombed");
+    }
+
     #[tokio::test]
     async fn test_eager_fetch_rate_limited_falls_back() {
         install_trace_subscriber();
@@ -2031,20 +2355,26 @@ mod tests {
         // test_start_updater_already_running.)
         let updater = tokio::spawn(cache.clone().start_updater());
 
-        // Tick 2 at 15s is skipped (rate-limit cooldown), tick 3 at 30s succeeds.
-        // NOTE: the first tick's 429 → lite-api fallback can untrack the
-        // token (the fallback fetch sees "0 prices" and untracks to stop
-        // re-query spam). Leave it untracked for the first ~17s so the
-        // empty-tokens `continue` path runs at tick 2, then re-track so
-        // tick 3 (30s) still fires.
-        // Timeline with a 15s tick and one skipped cooldown tick:
-        //   tick1 (t=0):  429 → fallback fails → cooldown set, token untracked
-        //   tick2 (t=15): token untracked → empty-tokens continue
-        //   tick3 (t=30): cooldown skip (consumes the flag)
-        //   tick4 (t=45): token re-tracked → 200 → price set
+        // Tick 2 at 15s is skipped (rate-limit backoff, streak=1 → skip 1),
+        // tick 3 at 30s succeeds.
+        // NOTE: the first tick's 429 → lite-api fallback can untrack AND
+        // tombstone the token (the fallback fetch sees "0 prices" — real
+        // network has no price for a fake mint). Clear the tombstone before
+        // re-tracking so tick 3 can fetch; this simulates the quota window
+        // resetting.
+        // Timeline with a 15s tick and one skipped backoff tick:
+        //   tick1 (t=0):  429 → fallback fails → streak=1, skip 1 tick;
+        //                 token untracked + tombstoned by fallback
+        //   tick2 (t=15): backoff skip
+        //   tick3 (t=30): tombstone cleared + re-tracked at t≈17 → 200 → price
         let mut re_tracked = false;
         for i in 0..50 {
             if i >= 17 && !re_tracked {
+                cache
+                    .unpriceable
+                    .lock()
+                    .expect("unpriceable mutex poisoned")
+                    .remove("tok-loop");
                 cache.track_token("tok-loop");
                 re_tracked = true;
             }

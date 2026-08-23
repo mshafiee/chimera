@@ -1495,6 +1495,17 @@ impl SignalProcessor {
                                 if let Some(ref registry) = self.state_registry {
                                     let _ = registry.update_position_state(&trade_uuid, "CLOSED");
                                 }
+                                // Untrack price polling (2026-08-23): a fully
+                                // closed position must not keep its token in
+                                // the 15s background price-poll set forever.
+                                // Shadow streams on the same token still get
+                                // prices via their per-tick eager fetches.
+                                // (Known residual gap: recovery/reconciliation
+                                // closes bypass this path and leave the token
+                                // tracked until process restart.)
+                                if let Some(ref pc) = self.price_cache {
+                                    pc.untrack_token(signal.token_address().unwrap_or(""));
+                                }
                                 let wallet = &signal.payload.wallet_address;
                                 // Query the trade for its net PnL.
                                 let pnl_sol = self

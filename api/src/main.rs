@@ -1981,6 +1981,17 @@ async fn main() -> anyhow::Result<()> {
         let monitor_engine = _engine_handle.clone();
         let monitor_token = cancel_token.clone();
         let monitor_pc = price_cache.clone();
+        let monitor_dex = dexscreener_client.clone();
+        // DexScreener third fallback for HELD positions (2026-08-23 price-feed
+        // resilience): when Jupiter cannot price a held token (unpriced/
+        // tombstoned) and eager fetch fails, refresh from DexScreener's
+        // deepest Solana pool instead of leaving the exit rails blind.
+        // Selection-time pricing stays Jupiter-pure — this only feeds the
+        // position monitor / exit evaluation.
+        let monitor_dex_fallback = std::env::var("CHIMERA_PRICE__DEXSCREENER_FALLBACK")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(true);
 
         tokio::spawn(async move {
             // 1s tick (2026-08-08): positions younger than FAST_WINDOW_SECS are
@@ -2080,6 +2091,34 @@ async fn main() -> anyhow::Result<()> {
                                     last_eager_fetch.insert(pos.token_address.clone(), now);
                                     monitor_pc.eager_fetch_token(&pos.token_address).await;
                                     current_price = monitor_pc.get_price_usd(&pos.token_address);
+                                    // Third fallback (2026-08-23): DexScreener's
+                                    // deepest Solana pool. Jupiter may have the
+                                    // token tombstoned-unpriceable while real
+                                    // pools still trade — without this the exit
+                                    // rails stay blind until the 10-min TTL
+                                    // expires.
+                                    if current_price.is_none()
+                                        && monitor_dex_fallback
+                                    {
+                                        if let Some(md) =
+                                            monitor_dex.get_market_data(&pos.token_address).await
+                                        {
+                                            if let Some(px) = md.price_usd {
+                                                monitor_pc.set_price(
+                                                    &pos.token_address,
+                                                    px,
+                                                    chimera_operator::price_cache::PriceSource::DexScreener,
+                                                    None,
+                                                );
+                                                current_price = Some(px);
+                                                tracing::debug!(
+                                                    token = %pos.token_address,
+                                                    price = %px,
+                                                    "position_monitor: price served by DexScreener fallback"
+                                                );
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             if current_price.is_none() {

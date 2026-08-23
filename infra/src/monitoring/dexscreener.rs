@@ -12,14 +12,20 @@ use parking_lot::RwLock;
 use reqwest::Client;
 use rust_decimal::Decimal;
 
-use chimera_core::engine::volume_cache::VolumeCache;
 use crate::monitoring::rate_limiter::{RateLimiter, RequestPriority};
+use chimera_core::engine::volume_cache::VolumeCache;
 
 /// Per-token market snapshot.
 #[derive(Debug, Clone)]
 pub struct TokenMarketData {
     pub liquidity_usd: Decimal,
     pub volume_24h_usd: Decimal,
+    /// Last traded price in USD from the deepest Solana pool (DexScreener
+    /// `priceUsd`). `None` when no Solana pair reports a price. Used by the
+    /// position monitor as a third fallback when Jupiter cannot price a held
+    /// token (2026-08-23 price-feed resilience plan) — NOT for selection-time
+    /// pricing, which stays Jupiter-pure.
+    pub price_usd: Option<Decimal>,
 }
 
 /// Cached entry with insertion time.
@@ -111,9 +117,11 @@ impl DexScreenerClient {
             None => return None,
         };
 
-        // Take the max across all Solana pairs (most liquid pool dominates).
+        // Take the max across all Solana pairs (most liquid pool dominates);
+        // the price comes from that same deepest pool.
         let mut max_liq: f64 = 0.0;
         let mut max_vol: f64 = 0.0;
+        let mut best_pair_price: Option<Decimal> = None;
         for pair in pairs {
             if pair.get("chainId").and_then(|c| c.as_str()) != Some("solana") {
                 continue;
@@ -133,10 +141,31 @@ impl DexScreenerClient {
                 max_vol = max_vol.max(vol);
             }
         }
+        // Second pass for price: the deepest Solana pool's `priceUsd`
+        // (string in the DexScreener schema, e.g. "0.001234").
+        let mut deepest_liq: f64 = -1.0;
+        for pair in pairs {
+            if pair.get("chainId").and_then(|c| c.as_str()) != Some("solana") {
+                continue;
+            }
+            let liq = pair
+                .get("liquidity")
+                .and_then(|l| l.get("usd"))
+                .and_then(|u| u.as_f64())
+                .unwrap_or(0.0);
+            if liq > deepest_liq {
+                deepest_liq = liq;
+                best_pair_price = pair
+                    .get("priceUsd")
+                    .and_then(|p| p.as_str())
+                    .and_then(|p| p.parse::<Decimal>().ok());
+            }
+        }
 
         let result = TokenMarketData {
             liquidity_usd: Decimal::from_f64_retain(max_liq).unwrap_or(Decimal::ZERO),
             volume_24h_usd: Decimal::from_f64_retain(max_vol).unwrap_or(Decimal::ZERO),
+            price_usd: best_pair_price,
         };
 
         // Feed the shared VolumeCache with the fresh sample
