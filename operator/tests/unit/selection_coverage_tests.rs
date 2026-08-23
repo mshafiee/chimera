@@ -11,7 +11,7 @@ use chimera_operator::db_abstraction::{create_database, Database, DbPool};
 use chimera_operator::engine::position_sizer::PositionSizer;
 use chimera_operator::engine::rejection_mute::RejectionMuteDetector;
 use chimera_operator::engine::selection::{
-    Ingress, SelectionConfig, SelectionRequest, SelectionService,
+    BuyDecision, Ingress, SelectionConfig, SelectionRequest, SelectionService,
 };
 use chimera_operator::engine::transaction_builder::TransactionBuilder;
 use chimera_operator::engine::{DecisionRecorder, LatencyTracker, ShadowConfig, ShadowTrader};
@@ -111,6 +111,8 @@ fn base_config() -> SelectionConfig {
         repeat_signal_min_prior: 1,
         entry_drift_guard_enabled: true,
         max_entry_drift_pct: rust_decimal::Decimal::new(30, 1),
+        wqs_trial_enabled: false,
+        wqs_trial_min_score: 10.0,
         momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
         momentum_bypass_enabled: false,
         wqs_proven_waiver_enabled: true,
@@ -2113,5 +2115,87 @@ async fn test_entry_drift_guard_rejects_matured_moves() {
         d.rejection_code,
         Some("ENTRY_DRIFT_EXCEEDED"),
         "disabled guard must not reject"
+    );
+}
+
+// ── WQS trial admission (2026-08-23) ─────────────────────────────────────────
+// Sub-floor wallets (WQS >= wqs_trial_min_score) pass the hard WQS gate into
+// SPEAR at the spear-lite micro cap instead of WQS_TOO_LOW. Evidence: 10/10
+// shadow mirror_main wins (+5.21% avg) on WQS-10.0 rejects in the 12h prod
+// comparison. Layering: spear-lite caps size AND consensus-or-proven still
+// blocks solo entries.
+
+/// Helper mirroring test_entry_drift_guard_rejects_matured_moves' harness:
+/// SOL @ 200 USD, prior shadow row (repeat gate), ACTIVE wallet, old tx.
+async fn trial_harness(
+    db: &Arc<dyn Database>,
+    wallet_wqs: f64,
+    cfg: SelectionConfig,
+) -> BuyDecision {
+    seed_prior_shadow(db, TOKEN, 1).await;
+    seed_wallet(db, WALLET, "ACTIVE", wallet_wqs).await;
+    let (_hel, helius) = helius_mock_with_txs(vec![old_tx()]).await;
+    let cache = Arc::new(
+        chimera_core::price_cache::PriceCache::with_jupiter_price_api(
+            "http://127.0.0.1:1".to_string(),
+        )
+        .expect("price cache"),
+    );
+    cache.set_price(SOL_MINT, dec("200"), PriceSource::Jupiter, Some(9));
+    // No token price: drift guard fails open; whale_entry unset.
+    build_service_full(
+        db.clone(),
+        seeded_parser(TOKEN, "SHIELD", "100000", true),
+        cfg,
+        None,
+        None,
+        None,
+        Some(helius.clone()),
+        None,
+    )
+    .with_price_cache(cache)
+    .decide(&request(TOKEN, Action::Buy))
+    .await
+}
+
+#[tokio::test]
+async fn test_wqs_trial_admits_near_floor_wallet() {
+    let (db, _guard) = create_test_db().await;
+    let mut cfg = base_config();
+    cfg.wqs_trial_enabled = true;
+    cfg.wqs_trial_min_score = 10.0;
+    let d = trial_harness(&db, 12.0, cfg).await;
+    assert_ne!(
+        d.rejection_code,
+        Some("WQS_TOO_LOW"),
+        "trial must waive the floor for WQS>=min-score wallets, got {:?}",
+        d.rejection_reason
+    );
+}
+
+#[tokio::test]
+async fn test_wqs_trial_disabled_keeps_hard_floor() {
+    let (db, _guard) = create_test_db().await;
+    let mut cfg = base_config();
+    cfg.wqs_trial_enabled = false;
+    let d = trial_harness(&db, 12.0, cfg).await;
+    assert_eq!(
+        d.rejection_code,
+        Some("WQS_TOO_LOW"),
+        "disabled trial keeps the hard floor"
+    );
+}
+
+#[tokio::test]
+async fn test_wqs_trial_below_trial_min_still_rejected() {
+    let (db, _guard) = create_test_db().await;
+    let mut cfg = base_config();
+    cfg.wqs_trial_enabled = true;
+    cfg.wqs_trial_min_score = 10.0;
+    let d = trial_harness(&db, 5.0, cfg).await;
+    assert_eq!(
+        d.rejection_code,
+        Some("WQS_TOO_LOW"),
+        "wallets below the trial minimum stay rejected"
     );
 }

@@ -756,6 +756,20 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(rust_decimal::Decimal::new(30, 1)), // 3.0%
+        // WQS trial admission (2026-08-23): sub-floor wallets (>= trial min)
+        // enter at spear-lite micro size instead of hard rejection. Evidence:
+        // 10/10 shadow mirror_main wins (+5.21% avg) on WQS-10.0 rejects in
+        // the 12h comparison — the documented star-copy-target profile stuck
+        // waiting for waiver evidence. Layered safety: spear-lite caps size
+        // AND consensus-or-proven still blocks solo entries.
+        wqs_trial_enabled: std::env::var("CHIMERA_SELECTION__WQS_TRIAL_ENABLED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(false),
+        wqs_trial_min_score: std::env::var("CHIMERA_SELECTION__WQS_TRIAL_MIN_SCORE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10.0),
     };
     let roster_addresses: Vec<String> = db_pool
         .get_active_wallets()

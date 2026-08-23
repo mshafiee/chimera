@@ -358,6 +358,8 @@ async fn build_real_webhook_app() -> (Router, Arc<dyn Database>, crate::common::
         repeat_signal_min_prior: 1,
         entry_drift_guard_enabled: true,
         max_entry_drift_pct: rust_decimal::Decimal::new(30, 1),
+            wqs_trial_enabled: false,
+            wqs_trial_min_score: 10.0,
         momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
         momentum_bypass_enabled: false,
         wqs_proven_waiver_enabled: true,

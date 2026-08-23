@@ -161,6 +161,18 @@ services:
        - "CHIMERA_RPC__FALLBACK_URL=${CHIMERA_RPC__FALLBACK_URL:-https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}}"
        # Minimum WQS for signal admission
        - CHIMERA_SELECTION__MIN_WQS_SCORE=15.0
+       # WQS trial admission (2026-08-23): sub-floor wallets with WQS >= 10
+       # enter at spear-lite micro size (capped below) instead of hard
+       # rejection. Evidence: 12h prod comparison found 10/10 shadow
+       # mirror_main wins (+5.21% avg, +0.52 SOL) on WQS-10.0 rejects — the
+       # documented star-copy-target profile stuck waiting for deduped-shadow
+       # waiver evidence. Layered safety: spear-lite caps size AND the
+       # consensus-or-proven gate still blocks solo entries.
+       # REVERT if realized (post-cost) PnL of WQS-trial positions is
+       # negative over 48h; tag trial decisions via the
+       # "WQS floor trial admission" log marker.
+       - CHIMERA_SELECTION__WQS_TRIAL_ENABLED=true
+       - CHIMERA_SELECTION__WQS_TRIAL_MIN_SCORE=10.0
        # Position cap for low-WQS wallets (WQS < 40 → max 0.25 SOL = min_size_sol)
        - CHIMERA_SELECTION__SPEAR_LITE_MAX_SIZE_SOL=0.25
        - CHIMERA_SELECTION__SPEAR_LITE_WQS_THRESHOLD=40.0

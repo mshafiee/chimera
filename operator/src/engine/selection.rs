@@ -234,6 +234,17 @@ pub struct SelectionConfig {
     /// plausibility clamp) and fails open with it when prices are unknown.
     pub entry_drift_guard_enabled: bool,
     pub max_entry_drift_pct: Decimal,
+    /// WQS trial admission (2026-08-23): sub-floor wallets with WQS >=
+    /// `wqs_trial_min_score` are admitted to SPEAR at the existing
+    /// spear-lite micro cap instead of being hard-rejected. Rationale: the
+    /// 12h prod comparison found 10/10 shadow mirror_main wins (+5.21% avg)
+    /// on WQS-10.0 rejects — the documented star-copy-target profile —
+    /// blocked while awaiting deduped-shadow significance for the waiver.
+    /// Layering: spear-lite caps size (0.25 SOL) AND the consensus-or-proven
+    /// gate still blocks solo entries, so trial wallets can only ever
+    /// contribute to multi-wallet consensus. Disable to restore hard floor.
+    pub wqs_trial_enabled: bool,
+    pub wqs_trial_min_score: f64,
 }
 
 impl SelectionConfig {
@@ -296,6 +307,8 @@ impl SelectionConfig {
         hasher.update(self.repeat_signal_min_prior.to_le_bytes());
         hasher.update(u8::from(self.entry_drift_guard_enabled).to_le_bytes());
         hasher.update(self.max_entry_drift_pct.to_string().as_bytes());
+        hasher.update(u8::from(self.wqs_trial_enabled).to_le_bytes());
+        hasher.update(self.wqs_trial_min_score.to_le_bytes());
         hex::encode(&hasher.finalize()[..8])
     }
 }
@@ -917,31 +930,53 @@ impl SelectionService {
             // wallet is rejected here regardless, so Some(false) is exact.
             wallet_proven = Some(proven_waiver);
             if !proven_waiver {
-                let reason = format!("Wallet WQS {:.1} below minimum {:.1}", wallet_wqs, min_wqs);
+                // WQS trial admission (2026-08-23): near-floor wallets
+                // (>= wqs_trial_min_score) enter at spear-lite micro size —
+                // see SelectionConfig field docs for the layering. The clamp
+                // to `min_wqs` below mirrors the proven-waiver path so
+                // quality scoring does not re-reject what this gate waived.
+                let trial_admitted =
+                    self.config.wqs_trial_enabled && wallet_wqs >= self.config.wqs_trial_min_score;
+                if !trial_admitted {
+                    let reason =
+                        format!("Wallet WQS {:.1} below minimum {:.1}", wallet_wqs, min_wqs);
+                    tracing::info!(
+                        ingress = ?req.ingress,
+                        decision = "BUY",
+                        token = %req.token_address,
+                        wallet = %req.wallet_address,
+                        rejection_code = "WQS_TOO_LOW",
+                        reason = %reason,
+                        wallet_wqs = wallet_wqs,
+                        min_wqs = min_wqs,
+                        "selection: BUY rejected by gate"
+                    );
+                    return BuyDecision::rejected(req, &self.config_hash, "WQS_TOO_LOW", reason);
+                }
                 tracing::info!(
                     ingress = ?req.ingress,
                     decision = "BUY",
                     token = %req.token_address,
                     wallet = %req.wallet_address,
-                    rejection_code = "WQS_TOO_LOW",
-                    reason = %reason,
                     wallet_wqs = wallet_wqs,
                     min_wqs = min_wqs,
-                    "selection: BUY rejected by gate"
+                    trial_min = self.config.wqs_trial_min_score,
+                    "WQS floor trial admission: sub-floor wallet enters at spear-lite micro size"
                 );
-                return BuyDecision::rejected(req, &self.config_hash, "WQS_TOO_LOW", reason);
+            } else {
+                tracing::info!(
+                    ingress = ?req.ingress,
+                    decision = "BUY",
+                    token = %req.token_address,
+                    wallet = %req.wallet_address,
+                    wallet_wqs = wallet_wqs,
+                    min_wqs = min_wqs,
+                    "WQS floor waived: wallet proven by deduped shadow statistics"
+                );
             }
-            tracing::info!(
-                ingress = ?req.ingress,
-                decision = "BUY",
-                token = %req.token_address,
-                wallet = %req.wallet_address,
-                wallet_wqs = wallet_wqs,
-                min_wqs = min_wqs,
-                "WQS floor waived: wallet proven by deduped shadow statistics"
-            );
-            // Score quality at the floor, not the raw sub-floor WQS: the
-            // 40%-weighted WQS term would otherwise pin a waived wallet at
+            // Score quality at the floor, not the raw sub-floor WQS — for
+            // BOTH the proven waiver and the trial admission: the 40%-
+            // weighted WQS term would otherwise pin a sub-floor wallet at
             // ~0.34 max — knife-edge against the 0.30 SPEAR threshold — and
             // re-reject here what step 2 just waived.
             wallet_wqs = min_wqs;
@@ -2518,6 +2553,8 @@ mod tests {
             repeat_signal_min_prior: 1,
             entry_drift_guard_enabled: true,
             max_entry_drift_pct: rust_decimal::Decimal::new(30, 1),
+            wqs_trial_enabled: false,
+            wqs_trial_min_score: 10.0,
             momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
             momentum_bypass_enabled: false,
             wqs_proven_waiver_enabled: true,

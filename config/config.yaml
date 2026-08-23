@@ -125,6 +125,13 @@ token_safety:
   # Minimum token age in hours to allow a BUY signal (0 disables the check)
   min_token_age_hours: 0.25        # 15min token age — paper experiment (was 0.5/30min): the shadow data shows the fresh-token edge (TOKEN_TOO_NEW = +239 SOL shadow) that the 30min floor filtered out. Loosened to 15min to measure whether that edge survives real execution. Still filters the <15min instant-rug zone. Revert if realized (post-cost) PnL is negative.
   min_token_age_pumpfun_hours: 0.25 # Same: 15min minimum for pump.fun tokens
+  # 2026-08-23 review of the remaining TOKEN_TOO_NEW rejects (24 in 12h):
+  # 22/24 were SECONDS-to-minutes-old BONDING-CURVE tokens (pre-graduation,
+  # $0 DEX liquidity) — they cannot actually be bought, so the shadow's
+  # +102%/+97% marks on those streams are paper fills at feed prices, not
+  # executable edge; the -51% fixed_4h leg is the real tail. Floor stays at
+  # 15min (6min for shadow-proven wallets). Re-examine only after the 15min
+  # experiment above accumulates realized data.
   # Proven-wallet age waiver floor (2026-08-07): wallets with statistically
   # significant shadow PnL (t-stat > 1.645) trade early entries by design —
   # their signals are age-waived to 0.1h (6 min) instead of the 30 min global
