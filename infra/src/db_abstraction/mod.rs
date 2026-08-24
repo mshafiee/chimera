@@ -838,6 +838,20 @@ pub trait Database: Send + Sync {
         wallet_address: &str,
     ) -> AppResult<(i64, rust_decimal::Decimal)>;
 
+    /// Recency-weighted proven check (2026-08-24): stats over the most
+    /// recent `window` CLOSED copy-trades (by closed_at), independent of any
+    /// aggregate window. Returns (trades_in_window, sum(net_pnl_sol)) where
+    /// trades_in_window = min(total_closed, `window`). The default returns an
+    /// empty window so lightweight test doubles stay valid — callers treat an
+    /// empty window as unevaluable (falls back to the aggregate check).
+    async fn get_wallet_recency_stats(
+        &self,
+        _wallet_address: &str,
+        _window: i64,
+    ) -> AppResult<(i64, rust_decimal::Decimal)> {
+        Ok((0, rust_decimal::Decimal::ZERO))
+    }
+
     /// Rolling shadow-mirror average PnL% for a token (`exit_strategy =
     /// 'mirror_main'` — the whale's own round trip under our exit rails,
     /// pre-cost). Returns `Some(avg)` only when at least `min_samples` exits

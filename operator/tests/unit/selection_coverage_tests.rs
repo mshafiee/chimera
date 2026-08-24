@@ -113,6 +113,7 @@ fn base_config() -> SelectionConfig {
         max_entry_drift_pct: rust_decimal::Decimal::new(30, 1),
         wqs_trial_enabled: false,
         wqs_trial_min_score: 10.0,
+        proven_recency_trades: 0,
         momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
         momentum_bypass_enabled: false,
         wqs_proven_waiver_enabled: true,
@@ -2197,5 +2198,106 @@ async fn test_wqs_trial_below_trial_min_still_rejected() {
         d.rejection_code,
         Some("WQS_TOO_LOW"),
         "wallets below the trial minimum stay rejected"
+    );
+}
+
+// ── Recency-weighted proven overlay (2026-08-24) ─────────────────────────────
+// Long-window aggregates go stale silently: ArcebCcX kept solo-admitting on
+// a positive all-time ledger while its trailing week ran −0.24 SOL. After any
+// proven path passes, the most recent `proven_recency_trades` closed
+// copy-trades must not be net-negative.
+
+async fn insert_closed_trade(db: &Arc<dyn Database>, uuid: &str, pnl_sol: &str, age_days: i64) {
+    sqlx::query(
+        "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status, net_pnl_sol, closed_at) \
+         VALUES ($1, $2, $3, 'SHIELD', 'BUY', 0.5, 'CLOSED', $4, $5)",
+    )
+    .bind(uuid)
+    .bind(WALLET)
+    .bind(TOKEN)
+    .bind(Decimal::from_str(pnl_sol).unwrap())
+    .bind(chrono::Utc::now() - chrono::TimeDelta::days(age_days))
+    .execute(&pg_pool(db))
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn test_proven_recency_overlay_blocks_stale_form() {
+    let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
+    seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
+    let mut cfg = base_config();
+    cfg.require_consensus_or_proven = true;
+    cfg.proven_recency_trades = 10;
+
+    // Old history: 6 winners (+1.0) three weeks ago → aggregate +6.
+    for i in 0..6 {
+        insert_closed_trade(&db, &format!("rec-old-{i}"), "1.0", 21).await;
+    }
+    // Trailing form: 10 losers (−0.2) within the last day → window −2.0
+    // while the all-time aggregate stays positive (+4.0).
+    for i in 0..10 {
+        insert_closed_trade(&db, &format!("rec-recent-{i}"), "-0.2", 0).await;
+    }
+
+    // Overlay active: negative trailing form blocks the solo admission even
+    // though the aggregate check passes.
+    let service = build_service(
+        db.clone(),
+        seeded_parser(TOKEN, "SHIELD", "100000", true),
+        cfg.clone(),
+    );
+    let d = service.decide(&request(TOKEN, Action::Buy)).await;
+    assert_eq!(
+        d.rejection_code,
+        Some("SINGLE_WALLET_UNPROVEN"),
+        "stale trailing form must not be proven"
+    );
+
+    // Disabling the overlay restores aggregate-only behavior.
+    let mut cfg_off = cfg.clone();
+    cfg_off.proven_recency_trades = 0;
+    let service = build_service(
+        db.clone(),
+        seeded_parser(TOKEN, "SHIELD", "100000", true),
+        cfg_off,
+    );
+    let d = service.decide(&request(TOKEN, Action::Buy)).await;
+    assert!(
+        d.admitted,
+        "aggregate-only check admits the stale-form wallet: {:?}",
+        d.rejection_code
+    );
+}
+
+/// Control: a wallet whose trailing window is positive passes the overlay
+/// untouched and solo-admits as before.
+#[tokio::test]
+async fn test_proven_recency_positive_recent_form_admits() {
+    let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
+    seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
+    let mut cfg = base_config();
+    cfg.require_consensus_or_proven = true;
+    cfg.proven_recency_trades = 10;
+
+    for i in 0..6 {
+        insert_closed_trade(&db, &format!("recp-old-{i}"), "1.0", 21).await;
+    }
+    for i in 0..10 {
+        insert_closed_trade(&db, &format!("recp-recent-{i}"), "0.1", 0).await;
+    }
+
+    let service = build_service(
+        db.clone(),
+        seeded_parser(TOKEN, "SHIELD", "100000", true),
+        cfg,
+    );
+    let d = service.decide(&request(TOKEN, Action::Buy)).await;
+    assert!(
+        d.admitted,
+        "positive trailing form stays proven: {:?}",
+        d.rejection_code
     );
 }

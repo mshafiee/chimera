@@ -173,6 +173,12 @@ services:
        # "WQS floor trial admission" log marker.
        - CHIMERA_SELECTION__WQS_TRIAL_ENABLED=true
        - CHIMERA_SELECTION__WQS_TRIAL_MIN_SCORE=10.0
+       # Recency-weighted proven overlay (2026-08-24): after any proven path
+       # passes, the wallet's last 10 closed copy-trades must not be net-
+       # negative. ArcebCcX kept solo-admitting on a positive all-time ledger
+       # while its trailing week ran -0.24 SOL — long-window aggregates go
+       # stale silently. Set to 0 to restore aggregate-only checks.
+       - CHIMERA_SELECTION__PROVEN_RECENCY_TRADES=10
        # Position cap for low-WQS wallets (WQS < 40 → max 0.25 SOL = min_size_sol)
        - CHIMERA_SELECTION__SPEAR_LITE_MAX_SIZE_SOL=0.25
        - CHIMERA_SELECTION__SPEAR_LITE_WQS_THRESHOLD=40.0

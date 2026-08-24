@@ -245,6 +245,12 @@ pub struct SelectionConfig {
     /// contribute to multi-wallet consensus. Disable to restore hard floor.
     pub wqs_trial_enabled: bool,
     pub wqs_trial_min_score: f64,
+    /// Recency-weighted proven overlay (2026-08-24): once any proven path
+    /// passes, the wallet's most recent `proven_recency_trades` closed
+    /// copy-trades must not be net-negative — long-window aggregates (30d
+    /// t-stat, all-time ledger) go stale silently. 0 disables. See
+    /// `wallet_is_proven`.
+    pub proven_recency_trades: i64,
 }
 
 impl SelectionConfig {
@@ -309,6 +315,7 @@ impl SelectionConfig {
         hasher.update(self.max_entry_drift_pct.to_string().as_bytes());
         hasher.update(u8::from(self.wqs_trial_enabled).to_le_bytes());
         hasher.update(self.wqs_trial_min_score.to_le_bytes());
+        hasher.update(self.proven_recency_trades.to_le_bytes());
         hex::encode(&hasher.finalize()[..8])
     }
 }
@@ -2208,6 +2215,55 @@ impl SelectionService {
     /// positive realized net PnL, per the live `trades` table. Fails closed on
     /// any error — an unverifiable wallet must not bypass the gate.
     async fn wallet_is_proven(&self, wallet_address: &str) -> bool {
+        let proven = self.wallet_is_proven_base(wallet_address).await;
+        if !proven {
+            return false;
+        }
+
+        // Recency-weighted overlay (2026-08-24): every proven path above
+        // (shadow-total, t-stat, ledger) aggregates over long windows that go
+        // stale silently — ArcebCcX kept solo-admitting on a positive
+        // all-time ledger while its trailing week ran −0.24 SOL. A wallet is
+        // only *currently* proven if its most recent `proven_recency_trades`
+        // closed copy-trades are not net-negative. Thin histories (fewer
+        // trades than the window) can't be judged and pass through; zero
+        // disables; errors fail-open.
+        if self.config.proven_recency_trades > 0 {
+            match self
+                .db
+                .get_wallet_recency_stats(wallet_address, self.config.proven_recency_trades)
+                .await
+            {
+                Ok((recent_n, net_recent))
+                    if recent_n >= self.config.proven_recency_trades
+                        && net_recent < Decimal::ZERO =>
+                {
+                    tracing::debug!(
+                        wallet = wallet_address,
+                        recent_n,
+                        proven_recency_trades = self.config.proven_recency_trades,
+                        net_recent = %net_recent,
+                        "Proven-wallet check: recent form negative — treating as unproven"
+                    );
+                    return false;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        wallet = wallet_address,
+                        error = %e,
+                        "Recency check failed — keeping proven status (fail-open)"
+                    );
+                }
+            }
+        }
+        true
+    }
+
+    /// Base proven evaluation without the recency overlay (see
+    /// `wallet_is_proven`): shadow-total-PnL OR shadow-t-stat OR the
+    /// closed-trade ledger fallback.
+    async fn wallet_is_proven_base(&self, wallet_address: &str) -> bool {
         // Shadow total-PnL proven (2026-08-13): admits high-variance "moonshot"
         // wallets (big total shadow PnL, low t-stat) the paths below reject.
         // OR'd first so it short-circuits; no-op when shadow_proven_enabled=false.
@@ -2555,6 +2611,7 @@ mod tests {
             max_entry_drift_pct: rust_decimal::Decimal::new(30, 1),
             wqs_trial_enabled: false,
             wqs_trial_min_score: 10.0,
+            proven_recency_trades: 0,
             momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
             momentum_bypass_enabled: false,
             wqs_proven_waiver_enabled: true,

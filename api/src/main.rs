@@ -770,6 +770,15 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10.0),
+        // Recency-weighted proven overlay (2026-08-24): after any proven path
+        // passes, the wallet's most recent 10 closed copy-trades must not be
+        // net-negative. Evidence: ArcebCcX kept solo-admitting on a positive
+        // all-time ledger while its trailing week ran −0.24 SOL — long-window
+        // aggregates go stale silently. Thin histories pass through unevaluated.
+        proven_recency_trades: std::env::var("CHIMERA_SELECTION__PROVEN_RECENCY_TRADES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10),
     };
     let roster_addresses: Vec<String> = db_pool
         .get_active_wallets()

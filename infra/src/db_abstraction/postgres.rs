@@ -3991,6 +3991,35 @@ impl Database for PostgresBackend {
         Ok((closed_trades, net_pnl_sol))
     }
 
+    /// Recency-weighted proven stats (2026-08-24): aggregate over the most
+    /// recent `window` CLOSED copy-trades. The 30d/all-time aggregate a
+    /// wallet proved itself on goes stale silently — ArcebCcX kept
+    /// solo-admitting signals on a positive all-time ledger while its
+    /// trailing week ran −0.24 SOL.
+    async fn get_wallet_recency_stats(
+        &self,
+        wallet_address: &str,
+        window: i64,
+    ) -> AppResult<(i64, rust_decimal::Decimal)> {
+        let row = sqlx::query(
+            "SELECT COUNT(*)::bigint AS recent_trades, \
+                    COALESCE(SUM(net_pnl_sol), 0) AS net_recent \
+             FROM (\
+                 SELECT net_pnl_sol FROM trades \
+                 WHERE wallet_address = $1 AND status = 'CLOSED' \
+                 ORDER BY closed_at DESC NULLS LAST \
+                 LIMIT $2\
+             ) recent",
+        )
+        .bind(wallet_address)
+        .bind(window)
+        .fetch_one(&self.pool)
+        .await?;
+        let recent_trades: i64 = row.try_get("recent_trades")?;
+        let net_recent: rust_decimal::Decimal = row.try_get("net_recent")?;
+        Ok((recent_trades, net_recent))
+    }
+
     async fn get_token_mirror_avg_pnl(
         &self,
         token_address: &str,
