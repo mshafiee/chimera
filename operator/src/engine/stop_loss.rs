@@ -76,6 +76,13 @@ pub struct StopLossManager {
     /// strands a position. In-memory only — a restart re-evaluates positions
     /// fresh, which is safe for a ~15s window.
     defer_counts: RwLock<HashMap<String, u64>>,
+    /// Per-position price-stability tracking (2026-08-24 frozen-feed
+    /// fast-truth): (last seen cached price, consecutive unchanged ticks).
+    /// Jupiter's `usdPrice` is LAST-TRADED price — a static value means
+    /// nobody is trading, not that the price is stable. Keyed by trade_uuid;
+    /// entries are bounded by the active position count and re-evaluate fresh
+    /// on restart.
+    price_ticks: RwLock<HashMap<String, (Decimal, u32)>>,
 }
 
 /// Stop-loss action
@@ -100,6 +107,7 @@ impl StopLossManager {
             signal_aggregator: Arc::new(RwLock::new(None)),
             token_parser: Arc::new(RwLock::new(None)),
             defer_counts: RwLock::new(HashMap::new()),
+            price_ticks: RwLock::new(HashMap::new()),
         }
     }
 
@@ -134,6 +142,7 @@ impl StopLossManager {
         token_address: &str,
         entry_price_usd: Decimal,
         cache_loss_pct: Decimal,
+        position_notional_sol: Decimal,
     ) -> bool {
         // Config gate: preserve today's behavior unless deferral is enabled and
         // a quote client is wired in.
@@ -144,6 +153,14 @@ impl StopLossManager {
             return false;
         };
 
+        let sol_price_usd = match self.price_cache.get_sol_price_usd() {
+            Some(v) if v > Decimal::ZERO => v,
+            _ => return false,
+        };
+        if entry_price_usd.is_zero() {
+            return false;
+        }
+
         // Decode the entry to build a test amount (mirrors profit_targets'
         // quote_confirms_profit). Unknown decimals -> cannot quote -> fail-safe.
         let decimals = match self.price_cache.get_price(token_address) {
@@ -153,27 +170,60 @@ impl StopLossManager {
         let Some(decimals) = decimals else {
             return false;
         };
-        let Some(test_amount) = 10u64.checked_pow(decimals as u32) else {
-            return false;
+        let unit_amount: u64 = match 10u64.checked_pow(decimals as u32) {
+            Some(v) => v,
+            None => return false,
+        };
+
+        // Quote a REPRESENTATIVE FRACTION of the actual position, not 1 whole
+        // token (2026-08-24): for sub-cent tokens a 1-token test trade is
+        // dust — near-mid pricing with zero impact — so the skew check saw no
+        // problem while the real sell ate the collapse (AbNNre 2026-08-23:
+        // dust-quote mark −5.7%, actual-size fill −13.95%). Jupiter quotes
+        // include route impact, so quoting ~25% of the position measures the
+        // true achievable price. Falls back to the legacy 1-token quote when
+        // size is unknown (zero notional).
+        let test_amount: u64 = if position_notional_sol.is_zero() {
+            unit_amount
+        } else {
+            let notional_usd = position_notional_sol * sol_price_usd;
+            let tokens_held = notional_usd / entry_price_usd;
+            let raw_units =
+                tokens_held * Decimal::from(25) / Decimal::from(100) * Decimal::from(unit_amount);
+            use rust_decimal::prelude::ToPrimitive;
+            match raw_units.round().to_u64() {
+                Some(v) if v >= unit_amount => v,
+                _ => unit_amount, // dust position or overflow → legacy floor
+            }
         };
         let out_sol = match parser.sell_quote_out_sol(token_address, test_amount).await {
             Ok(Some(v)) => v,
+            Err(e) => {
+                // Quote failure on an underwater exit is now operationally
+                // visible (dead pools often have no route) but stays
+                // fail-open: we cannot PROVE the fill is bad.
+                tracing::warn!(
+                    trade_uuid = %trade_uuid,
+                    token = token_address,
+                    quoted_raw_units = test_amount,
+                    error = %e,
+                    "Live sell quote failed before protective exit — proceeding fail-open"
+                );
+                return false;
+            }
             _ => return false,
         };
-        let sol_price_usd = match self.price_cache.get_sol_price_usd() {
-            Some(v) if v > Decimal::ZERO => v,
-            _ => return false,
-        };
-        if entry_price_usd.is_zero() {
-            return false;
-        }
 
         // Implied live fill price per token (USD) and its implied loss.
-        // `test_amount` = 10^decimals SPL units = exactly 1 token, so `out_sol`
-        // is the SOL received for 1 token → `out_sol * sol_price_usd` is USD per
-        // token, comparable to `entry_price_usd`. (Matches profit_targets'
-        // `quote_confirms_profit`, which uses `out_sol * sol_price_usd`.)
-        let fill_price_usd = out_sol * sol_price_usd;
+        // `out_sol` is the SOL received for `test_amount` raw units of the
+        // position-sized quote → per-token fill price = out_sol × sol_usd /
+        // (test_amount / 10^decimals). Comparable to `entry_price_usd`.
+        let tokens_in_test = Decimal::from(test_amount) / Decimal::from(10u64.pow(decimals as u32));
+        let fill_price_usd = if tokens_in_test.is_zero() {
+            return false;
+        } else {
+            out_sol * sol_price_usd / tokens_in_test
+        };
         let live_loss_pct =
             ((fill_price_usd - entry_price_usd) / entry_price_usd) * Decimal::from(100);
 
@@ -282,6 +332,7 @@ impl StopLossManager {
         entry_price: Decimal,
         token_address: &str,
         entry_time: chrono::DateTime<chrono::Utc>,
+        position_notional_sol: Decimal,
     ) -> StopLossAction {
         let current_price = match self.price_cache.get_price_usd(token_address) {
             Some(price) => {
@@ -338,6 +389,25 @@ impl StopLossManager {
             ratio * Decimal::from(100)
         };
 
+        // Frozen-feed tracking (2026-08-24): Jupiter's `usdPrice` is the
+        // LAST-TRADED price — an unchanged value across ticks means nobody is
+        // trading, not that the price is stable. Count consecutive unchanged
+        // ticks; recovery-gate handling below uses this to refuse holding for
+        // "recovery" against a static mark (AbNNre: feed frozen at −5.78% for
+        // 4 min while the real fill was −13.95%).
+        let frozen_ticks = {
+            let mut map = self.price_ticks.write().await;
+            let slot = map
+                .entry(trade_uuid.to_string())
+                .or_insert((current_price, 0u32));
+            if slot.0 == current_price {
+                slot.1 = slot.1.saturating_add(1);
+            } else {
+                *slot = (current_price, 0u32);
+            }
+            slot.1
+        };
+
         let elapsed_secs = chrono::Utc::now()
             .signed_duration_since(entry_time)
             .num_seconds()
@@ -362,7 +432,24 @@ impl StopLossManager {
             // held for recovery instead of being realized.
             let hard_floor_reached = loss_percent <= self.config.recovery_gate_hard_threshold;
             let longer_window_elapsed = elapsed_secs >= recovery_gate_max_secs;
-            if !hard_floor_reached && !longer_window_elapsed {
+            // Frozen-feed fast-truth (2026-08-24): an underwater position
+            // whose cached price has not moved for `frozen_feed_ticks` ticks
+            // is being judged against a static last-traded mark — do NOT hold
+            // it for "recovery". Evaluate against the LIVE sell quote instead
+            // (defer budget still bounds this; hard floor never defers).
+            let feed_frozen_underwater = self.config.frozen_feed_ticks > 0
+                && frozen_ticks as u64 >= self.config.frozen_feed_ticks
+                && loss_percent <= recovery_gate_threshold;
+            if feed_frozen_underwater {
+                tracing::warn!(
+                    trade_uuid = %trade_uuid,
+                    token = token_address,
+                    frozen_ticks,
+                    loss_pct = %loss_percent,
+                    "FROZEN_FEED: price unchanged across ticks while underwater — skipping recovery hold, evaluating live fill"
+                );
+            }
+            if !hard_floor_reached && !longer_window_elapsed && !feed_frozen_underwater {
                 tracing::debug!(
                     trade_uuid = %trade_uuid,
                     token = token_address,
@@ -386,6 +473,7 @@ impl StopLossManager {
                         token_address,
                         entry_price,
                         loss_percent,
+                        position_notional_sol,
                     )
                     .await
                 {
@@ -692,6 +780,7 @@ impl StopLossManager {
                     token_address,
                     entry_price,
                     loss_percent,
+                    position_notional_sol,
                 )
                 .await
             {
@@ -933,7 +1022,7 @@ mod tests {
 
         // No cached price, token not tracked → None (fail-open).
         assert_eq!(
-            mgr.check_stop_loss("u1", "w", dec!(1), "tok-unknown", entry)
+            mgr.check_stop_loss("u1", "w", dec!(1), "tok-unknown", entry, Decimal::ZERO)
                 .await,
             StopLossAction::None
         );
@@ -943,7 +1032,7 @@ mod tests {
         let old = chrono::Utc::now() - chrono::TimeDelta::seconds(200);
         cache.set_price_with_time("tok-stale", dec!(1), PriceSource::Jupiter, old, Some(9));
         assert_eq!(
-            mgr.check_stop_loss("u2", "w", dec!(1), "tok-stale", entry)
+            mgr.check_stop_loss("u2", "w", dec!(1), "tok-stale", entry, Decimal::ZERO)
                 .await,
             StopLossAction::Exit
         );
@@ -952,7 +1041,7 @@ mod tests {
         cache.track_token("tok-freshish");
         cache.set_price_with_time("tok-freshish", dec!(1), PriceSource::Jupiter, old, Some(9));
         assert_eq!(
-            mgr.check_stop_loss("u3", "w", dec!(1), "tok-freshish", entry)
+            mgr.check_stop_loss("u3", "w", dec!(1), "tok-freshish", entry, Decimal::ZERO)
                 .await,
             StopLossAction::Exit
         );
@@ -966,7 +1055,8 @@ mod tests {
         let mgr = StopLossManager::new(db, Arc::new(ProfitManagementConfig::default()), cache);
         let entry = chrono::Utc::now() - chrono::TimeDelta::seconds(60);
         assert_eq!(
-            mgr.check_stop_loss("u", "w", dec!(0), "tok-z", entry).await,
+            mgr.check_stop_loss("u", "w", dec!(0), "tok-z", entry, Decimal::ZERO)
+                .await,
             StopLossAction::Exit
         );
     }

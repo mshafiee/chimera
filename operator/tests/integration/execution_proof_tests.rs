@@ -118,6 +118,7 @@ async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
             Decimal::from_str("200.0").unwrap(),
             TOKEN,
             entry_time,
+            Decimal::ZERO,
         )
         .await;
     assert_eq!(

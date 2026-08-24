@@ -112,7 +112,14 @@ async fn test_zero_entry_price_forces_immediate_exit() {
     let mgr = StopLossManager::new(db, default_config(), price_cache);
 
     let action = mgr
-        .check_stop_loss("uuid-1", "wallet_a", Decimal::ZERO, TOKEN, past_entry())
+        .check_stop_loss(
+            "uuid-1",
+            "wallet_a",
+            Decimal::ZERO,
+            TOKEN,
+            past_entry(),
+            Decimal::ZERO,
+        )
         .await;
 
     assert_eq!(
@@ -158,6 +165,7 @@ async fn test_consensus_query_failure_no_stop_widening() {
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
             past_entry(),
+            Decimal::ZERO,
         )
         .await;
 
@@ -203,6 +211,7 @@ async fn test_consensus_widens_stop_for_high_wqs_wallet() {
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
             past_entry(),
+            Decimal::ZERO,
         )
         .await;
 
@@ -268,6 +277,7 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
             past_entry(),
+            Decimal::ZERO,
         )
         .await;
     assert_eq!(
@@ -291,6 +301,7 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
             past_entry(),
+            Decimal::ZERO,
         )
         .await;
     assert_eq!(
@@ -360,6 +371,7 @@ async fn test_low_wqs_low_volatility_tightens_to_9pct() {
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
             past_entry(),
+            Decimal::ZERO,
         )
         .await;
     assert_eq!(
@@ -382,6 +394,7 @@ async fn test_low_wqs_low_volatility_tightens_to_9pct() {
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
             past_entry(),
+            Decimal::ZERO,
         )
         .await;
     assert_eq!(
@@ -442,6 +455,7 @@ async fn test_consensus_plus_high_volatility_widens_further() {
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
             past_entry(),
+            Decimal::ZERO,
         )
         .await;
     assert_eq!(
@@ -465,6 +479,7 @@ async fn test_consensus_plus_high_volatility_widens_further() {
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
             past_entry(),
+            Decimal::ZERO,
         )
         .await;
     assert_eq!(
@@ -508,6 +523,7 @@ async fn test_hard_stop_overrides_wider_dynamic_threshold() {
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
             past_entry(),
+            Decimal::ZERO,
         )
         .await;
 
@@ -541,6 +557,7 @@ async fn test_stop_loss_price_cache_unavailable_returns_none() {
             Decimal::from_str("1.00").unwrap(),
             "token_nocache",
             past_entry(),
+            Decimal::ZERO,
         )
         .await;
 
@@ -585,6 +602,7 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
             past_entry(),
+            Decimal::ZERO,
         )
         .await;
     assert_eq!(
@@ -608,6 +626,7 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
             past_entry(),
+            Decimal::ZERO,
         )
         .await;
     assert_eq!(
@@ -657,7 +676,14 @@ async fn test_recovery_gate_exits_stale_losers() {
     // soft threshold but above the -5% floor and inside the 300s window →
     // selective gate holds for recovery, does NOT exit yet.
     let action = mgr
-        .check_stop_loss("g1", WALLET_A, Decimal::ONE, "tok-gate", entry_secs_ago(60))
+        .check_stop_loss(
+            "g1",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-gate",
+            entry_secs_ago(60),
+            Decimal::ZERO,
+        )
         .await;
     assert_eq!(
         action,
@@ -684,7 +710,14 @@ async fn test_recovery_gate_exits_stale_losers() {
     };
     let mgr2 = StopLossManager::new(db2, Arc::new(cfg2), pc2.clone());
     let action = mgr2
-        .check_stop_loss("g2", WALLET_A, Decimal::ONE, "tok-gate2", entry_secs_ago(400))
+        .check_stop_loss(
+            "g2",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-gate2",
+            entry_secs_ago(400),
+            Decimal::ZERO,
+        )
         .await;
     assert_eq!(
         action,
@@ -711,7 +744,14 @@ async fn test_recovery_gate_exits_stale_losers() {
     };
     let mgr3 = StopLossManager::new(db3, Arc::new(cfg3), pc3.clone());
     let action = mgr3
-        .check_stop_loss("g3", WALLET_A, Decimal::ONE, "tok-gate3", entry_secs_ago(60))
+        .check_stop_loss(
+            "g3",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-gate3",
+            entry_secs_ago(60),
+            Decimal::ZERO,
+        )
         .await;
     assert_eq!(
         action,
@@ -721,7 +761,14 @@ async fn test_recovery_gate_exits_stale_losers() {
 
     // Fresh entry (0s): recovery gate not yet triggered; loss small → hold.
     let action = mgr
-        .check_stop_loss("g4", WALLET_A, Decimal::ONE, "tok-gate", chrono::Utc::now())
+        .check_stop_loss(
+            "g4",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-gate",
+            chrono::Utc::now(),
+            Decimal::ZERO,
+        )
         .await;
     assert_eq!(action, StopLossAction::None);
 }
@@ -742,7 +789,14 @@ async fn test_wallet_missing_or_error_falls_back_to_default_wqs() {
         Some(9),
     );
     let action = mgr
-        .check_stop_loss("w1", "no-such-wallet", Decimal::ONE, "tok-w", past_entry())
+        .check_stop_loss(
+            "w1",
+            "no-such-wallet",
+            Decimal::ONE,
+            "tok-w",
+            past_entry(),
+            Decimal::ZERO,
+        )
         .await;
     assert_eq!(
         action,
@@ -764,7 +818,14 @@ async fn test_wallet_missing_or_error_falls_back_to_default_wqs() {
     );
     let mgr2 = StopLossManager::new(db.clone(), cfg.clone(), pc2.clone());
     let action = mgr2
-        .check_stop_loss("w2", "any-wallet", Decimal::ONE, "tok-w2", past_entry())
+        .check_stop_loss(
+            "w2",
+            "any-wallet",
+            Decimal::ONE,
+            "tok-w2",
+            past_entry(),
+            Decimal::ZERO,
+        )
         .await;
     assert_eq!(
         action,
@@ -806,7 +867,14 @@ async fn test_atr_based_stop_override() {
     });
     let mgr = StopLossManager::new(db, cfg, pc.clone());
     let action = mgr
-        .check_stop_loss("atr-1", WALLET_A, Decimal::ONE, "tok-atr", past_entry())
+        .check_stop_loss(
+            "atr-1",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-atr",
+            past_entry(),
+            Decimal::ZERO,
+        )
         .await;
     // With vol > 0 and a 10x multiplier the ATR stop is very wide (negative
     // threshold) — the -8% mark does NOT breach it → hold.
@@ -843,7 +911,14 @@ async fn test_adaptive_volatility_tightens_low_vol_stops() {
         Some(9),
     );
     let action = mgr
-        .check_stop_loss("lv-1", WALLET_A, Decimal::ONE, "tok-lowvol", past_entry())
+        .check_stop_loss(
+            "lv-1",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-lowvol",
+            past_entry(),
+            Decimal::ZERO,
+        )
         .await;
     assert_eq!(action, StopLossAction::None);
     // -15% mark exits.
@@ -854,7 +929,14 @@ async fn test_adaptive_volatility_tightens_low_vol_stops() {
         Some(9),
     );
     let action = mgr
-        .check_stop_loss("lv-2", WALLET_A, Decimal::ONE, "tok-lowvol", past_entry())
+        .check_stop_loss(
+            "lv-2",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-lowvol",
+            past_entry(),
+            Decimal::ZERO,
+        )
         .await;
     assert_eq!(action, StopLossAction::Exit);
 }
@@ -918,7 +1000,14 @@ async fn test_stop_mark_refresh_rejects_bad_cache_mark() {
     });
     let mgr = StopLossManager::new(db, cfg, pc.clone());
     let action = mgr
-        .check_stop_loss("mk-1", WALLET_A, Decimal::ONE, "tok-mark", past_entry())
+        .check_stop_loss(
+            "mk-1",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-mark",
+            past_entry(),
+            Decimal::ZERO,
+        )
         .await;
     assert_eq!(
         action,
@@ -950,7 +1039,14 @@ async fn test_stop_mark_refresh_confirms_exit_on_divergent_mark() {
     });
     let mgr = StopLossManager::new(db, cfg, pc.clone());
     let action = mgr
-        .check_stop_loss("mk-2", WALLET_A, Decimal::ONE, "tok-mark2", past_entry())
+        .check_stop_loss(
+            "mk-2",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-mark2",
+            past_entry(),
+            Decimal::ZERO,
+        )
         .await;
     assert_eq!(
         action,
@@ -987,6 +1083,7 @@ async fn test_wick_protection_grace_and_overrides() {
             Decimal::ONE,
             "tok-wick",
             chrono::Utc::now(),
+            Decimal::ZERO,
         )
         .await;
     assert_eq!(
@@ -1009,6 +1106,7 @@ async fn test_wick_protection_grace_and_overrides() {
             Decimal::ONE,
             "tok-wick",
             chrono::Utc::now(),
+            Decimal::ZERO,
         )
         .await;
     assert_eq!(
@@ -1019,7 +1117,14 @@ async fn test_wick_protection_grace_and_overrides() {
 
     // -25% beyond the wick window → normal exit.
     let action = mgr
-        .check_stop_loss("wk-3", WALLET_A, Decimal::ONE, "tok-wick", past_entry())
+        .check_stop_loss(
+            "wk-3",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-wick",
+            past_entry(),
+            Decimal::ZERO,
+        )
         .await;
     assert_eq!(action, StopLossAction::Exit);
 }
@@ -1045,7 +1150,14 @@ async fn test_consensus_db_fallback_and_query_error() {
     });
     let mgr = StopLossManager::new(db.clone(), cfg.clone(), pc.clone());
     let action = mgr
-        .check_stop_loss("cs-1", WALLET_A, Decimal::ONE, "tok-cons", past_entry())
+        .check_stop_loss(
+            "cs-1",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-cons",
+            past_entry(),
+            Decimal::ZERO,
+        )
         .await;
     // -15% base × 1.25 consensus = -18.75% → a -20% mark exits.
     assert_eq!(
@@ -1068,7 +1180,14 @@ async fn test_consensus_db_fallback_and_query_error() {
     );
     let mgr2 = StopLossManager::new(db.clone(), cfg.clone(), pc2);
     let action = mgr2
-        .check_stop_loss("cs-2", WALLET_A, Decimal::ONE, "tok-cons2", past_entry())
+        .check_stop_loss(
+            "cs-2",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-cons2",
+            past_entry(),
+            Decimal::ZERO,
+        )
         .await;
     assert_eq!(
         action,
@@ -1110,7 +1229,14 @@ async fn test_max_stop_loss_distance_override_warns() {
     let mgr = StopLossManager::new(db, cfg, pc.clone());
     // -6% breaches the clamped -5% threshold → exit (the max-distance warn fires).
     let action = mgr
-        .check_stop_loss("cl-1", WALLET_A, Decimal::ONE, "tok-clamp", past_entry())
+        .check_stop_loss(
+            "cl-1",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-clamp",
+            past_entry(),
+            Decimal::ZERO,
+        )
         .await;
     assert_eq!(action, StopLossAction::Exit);
 }
@@ -1242,7 +1368,14 @@ async fn test_aggregator_consensus_path() {
     );
     mgr.set_signal_aggregator(agg).await;
     let action = mgr
-        .check_stop_loss("ag-1", WALLET_A, Decimal::ONE, "tok-agg", past_entry())
+        .check_stop_loss(
+            "ag-1",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-agg",
+            past_entry(),
+            Decimal::ZERO,
+        )
         .await;
     assert_eq!(
         action,
@@ -1290,7 +1423,14 @@ async fn test_atr_override_applies_tighter_threshold() {
     let mgr = StopLossManager::new(db, cfg, pc.clone());
     // -5% mark: breaches the ATR-overridden threshold → exit.
     let action = mgr
-        .check_stop_loss("ao-1", WALLET_A, Decimal::ONE, "tok-atr2", past_entry())
+        .check_stop_loss(
+            "ao-1",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-atr2",
+            past_entry(),
+            Decimal::ZERO,
+        )
         .await;
     assert_eq!(
         action,
@@ -1336,7 +1476,14 @@ async fn test_volatility_multiplier_mid_bands() {
     let mgr = StopLossManager::new(db.clone(), cfg.clone(), pc.clone());
     // Medium WQS -15% × 1.5 = -22.5% → -10% mark holds.
     let action = mgr
-        .check_stop_loss("mb-1", WALLET_A, Decimal::ONE, "tok-mid", past_entry())
+        .check_stop_loss(
+            "mb-1",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-mid",
+            past_entry(),
+            Decimal::ZERO,
+        )
         .await;
     assert_eq!(action, StopLossAction::None);
 
@@ -1365,7 +1512,14 @@ async fn test_volatility_multiplier_mid_bands() {
     );
     let mgr2 = StopLossManager::new(db.clone(), cfg.clone(), pc2.clone());
     let action = mgr2
-        .check_stop_loss("mb-2", WALLET_A, Decimal::ONE, "tok-gentle", past_entry())
+        .check_stop_loss(
+            "mb-2",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-gentle",
+            past_entry(),
+            Decimal::ZERO,
+        )
         .await;
     assert_eq!(
         action,
@@ -1396,7 +1550,14 @@ async fn test_wick_large_loss_override() {
         Some(9),
     );
     let action = mgr
-        .check_stop_loss("ll-1", WALLET_A, Decimal::ONE, "tok-ll", chrono::Utc::now())
+        .check_stop_loss(
+            "ll-1",
+            WALLET_A,
+            Decimal::ONE,
+            "tok-ll",
+            chrono::Utc::now(),
+            Decimal::ZERO,
+        )
         .await;
     assert_eq!(
         action,
@@ -1553,6 +1714,7 @@ async fn test_recovery_gate_still_exits_when_defer_disabled() {
             Decimal::from_str("1.0").unwrap(),
             TOKEN,
             entry_secs_ago(120),
+            Decimal::ZERO,
         )
         .await;
     assert_eq!(
@@ -1580,6 +1742,7 @@ async fn test_recovery_gate_still_exits_when_no_quote_client() {
             Decimal::from_str("1.0").unwrap(),
             TOKEN,
             entry_secs_ago(120),
+            Decimal::ZERO,
         )
         .await;
     assert_eq!(
@@ -1690,6 +1853,7 @@ async fn test_recovery_gate_defers_on_bad_live_fill_then_exits_after_budget() {
                 Decimal::from_str("100.0").unwrap(),
                 TOKEN,
                 entry_secs_ago(120),
+                Decimal::ZERO,
             )
             .await;
         assert_eq!(
@@ -1707,6 +1871,7 @@ async fn test_recovery_gate_defers_on_bad_live_fill_then_exits_after_budget() {
             Decimal::from_str("100.0").unwrap(),
             TOKEN,
             entry_secs_ago(120),
+            Decimal::ZERO,
         )
         .await;
     assert_eq!(
@@ -1729,6 +1894,7 @@ async fn test_recovery_gate_defers_on_bad_live_fill_then_exits_after_budget() {
             Decimal::from_str("100.0").unwrap(),
             TOKEN,
             entry_secs_ago(120),
+            Decimal::ZERO,
         )
         .await;
     assert_eq!(
@@ -1736,4 +1902,248 @@ async fn test_recovery_gate_defers_on_bad_live_fill_then_exits_after_budget() {
         StopLossAction::Exit,
         "at/beyond the -25% hard stop floor never defers"
     );
+}
+
+// ─── Actual-size executable quotes (2026-08-24) ──────────────────────────────
+// The old probe quoted exactly 1 whole token — dust for sub-cent tokens,
+// near-mid pricing with zero impact — so the skew check approved exits whose
+// real fills collapsed (AbNNre: dust mark −5.7%, actual-size fill −13.95%).
+
+/// Size-aware Jupiter sell-quote mock: parses `amount=` from the request line
+/// and applies impact only above `impact_threshold_raw` units.
+async fn spawn_size_aware_quote_mock(
+    impact_threshold_raw: u64,
+    clean_per_token_lamports: u64,
+    impacted_per_token_lamports: u64,
+) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 16384];
+            let Ok(n) = sock.read(&mut buf).await else {
+                continue;
+            };
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let requested: u128 = req
+                .split("amount=")
+                .nth(1)
+                .and_then(|rest| rest.split('&').next())
+                .and_then(|v| v.parse::<u128>().ok())
+                .unwrap_or(0);
+            let per_token = if requested as u64 > impact_threshold_raw {
+                impacted_per_token_lamports
+            } else {
+                clean_per_token_lamports
+            };
+            // outAmount (lamports) = raw_units × per_token_lamports / 1e9
+            let out = (requested * per_token as u128 / 1_000_000_000_u128).max(1);
+            let body = serde_json::json!({ "outAmount": out.to_string() }).to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// Scenario (AbNNre-shaped): entry $1.00/token, cache $0.95 (−5%), recovery
+/// gate past its longer window so the defer check runs. The pool quotes a
+/// CLEAN price for dust probes (1 token → −6%) but an IMPACTED price for
+/// position-sized probes (25% of a 150-token holding → −60%). The old
+/// 1-token probe saw −6% (gap 1 < skew 5) and approved the exit; the
+/// actual-size probe sees −60% and defers.
+#[tokio::test]
+async fn test_actual_size_quote_defers_where_dust_quote_exits() {
+    let (db, _tmp) = create_test_db().await;
+    let pool = pg_pool(&db);
+    insert_wallet(&pool, "wallet_asize", 50.0).await;
+
+    // Impact threshold 2e9 raw (2 tokens); dust → $0.94/token (−6%);
+    // position-sized → $0.40/token (−60%). SOL fixed at $100.
+    let mock = spawn_size_aware_quote_mock(2_000_000_000, 9_400_000, 4_000_000).await;
+
+    let price_cache = Arc::new(PriceCache::new().unwrap());
+    const TOKEN: &str = "tok_asize";
+    set_cache_price(&price_cache, TOKEN, "0.95");
+    price_cache.set_price(
+        "So11111111111111111111111111111111111111112",
+        Decimal::from_str("100").unwrap(),
+        PriceSource::Jupiter,
+        Some(9),
+    );
+
+    let config = Arc::new(ProfitManagementConfig {
+        recovery_gate_secs: 30,
+        recovery_gate_threshold: Decimal::from_str("-1.0").unwrap(),
+        recovery_gate_hard_threshold: Decimal::from_str("-20.0").unwrap(),
+        recovery_gate_max_secs: 300,
+        // Let adaptive stops breathe: the default -5 cap would cut at exactly
+        // -5% right after a defer (fall-through), masking the defer behavior
+        // under test. Prod pins a wider cap too.
+        max_stop_loss_distance: Decimal::from_str("-50.0").unwrap(),
+        defer_max_ticks: 3,
+        exit_skew_pct: Decimal::from_str("5.0").unwrap(),
+        ..ProfitManagementConfig::default()
+    });
+    let mgr = StopLossManager::new(db.clone(), config, price_cache.clone());
+    mgr.set_token_parser(quote_parser(&mock)).await;
+
+    // Legacy behavior preserved: unknown size (zero notional) → 1-token dust
+    // probe → live −6% vs cache −5% → gap 1 < skew 5 → EXIT.
+    let action = mgr
+        .check_stop_loss(
+            "u-asize-dust",
+            "wallet_asize",
+            Decimal::from_str("1.0").unwrap(),
+            TOKEN,
+            entry_secs_ago(310),
+            Decimal::ZERO,
+        )
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::Exit,
+        "dust probe must reproduce legacy behavior (no defer)"
+    );
+
+    // Actual size: 1.5 SOL notional @ SOL $100 = $150 → 150 tokens → 25%
+    // probe = 37.5 tokens → impacted −60% fill → gap 55 > skew 5 → DEFER.
+    for i in 0..3 {
+        let action = mgr
+            .check_stop_loss(
+                "u-asize-real",
+                "wallet_asize",
+                Decimal::from_str("1.0").unwrap(),
+                TOKEN,
+                entry_secs_ago(310),
+                Decimal::from_str("1.5").unwrap(),
+            )
+            .await;
+        assert_eq!(
+            action,
+            StopLossAction::None,
+            "tick {i}: position-sized probe must defer within budget"
+        );
+    }
+    // Budget exhausted → exit regardless.
+    let action = mgr
+        .check_stop_loss(
+            "u-asize-real",
+            "wallet_asize",
+            Decimal::from_str("1.0").unwrap(),
+            TOKEN,
+            entry_secs_ago(310),
+            Decimal::from_str("1.5").unwrap(),
+        )
+        .await;
+    assert_eq!(action, StopLossAction::Exit, "budget still bounds deferral");
+}
+
+/// Frozen-feed fast-truth: an underwater position whose cached price has not
+/// moved for `frozen_feed_ticks` consecutive ticks skips the soft-band
+/// recovery hold (the mark is last-traded price — static means nobody is
+/// trading) and evaluates the exit directly. No parser wired → fail-open →
+/// Exit once frozen.
+#[tokio::test]
+async fn test_frozen_feed_underwater_skips_recovery_hold() {
+    let (db, _tmp) = create_test_db().await;
+    let pool = pg_pool(&db);
+    insert_wallet(&pool, "wallet_frozen", 50.0).await;
+    let price_cache = Arc::new(PriceCache::new().unwrap());
+    const TOKEN: &str = "tok_frozen";
+    set_cache_price(&price_cache, TOKEN, "0.95"); // −5%, never changes
+
+    let config = Arc::new(ProfitManagementConfig {
+        recovery_gate_secs: 30,
+        recovery_gate_threshold: Decimal::from_str("-1.0").unwrap(),
+        recovery_gate_hard_threshold: Decimal::from_str("-20.0").unwrap(),
+        recovery_gate_max_secs: 300,
+        max_stop_loss_distance: Decimal::from_str("-50.0").unwrap(),
+        frozen_feed_ticks: 3,
+        ..ProfitManagementConfig::default()
+    });
+    let mgr = StopLossManager::new(db, config, price_cache);
+
+    // Ticks 1-2: below the frozen threshold → soft band holds as usual.
+    for i in 0..2 {
+        let action = mgr
+            .check_stop_loss(
+                "u-frozen",
+                "wallet_frozen",
+                Decimal::from_str("1.0").unwrap(),
+                TOKEN,
+                entry_secs_ago(120),
+                Decimal::ZERO,
+            )
+            .await;
+        assert_eq!(
+            action,
+            StopLossAction::None,
+            "tick {i}: pre-threshold frozen count must keep the recovery hold"
+        );
+    }
+    // Tick 3: frozen threshold reached → hold skipped → fail-open exit.
+    let action = mgr
+        .check_stop_loss(
+            "u-frozen",
+            "wallet_frozen",
+            Decimal::from_str("1.0").unwrap(),
+            TOKEN,
+            entry_secs_ago(120),
+            Decimal::ZERO,
+        )
+        .await;
+    assert_eq!(
+        action,
+        StopLossAction::Exit,
+        "frozen feed underwater must skip the recovery hold"
+    );
+}
+
+/// Control: `frozen_feed_ticks = 0` preserves today's behavior exactly —
+/// the same static price keeps holding for recovery.
+#[tokio::test]
+async fn test_frozen_feed_disabled_keeps_soft_band_hold() {
+    let (db, _tmp) = create_test_db().await;
+    let pool = pg_pool(&db);
+    insert_wallet(&pool, "wallet_frozen_off", 50.0).await;
+    let price_cache = Arc::new(PriceCache::new().unwrap());
+    const TOKEN: &str = "tok_frozen_off";
+    set_cache_price(&price_cache, TOKEN, "0.95");
+
+    let config = Arc::new(ProfitManagementConfig {
+        recovery_gate_secs: 30,
+        recovery_gate_threshold: Decimal::from_str("-1.0").unwrap(),
+        recovery_gate_hard_threshold: Decimal::from_str("-20.0").unwrap(),
+        recovery_gate_max_secs: 300,
+        max_stop_loss_distance: Decimal::from_str("-50.0").unwrap(),
+        frozen_feed_ticks: 0,
+        ..ProfitManagementConfig::default()
+    });
+    let mgr = StopLossManager::new(db, config, price_cache);
+
+    for i in 0..6 {
+        let action = mgr
+            .check_stop_loss(
+                "u-frozen-off",
+                "wallet_frozen_off",
+                Decimal::from_str("1.0").unwrap(),
+                TOKEN,
+                entry_secs_ago(120),
+                Decimal::ZERO,
+            )
+            .await;
+        assert_eq!(
+            action,
+            StopLossAction::None,
+            "tick {i}: disabled detection keeps the soft-band hold"
+        );
+    }
 }

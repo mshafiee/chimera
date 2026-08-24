@@ -2033,6 +2033,17 @@ pub struct ProfitManagementConfig {
     /// worst case so a persistently bad fill never strands a position.
     #[serde(default = "default_defer_max_ticks")]
     pub defer_max_ticks: u64,
+    /// Frozen-feed underwater fast-truth (2026-08-24): Jupiter's `usdPrice`
+    /// is the LAST-TRADED price, so a token whose trading has dried up shows
+    /// a static mark that can diverge arbitrarily from the executable price
+    /// (AbNNre 2026-08-23: feed frozen at −5.78% for 4 min while the real
+    /// fill was −13.95%). When a position's cached price is unchanged for
+    /// this many consecutive monitor ticks AND it is underwater past the
+    /// recovery-gate threshold, skip the soft-band recovery hold and evaluate
+    /// the exit against the LIVE sell quote (defer budget still applies; the
+    /// −25% hard floor never defers). 0 disables.
+    #[serde(default = "default_frozen_feed_ticks")]
+    pub frozen_feed_ticks: u64,
     /// Pre-graduation exit rail (2026-08-07, Phase 5): exit pump.fun curve
     /// tokens when the bonding curve reaches the late-curve dump zone
     /// (completion > threshold, curve not yet complete) — before the depth
@@ -2170,6 +2181,10 @@ fn default_defer_max_ticks() -> u64 {
     3
 }
 
+fn default_frozen_feed_ticks() -> u64 {
+    12 // ~60s of steady-state 5s ticks with an unchanged price
+}
+
 fn default_pre_graduation_exit_enabled() -> bool {
     true
 }
@@ -2262,6 +2277,7 @@ impl Default for ProfitManagementConfig {
             recovery_gate_max_secs: default_recovery_gate_max_secs(),
             exit_skew_pct: default_exit_skew_pct(),
             defer_max_ticks: default_defer_max_ticks(),
+            frozen_feed_ticks: default_frozen_feed_ticks(),
             pre_graduation_exit_enabled: default_pre_graduation_exit_enabled(),
             pre_graduation_exit_threshold: default_pre_graduation_exit_threshold(),
             exit_profiles: ExitProfileConfig::default(),

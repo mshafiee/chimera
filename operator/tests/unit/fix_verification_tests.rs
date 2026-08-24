@@ -123,6 +123,7 @@ async fn should_not_fire_hard_stop_at_2pct_loss_with_default_config() {
             Decimal::from_str("100.00").unwrap(),
             TOKEN,
             past_entry(),
+            Decimal::ZERO,
         )
         .await;
 
@@ -171,6 +172,7 @@ async fn should_fire_dynamic_stop_at_21pct_loss_for_high_wqs_wallet() {
             Decimal::from_str("100.00").unwrap(),
             TOKEN,
             past_entry(),
+            Decimal::ZERO,
         )
         .await;
     assert_eq!(
@@ -193,6 +195,7 @@ async fn should_fire_dynamic_stop_at_21pct_loss_for_high_wqs_wallet() {
             Decimal::from_str("100.00").unwrap(),
             TOKEN,
             past_entry(),
+            Decimal::ZERO,
         )
         .await;
     assert_eq!(

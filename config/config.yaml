@@ -283,6 +283,14 @@ profit_management:
   # losses (past the hard stop floor) and missing quotes never defer.
   exit_skew_pct: 5.0
   defer_max_ticks: 3
+  # Frozen-feed underwater fast-truth (2026-08-24): Jupiter's usdPrice is the
+  # LAST-TRADED price — a static value across monitor ticks means nobody is
+  # trading, not a stable price. After this many unchanged ticks on an
+  # underwater position, skip the recovery-gate soft-band hold and evaluate
+  # the exit against the LIVE sell quote (defer budget still bounds it; -25%
+  # hard floor never defers). Evidence — AbNNre 2026-08-23: feed frozen at
+  # -5.78% for ~4 min while the real fill was -13.95% (-0.209 SOL).
+  frozen_feed_ticks: 12
   pre_graduation_exit_enabled: true   # Phase 5: exit pump.fun curve tokens at >85% completion (dump zone)
   pre_graduation_exit_threshold: 0.85 # Before the graduation depth discontinuity
   # Per-wallet exit profiles: derive per-wallet time-exit hours + trailing

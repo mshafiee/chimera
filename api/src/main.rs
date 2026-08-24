@@ -2213,6 +2213,7 @@ async fn main() -> anyhow::Result<()> {
                                 pos.entry_price,
                                 &pos.token_address,
                                 pos.entry_time,
+                                pos.entry_amount_sol,
                             ).await;
 
                             if sl_action == StopLossAction::Exit {
