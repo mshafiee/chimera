@@ -2238,14 +2238,47 @@ impl SelectionService {
                     if recent_n >= self.config.proven_recency_trades
                         && net_recent < Decimal::ZERO =>
                 {
-                    tracing::debug!(
-                        wallet = wallet_address,
-                        recent_n,
-                        proven_recency_trades = self.config.proven_recency_trades,
-                        net_recent = %net_recent,
-                        "Proven-wallet check: recent form negative — treating as unproven"
-                    );
-                    return false;
+                    // Shadow escape hatch (2026-08-24): a live-ledger block
+                    // is otherwise unrecoverable — the wallet cannot trade
+                    // to rebuild its live form, and blocking it also stops
+                    // the very copy flow the shadow book keeps scoring
+                    // (shadow evaluates every signal regardless of live
+                    // blocks). When the wallet's trailing-7d deduped shadow
+                    // mirror_main form is positive with enough samples,
+                    // trust that evidence and waive the overlay. Prod
+                    // evidence at decision time: 8MPy8CXZ +6.58%/116 exits,
+                    // ArcebCcX +2.65%/29.
+                    const SHADOW_ESCAPE_WINDOW_DAYS: i32 = 7;
+                    const SHADOW_ESCAPE_MIN_SAMPLES: i64 = 3;
+                    match self
+                        .db
+                        .get_wallet_pnl_statistics(wallet_address, SHADOW_ESCAPE_WINDOW_DAYS)
+                        .await
+                    {
+                        Ok(Some((n, mean, _)))
+                            if n >= SHADOW_ESCAPE_MIN_SAMPLES && mean > Decimal::ZERO =>
+                        {
+                            tracing::info!(
+                                wallet = wallet_address,
+                                recent_n,
+                                net_recent = %net_recent,
+                                shadow_n = n,
+                                shadow_mean_pct = %mean,
+                                "Recency overlay waived: live form negative but trailing shadow mirror_main positive"
+                            );
+                        }
+                        _ => {
+                            tracing::debug!(
+                                wallet = wallet_address,
+                                recent_n,
+                                proven_recency_trades =
+                                    self.config.proven_recency_trades,
+                                net_recent = %net_recent,
+                                "Proven-wallet check: recent form negative and no positive shadow evidence — treating as unproven"
+                            );
+                            return false;
+                        }
+                    }
                 }
                 Ok(_) => {}
                 Err(e) => {

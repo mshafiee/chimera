@@ -2241,6 +2241,28 @@ async fn test_proven_recency_overlay_blocks_stale_form() {
         insert_closed_trade(&db, &format!("rec-recent-{i}"), "-0.2", 0).await;
     }
 
+    // Negative trailing shadow form too → the escape hatch does not waive.
+    for i in 0..4 {
+        sqlx::query(
+            "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, strategy, main_admitted, entry_amount_sol, ingress, opened_at) \
+             VALUES ($1, 'd', 'run', $2, $3, 'SHIELD', true, 0.1, 'webhook', NOW() - make_interval(hours => $4::int))",
+        )
+        .bind(format!("rec-negsh-{i}"))
+        .bind(WALLET)
+        .bind(TOKEN)
+        .bind(i + 1)
+        .execute(&pg_pool(&db))
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO shadow_exits (shadow_id, exit_strategy, pnl_pct, pnl_sol) VALUES ($1, 'mirror_main', -4.0, 0.0)",
+        )
+        .bind(format!("rec-negsh-{i}"))
+        .execute(&pg_pool(&db))
+        .await
+        .unwrap();
+    }
+
     // Overlay active: negative trailing form blocks the solo admission even
     // though the aggregate check passes.
     let service = build_service(
@@ -2298,6 +2320,62 @@ async fn test_proven_recency_positive_recent_form_admits() {
     assert!(
         d.admitted,
         "positive trailing form stays proven: {:?}",
+        d.rejection_code
+    );
+}
+
+/// Shadow escape hatch: live trailing form is negative but the trailing-7d
+/// deduped shadow mirror_main form is positive with enough samples — the
+/// overlay waives and the wallet solo-admits again (self-recovering valve;
+/// a pure live-ledger block is otherwise unrecoverable).
+#[tokio::test]
+async fn test_recency_overlay_shadow_escape_hatch_waives() {
+    let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
+    seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
+    let mut cfg = base_config();
+    cfg.require_consensus_or_proven = true;
+    cfg.proven_recency_trades = 10;
+
+    // Old winners + recent live losers (aggregate positive, window negative).
+    for i in 0..6 {
+        insert_closed_trade(&db, &format!("hatch-old-{i}"), "1.0", 21).await;
+    }
+    for i in 0..10 {
+        insert_closed_trade(&db, &format!("hatch-live-{i}"), "-0.2", 0).await;
+    }
+    // Trailing-7d shadow mirror_main POSITIVE: 4 exits at +5% across
+    // distinct hours (>=3 samples, mean > 0).
+    for i in 0..4 {
+        sqlx::query(
+            "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, strategy, main_admitted, entry_amount_sol, ingress, opened_at) \
+             VALUES ($1, 'd', 'run', $2, $3, 'SHIELD', true, 0.1, 'webhook', NOW() - make_interval(hours => $4::int))",
+        )
+        .bind(format!("hatch-sh-{i}"))
+        .bind(WALLET)
+        .bind(TOKEN)
+        .bind(i * 5 + 1)
+        .execute(&pg_pool(&db))
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO shadow_exits (shadow_id, exit_strategy, pnl_pct, pnl_sol) VALUES ($1, 'mirror_main', 5.0, 0.0)",
+        )
+        .bind(format!("hatch-sh-{i}"))
+        .execute(&pg_pool(&db))
+        .await
+        .unwrap();
+    }
+
+    let service = build_service(
+        db.clone(),
+        seeded_parser(TOKEN, "SHIELD", "100000", true),
+        cfg,
+    );
+    let d = service.decide(&request(TOKEN, Action::Buy)).await;
+    assert!(
+        d.admitted,
+        "positive trailing shadow evidence must waive the recency overlay: {:?}",
         d.rejection_code
     );
 }
