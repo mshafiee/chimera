@@ -385,7 +385,7 @@ async fn test_on_signal_buy_no_price_writes_no_price_exits() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert_eq!(exits, 5, "all five exit strategies recorded with no_price");
+    assert_eq!(exits, 6, "all six exit strategies recorded with no_price");
 }
 
 #[tokio::test]
@@ -738,8 +738,11 @@ async fn test_exit_max_lifetime_all_strategies() {
     seed_prices(&cache, "1.0");
     let trader = ShadowTrader::new(db.clone(), cache, shadow_config(), None);
     trader.check_exits().await;
-    let count = wait_for_exit_count(&pool, "exit-life", 5).await;
-    assert_eq!(count, 5, "max lifetime exits every strategy");
+    let count = wait_for_exit_count(&pool, "exit-life", 6).await;
+    assert_eq!(
+        count, 6,
+        "max lifetime exits every strategy (incl. mirror_v2)"
+    );
     let fully: bool = sqlx::query_scalar(
         "SELECT fully_closed FROM shadow_positions WHERE shadow_id = 'exit-life'",
     )

@@ -2325,19 +2325,24 @@ async fn main() -> anyhow::Result<()> {
                             let pt_triggered = !matches!(pt_action, ProfitTargetAction::None);
                             let pt_exit = match pt_action {
                                 ProfitTargetAction::FullExit => "full_profit_target",
+                                // Momentum cuts are protective, not profit
+                                // taking — label them truthfully (they fire
+                                // at negative PnL and were corrupting
+                                // exit-reason analytics as "profit targets").
+                                ProfitTargetAction::MomentumExit => "momentum_exit",
                                 ProfitTargetAction::ExitAmount(_) => "partial_profit_target",
                                 ProfitTargetAction::None => "none",
                             };
                             match pt_action {
-                                ProfitTargetAction::FullExit => {
+                                ProfitTargetAction::FullExit | ProfitTargetAction::MomentumExit => {
                                     tracing::info!(
                                         trade_uuid = %pos.trade_uuid,
                                         token = %pos.token_address,
-                                        exit_reason = "full_profit_target",
+                                        exit_reason = pt_exit,
                                         exit_price = ?current_price,
                                         pnl_percent = ?pnl_pct,
                                         pnl_sol = ?est_pnl_sol,
-                                        "Full profit target reached, queuing EXIT signal"
+                                        "Profit rail full exit reached, queuing EXIT signal"
                                     );
                                     let signal = build_exit_signal(&pos, rust_decimal::Decimal::ONE);
                                     if let Err(e) = monitor_engine.queue_signal(signal, None).await {

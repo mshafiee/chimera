@@ -12,15 +12,15 @@ use crate::engine::selection::{BuyDecision, SelectionRequest};
 use crate::models::Action;
 use crate::price_cache::PriceCache;
 
-const EXIT_STRATEGIES: [&str; 5] = [
+const EXIT_STRATEGIES: [&str; 6] = [
     "mirror_main",
+    "mirror_v2",
     "fixed_1h",
     "fixed_4h",
     "fixed_24h",
     "wallet_sell",
 ];
 
-const FIXED_HOLDS_SECS: [i64; 3] = [3600, 14400, 86400];
 
 /// Write-time dedup window: at most one shadow position per (wallet, token)
 /// within this window (2026-08-14). Repeat whale BUY signals on one token
@@ -624,11 +624,67 @@ impl ShadowTrader {
             }
         }
 
-        for (i, strategy) in EXIT_STRATEGIES.iter().enumerate() {
-            if *strategy == "mirror_main" || *strategy == "wallet_sell" {
+        // ── mirror_v2 A/B (2026-08-25, profitability review) ───────────────
+        // Widened-payoff probe against mirror_main on IDENTICAL streams:
+        // live banks winners at ~+5% while the same streams' shadow
+        // target-exits average +14%, and live payoff is 1:1 (avg_win ==
+        // avg_loss) which nets negative after ~1.2% round-trip fees. v2 =
+        // final target raised 5 -> 12 and trailing distance doubled; recovery
+        // gate, hard floor, time exits unchanged. Paired rows per shadow_id
+        // make the comparison exact. Verdict rule: promote the wider profile
+        // to live rails only if v2 net > main net over >=100 paired exits.
+        let mut cfg_v2 = (*self.config.profit_config).clone();
+        cfg_v2.targets = vec![rust_decimal::Decimal::from(12)];
+        let mut eff_v2 = eff;
+        eff_v2.trailing_distance_pct *= rust_decimal::Decimal::from(2);
+        if let Some(reason) = Self::check_mirror_main(
+            &cfg_v2,
+            &eff_v2,
+            pos.entry_price_usd,
+            current_price,
+            peak_price,
+            elapsed_secs,
+            &pos.strategy,
+        ) {
+            let insert_v2 = sqlx::query(
+                r#"INSERT INTO shadow_exits (shadow_id, exit_strategy, exit_price_usd, exit_sol_price_usd, pnl_pct, pnl_sol, exit_reason, hold_duration_secs)
+                   VALUES ($1, 'mirror_v2', $2, $3, $4, $5, $6, $7)
+                   ON CONFLICT (shadow_id, exit_strategy) DO NOTHING"#,
+            )
+            .bind(&pos.shadow_id)
+            .bind(current_price)
+            .bind(sol_price)
+            .bind(Self::pnl_pct(pos.entry_price_usd, current_price))
+            .bind(Self::pnl_sol(pos.entry_price_usd, current_price, pos.entry_amount_sol))
+            .bind(&reason)
+            .bind(elapsed_secs.max(0))
+            .execute(pool)
+            .await;
+
+            if let Ok(r) = insert_v2 {
+                if r.rows_affected() > 0 {
+                    tracing::trace!(
+                        shadow_id = %pos.shadow_id,
+                        reason = %reason,
+                        pnl_pct = %Self::pnl_pct(pos.entry_price_usd, current_price),
+                        "Shadow: mirror_v2 exit"
+                    );
+                }
+            }
+        }
+
+        for strategy in EXIT_STRATEGIES.iter() {
+            if matches!(*strategy, "mirror_main" | "mirror_v2" | "wallet_sell") {
                 continue;
             }
-            let hold_secs = FIXED_HOLDS_SECS.get(i - 1).copied().unwrap_or(86400);
+            // Named mapping (2026-08-25): inserting mirror_v2 into the array
+            // silently shifted every positional index and mis-mapped the
+            // fixed holds (fixed_1h read the 4h window). Names, not positions.
+            let hold_secs = match *strategy {
+                "fixed_1h" => 3_600,
+                "fixed_4h" => 14_400,
+                _ => 86_400,
+            };
 
             if elapsed_secs >= hold_secs {
                 let insert = sqlx::query(

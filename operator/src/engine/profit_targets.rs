@@ -75,6 +75,12 @@ pub enum ProfitTargetAction {
     ExitAmount(Decimal),
     /// Full exit
     FullExit,
+    /// Full exit driven by negative-momentum detection (RSI breakdown).
+    /// Distinct from `FullExit` so monitors label it `momentum_exit` —
+    /// momentum cuts routinely fire at NEGATIVE PnL and were being logged as
+    /// "full_profit_target", corrupting every exit-reason analysis
+    /// (2026-08-25 profitability review).
+    MomentumExit,
 }
 
 /// Number of 5-second ticks over which to ramp the volatility scale from 1.0
@@ -844,7 +850,7 @@ impl ProfitTargetManager {
                     reason = "momentum_exit",
                     "Profit exit triggered: momentum exit (negative momentum detected)"
                 );
-                return ProfitTargetAction::FullExit;
+                return ProfitTargetAction::MomentumExit;
             }
         }
 

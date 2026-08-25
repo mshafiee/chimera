@@ -163,7 +163,15 @@ mod tests {
         let c = cfg();
         let hours = c.losing_time_exit_hours_shield;
         assert_eq!(
-            evaluate_exit(&c, &eff(), dec!(1.0), dec!(1.0), dec!(1.0), hours as i64 * 3600, "SHIELD"),
+            evaluate_exit(
+                &c,
+                &eff(),
+                dec!(1.0),
+                dec!(1.0),
+                dec!(1.0),
+                hours as i64 * 3600,
+                "SHIELD"
+            ),
             Some("time_exit".to_string())
         );
     }
@@ -174,6 +182,26 @@ mod tests {
         assert_eq!(
             evaluate_exit(&c, &eff(), dec!(1.0), dec!(1.0), dec!(1.0), 10, "SHIELD"),
             None
+        );
+    }
+
+    /// mirror_v2 semantics (2026-08-25 A/B): with the final target raised to
+    /// +12%, a +7% move must NOT exit (mirror_main's +5% target would have),
+    /// and a +13% move exits with the v2 reason tag.
+    #[test]
+    fn mirror_v2_raised_target_holds_through_old_target_zone() {
+        let mut c = cfg();
+        c.targets = vec![dec!(12)];
+        // +7%: old rail would bank here; v2 holds.
+        assert_eq!(
+            evaluate_exit(&c, &eff(), dec!(1.0), dec!(1.07), dec!(1.07), 60, "SHIELD"),
+            None,
+            "v2 must hold through the old +5% target zone"
+        );
+        // +13%: crossed the raised target.
+        assert_eq!(
+            evaluate_exit(&c, &eff(), dec!(1.0), dec!(1.13), dec!(1.13), 60, "SHIELD"),
+            Some("profit_target_12".to_string())
         );
     }
 }
