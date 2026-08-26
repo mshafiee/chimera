@@ -14,13 +14,12 @@ use crate::price_cache::PriceCache;
 
 const EXIT_STRATEGIES: [&str; 6] = [
     "mirror_main",
-    "mirror_v2",
+    "mirror_v3",
     "fixed_1h",
     "fixed_4h",
     "fixed_24h",
     "wallet_sell",
 ];
-
 
 /// Write-time dedup window: at most one shadow position per (wallet, token)
 /// within this window (2026-08-14). Repeat whale BUY signals on one token
@@ -71,6 +70,12 @@ pub struct ShadowTrader {
     price_cache: Arc<PriceCache>,
     config: ShadowConfig,
     peaks: Arc<tokio::sync::Mutex<HashMap<String, Decimal>>>,
+    /// mirror_v3 first-bank tracking (2026-08-26): shadow_id -> true once the
+    /// +5% first-tier bank has been virtually recorded. v3 models live's
+    /// tiered structure (bank `w` fraction at the first target crossing,
+    /// trail the remainder) so the shadow mark predicts live PnL instead of a
+    /// full-exit proxy.
+    v3_banked: Arc<tokio::sync::Mutex<HashMap<String, bool>>>,
     /// Per-wallet exit profiles — keeps the mirror_main simulation faithful
     /// to the real monitor (per-wallet time exits + trailing).
     exit_profiles: Option<Arc<crate::engine::exit_profile::ExitProfileCache>>,
@@ -96,6 +101,7 @@ impl ShadowTrader {
             price_cache,
             config,
             peaks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            v3_banked: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             exit_profiles,
             last_fetch_attempt: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
@@ -624,57 +630,81 @@ impl ShadowTrader {
             }
         }
 
-        // ── mirror_v2 A/B (2026-08-25, profitability review) ───────────────
-        // Widened-payoff probe against mirror_main on IDENTICAL streams:
-        // live banks winners at ~+5% while the same streams' shadow
-        // target-exits average +14%, and live payoff is 1:1 (avg_win ==
-        // avg_loss) which nets negative after ~1.2% round-trip fees. v2 =
-        // final target raised 5 -> 12 and trailing distance doubled; recovery
-        // gate, hard floor, time exits unchanged. Paired rows per shadow_id
-        // make the comparison exact. Verdict rule: promote the wider profile
-        // to live rails only if v2 net > main net over >=100 paired exits.
-        let mut cfg_v2 = (*self.config.profit_config).clone();
-        cfg_v2.targets = vec![rust_decimal::Decimal::from(12)];
-        let mut eff_v2 = eff;
-        eff_v2.trailing_distance_pct *= rust_decimal::Decimal::from(2);
-        if let Some(reason) = Self::check_mirror_main(
-            &cfg_v2,
-            &eff_v2,
-            pos.entry_price_usd,
-            current_price,
-            peak_price,
-            elapsed_secs,
-            &pos.strategy,
-        ) {
-            let insert_v2 = sqlx::query(
+        // ── mirror_v3 (2026-08-26, profitability solution) ─────────────────
+        // Blended tiered-exit model that MATCHES live's actual structure:
+        // bank `w` fraction at the first +5% crossing, trail the remainder
+        // under the same rails. v2's verdict (107 pairs, Σ −90 vs +332)
+        // proved holding past the first crossing gives back gains; v3 exists
+        // so the shadow mark predicts what the NEW live rails actually pay
+        // (config.yaml now banks 66% at first target) instead of a
+        // full-exit proxy. Pure-virtual bank: recorded once current gain
+        // crosses the target; remainder outcome = whatever the shared rail
+        // evaluation eventually returns.
+        const V3_BANK_TARGET_PCT: i32 = 5;
+        const V3_BANKED_WEIGHT_NUM: i64 = 66;
+        const V3_BANKED_WEIGHT_DEN: i64 = 100;
+        let gain_pct = Self::pnl_pct(pos.entry_price_usd, current_price);
+        if !self.v3_banked.lock().await.contains_key(&pos.shadow_id)
+            && gain_pct >= Decimal::from(V3_BANK_TARGET_PCT)
+        {
+            self.v3_banked
+                .lock()
+                .await
+                .insert(pos.shadow_id.clone(), true);
+        }
+
+        if let Some(reason) = {
+            // Target branch disabled for v3: the bank is virtual, the
+            // remainder rides until a protective/trailing/time rail fires.
+            let mut cfg_v3 = (*self.config.profit_config).clone();
+            cfg_v3.targets = Vec::new();
+            crate::engine::exit_rules::evaluate_exit(
+                &cfg_v3,
+                &eff,
+                pos.entry_price_usd,
+                current_price,
+                peak_price,
+                elapsed_secs,
+                pos.strategy.as_deref().unwrap_or("SHIELD"),
+            )
+        } {
+            let banked = self.v3_banked.lock().await.remove(&pos.shadow_id);
+            let blended_pct = Self::mirror_v3_blend(
+                banked.is_some(),
+                rust_decimal::Decimal::from(V3_BANK_TARGET_PCT),
+                rust_decimal::Decimal::from(V3_BANKED_WEIGHT_NUM)
+                    / rust_decimal::Decimal::from(V3_BANKED_WEIGHT_DEN),
+                Self::pnl_pct(pos.entry_price_usd, current_price),
+            );
+            let insert_v3 = sqlx::query(
                 r#"INSERT INTO shadow_exits (shadow_id, exit_strategy, exit_price_usd, exit_sol_price_usd, pnl_pct, pnl_sol, exit_reason, hold_duration_secs)
-                   VALUES ($1, 'mirror_v2', $2, $3, $4, $5, $6, $7)
+                   VALUES ($1, 'mirror_v3', $2, $3, $4, $5, $6, $7)
                    ON CONFLICT (shadow_id, exit_strategy) DO NOTHING"#,
             )
             .bind(&pos.shadow_id)
             .bind(current_price)
             .bind(sol_price)
-            .bind(Self::pnl_pct(pos.entry_price_usd, current_price))
-            .bind(Self::pnl_sol(pos.entry_price_usd, current_price, pos.entry_amount_sol))
-            .bind(&reason)
+            .bind(blended_pct)
+            .bind(blended_pct * pos.entry_amount_sol / rust_decimal::Decimal::from(100))
+            .bind(format!("mirror_v3_{}", reason))
             .bind(elapsed_secs.max(0))
             .execute(pool)
             .await;
 
-            if let Ok(r) = insert_v2 {
+            if let Ok(r) = insert_v3 {
                 if r.rows_affected() > 0 {
                     tracing::trace!(
                         shadow_id = %pos.shadow_id,
                         reason = %reason,
-                        pnl_pct = %Self::pnl_pct(pos.entry_price_usd, current_price),
-                        "Shadow: mirror_v2 exit"
+                        pnl_pct = %blended_pct,
+                        "Shadow: mirror_v3 exit"
                     );
                 }
             }
         }
 
         for strategy in EXIT_STRATEGIES.iter() {
-            if matches!(*strategy, "mirror_main" | "mirror_v2" | "wallet_sell") {
+            if matches!(*strategy, "mirror_main" | "mirror_v3" | "wallet_sell") {
                 continue;
             }
             // Named mapping (2026-08-25): inserting mirror_v2 into the array
@@ -765,6 +795,23 @@ impl ShadowTrader {
         (exit - entry) / entry * Decimal::from(100)
     }
 
+    /// mirror_v3 blended outcome (2026-08-26): a `w` fraction of the position
+    /// was virtually banked at the first +5% crossing, the remainder realized
+    /// whatever the protective/trailing rails eventually paid. Banked value
+    /// is pinned at the crossing level (+5% × w); everything else rides.
+    /// Pre-bank exits (dump before +5% ever crossed) are the raw loss.
+    fn mirror_v3_blend(
+        banked: bool,
+        bank_target_pct: Decimal,
+        weight: Decimal,
+        exit_pnl_pct: Decimal,
+    ) -> Decimal {
+        if !banked {
+            return exit_pnl_pct;
+        }
+        weight * bank_target_pct + (Decimal::ONE - weight) * exit_pnl_pct
+    }
+
     fn pnl_sol(entry: Decimal, exit: Decimal, amount: Decimal) -> Decimal {
         if entry.is_zero() {
             return Decimal::ZERO;
@@ -819,4 +866,38 @@ struct ShadowPositionRow {
     entry_price_usd: Decimal,
     entry_amount_sol: Decimal,
     opened_at: chrono::DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod v3_blend_tests {
+    use super::*;
+
+    #[test]
+    fn pre_bank_exits_return_raw_loss() {
+        // Dumped below the bank before +5% ever crossed: the full loss rides.
+        assert_eq!(
+            ShadowTrader::mirror_v3_blend(false, dec!(5), dec!(0.66), dec!(-8)),
+            dec!(-8)
+        );
+    }
+
+    #[test]
+    fn banked_then_giveback_locks_most_of_the_target() {
+        // Banked at +5% on 66%, remainder trailed and gave back to -3%:
+        // blend = 0.66*5 + 0.34*(-3) = 2.28 — vs a raw -3% under old rails.
+        assert_eq!(
+            ShadowTrader::mirror_v3_blend(true, dec!(5), dec!(0.66), dec!(-3)),
+            rust_decimal::Decimal::new(228, 2)
+        );
+    }
+
+    #[test]
+    fn banked_then_runner_adds_tail_upside() {
+        // Banked at +5% on 66%, remainder trails to +14%:
+        // 0.66*5 + 0.34*14 = 8.06.
+        assert_eq!(
+            ShadowTrader::mirror_v3_blend(true, dec!(5), dec!(0.66), dec!(14)),
+            rust_decimal::Decimal::new(806, 2)
+        );
+    }
 }
