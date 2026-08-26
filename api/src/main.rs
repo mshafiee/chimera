@@ -587,6 +587,16 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(48),
+        // Mirror-gate sample carve-out (2026-08-26): age-trial tokens are
+        // fresh by construction and can never hold the full 10-sample floor —
+        // trial tokens need only this many deduped mirror exits, with
+        // negative thin averages still rejecting (dump protection intact).
+        mirror_gate_trial_min_samples: std::env::var(
+            "CHIMERA_SELECTION__MIRROR_GATE_TRIAL_MIN_SAMPLES",
+        )
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3),
         momentum_bypass_min_pct: std::env::var("CHIMERA_SELECTION__MOMENTUM_BYPASS_MIN_PCT")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -779,6 +789,45 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10),
+        // Token-age trial admission (2026-08-26, default OFF): SHIELD BUYs on
+        // tokens below the global age floor admit at a 0.25 SOL micro cap
+        // instead of hard rejection — but only above the instant-rug floor
+        // (min_token_age_proven_hours). Evidence: the 72h window's paper PnL
+        // concentrated in TOKEN_TOO_NEW rejects (+21.6/+7.5/+7.5/+6.4 shadow
+        // SOL); trial entries accumulate live evidence at minimum-viable cost.
+        token_age_trial_enabled: std::env::var("CHIMERA_SELECTION__TOKEN_AGE_TRIAL_ENABLED")
+            .ok()
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false),
+        token_age_trial_max_size_sol: std::env::var(
+            "CHIMERA_SELECTION__TOKEN_AGE_TRIAL_MAX_SIZE_SOL",
+        )
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(rust_decimal::Decimal::new(25, 2)), // 0.25 SOL
+        // Per-wallet realized-loss pause (2026-08-26, default ON — pure risk
+        // reduction): a wallet whose realized copy PnL over the trailing 24h
+        // is worse than −0.15 SOL stops copying until trades age out.
+        // Evidence: ArcebCcX burned −0.16 SOL across 8 trades in one 72h
+        // window while compliant with every other gate; realized loss is the
+        // fastest ground truth available. Fail-open on DB errors so a stats
+        // outage cannot halt all trading.
+        wallet_loss_pause_enabled: std::env::var("CHIMERA_SELECTION__WALLET_LOSS_PAUSE_ENABLED")
+            .ok()
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(true),
+        wallet_loss_pause_max_loss_sol: std::env::var(
+            "CHIMERA_SELECTION__WALLET_LOSS_PAUSE_MAX_LOSS_SOL",
+        )
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(rust_decimal::Decimal::new(15, 2)), // −0.15 SOL
+        wallet_loss_pause_window_hours: std::env::var(
+            "CHIMERA_SELECTION__WALLET_LOSS_PAUSE_WINDOW_HOURS",
+        )
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24),
     };
     let roster_addresses: Vec<String> = db_pool
         .get_active_wallets()

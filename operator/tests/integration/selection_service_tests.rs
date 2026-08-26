@@ -131,6 +131,7 @@ fn build_selection_service(
         mirror_gate_min_avg_pct: dec("1.5"),
         mirror_gate_min_samples: 10,
         mirror_gate_window_hours: 48,
+        mirror_gate_trial_min_samples: 0,
         wallet_tstat_enabled: true,
         wallet_tstat_threshold: 1.645,
         wallet_tstat_min_samples: 10,
@@ -158,9 +159,14 @@ fn build_selection_service(
         repeat_signal_min_prior: 1,
         entry_drift_guard_enabled: true,
         max_entry_drift_pct: rust_decimal::Decimal::new(30, 1),
-            wqs_trial_enabled: false,
-            wqs_trial_min_score: 10.0,
-            proven_recency_trades: 0,
+        wqs_trial_enabled: false,
+        wqs_trial_min_score: 10.0,
+        proven_recency_trades: 0,
+        token_age_trial_enabled: false,
+        token_age_trial_max_size_sol: rust_decimal::Decimal::new(25, 2),
+        wallet_loss_pause_enabled: false,
+        wallet_loss_pause_window_hours: 24,
+        wallet_loss_pause_max_loss_sol: rust_decimal::Decimal::new(15, 2),
         momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
         momentum_bypass_enabled: false,
         wqs_proven_waiver_enabled: true,
@@ -195,6 +201,7 @@ async fn test_wqs_below_70_buy_rejected() {
         source_amount_sol: dec("1.0"),
         ingress: Ingress::Webhook,
         source_slot: None,
+        source_block_time: None,
         exit_fraction: None,
         whale_entry_price: None,
     };
@@ -218,6 +225,7 @@ async fn test_wqs_boundary_just_below_70_rejected() {
         source_amount_sol: dec("1.0"),
         ingress: Ingress::Webhook,
         source_slot: None,
+        source_block_time: None,
         exit_fraction: None,
         whale_entry_price: None,
     };
@@ -243,6 +251,7 @@ async fn test_wqs_exactly_70_passes_wqs_gate() {
         source_amount_sol: dec("1.0"),
         ingress: Ingress::Webhook,
         source_slot: None,
+        source_block_time: None,
         exit_fraction: None,
         whale_entry_price: None,
     };
@@ -269,6 +278,7 @@ async fn test_sell_no_position_rejected() {
         source_amount_sol: dec("1.0"),
         ingress: Ingress::Webhook,
         source_slot: None,
+        source_block_time: None,
         exit_fraction: None,
         whale_entry_price: None,
     };
@@ -291,6 +301,7 @@ async fn test_both_ingresses_produce_identical_rejection() {
         source_amount_sol: dec("1.0"),
         ingress: Ingress::Webhook,
         source_slot: None,
+        source_block_time: None,
         exit_fraction: None,
         whale_entry_price: None,
     };
@@ -333,6 +344,7 @@ async fn test_single_wallet_unproven_buy_rejected_by_gate() {
         source_amount_sol: dec("1.0"),
         ingress: Ingress::Webhook,
         source_slot: None,
+        source_block_time: None,
         exit_fraction: None,
         whale_entry_price: None,
     };
@@ -362,6 +374,7 @@ async fn test_proven_wallet_single_signal_passes_gate() {
         source_amount_sol: dec("1.0"),
         ingress: Ingress::Webhook,
         source_slot: None,
+        source_block_time: None,
         exit_fraction: None,
         whale_entry_price: None,
     };
@@ -392,6 +405,7 @@ async fn test_unproven_wallet_with_negative_pnl_rejected_by_gate() {
         source_amount_sol: dec("1.0"),
         ingress: Ingress::Webhook,
         source_slot: None,
+        source_block_time: None,
         exit_fraction: None,
         whale_entry_price: None,
     };
@@ -421,6 +435,7 @@ async fn test_consensus_gate_bypass_allows_price_hold_confirmation() {
         source_amount_sol: dec("1.0"),
         ingress: Ingress::Webhook,
         source_slot: None,
+        source_block_time: None,
         exit_fraction: None,
         whale_entry_price: None,
     };
@@ -526,6 +541,7 @@ async fn test_mirror_gate_rejects_negative_token() {
         source_amount_sol: dec("1.0"),
         ingress: Ingress::Webhook,
         source_slot: None,
+        source_block_time: None,
         exit_fraction: None,
         whale_entry_price: None,
     };
@@ -561,6 +577,7 @@ async fn test_mirror_gate_passes_positive_token() {
         source_amount_sol: dec("1.0"),
         ingress: Ingress::Webhook,
         source_slot: None,
+        source_block_time: None,
         exit_fraction: None,
         whale_entry_price: None,
     };
@@ -592,6 +609,7 @@ async fn test_mirror_gate_insufficient_evidence_rejected() {
         source_amount_sol: dec("1.0"),
         ingress: Ingress::Webhook,
         source_slot: None,
+        source_block_time: None,
         exit_fraction: None,
         whale_entry_price: None,
     };
@@ -623,6 +641,7 @@ async fn test_tstat_wallet_with_significant_pnl_passes_wallet_gate() {
         source_amount_sol: dec("1.0"),
         ingress: Ingress::Webhook,
         source_slot: None,
+        source_block_time: None,
         exit_fraction: None,
         whale_entry_price: None,
     };
@@ -663,6 +682,7 @@ async fn test_tstat_wallet_with_zero_mean_rejected() {
         source_amount_sol: dec("1.0"),
         ingress: Ingress::Webhook,
         source_slot: None,
+        source_block_time: None,
         exit_fraction: None,
         whale_entry_price: None,
     };
@@ -690,6 +710,7 @@ async fn test_tstat_wallet_insufficient_samples_rejected() {
         source_amount_sol: dec("1.0"),
         ingress: Ingress::Webhook,
         source_slot: None,
+        source_block_time: None,
         exit_fraction: None,
         whale_entry_price: None,
     };

@@ -222,6 +222,9 @@ struct DecisionRow {
     volume_24h_usd: Option<f64>,
     price_impact_pct: Option<f64>,
     source_slot: Option<i64>,
+    /// On-chain time of the copied wallet's source transaction (telemetry for
+    /// entry-lag slippage measurement). None on the direct webhook path.
+    source_block_time: Option<DateTime<Utc>>,
     received_at: DateTime<Utc>,
     decided_at: DateTime<Utc>,
     code_revision: String,
@@ -275,7 +278,9 @@ impl DecisionRow {
             wqs: decision.wqs,
             wqs_confidence: decision.wqs_confidence,
             quality_score: decision.quality_score,
-            consensus_wallet_count: decision.consensus_wallet_count.and_then(|c| i32::try_from(c).ok()),
+            consensus_wallet_count: decision
+                .consensus_wallet_count
+                .and_then(|c| i32::try_from(c).ok()),
             regime_multiplier: decision
                 .regime_multiplier
                 .and_then(|d| d.to_f64())
@@ -294,6 +299,7 @@ impl DecisionRow {
                 .and_then(|d| d.to_f64())
                 .map(|v| clamp_num(v, NUMERIC_20_10_BOUND)),
             source_slot: req.source_slot.and_then(|s| i64::try_from(s).ok()),
+            source_block_time: req.source_block_time,
             received_at,
             decided_at: Utc::now(),
             code_revision: run_context.code_revision.clone(),
@@ -307,10 +313,7 @@ impl DecisionRow {
 ///
 /// Transient DB failures are retried with a short backoff so a hiccup does not
 /// permanently leave the row missing `quote_json`/`trade_uuid`.
-async fn retry_update<'q, F>(
-    pool: &sqlx::PgPool,
-    run: F,
-) -> Result<(), sqlx::Error>
+async fn retry_update<'q, F>(pool: &sqlx::PgPool, run: F) -> Result<(), sqlx::Error>
 where
     F: Fn() -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
 {
@@ -343,15 +346,16 @@ async fn insert_decision_record(
             action, strategy, admitted, rejection_code, rejection_reason,
             size_sol, source_amount_sol, wqs, wqs_confidence, quality_score,
             consensus_wallet_count, regime_multiplier, token_age_hours, liquidity_usd,
-            volume_24h_usd, price_impact_pct, source_slot, received_at, decided_at,
+            volume_24h_usd, price_impact_pct, source_slot, source_block_time,
+            received_at, decided_at,
             code_revision, config_hash, roster_hash
         ) VALUES (
             $1, $2, $3, $4, $5, $6,
             $7, $8, $9, $10, $11,
             $12, $13, $14, $15, $16,
             $17, $18, $19, $20,
-            $21, $22, $23, $24, $25,
-            $26, $27, $28
+            $21, $22, $23, $24, $25, $26,
+            $27, $28, $29
         )
         "#,
     )
@@ -378,6 +382,7 @@ async fn insert_decision_record(
     .bind(row.volume_24h_usd)
     .bind(row.price_impact_pct)
     .bind(row.source_slot)
+    .bind(row.source_block_time)
     .bind(row.received_at)
     .bind(row.decided_at)
     .bind(&row.code_revision)
@@ -393,8 +398,8 @@ async fn insert_decision_record(
 mod tests {
     use super::*;
     use crate::engine::selection::Ingress;
-    use crate::monitoring::test_db::MockDb;
     use crate::models::Strategy;
+    use crate::monitoring::test_db::MockDb;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use std::sync::atomic::Ordering;
@@ -415,6 +420,7 @@ mod tests {
             source_amount_sol: dec!(1.5),
             ingress: Ingress::Webhook,
             source_slot: Some(123_456),
+            source_block_time: Some(Utc::now() - chrono::Duration::seconds(7)),
             exit_fraction: None,
             whale_entry_price: None,
         }
@@ -447,8 +453,14 @@ mod tests {
 
     #[test]
     fn clamp_num_bounds_values() {
-        assert_eq!(clamp_num(1_000_000_000_000.0, NUMERIC_30_18_BOUND), NUMERIC_30_18_BOUND);
-        assert_eq!(clamp_num(-1_000_000_000_000.0, NUMERIC_30_18_BOUND), -NUMERIC_30_18_BOUND);
+        assert_eq!(
+            clamp_num(1_000_000_000_000.0, NUMERIC_30_18_BOUND),
+            NUMERIC_30_18_BOUND
+        );
+        assert_eq!(
+            clamp_num(-1_000_000_000_000.0, NUMERIC_30_18_BOUND),
+            -NUMERIC_30_18_BOUND
+        );
         assert_eq!(clamp_num(5.5, NUMERIC_30_18_BOUND), 5.5);
         assert_eq!(clamp_num(0.0, NUMERIC_20_10_BOUND), 0.0);
     }
@@ -459,7 +471,13 @@ mod tests {
         let decision = sample_decision(&req);
         let ctx = mock_run_context();
 
-        let row = DecisionRow::from_decision(&decision, &req, Some("trade-abc"), chrono::Utc::now(), &ctx);
+        let row = DecisionRow::from_decision(
+            &decision,
+            &req,
+            Some("trade-abc"),
+            chrono::Utc::now(),
+            &ctx,
+        );
 
         assert_eq!(row.decision_id, "decision-42");
         assert_eq!(row.run_id, ctx.run_id);
@@ -487,6 +505,10 @@ mod tests {
         assert_eq!(row.volume_24h_usd, Some(500_000.0));
         assert_eq!(row.price_impact_pct, Some(0.25));
         assert_eq!(row.source_slot, Some(123_456));
+        // Source block time must carry through for entry-lag measurement:
+        // `decided_at - source_block_time` quantifies per-signal lag slippage.
+        let expected_block_time = req.source_block_time.expect("sample carries block time");
+        assert_eq!(row.source_block_time, Some(expected_block_time));
     }
 
     #[test]

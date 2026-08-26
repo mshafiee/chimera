@@ -112,12 +112,7 @@ pub async fn helius_webhook_handler(
         let verify_this_event = {
             // Deterministic per-signature sampling: the same signature
             // always resolves the same way (idempotent on redelivery).
-            let bucket = event
-                .signature
-                .bytes()
-                .map(|b| b as u64)
-                .sum::<u64>()
-                % 100;
+            let bucket = event.signature.bytes().map(|b| b as u64).sum::<u64>() % 100;
             (bucket as f64) < state.rpc_verify_sample_rate * 100.0
         };
         if !verify_this_event {
@@ -364,7 +359,11 @@ pub async fn helius_webhook_handler(
                         action: direction,
                         source_amount_sol: swap.amount_in,
                         ingress: crate::engine::Ingress::Helius,
-                        source_slot: None, // ParsedSwap doesn't carry slot; future: parse from tx
+                        source_slot: Some(event.slot),
+                        source_block_time: chrono::DateTime::<chrono::Utc>::from_timestamp(
+                            event.timestamp.max(0),
+                            0,
+                        ),
                         exit_fraction: None,
                         whale_entry_price: {
                             let sol_mint = crate::constants::mints::SOL;

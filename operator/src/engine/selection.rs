@@ -131,6 +131,15 @@ pub struct SelectionConfig {
     pub mirror_gate_min_avg_pct: Decimal,
     pub mirror_gate_min_samples: i32,
     pub mirror_gate_window_hours: i32,
+    /// Mirror-gate sample carve-out (2026-08-26): tokens admitted by the
+    /// token-age trial are fresh by construction — they can never have the
+    /// full `mirror_gate_min_samples` (10) of shadow exits within the window,
+    /// so the standard floor would nullify every trial admission
+    /// (SHADOW_MIRROR_INSUFFICIENT was the binding constraint post-trial).
+    /// Trial tokens instead require only this many deduped exits — and a
+    /// thin-but-negative average still rejects via SHADOW_MIRROR_NEGATIVE,
+    /// so dump protection is preserved. 0 disables the carve-out.
+    pub mirror_gate_trial_min_samples: i32,
     /// Momentum bypass for the shadow-mirror gate (2026-08-11): if the token's
     /// price_cache shows momentum above this percentage (positive trend),
     /// bypass the shadow-mirror sample requirement. Tokens with sustained
@@ -251,6 +260,27 @@ pub struct SelectionConfig {
     /// t-stat, all-time ledger) go stale silently. 0 disables. See
     /// `wallet_is_proven`.
     pub proven_recency_trades: i64,
+    /// Token-age trial admission (2026-08-26): SHIELD BUYs on tokens below
+    /// the global `min_token_age_*` floor are TRIAL-ADMITTED at
+    /// `token_age_trial_max_size_sol` instead of hard-rejected — but only
+    /// above the instant-rug zone (`min_token_age_proven_hours`). Evidence:
+    /// paper EV is concentrated in sub-floor tokens (`TOKEN_TOO_NEW` rejects
+    /// carried +21.6/+7.5/+7.5/+6.4 shadow SOL in one 72h window); trial
+    /// entries pay the minimum viable round-trip cost while accumulating live
+    /// evidence. Layered safety: liquidity/mirror/quality/drift/pump-chase
+    /// gates still apply downstream, and skip-below-min sizing makes the cap
+    /// the entry floor. 0-size-cap or disabled restores hard rejection.
+    pub token_age_trial_enabled: bool,
+    pub token_age_trial_max_size_sol: Decimal,
+    /// Per-wallet realized-loss pause (2026-08-26): when the wallet's
+    /// REALIZED copy PnL (`positions.realized_net_pnl_sol`, CLOSED, valid)
+    /// within the trailing window is worse than `-max_loss`, all its BUYs are
+    /// rejected with WALLET_LOSS_PAUSED until trades age out of the window.
+    /// Realized loss is ground truth no stale aggregate catches in time.
+    /// Disable to restore gate-only discipline.
+    pub wallet_loss_pause_enabled: bool,
+    pub wallet_loss_pause_max_loss_sol: Decimal,
+    pub wallet_loss_pause_window_hours: i32,
 }
 
 impl SelectionConfig {
@@ -283,6 +313,7 @@ impl SelectionConfig {
         hasher.update(self.mirror_gate_min_avg_pct.to_string().as_bytes());
         hasher.update(self.mirror_gate_min_samples.to_le_bytes());
         hasher.update(self.mirror_gate_window_hours.to_le_bytes());
+        hasher.update(self.mirror_gate_trial_min_samples.to_le_bytes());
         hasher.update(self.momentum_bypass_min_pct.to_string().as_bytes());
         hasher.update(u8::from(self.momentum_bypass_enabled).to_le_bytes());
         hasher.update(u8::from(self.wqs_proven_waiver_enabled).to_le_bytes());
@@ -316,6 +347,11 @@ impl SelectionConfig {
         hasher.update(u8::from(self.wqs_trial_enabled).to_le_bytes());
         hasher.update(self.wqs_trial_min_score.to_le_bytes());
         hasher.update(self.proven_recency_trades.to_le_bytes());
+        hasher.update(u8::from(self.token_age_trial_enabled).to_le_bytes());
+        hasher.update(self.token_age_trial_max_size_sol.to_string().as_bytes());
+        hasher.update(u8::from(self.wallet_loss_pause_enabled).to_le_bytes());
+        hasher.update(self.wallet_loss_pause_max_loss_sol.to_string().as_bytes());
+        hasher.update(self.wallet_loss_pause_window_hours.to_le_bytes());
         hex::encode(&hasher.finalize()[..8])
     }
 }
@@ -332,6 +368,11 @@ pub struct SelectionRequest {
     pub ingress: Ingress,
     /// Optional Solana slot of the source transaction (Helius only).
     pub source_slot: Option<u64>,
+    /// On-chain timestamp of the copied wallet's source transaction. Used
+    /// purely for telemetry (`decision_records.source_block_time`) so
+    /// entry-lag slippage (`decided_at - source_block_time`) becomes
+    /// measurable per signal. Never feeds any gate or sizing decision.
+    pub source_block_time: Option<chrono::DateTime<chrono::Utc>>,
     /// For SELL: the fraction of the position to exit (None = full).
     pub exit_fraction: Option<Decimal>,
     /// Whale's entry price in SOL per raw token unit (2026-08-11):
@@ -889,6 +930,60 @@ impl SelectionService {
             }
         }
 
+        // Per-wallet realized-loss pause (2026-08-26): a wallet whose REALIZED
+        // copy PnL over the trailing window already burned more than
+        // `wallet_loss_pause_max_loss_sol` stops copying until the window
+        // rolls off — realized loss is ground truth that no WQS/t-stat
+        // aggregate goes stale fast enough to see (ArcebCcX: −0.16 SOL across
+        // 8 trades in one 72h window while compliant with every other gate).
+        // Fail-open on DB error: a transient stats outage must not halt all
+        // trading (the global circuit breaker owns that risk role).
+        if self.config.wallet_loss_pause_enabled {
+            match self
+                .db
+                .get_wallet_realized_pnl_window(
+                    &req.wallet_address,
+                    self.config.wallet_loss_pause_window_hours,
+                )
+                .await
+            {
+                Ok(Some(pnl)) if pnl <= -self.config.wallet_loss_pause_max_loss_sol => {
+                    let reason = format!(
+                        "Wallet realized {} SOL within {}h — paused (max_loss {})",
+                        pnl,
+                        self.config.wallet_loss_pause_window_hours,
+                        -self.config.wallet_loss_pause_max_loss_sol
+                    );
+                    tracing::warn!(
+                        ingress = ?req.ingress,
+                        decision = "BUY",
+                        token = %req.token_address,
+                        wallet = %req.wallet_address,
+                        rejection_code = "WALLET_LOSS_PAUSED",
+                        reason = %reason,
+                        realized_pnl_sol = %pnl,
+                        pause_max_loss_sol = %self.config.wallet_loss_pause_max_loss_sol,
+                        window_hours = self.config.wallet_loss_pause_window_hours,
+                        "selection: BUY rejected by gate"
+                    );
+                    return BuyDecision::rejected(
+                        req,
+                        &self.config_hash,
+                        "WALLET_LOSS_PAUSED",
+                        reason,
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        wallet = %req.wallet_address,
+                        error = %e,
+                        "Loss-pause check failed — fail-open (stats outage)"
+                    );
+                }
+            }
+        }
+
         // Rejection-rate mute gate — short-circuit wallets with overwhelming
         // hard-rejection rates (non-speculative / unsafe / illiquid pump.fun).
         if let Some(ref detector) = self.mute_detector {
@@ -1104,6 +1199,9 @@ impl SelectionService {
         } else {
             self.config.min_token_age_hours
         };
+        // Set when the token-age trial admits a sub-floor token (below);
+        // carried into sizing as an extra micro-position cap.
+        let mut age_trial_cap: Option<Decimal> = None;
         if min_age > 0.0 {
             match token_age_hours {
                 Some(age) if age < min_age => {
@@ -1134,27 +1232,65 @@ impl SelectionService {
                             "Proven-wallet age waiver: token below global min but above proven floor"
                         );
                     } else {
-                        let reason =
-                            format!("Token age {:.1}h below minimum {:.1}h", age, effective_min);
-                        tracing::info!(
-                            ingress = ?req.ingress,
-                            decision = "BUY",
-                            token = %req.token_address,
-                            wallet = %req.wallet_address,
-                            rejection_code = "TOKEN_TOO_NEW",
-                            reason = %reason,
-                            token_age_hours = age,
-                            min_age = effective_min,
-                            strategy = ?strategy,
-                            is_pumpfun = is_pumpfun,
-                            "selection: BUY rejected by gate"
-                        );
-                        return BuyDecision::rejected(
-                            req,
-                            &self.config_hash,
-                            "TOKEN_TOO_NEW",
-                            reason,
-                        );
+                        // Token-age trial admission (2026-08-26): instead of
+                        // hard-rejecting, admit SHIELD BUYs on sub-floor
+                        // tokens at a micro-size cap — above the instant-rug
+                        // floor (`min_token_age_proven_hours`) only. Evidence:
+                        // the 72h window's paper PnL was concentrated in
+                        // TOKEN_TOO_NEW rejects (+21.6/+7.5/+7.5/+6.4 shadow
+                        // SOL). Downstream gates (consensus-or-proven,
+                        // liquidity floor, mirror gate, quality, drift,
+                        // pump-chase) still apply; sizing clamps to the cap.
+                        let trial_eligible = self.config.token_age_trial_enabled
+                            && strategy == Strategy::Shield
+                            && self.config.min_token_age_proven_hours > 0.0
+                            && age >= self.config.min_token_age_proven_hours;
+                        if trial_eligible {
+                            tracing::info!(
+                                ingress = ?req.ingress,
+                                decision = "BUY",
+                                token = %req.token_address,
+                                wallet = %req.wallet_address,
+                                token_age_hours = age,
+                                global_min = min_age,
+                                proven_floor = self.config.min_token_age_proven_hours,
+                                trial_cap_sol = %self.config.token_age_trial_max_size_sol,
+                                strategy = ?strategy,
+                                is_pumpfun = is_pumpfun,
+                                "Token-age TRIAL admission: sub-floor token admitted at micro size"
+                            );
+                            age_trial_cap = Some(self.config.token_age_trial_max_size_sol);
+                        } else {
+                            let reason = format!(
+                                "Token age {:.1}h below minimum {:.1}h",
+                                age, effective_min
+                            );
+                            tracing::info!(
+                                ingress = ?req.ingress,
+                                decision = "BUY",
+                                token = %req.token_address,
+                                wallet = %req.wallet_address,
+                                rejection_code = "TOKEN_TOO_NEW",
+                                reason = %reason,
+                                token_age_hours = age,
+                                min_age = effective_min,
+                                strategy = ?strategy,
+                                is_pumpfun = is_pumpfun,
+                                "selection: BUY rejected by gate"
+                            );
+                            let mut decision = BuyDecision::rejected(
+                                req,
+                                &self.config_hash,
+                                "TOKEN_TOO_NEW",
+                                reason,
+                            );
+                            // Telemetry (2026-08-26): rejected() zeroes
+                            // token_age_hours, leaving decision_records unable to
+                            // audit how far below the age floor blocked tokens
+                            // sat. Keep the offending age on the record.
+                            decision.token_age_hours = Some(age);
+                            return decision;
+                        }
                     }
                 }
                 None => {
@@ -1343,12 +1479,23 @@ impl SelectionService {
         // price-hold provides the admission evidence (the gate is bypassed in
         // the confirmation re-decision).
         if !bypass_consensus_proven && self.config.mirror_gate_enabled {
+            // Sample-floor carve-out (2026-08-26): age-trial tokens are fresh
+            // by construction — they can never hold the full sample floor.
+            // Lower it for them (negative averages still reject below).
+            let effective_min_samples = if age_trial_cap.is_some()
+                && self.config.mirror_gate_trial_min_samples > 0
+                && self.config.mirror_gate_trial_min_samples < self.config.mirror_gate_min_samples
+            {
+                self.config.mirror_gate_trial_min_samples
+            } else {
+                self.config.mirror_gate_min_samples
+            };
             let avg = match self
                 .db
                 .get_token_mirror_avg_pnl(
                     &req.token_address,
                     self.config.mirror_gate_window_hours,
-                    self.config.mirror_gate_min_samples,
+                    effective_min_samples,
                 )
                 .await
             {
@@ -1368,7 +1515,7 @@ impl SelectionService {
                         "Token shadow-mirror avg {:.2}% below minimum {:.2}% ({} samples, {}h window)",
                         avg,
                         self.config.mirror_gate_min_avg_pct,
-                        self.config.mirror_gate_min_samples,
+                        effective_min_samples,
                         self.config.mirror_gate_window_hours
                     );
                     tracing::info!(
@@ -1430,7 +1577,7 @@ impl SelectionService {
                     if !momentum_bypassed {
                         let reason = format!(
                             "Token has <{} shadow-mirror samples in {}h — insufficient evidence",
-                            self.config.mirror_gate_min_samples,
+                            effective_min_samples,
                             self.config.mirror_gate_window_hours
                         );
                         tracing::info!(
@@ -1440,6 +1587,8 @@ impl SelectionService {
                             wallet = %req.wallet_address,
                             rejection_code = "SHADOW_MIRROR_INSUFFICIENT",
                             reason = %reason,
+                            effective_min_samples = effective_min_samples,
+                            age_trial = age_trial_cap.is_some(),
                             "selection: BUY rejected by gate"
                         );
                         return BuyDecision::rejected(
@@ -1981,10 +2130,20 @@ impl SelectionService {
                 strategy,
                 consensus_wallet_count,
                 regime_multiplier,
-                wqs_capped_max_size: if wallet_wqs < self.config.spear_lite_wqs_threshold {
-                    Some(self.config.spear_lite_max_size_sol)
-                } else {
-                    None
+                // Micro-position caps: the WQS spear-lite cap for sub-threshold
+                // wallets, and the token-age trial cap for trial-admitted
+                // sub-floor tokens. Both may apply — take the most
+                // conservative (lower) of whichever are present.
+                wqs_capped_max_size: {
+                    let wqs_cap = if wallet_wqs < self.config.spear_lite_wqs_threshold {
+                        Some(self.config.spear_lite_max_size_sol)
+                    } else {
+                        None
+                    };
+                    match (wqs_cap, age_trial_cap) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    }
                 },
                 boost_target_sol,
                 token_address: Some(req.token_address.clone()),
@@ -2612,9 +2771,10 @@ mod tests {
             min_proven_trades: 10,
             require_proven_positive_pnl: true,
             mirror_gate_enabled: true,
-            mirror_gate_min_avg_pct: Decimal::new(15, 1),
+            mirror_gate_min_avg_pct: Decimal::new(15, 1), // 1.5%
             mirror_gate_min_samples: 10,
             mirror_gate_window_hours: 48,
+            mirror_gate_trial_min_samples: 3,
             wallet_tstat_enabled: true,
             wallet_tstat_threshold: 1.645,
             wallet_tstat_min_samples: 10,
@@ -2645,6 +2805,11 @@ mod tests {
             wqs_trial_enabled: false,
             wqs_trial_min_score: 10.0,
             proven_recency_trades: 0,
+            token_age_trial_enabled: false,
+            token_age_trial_max_size_sol: Decimal::new(25, 2), // 0.25 SOL
+            wallet_loss_pause_enabled: true,
+            wallet_loss_pause_max_loss_sol: Decimal::new(15, 2), // 0.15 SOL
+            wallet_loss_pause_window_hours: 24,
             momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
             momentum_bypass_enabled: false,
             wqs_proven_waiver_enabled: true,

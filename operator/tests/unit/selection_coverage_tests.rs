@@ -84,6 +84,7 @@ fn base_config() -> SelectionConfig {
         mirror_gate_min_avg_pct: dec("1.5"),
         mirror_gate_min_samples: 10,
         mirror_gate_window_hours: 48,
+        mirror_gate_trial_min_samples: 0,
         wallet_tstat_enabled: false,
         wallet_tstat_threshold: 1.645,
         wallet_tstat_min_samples: 10,
@@ -114,6 +115,11 @@ fn base_config() -> SelectionConfig {
         wqs_trial_enabled: false,
         wqs_trial_min_score: 10.0,
         proven_recency_trades: 0,
+        token_age_trial_enabled: false,
+        token_age_trial_max_size_sol: rust_decimal::Decimal::new(25, 2),
+        wallet_loss_pause_enabled: false,
+        wallet_loss_pause_window_hours: 24,
+        wallet_loss_pause_max_loss_sol: rust_decimal::Decimal::new(15, 2),
         momentum_bypass_min_pct: rust_decimal::Decimal::new(3, 0),
         momentum_bypass_enabled: false,
         wqs_proven_waiver_enabled: true,
@@ -187,6 +193,7 @@ fn request(token: &str, action: Action) -> SelectionRequest {
         source_amount_sol: dec("0.5"),
         ingress: Ingress::Webhook,
         source_slot: None,
+        source_block_time: None,
         exit_fraction: None,
         whale_entry_price: None,
     }
@@ -265,6 +272,12 @@ fn old_tx() -> serde_json::Value {
 
 fn young_tx() -> serde_json::Value {
     tx_with_timestamp(chrono::Utc::now().timestamp() - 300) // 5 min old
+}
+
+/// 20 minutes old — above the instant-rug floor (0.1h = 6 min) but below the
+/// global maturity floor (1h). The token-age trial band.
+fn trial_band_tx() -> serde_json::Value {
+    tx_with_timestamp(chrono::Utc::now().timestamp() - 20 * 60)
 }
 
 // ── Basic gates ──────────────────────────────────────────────────────────────
@@ -2198,6 +2211,305 @@ async fn test_wqs_trial_below_trial_min_still_rejected() {
         d.rejection_code,
         Some("WQS_TOO_LOW"),
         "wallets below the trial minimum stay rejected"
+    );
+}
+
+// ── Token-age trial admission (2026-08-26) ───────────────────────────────────
+// SHIELD BUYs on sub-floor tokens (below min_token_age_hours but above the
+// instant-rug floor) admit at a micro-size cap instead of TOKEN_TOO_NEW.
+// Evidence: the 72h window's paper PnL concentrated in TOKEN_TOO_NEW rejects
+// (+21.6/+7.5/+7.5/+6.4 shadow SOL). Layered safety: all downstream gates
+// still apply; sizing clamps to token_age_trial_max_size_sol.
+
+/// Harness mirroring `trial_harness` but with a parametrized tx age, so the
+/// token age lands anywhere between the rug floor and the global floor.
+async fn age_trial_harness(
+    db: &Arc<dyn Database>,
+    tx: serde_json::Value,
+    cfg: SelectionConfig,
+) -> BuyDecision {
+    seed_prior_shadow(db, TOKEN, 1).await;
+    seed_wallet(db, WALLET, "ACTIVE", 80.0).await;
+    let (_hel, helius) = helius_mock_with_txs(vec![tx]).await;
+    let cache = Arc::new(
+        chimera_core::price_cache::PriceCache::with_jupiter_price_api(
+            "http://127.0.0.1".to_string(),
+        )
+        .expect("price cache"),
+    );
+    build_service_full(
+        db.clone(),
+        seeded_parser(TOKEN, "SHIELD", "100000", true),
+        cfg,
+        None,
+        None,
+        None,
+        Some(helius.clone()),
+        None,
+    )
+    .with_price_cache(cache)
+    .decide(&request(TOKEN, Action::Buy))
+    .await
+}
+
+#[tokio::test]
+async fn test_token_age_trial_admits_sub_floor_band() {
+    let (db, _guard) = create_test_db().await;
+    let mut cfg = base_config();
+    cfg.token_age_trial_enabled = true;
+    let d = age_trial_harness(&db, trial_band_tx(), cfg).await;
+    assert!(
+        d.admitted,
+        "trial must admit tokens in the rug-floor..global-floor band, got {:?}",
+        d.rejection_reason
+    );
+    // The decision record carries the offending (sub-floor) age for cohorting.
+    assert!(d.token_age_hours.is_some());
+}
+
+#[tokio::test]
+async fn test_token_age_trial_disabled_keeps_hard_reject() {
+    let (db, _guard) = create_test_db().await;
+    let mut cfg = base_config();
+    cfg.token_age_trial_enabled = false;
+    let d = age_trial_harness(&db, trial_band_tx(), cfg).await;
+    assert_eq!(
+        d.rejection_code,
+        Some("TOKEN_TOO_NEW"),
+        "disabled trial keeps the hard maturity filter"
+    );
+}
+
+#[tokio::test]
+async fn test_token_age_trial_never_admits_rug_zone() {
+    let (db, _guard) = create_test_db().await;
+    let mut cfg = base_config();
+    cfg.token_age_trial_enabled = true;
+    // 5-min token is below the instant-rug floor (0.1h = 6 min): even with
+    // the trial on it stays rejected — trials never buy sub-rug-floor tokens.
+    let d = age_trial_harness(&db, young_tx(), cfg).await;
+    assert_eq!(
+        d.rejection_code,
+        Some("TOKEN_TOO_NEW"),
+        "instant-rug zone stays blocked regardless of trial admission"
+    );
+}
+
+// ── Per-wallet realized-loss pause (2026-08-26) ──────────────────────────────
+// A wallet whose REALIZED copy PnL over the trailing window is worse than
+// −max_loss stops copying until trades age out. Realized loss is ground
+// truth no stale aggregate catches in time (ArcebCcX: −0.16 SOL across 8
+// trades in one 72h window while compliant with every other gate).
+
+/// Seed a CLOSED, pnl-valid position with the given realized net PnL and
+/// closed_at offset in hours ago (mirrors the stop-loss-cooldown seed style).
+async fn seed_realized_position(
+    db: &Arc<dyn Database>,
+    uuid: &str,
+    wallet: &str,
+    net_pnl_sol: &str,
+    hours_ago: i32,
+) {
+    sqlx::query(
+        "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status) \
+         VALUES ($1, $2, $3, 'SHIELD', 'BUY', 1.0, 'CLOSED')",
+    )
+    .bind(uuid)
+    .bind(wallet)
+    .bind(TOKEN)
+    .execute(&pg_pool(db))
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO positions (trade_uuid, wallet_address, token_address, strategy, entry_amount_sol, entry_price, entry_tx_signature, state, realized_net_pnl_sol, closed_at) \
+         VALUES ($1, $2, $3, 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', $4, NOW() - make_interval(hours => $5))",
+    )
+    .bind(uuid)
+    .bind(wallet)
+    .bind(TOKEN)
+    .bind(Decimal::from_str(net_pnl_sol).unwrap())
+    .bind(hours_ago)
+    .execute(&pg_pool(db))
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn test_wallet_loss_pause_blocks_after_big_loss() {
+    let (db, _guard) = create_test_db().await;
+    // Seed the repeat-signal shadow row FIRST so seeding positions below
+    // doesn't interfere; harness normally does this via age_trial_harness.
+    seed_prior_shadow(&db, TOKEN, 1).await;
+    seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
+    seed_realized_position(&db, "lp-loss-1", WALLET, "-0.20", 2).await;
+
+    let mut cfg = base_config();
+    cfg.wallet_loss_pause_enabled = true;
+    cfg.wallet_loss_pause_max_loss_sol = dec("0.15");
+    cfg.wallet_loss_pause_window_hours = 24;
+
+    let service = build_service(
+        db.clone(),
+        seeded_parser(TOKEN, "SHIELD", "100000", true),
+        cfg,
+    );
+    let d = service.decide(&request(TOKEN, Action::Buy)).await;
+    assert_eq!(
+        d.rejection_code,
+        Some("WALLET_LOSS_PAUSED"),
+        "wallet at −0.20 SOL realized within 24h must be paused, got {:?}",
+        d.rejection_reason
+    );
+}
+
+#[tokio::test]
+async fn test_wallet_loss_pause_passes_profitable_and_thin_history() {
+    let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
+    seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
+    // Positive window → no pause.
+    seed_realized_position(&db, "lp-win-1", WALLET, "0.30", 3).await;
+
+    let mut cfg = base_config();
+    cfg.wallet_loss_pause_enabled = true;
+    cfg.wallet_loss_pause_max_loss_sol = dec("0.15");
+    cfg.wallet_loss_pause_window_hours = 24;
+
+    let service = build_service(
+        db.clone(),
+        seeded_parser(TOKEN, "SHIELD", "100000", true),
+        cfg.clone(),
+    );
+    let d = service.decide(&request(TOKEN, Action::Buy)).await;
+    assert_ne!(
+        d.rejection_code,
+        Some("WALLET_LOSS_PAUSED"),
+        "profitable window must not pause"
+    );
+
+    // Thin history (different wallet, no closed trades) passes unevaluated.
+    seed_wallet(&db, WALLET_B, "ACTIVE", 80.0).await;
+    let mut req = request(TOKEN, Action::Buy);
+    req.wallet_address = WALLET_B.to_string();
+    let d = service.decide(&req).await;
+    assert_ne!(
+        d.rejection_code,
+        Some("WALLET_LOSS_PAUSED"),
+        "no closed trades in window → unevaluated"
+    );
+}
+
+#[tokio::test]
+async fn test_wallet_loss_pause_expired_window_releases() {
+    let (db, _guard) = create_test_db().await;
+    seed_prior_shadow(&db, TOKEN, 1).await;
+    seed_wallet(&db, WALLET, "ACTIVE", 80.0).await;
+    // Loss is 30h old — outside a 24h window.
+    seed_realized_position(&db, "lp-old-1", WALLET, "-0.50", 30).await;
+
+    let mut cfg = base_config();
+    cfg.wallet_loss_pause_enabled = true;
+    cfg.wallet_loss_pause_max_loss_sol = dec("0.15");
+    cfg.wallet_loss_pause_window_hours = 24;
+
+    let service = build_service(
+        db.clone(),
+        seeded_parser(TOKEN, "SHIELD", "100000", true),
+        cfg,
+    );
+    let d = service.decide(&request(TOKEN, Action::Buy)).await;
+    assert_ne!(
+        d.rejection_code,
+        Some("WALLET_LOSS_PAUSED"),
+        "losses outside the window must release the pause"
+    );
+}
+
+// ── Mirror-gate sample carve-out (2026-08-26) ────────────────────────────────
+// Age-trial tokens are fresh by construction and can never hold the full
+// mirror sample floor. With the carve-out they need only
+// `mirror_gate_trial_min_samples` deduped exits — negative thin averages
+// still reject via SHADOW_MIRROR_NEGATIVE.
+
+/// Seed `n` dedup-safe mirror_main shadow exits on `token`, one per hour,
+/// all with the given pnl_pct.
+async fn seed_mirror_exits(db: &Arc<dyn Database>, token: &str, n: i32, pnl_pct: &str) {
+    let pool = pg_pool(db);
+    for i in 0..n {
+        let sid = format!("carve-{token}-{i}");
+        sqlx::query(
+            "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, main_admitted, entry_amount_sol, ingress, opened_at) \
+             VALUES ($1, 'd', 'run', $2, $3, false, 0.1, 'webhook', NOW() - make_interval(hours => $4))",
+        )
+        .bind(&sid)
+        .bind(WALLET)
+        .bind(token)
+        .bind(i + 1)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO shadow_exits (shadow_id, exit_strategy, pnl_pct, pnl_sol, exit_reason) \
+             VALUES ($1, 'mirror_main', $2, 0.01, 'profit_target_5')",
+        )
+        .bind(&sid)
+        .bind(Decimal::from_str(pnl_pct).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_mirror_gate_carveout_admits_trial_band_token() {
+    let (db, _guard) = create_test_db().await;
+    // 4 deduped positive exits: above the 3-sample trial floor, below the
+    // standard 10-sample floor.
+    seed_mirror_exits(&db, TOKEN, 4, "4.0").await;
+
+    let mut cfg = base_config();
+    cfg.mirror_gate_enabled = true;
+    cfg.mirror_gate_min_samples = 10;
+    cfg.mirror_gate_trial_min_samples = 3;
+    cfg.token_age_trial_enabled = true;
+
+    let d = age_trial_harness(&db, trial_band_tx(), cfg).await;
+    assert_ne!(
+        d.rejection_code,
+        Some("SHADOW_MIRROR_INSUFFICIENT"),
+        "carve-out must lower the sample floor for age-trial tokens, got {:?}",
+        d.rejection_reason
+    );
+    assert_ne!(
+        d.rejection_code,
+        Some("SHADOW_MIRROR_NEGATIVE"),
+        "positive thin evidence must not read as negative"
+    );
+    assert!(
+        d.admitted,
+        "trial band + carve-out admits: {:?}",
+        d.rejection_code
+    );
+}
+
+#[tokio::test]
+async fn test_mirror_gate_no_carveout_still_insufficient() {
+    let (db, _guard) = create_test_db().await;
+    seed_mirror_exits(&db, TOKEN, 4, "4.0").await;
+
+    let mut cfg = base_config();
+    cfg.mirror_gate_enabled = true;
+    cfg.mirror_gate_min_samples = 10;
+    // Carve-out disabled → the full 10-sample floor applies to the same
+    // fresh token with only 4 exits.
+    cfg.mirror_gate_trial_min_samples = 0;
+    cfg.token_age_trial_enabled = true;
+
+    let d = age_trial_harness(&db, trial_band_tx(), cfg).await;
+    assert_eq!(
+        d.rejection_code,
+        Some("SHADOW_MIRROR_INSUFFICIENT"),
+        "without the carve-out the full floor applies"
     );
 }
 

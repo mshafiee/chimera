@@ -224,6 +224,9 @@ pub async fn webhook_handler(
         source_amount_sol: signal.payload.amount_sol,
         ingress: crate::engine::Ingress::Webhook,
         source_slot: None,
+        // The scout-driven HMAC webhook payload carries no on-chain timestamp
+        // for the source trade; telemetry falls back to `received_at`.
+        source_block_time: None,
         exit_fraction: signal.payload.exit_fraction,
         whale_entry_price: None, // webhook path doesn't carry raw swap amounts
     };

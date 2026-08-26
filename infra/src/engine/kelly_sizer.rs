@@ -1253,6 +1253,14 @@ pub(crate) mod tests {
                 .unwrap_or(None))
         }
 
+        async fn get_wallet_realized_pnl_window(
+            &self,
+            _wallet_address: &str,
+            _window_hours: i32,
+        ) -> AppResult<Option<Decimal>> {
+            unimplemented!()
+        }
+
         async fn get_wallet_copy_performance(
             &self,
             _wallet_address: &str,

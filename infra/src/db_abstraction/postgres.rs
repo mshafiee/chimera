@@ -4093,11 +4093,43 @@ impl Database for PostgresBackend {
         Ok(row)
     }
 
+    async fn get_wallet_realized_pnl_window(
+        &self,
+        wallet_address: &str,
+        window_hours: i32,
+    ) -> AppResult<Option<rust_decimal::Decimal>> {
+        // REALIZED ledger only (CLOSED trades with net_pnl_sol): this is the
+        // same ground truth the dashboard PnL view shows. Both BUY and SELL
+        // rows of a round trip can carry net_pnl_sol in attribution mode, but
+        // summing them double-counts — net_pnl is booked on the SELL leg that
+        // closes the position (and on BUY legs only for tiered banks). Group
+        // per position trade_uuid? net_pnl rows: use positions.realized_net_
+        // pnl_sol joined via trade_uuid instead — one row per closed round
+        // trip, already cost-attributed.
+        // SUM without GROUP BY always returns exactly one row (NULL when no
+        // closed trades in the window) → (Option<Decimal>,) suffices; None
+        // maps to "thin history" for the caller.
+        let row: (Option<rust_decimal::Decimal>,) = sqlx::query_as(
+            r#"
+            SELECT SUM(p.realized_net_pnl_sol) AS window_pnl
+            FROM positions p
+            WHERE p.wallet_address = $1
+              AND p.state = 'CLOSED'
+              AND p.pnl_data_valid
+              AND p.closed_at > NOW() - ($2 || ' hours')::interval
+            "#,
+        )
+        .bind(wallet_address)
+        .bind(window_hours)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
+    }
+
     async fn get_wallet_copy_performance(
         &self,
         wallet_address: &str,
-    ) -> AppResult<Option<WalletCopyPerformance>> {
-        let row = sqlx::query(
+    ) -> AppResult<Option<WalletCopyPerformance>> {        let row = sqlx::query(
             r#"
             SELECT
                 wallet_address,

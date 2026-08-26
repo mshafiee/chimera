@@ -127,6 +127,7 @@ fn buy_request() -> SelectionRequest {
         source_amount_sol: dec("0.5"),
         ingress: Ingress::Helius,
         source_slot: Some(1),
+        source_block_time: None,
         exit_fraction: None,
         whale_entry_price: None,
     }

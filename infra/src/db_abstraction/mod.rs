@@ -882,6 +882,19 @@ pub trait Database: Send + Sync {
         window_days: i32,
     ) -> AppResult<Option<(i64, rust_decimal::Decimal, rust_decimal::Decimal)>>;
 
+    /// Sum of the wallet's REALIZED copy-trade PnL (`trades.net_pnl_sol` on
+    /// CLOSED trades) within the trailing window in hours. Feeds the
+    /// per-wallet loss-pause gate: a wallet that just burned capital keeps
+    /// copying until someone notices — this makes the pause automatic.
+    /// Returns `None` when the wallet has no closed trades in the window
+    /// (thin history passes through unevaluated, matching the recency
+    /// overlay's semantics).
+    async fn get_wallet_realized_pnl_window(
+        &self,
+        wallet_address: &str,
+        window_hours: i32,
+    ) -> AppResult<Option<rust_decimal::Decimal>>;
+
     /// Get wallet copy performance metrics
     async fn get_wallet_copy_performance(
         &self,

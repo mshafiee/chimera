@@ -997,6 +997,14 @@ impl Database for MockDb {
         unimplemented!("MockDb::get_wallet_pnl_statistics not implemented")
     }
 
+    async fn get_wallet_realized_pnl_window(
+        &self,
+        _wallet_address: &str,
+        _window_hours: i32,
+    ) -> AppResult<Option<rust_decimal::Decimal>> {
+        unimplemented!("MockDb::get_wallet_realized_pnl_window not implemented")
+    }
+
     async fn get_wallet_copy_performance(
         &self,
         wallet_address: &str,
