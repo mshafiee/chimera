@@ -173,6 +173,17 @@ services:
        # "WQS floor trial admission" log marker.
        - CHIMERA_SELECTION__WQS_TRIAL_ENABLED=true
        - CHIMERA_SELECTION__WQS_TRIAL_MIN_SCORE=10.0
+       # Token-age trial admission (2026-08-27, DARK→LIVE): SHIELD BUYs on
+       # tokens in the [proven-floor(6min), global-min(15min)) band admit at
+       # this micro cap instead of hard-rejecting TOKEN_TOO_NEW. Evidence
+       # (shadow mirror_main, whale's round trip under our exit rails):
+       # 72h leak +2.74 SOL pre-deploy; post-deploy 4 exits avg +19.5%.
+       # Zero-mirror-sample fresh tokens complete via entry-confirmation
+       # price-hold (bypass path). Downstream gates unchanged. REVERT if
+       # realized net PnL of trial-size positions is negative over ~50
+       # signals; tag via "Token-age TRIAL admission" log marker.
+       - CHIMERA_SELECTION__TOKEN_AGE_TRIAL_ENABLED=true
+       - CHIMERA_SELECTION__TOKEN_AGE_TRIAL_MAX_SIZE_SOL=0.25
        # Recency-weighted proven overlay (2026-08-24): after any proven path
        # passes, the wallet's last 10 closed copy-trades must not be net-
        # negative. ArcebCcX kept solo-admitting on a positive all-time ledger
