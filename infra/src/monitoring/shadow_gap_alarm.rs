@@ -20,7 +20,16 @@ use tracing::{error, info, warn};
 use crate::db_abstraction::Database;
 use crate::notifications::{CompositeNotifier, NotificationEvent};
 
-/// Admitted decisions without a shadow row over the trailing window.
+/// Admitted decisions without shadow coverage over the trailing window.
+///
+/// A decision counts as covered when EITHER a shadow row links to its own
+/// decision_id, OR an ADMITTED twin row for the same (wallet, token) pair
+/// was opened within the write-time dedup window (shadow_trader's
+/// DEDUP_WINDOW_SECS = 1h): duplicate whale buys inside the window keep the
+/// first row, so the pair is measured once and those decisions must not
+/// alarm. A REJECTED twin does NOT cover — that is the original silent-gap
+/// bug class (admitted gate-report measured by a rejected twin), which the
+/// writer repairs on admission; if the repair fails this probe still fires.
 async fn count_missing_shadow_rows(db: &Arc<dyn Database>) -> anyhow::Result<i64> {
     use crate::db_abstraction::DbPool;
     let DbPool::PostgreSQL(pool) = db.pool();
@@ -33,6 +42,13 @@ async fn count_missing_shadow_rows(db: &Arc<dyn Database>) -> anyhow::Result<i64
              AND NOT EXISTS (
                  SELECT 1 FROM shadow_positions sp
                  WHERE sp.decision_id = dr.decision_id
+                    OR (
+                        sp.wallet_address = dr.wallet_address
+                        AND sp.token_address = dr.token_address
+                        AND sp.main_admitted = TRUE
+                        AND sp.opened_at >= dr.decided_at - INTERVAL '1 hour'
+                        AND sp.opened_at <= dr.decided_at + INTERVAL '1 hour'
+                    )
              )"#,
     )
     .fetch_one(&pool)
