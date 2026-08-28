@@ -19,9 +19,21 @@ pub use types::{
 };
 
 use chimera_core::error::{AppError, AppResult};
+use rust_decimal::Decimal;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Kelly-style inputs derived from a wallet's trailing deduped mirror_main
+/// shadow exits (2026-08-28 shadow-tiered proven sizing). `avg_win`/`avg_loss`
+/// are per-trade return FRACTIONS (0.04 = +4%); `win_rate` is 0.0–1.0.
+#[derive(Debug, Clone)]
+pub struct ShadowKellyStats {
+    pub samples: i64,
+    pub win_rate: Decimal,
+    pub avg_win: Decimal,
+    pub avg_loss: Decimal,
+}
 
 /// Database query timing and monitoring utility
 ///
@@ -881,6 +893,14 @@ pub trait Database: Send + Sync {
         wallet_address: &str,
         window_days: i32,
     ) -> AppResult<Option<(i64, rust_decimal::Decimal, rust_decimal::Decimal)>>;
+
+    /// Trailing deduped mirror_main shadow-exit stats for one wallet.
+    /// None when the wallet has no qualifying exits in the window.
+    async fn get_wallet_shadow_kelly_stats(
+        &self,
+        wallet_address: &str,
+        window_days: i32,
+    ) -> AppResult<Option<ShadowKellyStats>>;
 
     /// Sum of the wallet's REALIZED copy-trade PnL (`trades.net_pnl_sol` on
     /// CLOSED trades) within the trailing window in hours. Feeds the

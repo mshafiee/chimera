@@ -7,9 +7,9 @@ use super::{
     ConfigAuditItem, Database, DbPool, DeadLetterItem, DiscrepancyRow, DiscrepancyTypeStats,
     ExitTargetData, InsertPosition, InsertTrade, KillSwitchState, LatencyBucket, Position,
     PositionDetail, PositionRecord, ReconciliationRun, ReconciliationStats, ReconciliationStatus,
-    RetryableDlqItem, Trade, TradeDetail, TradeLatencyStats, TradeStatistics, UpdateDlqItemParams,
-    UpdatePosition, UpdateTradeStatus, Wallet, WalletCopyPerformance, WalletDetail,
-    WalletMonitoring, WalletPerformance, WebhookAuditLog,
+    RetryableDlqItem, ShadowKellyStats, Trade, TradeDetail, TradeLatencyStats, TradeStatistics,
+    UpdateDlqItemParams, UpdatePosition, UpdateTradeStatus, Wallet, WalletCopyPerformance,
+    WalletDetail, WalletMonitoring, WalletPerformance, WebhookAuditLog,
 };
 use chimera_core::error::{AppError, AppResult};
 use rust_decimal::prelude::*;
@@ -4091,6 +4091,53 @@ impl Database for PostgresBackend {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row)
+    }
+
+    async fn get_wallet_shadow_kelly_stats(
+        &self,
+        wallet_address: &str,
+        window_days: i32,
+    ) -> AppResult<Option<ShadowKellyStats>> {
+        let row: Option<(i64, Option<f64>, Option<Decimal>, Option<Decimal>)> = sqlx::query_as(
+            // Dedup mirrors get_wallet_pnl_statistics (2026-08-14): one exit
+            // per (token, hour of opened_at). mirror_main only — the promoter
+            // bar this sizing tiers on is mirror_main-based. no_price exits
+            // excluded (zero-PnL distortions).
+            r#"WITH dedup AS (
+                 SELECT DISTINCT ON (sp.token_address, date_trunc('hour', sp.opened_at))
+                        se.pnl_pct
+                 FROM shadow_exits se
+                 JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
+                 WHERE sp.wallet_address = $1
+                   AND se.exit_strategy = 'mirror_main'
+                   AND se.exit_reason IS DISTINCT FROM 'no_price'
+                   AND se.pnl_pct IS NOT NULL
+                   AND sp.opened_at > NOW() - ($2 || ' days')::interval
+                 ORDER BY sp.token_address, date_trunc('hour', sp.opened_at), sp.opened_at
+               )
+               SELECT COUNT(*)::bigint,
+                      COUNT(*) FILTER (WHERE pnl_pct > 0)::float8 / NULLIF(COUNT(*), 0),
+                      AVG(pnl_pct) FILTER (WHERE pnl_pct > 0),
+                      AVG(ABS(pnl_pct)) FILTER (WHERE pnl_pct < 0)
+               FROM dedup
+               HAVING COUNT(*) > 0"#,
+        )
+        .bind(wallet_address)
+        .bind(window_days)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        Ok(
+            row.map(|(samples, win_rate, avg_win, avg_loss)| ShadowKellyStats {
+                samples,
+                win_rate: Decimal::from_f64_retain(win_rate.unwrap_or(0.0))
+                    .unwrap_or(Decimal::ZERO),
+                // pnl_pct is stored as percent (4.0 = +4%) — convert to fraction.
+                avg_win: avg_win.unwrap_or(Decimal::ZERO) / Decimal::from(100),
+                avg_loss: avg_loss.unwrap_or(Decimal::ZERO) / Decimal::from(100),
+            }),
+        )
     }
 
     async fn get_wallet_realized_pnl_window(

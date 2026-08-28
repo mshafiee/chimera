@@ -1005,6 +1005,14 @@ impl Database for MockDb {
         unimplemented!("MockDb::get_wallet_realized_pnl_window not implemented")
     }
 
+    async fn get_wallet_shadow_kelly_stats(
+        &self,
+        _wallet_address: &str,
+        _window_days: i32,
+    ) -> AppResult<Option<ShadowKellyStats>> {
+        Ok(None)
+    }
+
     async fn get_wallet_copy_performance(
         &self,
         wallet_address: &str,
