@@ -8,11 +8,45 @@
 
 use crate::config::PositionSizingConfig;
 use crate::db_abstraction::Database;
+use crate::db_abstraction::ShadowKellyStats;
 use crate::engine::kelly_sizer::KellySizer;
 use crate::error::AppResult;
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
+use std::str::FromStr;
 use std::sync::Arc;
+
+/// Map trailing deduped shadow-edge stats to a proven-size tier multiplier.
+///
+/// Net expectancy (gross minus `cost_pct`) drives the tier:
+///   \>= +10% -> 1.5x  (star: the 132Tkgf5YE class, +18.6% gross)
+///   \>= +5%  -> 1.25x
+///   \>= 0%   -> 1.0x  (net-clear — the promotion bar; unchanged behavior)
+///   \< 0%    -> 0.5x  (trailing below-cost drift: defensive)
+/// Thin evidence (< min_samples) is NEUTRAL 1.0x — absence of evidence is not
+/// negative evidence (coverage loss, not bleeding, is the blackout failure mode).
+pub fn shadow_proven_size_multiplier(
+    stats: &ShadowKellyStats,
+    cost_pct: Decimal,
+    min_samples: i64,
+) -> Decimal {
+    if stats.samples < min_samples {
+        return Decimal::ONE;
+    }
+    let expectancy_pct = (stats.win_rate * stats.avg_win
+        - (Decimal::ONE - stats.win_rate) * stats.avg_loss)
+        * Decimal::from(100);
+    let net_pct = expectancy_pct - cost_pct;
+    if net_pct >= Decimal::from(10) {
+        Decimal::from_str("1.5").unwrap_or(Decimal::ONE)
+    } else if net_pct >= Decimal::from(5) {
+        Decimal::from_str("1.25").unwrap_or(Decimal::ONE)
+    } else if net_pct >= Decimal::ZERO {
+        Decimal::ONE
+    } else {
+        Decimal::from_str("0.5").unwrap_or(Decimal::ONE)
+    }
+}
 
 /// Position sizer
 pub struct PositionSizer {

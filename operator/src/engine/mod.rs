@@ -50,6 +50,7 @@ pub use crate::config::ExecutionLockConfig;
 pub use decision_recorder::DecisionRecorder;
 pub use execution_lock::{ExecutionLock, LockGuard, LockInfo};
 pub use executor::*;
+pub use position_sizer::shadow_proven_size_multiplier;
 pub use position_sizer::PositionSizer;
 pub use profit_targets::{ProfitTargetAction, ProfitTargetManager};
 pub use recovery::RecoveryManager;

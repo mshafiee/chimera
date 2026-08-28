@@ -891,3 +891,78 @@ async fn test_capital_relative_skip_below_min_preserved() {
         "legacy mode must clamp up to min_size_sol"
     );
 }
+
+// ─── Shadow-tier proven sizing multiplier (2026-08-28) ──────────────────────
+
+use chimera_operator::db_abstraction::ShadowKellyStats;
+use chimera_operator::engine::position_sizer::shadow_proven_size_multiplier;
+
+fn shadow_stats(samples: i64, win: &str, avg_win: &str, avg_loss: &str) -> ShadowKellyStats {
+    ShadowKellyStats {
+        samples,
+        win_rate: Decimal::from_str(win).unwrap(),
+        avg_win: Decimal::from_str(avg_win).unwrap(),
+        avg_loss: Decimal::from_str(avg_loss).unwrap(),
+    }
+}
+
+#[test]
+fn test_shadow_tier_star_edge() {
+    // p=0.8, aw=0.20, al=0.02 -> expectancy 15.6% gross, 15.1% net >= 10 -> 1.5x
+    let stats = shadow_stats(25, "0.8", "0.20", "0.02");
+    assert_eq!(
+        shadow_proven_size_multiplier(&stats, Decimal::from_str("0.5").unwrap(), 20),
+        Decimal::from_str("1.5").unwrap()
+    );
+}
+
+#[test]
+fn test_shadow_tier_strong_edge() {
+    // expectancy 6.0% gross, 5.5% net in [5, 10) -> 1.25x
+    let stats = shadow_stats(25, "0.8", "0.08", "0.02");
+    assert_eq!(
+        shadow_proven_size_multiplier(&stats, Decimal::from_str("0.5").unwrap(), 20),
+        Decimal::from_str("1.25").unwrap()
+    );
+}
+
+#[test]
+fn test_shadow_tier_net_clear_edge() {
+    // expectancy 2.8% gross, 2.3% net in [0, 5) -> 1.0x (unchanged behavior)
+    let stats = shadow_stats(25, "0.8", "0.04", "0.02");
+    assert_eq!(
+        shadow_proven_size_multiplier(&stats, Decimal::from_str("0.5").unwrap(), 20),
+        Decimal::ONE
+    );
+}
+
+#[test]
+fn test_shadow_tier_below_cost() {
+    // expectancy 0.2% gross, -0.3% net < 0 -> 0.5x (defensive)
+    let stats = shadow_stats(25, "0.8", "0.01", "0.03");
+    assert_eq!(
+        shadow_proven_size_multiplier(&stats, Decimal::from_str("0.5").unwrap(), 20),
+        Decimal::from_str("0.5").unwrap()
+    );
+}
+
+#[test]
+fn test_shadow_tier_exact_star_boundary() {
+    // p=0.5, aw=0.22, al=0.01: p*aw - (1-p)*al = 0.11 - 0.005 = 0.105
+    // -> 10.5% gross, 10.0% net — exactly at the >= 10 boundary -> 1.5x
+    let stats = shadow_stats(25, "0.5", "0.22", "0.01");
+    assert_eq!(
+        shadow_proven_size_multiplier(&stats, Decimal::from_str("0.5").unwrap(), 20),
+        Decimal::from_str("1.5").unwrap()
+    );
+}
+
+#[test]
+fn test_shadow_tier_thin_evidence_is_neutral() {
+    // Absence of evidence is NOT negative evidence: thin book -> 1.0x.
+    let stats = shadow_stats(5, "0.0", "0.0", "0.5");
+    assert_eq!(
+        shadow_proven_size_multiplier(&stats, Decimal::from_str("0.5").unwrap(), 20),
+        Decimal::ONE
+    );
+}
