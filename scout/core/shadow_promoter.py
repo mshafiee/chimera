@@ -65,6 +65,18 @@ PROMOTE_WINDOW_DAYS = int(os.environ.get("SCOUT_PROMOTE_WINDOW_DAYS", "30"))
 DEMOTE_WINDOW_DAYS = int(os.environ.get("SCOUT_DEMOTE_WINDOW_DAYS", "14"))
 DEMOTE_MIN_SAMPLES = int(os.environ.get("SCOUT_DEMOTE_MIN_SAMPLES", "10"))
 
+# --- Candidate-proving lane (2026-08-28) -------------------------------------
+# The operator processes PROVING wallets in shadow-only mode (decisions +
+# shadow forks, never queued live), so discovered candidates can finally
+# accrue the trailing evidence promotion needs. This module manages the lane:
+# fill it with the highest-WQS CANDIDATE wallets, recycle stagnant provers
+# (zero evidence after PROVE_STAGNATION_DAYS) back to CANDIDATE, and promote
+# provers whose trailing book clears the post-cost bar. PROVING wallets also
+# get webhook coverage (consolidate_webhooks.sh + operator eligibility accept
+# the status) — without coverage they can never be sampled.
+PROVING_ROSTER_SIZE = int(os.environ.get("SCOUT_PROVING_ROSTER_SIZE", "30"))
+PROVE_STAGNATION_DAYS = int(os.environ.get("SCOUT_PROVE_STAGNATION_DAYS", "14"))
+
 
 @dataclass(frozen=True)
 class WalletPerf:
@@ -229,7 +241,7 @@ def optimize_paper_roster(
             (net_pct is not None and net_pct >= Decimal(str(min_net_pct)))
             or (net_pct is None and p.total_pnl >= Decimal(str(PROMOTE_MIN_PNL)))
         ) and _not_tail_only(p)
-        if clear and p.status in ("CANDIDATE", None):
+        if clear and p.status in ("PROVING", "CANDIDATE", None):
             to_promote.append((p, net))
         elif p.status == "ACTIVE" and net <= Decimal("0"):
             to_demote.append((p, net))
@@ -263,6 +275,58 @@ def fetch_idle_candidates(min_age_days: int = PRUNE_MIN_AGE_DAYS) -> list[str]:
     return [r["address"] if isinstance(r, dict) else r[0] for r in rows]
 
 
+def rebalance_proving_pool(
+    stagnation_days: int = PROVE_STAGNATION_DAYS,
+    target_size: int = PROVING_ROSTER_SIZE,
+) -> dict:
+    """Keep the PROVING pool full of the most promising CANDIDATE wallets.
+
+    - Recycle: PROVING wallets with ZERO shadow evidence and promoted_at older
+      than `stagnation_days` go back to CANDIDATE — they had their chance to
+      generate signals; a fresh discovery class gets the slot.
+    - Fill: highest-WQS CANDIDATE wallets (oldest promoted_at first on ties)
+      move to PROVING until the pool holds `target_size` wallets.
+
+    Returns {"to_proving": [...], "to_candidate": [...]} (planned actions;
+    the caller applies them via update_wallet_status).
+    """
+    # Stagnant provers recycle first (they vacate pool slots).
+    rows = execute_and_fetchall(
+        """
+        SELECT w.address
+        FROM wallets w
+        WHERE w.status = 'PROVING'
+          AND w.promoted_at < NOW() - (%s || ' days')::INTERVAL
+          AND NOT EXISTS (
+              SELECT 1 FROM shadow_positions sp WHERE sp.wallet_address = w.address
+          )
+        ORDER BY w.promoted_at ASC
+        """,
+        (str(stagnation_days),),
+    )
+    to_candidate = [r["address"] if isinstance(r, dict) else r[0] for r in rows]
+
+    count_rows = execute_and_fetchall(
+        "SELECT count(*) FROM wallets WHERE status = 'PROVING'",
+    )
+    current = count_rows[0]["count"] if isinstance(count_rows[0], dict) else count_rows[0][0]
+    deficit = max(0, target_size - (int(current) - len(to_candidate)))
+    to_proving: list[str] = []
+    if deficit > 0:
+        rows = execute_and_fetchall(
+            """
+            SELECT w.address
+            FROM wallets w
+            WHERE w.status = 'CANDIDATE'
+            ORDER BY w.wqs_score DESC NULLS LAST, w.promoted_at ASC NULLS LAST
+            LIMIT %s
+            """,
+            (str(deficit),),
+        )
+        to_proving = [r["address"] if isinstance(r, dict) else r[0] for r in rows]
+    return {"to_proving": to_proving, "to_candidate": to_candidate}
+
+
 def run_cycle(
     dry_run: bool = False,
     prune: bool = False,
@@ -272,16 +336,31 @@ def run_cycle(
 
     Returns a summary dict of actions taken/planned.
 
-    Promotion reads the trailing PROMOTE_WINDOW_DAYS (default 30d) shadow
-    book; demotion reads the trailing DEMOTE_WINDOW_DAYS (default 14d) book
-    with a DEMOTE_MIN_SAMPLES floor so dormant wallets are never cut for
-    absence of evidence (see the 2026-08-28 windowing note above the
-    thresholds).
+    The candidate-proving pool is rebalanced first (fill with highest-WQS
+    candidates, recycle stagnant provers). Promotion then reads the trailing
+    PROMOTE_WINDOW_DAYS (default 30d) shadow book; demotion reads the shorter
+    DEMOTE_WINDOW_DAYS (default 14d) book with a DEMOTE_MIN_SAMPLES floor so
+    dormant wallets are never cut for absence of evidence.
     """
+    try:
+        proving = rebalance_proving_pool()
+    except Exception as e:  # noqa: BLE001 — pool rebalance is advisory; a DB
+        # hiccup here must not kill the promote/demote cycle.
+        logger.warning("proving pool rebalance failed — skipping lane this cycle: %s", e)
+        proving = {"to_proving": [], "to_candidate": []}
+    if proving["to_proving"] or proving["to_candidate"]:
+        logger.info(
+            "proving pool: %d -> PROVING, %d -> CANDIDATE (stagnant)",
+            len(proving["to_proving"]), len(proving["to_candidate"]),
+        )
+        if not dry_run:
+            for addr in proving["to_candidate"]:
+                update_wallet_status(addr, "CANDIDATE")
+            for addr in proving["to_proving"]:
+                update_wallet_status(addr, "PROVING")
     promote_perf = fetch_shadow_performance(PROMOTE_WINDOW_DAYS)
     demote_perf = fetch_shadow_performance(DEMOTE_WINDOW_DAYS)
-    cost_per_sol = observed_cost_per_sol()
-    # Keep the PAPER copy set at the post-cost-CLEAR optimum every scheduled
+    cost_per_sol = observed_cost_per_sol()    # Keep the PAPER copy set at the post-cost-CLEAR optimum every scheduled
     # cycle (Phase 2H): promote CLEAR candidates from the trailing promote
     # window, demote ACTIVE cost-burners (net <= 0) from the shorter trailing
     # demote window. Caps remain as guardrails against roster flapping.
@@ -295,6 +374,8 @@ def run_cycle(
     summary: dict = {
         "promote": [p.address for p in promotions],
         "demote": [p.address for p in demotions],
+        "to_proving": proving["to_proving"],
+        "to_candidate": proving["to_candidate"],
         "prune": [],
         "dry_run": dry_run,
     }

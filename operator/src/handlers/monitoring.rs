@@ -304,11 +304,17 @@ pub async fn helius_webhook_handler(
                     }
                 };
 
-                // Only process signals from ACTIVE wallets
-                if wallet.status == "ACTIVE" {
+                // Process signals from ACTIVE wallets (live copy) and PROVING
+                // wallets (candidate-proving lane, 2026-08-28: shadow-only —
+                // decide() forks the shadow book unconditionally, but PROVING
+                // signals are never queued live, so the promoter accumulates
+                // trailing evidence without risking capital).
+                let paper_only = wallet.status == "PROVING";
+                if wallet.status == "ACTIVE" || paper_only {
                     tracing::debug!(
                         wallet = %wallet_address,
-                        "ACTIVE wallet signal accepted for processing"
+                        paper_only,
+                        "Roster wallet signal accepted for processing"
                     );
                     // FIX 1: Check circuit breaker before queuing
                     if let Some(ref cb) = state.circuit_breaker {
@@ -396,7 +402,7 @@ pub async fn helius_webhook_handler(
                         // historical closed trades).
                         let confirmable = decision.rejection_code == Some("SINGLE_WALLET_UNPROVEN")
                             || decision.rejection_code == Some("SHADOW_MIRROR_INSUFFICIENT");
-                        if confirmable && direction == Action::Buy {
+                        if confirmable && direction == Action::Buy && !paper_only {
                             if let Some(ref ec) = state.entry_confirmation {
                                 let sol_mint = crate::constants::mints::SOL;
                                 // Only SOL-quoted buys give a free exact entry
@@ -423,7 +429,18 @@ pub async fn helius_webhook_handler(
                     // Queue the admitted signal through the shared path (also
                     // used by the entry-confirmation loop) — identical UUID,
                     // payload, decimals, insert, link, queue, and status
-                    // updates as before.
+                    // updates as before. PROVING wallets stop here: the
+                    // decision and its shadow fork are already recorded, but
+                    // nothing is queued live (candidate-proving lane).
+                    if paper_only {
+                        tracing::info!(
+                            wallet = %wallet_address,
+                            token = %target_token,
+                            size_sol = ?decision.size_sol,
+                            "PROVING wallet signal admitted — shadow-only (not queued live)"
+                        );
+                        continue;
+                    }
                     if !crate::engine::entry_confirmation::queue_monitoring_signal(
                         &state.db,
                         &state.engine,
@@ -440,7 +457,7 @@ pub async fn helius_webhook_handler(
                     tracing::debug!(
                         wallet = %wallet_address,
                         status = %wallet.status,
-                        "Wallet detected but not ACTIVE, skipping signal"
+                        "Wallet is neither ACTIVE nor PROVING, skipping signal"
                     );
                 }
             } else {
@@ -575,11 +592,11 @@ pub async fn enable_wallet_monitoring(
         }
     };
 
-    if wallet.status != "ACTIVE" {
+    if wallet.status != "ACTIVE" && wallet.status != "PROVING" {
         tracing::warn!(
             wallet = %wallet_address,
             status = %wallet.status,
-            "Wallet is not ACTIVE, cannot enable monitoring"
+            "Wallet is not ACTIVE/PROVING, cannot enable monitoring"
         );
         return StatusCode::BAD_REQUEST;
     }

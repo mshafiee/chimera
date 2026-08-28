@@ -1363,7 +1363,10 @@ impl WebhookLifecycleManager {
                     _ => 65.0,
                 };
 
-                if wallet.status != "ACTIVE" {
+                // PROVING wallets are webhook-eligible: the candidate-proving
+                // lane (2026-08-28) needs their signals forked into the shadow
+                // book so the promoter can judge trailing edge.
+                if wallet.status != "ACTIVE" && wallet.status != "PROVING" {
                     return Ok(WebhookEligibility {
                         eligible: false,
                         wqs_score: wallet.wqs_score,

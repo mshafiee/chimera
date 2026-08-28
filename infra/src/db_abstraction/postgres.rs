@@ -2798,7 +2798,7 @@ impl Database for PostgresBackend {
             SELECT w.address
             FROM wallets w
             LEFT JOIN wallet_monitoring wm ON w.address = wm.wallet_address
-            WHERE w.status = 'ACTIVE'
+            WHERE w.status IN ('ACTIVE', 'PROVING')
               AND (wm.helius_webhook_id IS NULL OR wm.helius_webhook_id = '')
               AND w.address IS NOT NULL
             "#,
@@ -2813,8 +2813,8 @@ impl Database for PostgresBackend {
             r#"
             SELECT w.address, wm.helius_webhook_id
             FROM wallets w
-            JOIN wallet_monitoring wm ON w.address = wm.wallet_address
-            WHERE w.status = 'ACTIVE'
+            JOIN wallet_monitoring wm ON wm.wallet_address = w.address
+            WHERE w.status IN ('ACTIVE', 'PROVING')
               AND wm.helius_webhook_id IS NOT NULL
               AND wm.helius_webhook_id != ''
             "#,

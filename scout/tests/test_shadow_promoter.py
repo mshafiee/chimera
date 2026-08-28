@@ -209,3 +209,61 @@ def test_promotion_reads_promote_window_only(monkeypatch):
     assert ("STALE_BURNER", "CANDIDATE") in applied
     assert summary["promote"] == ["NEW_CLEAR"]
     assert summary["demote"] == ["STALE_BURNER"]
+
+
+def test_promotes_proving_wallets(monkeypatch):
+    # PROVING wallets are first-class promotion candidates: the lane exists so
+    # their trailing book can be judged — a clear prover graduates to ACTIVE.
+    perf = [_perf("PROVEN_PROVER", "PROVING", 25, 6.0, notional=100)]
+    monkeypatch.setattr(sp, "observed_cost_per_sol", lambda: Decimal("0.02"))
+    res = sp.optimize_paper_roster(perf, cost_per_sol=Decimal("0.02"))
+    assert [p.address for p in res["promote"]] == ["PROVEN_PROVER"]
+
+
+def test_rebalance_recycles_stagnant_and_fills(monkeypatch):
+    # Stagnant provers (zero shadow evidence past the window) recycle to
+    # CANDIDATE; the deficit is filled with the highest-WQS candidates.
+    def fake_fetch(query, params=()):
+        if "NOT EXISTS" in query:
+            return [{"address": "STAGNANT_1"}]
+        if "count(*)" in query:
+            return [{"count": 3}]  # 3 proving, 1 recycling -> deficit = 30 - 2 = 28
+        return [{"address": f"CAND_{i}"} for i in range(28)]
+
+    monkeypatch.setattr(sp, "execute_and_fetchall", fake_fetch)
+    res = sp.rebalance_proving_pool(stagnation_days=14, target_size=30)
+    assert res["to_candidate"] == ["STAGNANT_1"]
+    assert len(res["to_proving"]) == 28
+    assert res["to_proving"][0] == "CAND_0"
+
+
+def test_rebalance_no_fill_when_pool_full(monkeypatch):
+    def fake_fetch(query, params=()):
+        if "NOT EXISTS" in query:
+            return []
+        return [{"count": 30}]
+
+    monkeypatch.setattr(sp, "execute_and_fetchall", fake_fetch)
+    res = sp.rebalance_proving_pool(stagnation_days=14, target_size=30)
+    assert res["to_proving"] == []
+    assert res["to_candidate"] == []
+
+
+def test_run_cycle_rebalances_proving_pool(monkeypatch):
+    # The cycle applies the proving rebalance (PROVING entry + recycle) before
+    # promote/demote selection.
+    monkeypatch.setattr(
+        sp, "rebalance_proving_pool",
+        lambda stagnation_days=14, target_size=30: {
+            "to_proving": ["FRESH_1"], "to_candidate": ["STALE_1"],
+        },
+    )
+    monkeypatch.setattr(sp, "fetch_shadow_performance", lambda window_days: [])
+    monkeypatch.setattr(sp, "observed_cost_per_sol", lambda: Decimal("0.02"))
+    applied = []
+    monkeypatch.setattr(sp, "update_wallet_status", lambda addr, status: applied.append((addr, status)))
+    summary = sp.run_cycle(dry_run=False)
+    assert ("STALE_1", "CANDIDATE") in applied
+    assert ("FRESH_1", "PROVING") in applied
+    assert summary["to_proving"] == ["FRESH_1"]
+    assert summary["to_candidate"] == ["STALE_1"]

@@ -42,7 +42,7 @@ psql_q() { # psql_q <sql> — one -tA row per line
 
 # ── 1. Read ACTIVE wallets + webhook URL from the DB ─────────────────────────
 log "Reading ACTIVE wallets and webhook URL from DB"
-readarray -t WALLETS < <(psql_q "SELECT address FROM wallets WHERE status='ACTIVE' ORDER BY address;")
+readarray -t WALLETS < <(psql_q "SELECT address FROM wallets WHERE status IN ('ACTIVE','PROVING') ORDER BY address;")
 [ "${#WALLETS[@]}" -gt 0 ] || fail "No ACTIVE wallets found"
 WEBHOOK_URL="$(psql_q "SELECT config_value FROM webhook_configuration WHERE config_key='current_webhook_url' LIMIT 1;" | tr -d '\r')"
 if [ -z "$WEBHOOK_URL" ]; then
@@ -122,7 +122,7 @@ try:
         print(a)
 except Exception:
     pass' >> "$union_file" || true
-    done < <(psql_q "SELECT DISTINCT helius_webhook_id FROM wallet_monitoring wm JOIN wallets w ON w.address=wm.wallet_address WHERE w.status='ACTIVE' AND wm.helius_webhook_id IS NOT NULL AND wm.helius_webhook_id != '';" | tr -d '\r')
+    done < <(psql_q "SELECT DISTINCT helius_webhook_id FROM wallet_monitoring wm JOIN wallets w ON w.address=wm.wallet_address WHERE w.status IN ('ACTIVE','PROVING') AND wm.helius_webhook_id IS NOT NULL AND wm.helius_webhook_id != '';" | tr -d '\r')
     local missing=0
     for w in "${WALLETS[@]}"; do
         grep -qxF "$w" "$union_file" || missing=$((missing + 1))
@@ -246,7 +246,7 @@ for wid in "${COVERED[@]}"; do
     skip=false
     for cid in "${CREATED_IDS[@]}"; do [ "$wid" = "$cid" ] && skip=true; done
     $skip && continue
-    if refcount="$(psql_q "SELECT count(*) FROM wallet_monitoring wm JOIN wallets w ON w.address=wm.wallet_address WHERE w.status='ACTIVE' AND wm.helius_webhook_id='$wid';" | tr -d '\r')"; then
+    if refcount="$(psql_q "SELECT count(*) FROM wallet_monitoring wm JOIN wallets w ON w.address=wm.wallet_address WHERE w.status IN ('ACTIVE','PROVING') AND wm.helius_webhook_id='$wid';" | tr -d '\r')"; then
         [ "${refcount:-0}" -gt 0 ] && { log "Keeping $wid (referenced by ${refcount} ACTIVE wallets)"; continue; }
     fi
     docker exec chimera-postgres psql -U chimera -d chimera -t -A -c \
