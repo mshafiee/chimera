@@ -161,9 +161,14 @@ pub async fn helius_webhook_handler(
             }
         }
 
-        // Resolve tracked wallet address: match userAccount entries against ACTIVE wallets.
-        // Uses a 30s TTL cache to avoid a `get_wallets_by_status("ACTIVE")` DB query
-        // per webhook event (10K+ events/hour — the dominant DB load before this cache).
+        // Resolve tracked wallet address: match userAccount entries against
+        // ACTIVE (live copy) and PROVING (candidate-proving lane, shadow-only)
+        // wallets. Uses a 30s TTL cache to avoid a `get_wallets_by_status(...)`
+        // DB query per webhook event (10K+ events/hour — the dominant DB load
+        // before this cache). PROVING addresses MUST be in this set: the cache
+        // pre-filters events before the per-event status check, so leaving
+        // them out silently starves the proving lane (found 2026-08-28: the
+        // lane accrued zero evidence for 12h despite provers trading).
         let active_wallet_addresses: std::collections::HashSet<String> = {
             // Cache read scoped to its own block — guard drops before any await.
             let cached_set: Option<std::collections::HashSet<String>> = {
@@ -179,11 +184,17 @@ pub async fn helius_webhook_handler(
             match cached_set {
                 Some(set) => set,
                 None => {
-                    let wallets = match state.db.get_wallets_by_status("ACTIVE").await {
+                    let mut wallets = match state.db.get_wallets_by_status("ACTIVE").await {
                         Ok(w) => w,
                         Err(e) => {
                             tracing::warn!(error = %e, "Failed to query active wallets, falling back to no filter");
                             vec![]
+                        }
+                    };
+                    match state.db.get_wallets_by_status("PROVING").await {
+                        Ok(mut proving) => wallets.append(&mut proving),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to query proving wallets — continuing with ACTIVE only");
                         }
                     };
                     let set: std::collections::HashSet<String> =
@@ -230,7 +241,7 @@ pub async fn helius_webhook_handler(
                     tracing::debug!(
                         signature = %event.signature,
                         transaction_type = %event.transaction_type,
-                        "Webhook event has no tracked wallet (no ACTIVE wallet matched user_account)"
+                        "Webhook event has no tracked wallet (no ACTIVE/PROVING wallet matched user_account)"
                     );
                     continue;
                 }
