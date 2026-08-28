@@ -2331,6 +2331,20 @@ pub struct PositionSizingConfig {
     /// proven_size_sol ≥ min_size_sol) silences the proven roster.
     #[serde(default = "default_true")]
     pub proven_sizing_boost: bool,
+    /// Shadow-tiered proven sizing (2026-08-28): modulate proven_size_pct by
+    /// the wallet's trailing deduped mirror_main expectancy. Dark-launch
+    /// default false — enable via config.yaml `position_sizing`.
+    #[serde(default)]
+    pub shadow_kelly_enabled: bool,
+    /// Trailing window (days) for the shadow evidence.
+    #[serde(default = "default_shadow_kelly_window_days")]
+    pub shadow_kelly_window_days: i32,
+    /// Minimum deduped exits in the window; fewer -> neutral 1.0x tier.
+    #[serde(default = "default_shadow_kelly_min_samples")]
+    pub shadow_kelly_min_samples: i64,
+    /// Round-trip cost percent subtracted from gross shadow expectancy.
+    #[serde(default = "default_shadow_kelly_cost_pct")]
+    pub shadow_kelly_cost_pct: Decimal,
     /// Fixed size (SOL) for proven-wallet entries under the boost. Subject
     /// to strategy max, portfolio heat, and the spear_lite cap; the
     /// conviction-size cap is intentionally NOT applied (its 0.25 default
@@ -2448,6 +2462,18 @@ fn default_min_size_sol() -> Decimal {
     dec!(0.05)
 }
 
+fn default_shadow_kelly_window_days() -> i32 {
+    30
+}
+
+fn default_shadow_kelly_min_samples() -> i64 {
+    20
+}
+
+fn default_shadow_kelly_cost_pct() -> Decimal {
+    dec!(0.5)
+}
+
 fn default_proven_size_sol() -> Decimal {
     dec!(0.75)
 }
@@ -2530,6 +2556,10 @@ impl Default for PositionSizingConfig {
             min_size_sol: default_min_size_sol(),
             skip_below_min_size: true,
             proven_sizing_boost: true,
+            shadow_kelly_enabled: false,
+            shadow_kelly_window_days: default_shadow_kelly_window_days(),
+            shadow_kelly_min_samples: default_shadow_kelly_min_samples(),
+            shadow_kelly_cost_pct: default_shadow_kelly_cost_pct(),
             proven_size_sol: default_proven_size_sol(),
             proven_size_pct: default_proven_size_pct(),
             min_live_position_sol: default_min_live_position_sol(),
