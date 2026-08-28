@@ -26,7 +26,7 @@ def _perf(address, status, samples, total, win=0.5, notional=0.0, max_win=None):
         status=status,
         samples=samples,
         total_pnl=Decimal(str(total)),
-        avg_pnl=Decimal(str(total)) / Decimal(samples),
+        avg_pnl=Decimal(str(total)) / Decimal(samples) if samples else Decimal("0"),
         win_rate=win,
         notional=Decimal(str(notional)),
         max_win=Decimal(str(max_win)) if max_win is not None else None,
@@ -145,7 +145,7 @@ def test_run_cycle_applies_paper_optimal_roster(monkeypatch):
         _perf("BURNER_ACT", "ACTIVE", 30, 0.5, notional=100),      # net -1.5 <= 0 -> demote
         _perf("BELOW_SAMPLES", "ACTIVE", 9, -5.0, notional=100),   # under min samples
     ]
-    monkeypatch.setattr(sp, "fetch_shadow_performance", lambda: perf)
+    monkeypatch.setattr(sp, "fetch_shadow_performance", lambda window_days: perf)
     monkeypatch.setattr(sp, "observed_cost_per_sol", lambda: Decimal("0.02"))
     applied = []
     monkeypatch.setattr(sp, "update_wallet_status", lambda addr, status: applied.append((addr, status)))
@@ -155,3 +155,57 @@ def test_run_cycle_applies_paper_optimal_roster(monkeypatch):
     assert ("BELOW_SAMPLES", "CANDIDATE") not in applied
     assert summary["promote"] == ["CLEAR_CAND"]
     assert summary["demote"] == ["BURNER_ACT"]
+
+
+def test_run_cycle_uses_trailing_windows(monkeypatch):
+    # Promotion must read the trailing promote window (30d); demotion the
+    # shorter demote window (14d) — lifetime aggregates promoted stale edges
+    # and hid decay (2026-08-28 windowing fix).
+    seen_windows = []
+
+    def fake_fetch(window_days):
+        seen_windows.append(window_days)
+        return []
+
+    monkeypatch.setattr(sp, "fetch_shadow_performance", fake_fetch)
+    monkeypatch.setattr(sp, "observed_cost_per_sol", lambda: Decimal("0.02"))
+    monkeypatch.setattr(sp, "update_wallet_status", lambda addr, status: None)
+    sp.run_cycle(dry_run=True)
+    assert seen_windows == [sp.PROMOTE_WINDOW_DAYS, sp.DEMOTE_WINDOW_DAYS]
+
+
+def test_demotion_needs_min_trailing_samples(monkeypatch):
+    # Demotion is protective: it must fire on a REAL trailing bleeding book
+    # (>= DEMOTE_MIN_SAMPLES exits) and must NOT fire on thin or dormant
+    # evidence — cutting a quiet wallet removes its webhook coverage, which is
+    # the 2026-08-17 star-wallet blackout failure mode.
+    perf = [
+        _perf("BLEEDER", "ACTIVE", 14, -3.0, notional=200),   # net -3.28 -> demote
+        _perf("THIN_LOSER", "ACTIVE", 5, -3.0, notional=100),  # under demote floor -> keep
+        _perf("DORMANT", "ACTIVE", 0, 0.0, notional=0),        # no evidence -> keep
+    ]
+    monkeypatch.setattr(sp, "observed_cost_per_sol", lambda: Decimal("0.02"))
+    demotions = sp.optimize_paper_roster(
+        perf, cost_per_sol=Decimal("0.02"), min_samples=sp.DEMOTE_MIN_SAMPLES,
+    )["demote"]
+    assert [p.address for p in demotions] == ["BLEEDER"]
+
+
+def test_promotion_reads_promote_window_only(monkeypatch):
+    # A CANDIDATE clear in the promote window is promoted even if absent from
+    # the demote window; an ACTIVE burner in the demote window is demoted even
+    # if absent from the promote window — the two windows are independent.
+    promote_perf = [_perf("NEW_CLEAR", "CANDIDATE", 25, 6.0, notional=100)]
+    demote_perf = [_perf("STALE_BURNER", "ACTIVE", 20, -2.0, notional=100)]
+    monkeypatch.setattr(
+        sp, "fetch_shadow_performance",
+        lambda window_days: promote_perf if window_days == sp.PROMOTE_WINDOW_DAYS else demote_perf,
+    )
+    monkeypatch.setattr(sp, "observed_cost_per_sol", lambda: Decimal("0.02"))
+    applied = []
+    monkeypatch.setattr(sp, "update_wallet_status", lambda addr, status: applied.append((addr, status)))
+    summary = sp.run_cycle(dry_run=False)
+    assert ("NEW_CLEAR", "ACTIVE") in applied
+    assert ("STALE_BURNER", "CANDIDATE") in applied
+    assert summary["promote"] == ["NEW_CLEAR"]
+    assert summary["demote"] == ["STALE_BURNER"]

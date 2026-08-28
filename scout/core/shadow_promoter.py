@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from decimal import Decimal
@@ -49,6 +50,21 @@ PRUNE_MIN_AGE_DAYS = 14   # only prune candidates idle this long
 # floor with margin (net_pct = net pnl / notional * 100).
 PROMOTE_MIN_NET_PCT = 1.5
 
+# --- Trailing windows (2026-08-28) ------------------------------------------
+# Lifetime aggregates promoted stale edges and hid decay: a wallet whose edge
+# died months ago stays ACTIVE as long as its lifetime net stays positive, and
+# a wallet with a strong recent book but weak lifetime stays unpromotable.
+# Promotion now reads the trailing promote window; demotion reads a shorter
+# trailing window so below-cost drift is caught while evidence is fresh.
+# Dormancy guard: an ACTIVE wallet with fewer than DEMOTE_MIN_SAMPLES exits in
+# the demote window is NOT demoted for absence of evidence — removing its
+# webhook coverage when it goes quiet is the 2026-08-17 star-wallet blackout
+# failure mode (coverage loss made the platform's best wallet invisible for
+# 11 days). Dormant wallets cost nothing; bleeding wallets get cut.
+PROMOTE_WINDOW_DAYS = int(os.environ.get("SCOUT_PROMOTE_WINDOW_DAYS", "30"))
+DEMOTE_WINDOW_DAYS = int(os.environ.get("SCOUT_DEMOTE_WINDOW_DAYS", "14"))
+DEMOTE_MIN_SAMPLES = int(os.environ.get("SCOUT_DEMOTE_MIN_SAMPLES", "10"))
+
 
 @dataclass(frozen=True)
 class WalletPerf:
@@ -62,13 +78,21 @@ class WalletPerf:
     max_win: Optional[Decimal] = None
 
 
-def fetch_shadow_performance() -> list[WalletPerf]:
+def fetch_shadow_performance(window_days: Optional[int] = None) -> list[WalletPerf]:
     """Per-wallet mirror_main shadow PnL joined to current roster status.
 
     Also carries notional (for post-cost net expectancy) and max_win (for the
-    not-one-lucky-trade guard)."""
+    not-one-lucky-trade guard). `window_days` restricts evidence to exits in
+    the trailing window (exit time = when the edge was realized); None keeps
+    the lifetime aggregate for back-compat callers.
+    """
+    window_sql = ""
+    params: tuple = ()
+    if window_days is not None:
+        window_sql = "AND se.exited_at > NOW() - (%s || ' days')::INTERVAL"
+        params = (str(window_days),)
     rows = execute_and_fetchall(
-        """
+        f"""
         SELECT sp.wallet_address, w.status,
                COUNT(*)                                   AS samples,
                SUM(se.pnl_sol)                            AS total_pnl,
@@ -80,8 +104,10 @@ def fetch_shadow_performance() -> list[WalletPerf]:
         JOIN shadow_exits se ON se.shadow_id = sp.shadow_id
         LEFT JOIN wallets w ON w.address = sp.wallet_address
         WHERE se.exit_strategy = 'mirror_main' AND se.pnl_sol IS NOT NULL
+        {window_sql}
         GROUP BY sp.wallet_address, w.status
         """,
+        params,
     )
     out: list[WalletPerf] = []
     for r in rows:
@@ -245,15 +271,26 @@ def run_cycle(
     """Execute one promotion/demotion (and optional prune) cycle.
 
     Returns a summary dict of actions taken/planned.
+
+    Promotion reads the trailing PROMOTE_WINDOW_DAYS (default 30d) shadow
+    book; demotion reads the trailing DEMOTE_WINDOW_DAYS (default 14d) book
+    with a DEMOTE_MIN_SAMPLES floor so dormant wallets are never cut for
+    absence of evidence (see the 2026-08-28 windowing note above the
+    thresholds).
     """
-    perf = fetch_shadow_performance()
+    promote_perf = fetch_shadow_performance(PROMOTE_WINDOW_DAYS)
+    demote_perf = fetch_shadow_performance(DEMOTE_WINDOW_DAYS)
     cost_per_sol = observed_cost_per_sol()
     # Keep the PAPER copy set at the post-cost-CLEAR optimum every scheduled
-    # cycle (Phase 2H): promote CLEAR candidates, demote ACTIVE cost-burners
-    # (net <= 0). Caps remain as guardrails against roster flapping.
-    roster = optimize_paper_roster(perf, cost_per_sol=cost_per_sol)
-    promotions = roster["promote"][:MAX_PROMOTIONS]
-    demotions = roster["demote"][:MAX_DEMOTIONS]
+    # cycle (Phase 2H): promote CLEAR candidates from the trailing promote
+    # window, demote ACTIVE cost-burners (net <= 0) from the shorter trailing
+    # demote window. Caps remain as guardrails against roster flapping.
+    promote_roster = optimize_paper_roster(promote_perf, cost_per_sol=cost_per_sol)
+    demote_roster = optimize_paper_roster(
+        demote_perf, cost_per_sol=cost_per_sol, min_samples=DEMOTE_MIN_SAMPLES,
+    )
+    promotions = promote_roster["promote"][:MAX_PROMOTIONS]
+    demotions = demote_roster["demote"][:MAX_DEMOTIONS]
 
     summary: dict = {
         "promote": [p.address for p in promotions],
@@ -263,8 +300,10 @@ def run_cycle(
     }
 
     logger.info(
-        "shadow promotion cycle: %d promote, %d demote (dry_run=%s)",
-        len(promotions), len(demotions), dry_run,
+        "shadow promotion cycle: %d promote (trailing %dd), %d demote (trailing %dd, min %d samples) (dry_run=%s)",
+        len(promotions), PROMOTE_WINDOW_DAYS,
+        len(demotions), DEMOTE_WINDOW_DAYS, DEMOTE_MIN_SAMPLES,
+        dry_run,
     )
     for p in promotions:
         logger.info(
@@ -323,7 +362,7 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     if args.optimize_paper:
-        perf = fetch_shadow_performance()
+        perf = fetch_shadow_performance(PROMOTE_WINDOW_DAYS)
         cps = observed_cost_per_sol()
         res = optimize_paper_roster(
             perf, cost_per_sol=cps, min_net_pct=args.promote_min_net_pct,
