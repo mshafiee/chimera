@@ -1074,3 +1074,17 @@ async fn test_shadow_tier_thin_evidence_flat_proven_size() {
     let size = sizer.calculate_size(factors).await.unwrap();
     assert_eq!(size, Decimal::from_str("1.5").unwrap());
 }
+
+#[tokio::test]
+async fn test_shadow_tier_no_evidence_fails_open_flat_proven_size() {
+    // Ok(None) arm: enabled flag, zero qualifying shadow exits -> no stats ->
+    // tier_mult stays ONE -> flat proven size 1.5 (fail-open by construction).
+    let (db, _guard) = create_test_db().await;
+    // Deliberately seed NOTHING: get_wallet_shadow_kelly_stats returns None.
+
+    let mut factors = neutral_factors();
+    factors.is_proven = true;
+    let sizer = PositionSizer::new(db, shadow_sizing_config(true));
+    let size = sizer.calculate_size(factors).await.unwrap();
+    assert_eq!(size, Decimal::from_str("1.5").unwrap());
+}
