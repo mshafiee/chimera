@@ -498,14 +498,56 @@ impl PositionSizer {
         // NOT applied: its history-less default (0.25) would re-clamp
         // proven entries on fresh tokens, restoring the minimum-size regime.
         if self.config.proven_sizing_boost && factors.is_proven {
+            let mut tier_mult = Decimal::ONE;
+            if self.config.shadow_kelly_enabled {
+                match self
+                    .db
+                    .get_wallet_shadow_kelly_stats(
+                        &factors.wallet_address,
+                        self.config.shadow_kelly_window_days,
+                    )
+                    .await
+                {
+                    Ok(Some(stats)) => {
+                        tier_mult = shadow_proven_size_multiplier(
+                            &stats,
+                            self.config.shadow_kelly_cost_pct,
+                            self.config.shadow_kelly_min_samples,
+                        );
+                        tracing::info!(
+                            wallet = %factors.wallet_address,
+                            samples = stats.samples,
+                            tier_mult = %tier_mult,
+                            "shadow-tier proven sizing applied"
+                        );
+                    }
+                    Ok(None) => {
+                        tracing::debug!(
+                            wallet = %factors.wallet_address,
+                            "shadow-tier sizing: no trailing shadow evidence — flat proven size"
+                        );
+                    }
+                    Err(e) => {
+                        // Fail-open: a stats lookup failure must never block a
+                        // proven trade — flat proven_size_pct applies.
+                        tracing::warn!(
+                            wallet = %factors.wallet_address,
+                            error = %e,
+                            "shadow-tier sizing lookup failed — flat proven size"
+                        );
+                    }
+                }
+            }
             tracing::info!(
                 wallet = %factors.wallet_address,
                 strategy = ?factors.strategy,
                 wqs_chain_size = %size,
                 proven_size_sol = %self.config.proven_size_pct,
+                tier_mult = %tier_mult,
                 "Proven-wallet sizing override applied (bypasses WQS × confidence chain)"
             );
-            size = (capital * self.config.proven_size_pct).min(self.config.max_size_sol);
+            size =
+                ((capital * self.config.proven_size_pct) * tier_mult).min(self.config.max_size_sol);
         }
 
         // Min/max application (2026-08-18): under skip_below_min_size, a

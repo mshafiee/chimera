@@ -966,3 +966,111 @@ fn test_shadow_tier_thin_evidence_is_neutral() {
         Decimal::ONE
     );
 }
+
+// ─── Shadow-tier proven sizing integration ──────────────────────────────────
+
+/// Seed `wins` wins at `win_pct` and `losses` losses at `loss_pct` as deduped
+/// mirror_main shadow exits for `wallet` (one per hour — dedup key).
+async fn seed_shadow_exits(
+    pool: &Pool<Postgres>,
+    wallet: &str,
+    wins: usize,
+    win_pct: &str,
+    losses: usize,
+    loss_pct: &str,
+) {
+    let mut hour: i32 = 1;
+    for pct in std::iter::repeat(win_pct)
+        .take(wins)
+        .chain(std::iter::repeat(loss_pct).take(losses))
+    {
+        let sid = format!("sk-{}-{}", wallet, hour);
+        sqlx::query(
+            "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, main_admitted, entry_amount_sol, ingress, opened_at) \
+             VALUES ($1, 'd', 'run', $2, 'seedtoken', false, 0.1, 'webhook', NOW() - make_interval(hours => $3))",
+        )
+        .bind(&sid)
+        .bind(wallet)
+        .bind(hour)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO shadow_exits (shadow_id, exit_strategy, pnl_pct, exit_reason) \
+             VALUES ($1, 'mirror_main', $2, 'profit_target')",
+        )
+        .bind(&sid)
+        .bind(Decimal::from_str(pct).unwrap())
+        .execute(pool)
+        .await
+        .unwrap();
+        hour += 1;
+    }
+}
+
+fn shadow_sizing_config(enabled: bool) -> Arc<PositionSizingConfig> {
+    Arc::new(PositionSizingConfig {
+        shadow_kelly_enabled: enabled,
+        // Absolute ceiling under test: the sizer's Shield strategy_max and the
+        // proven override both bind at `max_size_sol` (the sizer never reads
+        // `shield_max_size_sol`). Default is 50.0 — too high for the star case
+        // to demonstrate the tier-up being capped — so pin the 2.0 SOL ceiling
+        // the shadow-tiering expectations are specified against.
+        max_size_sol: Decimal::from_str("2.0").unwrap(),
+        ..PositionSizingConfig::default()
+    })
+}
+
+#[tokio::test]
+async fn test_shadow_tier_star_proven_sized_up() {
+    // 20 wins +20%, 5 losses -2% -> expectancy 15.6% gross, 15.1% net -> 1.5x.
+    // proven base = 10 * 0.15 = 1.5 -> tiered 2.25 -> strategy_max = min(10*0.30, 2.0) = 2.0.
+    let (db, _guard) = create_test_db().await;
+    seed_shadow_exits(&pg_pool(&db), "test_wallet", 20, "20.0", 5, "-2.0").await;
+
+    let mut factors = neutral_factors();
+    factors.is_proven = true;
+    let sizer = PositionSizer::new(db, shadow_sizing_config(true));
+    let size = sizer.calculate_size(factors).await.unwrap();
+    assert_eq!(size, Decimal::from_str("2.0").unwrap());
+}
+
+#[tokio::test]
+async fn test_shadow_tier_below_cost_proven_sized_down() {
+    // 20 wins +1%, 5 losses -3% -> expectancy 0.2% gross, -0.3% net -> 0.5x.
+    // proven base 1.5 -> 0.75 (strategy_max 2.0 does not bind).
+    let (db, _guard) = create_test_db().await;
+    seed_shadow_exits(&pg_pool(&db), "test_wallet", 20, "1.0", 5, "-3.0").await;
+
+    let mut factors = neutral_factors();
+    factors.is_proven = true;
+    let sizer = PositionSizer::new(db, shadow_sizing_config(true));
+    let size = sizer.calculate_size(factors).await.unwrap();
+    assert_eq!(size, Decimal::from_str("0.75").unwrap());
+}
+
+#[tokio::test]
+async fn test_shadow_tier_disabled_keeps_flat_proven_size() {
+    // Dark-launch guard: disabled -> flat proven_size_pct (1.5), no DB call effect.
+    let (db, _guard) = create_test_db().await;
+    seed_shadow_exits(&pg_pool(&db), "test_wallet", 20, "20.0", 5, "-2.0").await;
+
+    let mut factors = neutral_factors();
+    factors.is_proven = true;
+    let sizer = PositionSizer::new(db, shadow_sizing_config(false));
+    let size = sizer.calculate_size(factors).await.unwrap();
+    assert_eq!(size, Decimal::from_str("1.5").unwrap());
+}
+
+#[tokio::test]
+async fn test_shadow_tier_thin_evidence_flat_proven_size() {
+    // 3 exits only (< 20 min samples) -> neutral 1.0x even when enabled.
+    let (db, _guard) = create_test_db().await;
+    seed_shadow_exits(&pg_pool(&db), "test_wallet", 3, "20.0", 0, "0").await;
+
+    let mut factors = neutral_factors();
+    factors.is_proven = true;
+    let sizer = PositionSizer::new(db, shadow_sizing_config(true));
+    let size = sizer.calculate_size(factors).await.unwrap();
+    assert_eq!(size, Decimal::from_str("1.5").unwrap());
+}
