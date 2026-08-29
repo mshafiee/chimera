@@ -499,6 +499,8 @@ impl Executor {
                 // Infra-health alarm (shadow measurement loop) shares the
                 // rpc_fallback rule
                 NotificationEvent::ShadowRecordingGap { .. } => rules.rpc_fallback,
+                // Proving-lane starvation alarm (same infra-health family)
+                NotificationEvent::ProvingLaneStarved { .. } => rules.rpc_fallback,
             };
 
             if should_send {
