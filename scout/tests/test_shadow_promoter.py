@@ -267,3 +267,14 @@ def test_run_cycle_rebalances_proving_pool(monkeypatch):
     assert ("FRESH_1", "PROVING") in applied
     assert summary["to_proving"] == ["FRESH_1"]
     assert summary["to_candidate"] == ["STALE_1"]
+
+
+def test_proving_pool_stats_counts_evidence(monkeypatch):
+    def fake_fetch(query, params=()):
+        if "has_evidence" in query:
+            return [{"provers": 30, "with_evidence": 12}]
+        raise AssertionError(f"unexpected query: {query}")
+
+    monkeypatch.setattr(sp, "execute_and_fetchall", fake_fetch)
+    stats = sp.proving_pool_stats()
+    assert stats == {"provers": 30, "with_evidence": 12}

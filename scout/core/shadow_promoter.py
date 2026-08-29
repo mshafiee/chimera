@@ -327,6 +327,32 @@ def rebalance_proving_pool(
     return {"to_proving": to_proving, "to_candidate": to_candidate}
 
 
+def proving_pool_stats() -> dict:
+    """Pool visibility: PROVING size and how many provers hold any shadow
+    evidence. Logged every cycle so a starved lane (provers trading but
+    zero evidence — the 2026-08-28 cache-starve class) is visible in the
+    scout log without touching the DB by hand."""
+    rows = execute_and_fetchall(
+        """
+        SELECT COUNT(*) AS provers,
+               COUNT(*) FILTER (WHERE has_evidence) AS with_evidence
+        FROM (
+            SELECT w.status,
+                   EXISTS (
+                       SELECT 1 FROM shadow_positions sp
+                       WHERE sp.wallet_address = w.address
+                   ) AS has_evidence
+            FROM wallets w
+            WHERE w.status = 'PROVING'
+        ) t
+        """,
+    )
+    r = rows[0]
+    if isinstance(r, dict):
+        return {"provers": int(r["provers"]), "with_evidence": int(r["with_evidence"])}
+    return {"provers": int(r[0]), "with_evidence": int(r[1])}
+
+
 def run_cycle(
     dry_run: bool = False,
     prune: bool = False,
@@ -358,6 +384,14 @@ def run_cycle(
                 update_wallet_status(addr, "CANDIDATE")
             for addr in proving["to_proving"]:
                 update_wallet_status(addr, "PROVING")
+    try:
+        pool_stats = proving_pool_stats()
+        logger.info(
+            "proving pool stats: size=%d, with_evidence=%d",
+            pool_stats["provers"], pool_stats["with_evidence"],
+        )
+    except Exception as e:  # noqa: BLE001 — stats are advisory visibility.
+        logger.warning("proving pool stats failed: %s", e)
     promote_perf = fetch_shadow_performance(PROMOTE_WINDOW_DAYS)
     demote_perf = fetch_shadow_performance(DEMOTE_WINDOW_DAYS)
     cost_per_sol = observed_cost_per_sol()    # Keep the PAPER copy set at the post-cost-CLEAR optimum every scheduled
