@@ -213,6 +213,29 @@ impl SignalProcessor {
                 token = %signal.token_address().unwrap_or(""),
                 "Wallet SELL signal skipped (copy_wallet_sells=false) — position managed by exit system"
             );
+            // Terminal bookkeeping (2026-08-28): the queue path already
+            // created this trade row QUEUED; leaving it for the stale-trade
+            // sweeper made every whale-SELL skip churn a sweeper cancel plus
+            // a DLQ retry cycle for a skip that is deterministic. Mark it
+            // DEAD_LETTER with a terminal-classified reason instead.
+            let skip_reason = "WHALE_SELL_SKIP: position managed by exit system (copy_wallet_sells=false) — deterministic skip";
+            if let Err(e) = self
+                .db
+                .mark_trade_dead_letter(
+                    &trade_uuid,
+                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                    skip_reason,
+                )
+                .await
+            {
+                // Fail-open: the sweeper still collects the row; do not
+                // turn a bookkeeping failure into a trading failure.
+                tracing::warn!(
+                    trade_uuid = %trade_uuid,
+                    error = %e,
+                    "Failed to mark skipped whale SELL dead — sweeper will collect it"
+                );
+            }
             return;
         }
 

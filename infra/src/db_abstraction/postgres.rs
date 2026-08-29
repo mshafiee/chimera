@@ -3943,6 +3943,10 @@ impl Database for PostgresBackend {
                   -- gates; replaying a stale admitted payload bypasses them.
                   OR $3 ILIKE '%Duplicate token%'
                   OR $3 ILIKE '%30min cooldown%'
+                  -- Whale-SELL skips are DETERMINISTIC (2026-08-28):
+                  -- copy_wallet_sells=false means the exit system owns the
+                  -- position; replaying the payload re-skips identically.
+                  OR $3 ILIKE '%WHALE_SELL_SKIP%'
                   OR $3 ILIKE '%shadow blacklist%'))
             "#,
         )
