@@ -20,7 +20,7 @@ def _zero_cost(monkeypatch):
     monkeypatch.setattr(sp, "observed_cost_per_sol", lambda: Decimal("0"))
 
 
-def _perf(address, status, samples, total, win=0.5, notional=0.0, max_win=None):
+def _perf(address, status, samples, total, win=0.5, notional=0.0, max_win=None, last_exit_age_days=1.0):
     return WalletPerf(
         address=address,
         status=status,
@@ -30,6 +30,7 @@ def _perf(address, status, samples, total, win=0.5, notional=0.0, max_win=None):
         win_rate=win,
         notional=Decimal(str(notional)),
         max_win=Decimal(str(max_win)) if max_win is not None else None,
+        last_exit_age_days=last_exit_age_days,
     )
 
 
@@ -278,3 +279,37 @@ def test_proving_pool_stats_counts_evidence(monkeypatch):
     monkeypatch.setattr(sp, "execute_and_fetchall", fake_fetch)
     stats = sp.proving_pool_stats()
     assert stats == {"provers": 30, "with_evidence": 12}
+
+
+# ── Promotion recency guard (2026-08-29) ────────────────────────────────────
+
+def test_promotion_requires_recent_edge():
+    # Strong historical book but the whale went quiet 8 days ago: the
+    # operator's dormancy rotation reclaims it within days — promoting it
+    # just flaps the roster. Recency guard must hold it back.
+    stale_book = _perf(
+        "STALE_QUIET", "CANDIDATE", 81, 2.477, win=0.46,
+        notional=60.0, last_exit_age_days=8.0,
+    )
+    res = sp.optimize_paper_roster([stale_book], cost_per_sol=Decimal("0.02"))
+    assert res["promote"] == []
+
+
+def test_promotion_allows_recent_edge():
+    # Same book, newest exit 1 day old: clear to promote.
+    fresh_book = _perf(
+        "FRESH_QUIET", "CANDIDATE", 81, 2.477, win=0.46,
+        notional=60.0, last_exit_age_days=1.0,
+    )
+    res = sp.optimize_paper_roster([fresh_book], cost_per_sol=Decimal("0.02"))
+    assert [p.address for p in res["promote"]] == ["FRESH_QUIET"]
+
+
+def test_promotion_rejects_unknown_recency():
+    # No exit timestamp (None) = no evidence of current edge — treat as stale.
+    unknown = _perf(
+        "UNKNOWN_RECENCY", "CANDIDATE", 81, 2.477, win=0.46,
+        notional=60.0, last_exit_age_days=None,
+    )
+    res = sp.optimize_paper_roster([unknown], cost_per_sol=Decimal("0.02"))
+    assert res["promote"] == []

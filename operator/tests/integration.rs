@@ -97,3 +97,8 @@ mod dlq_terminal_rejection_tests;
 
 #[path = "integration/profitability_verdict_tests.rs"]
 mod profitability_verdict_tests;
+
+// ── Dormancy-demotion promotion grace (2026-08-29) ──────────────────────────
+
+#[path = "integration/dormancy_grace_tests.rs"]
+mod dormancy_grace_tests;

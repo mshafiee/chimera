@@ -847,14 +847,26 @@ impl Database for PostgresBackend {
         // dead-weight wallets that generate no copy signals. Skips wallets with
         // unknown last_trade_at (NULL) — those are handled by the inactivity
         // rotation's own logic.
+        //
+        // Dormancy anchor (2026-08-29): GREATEST(promoted_at, last_trade_at) —
+        // a freshly promoted wallet gets the full window before the rotation
+        // reclaims it, honoring the promotion-grace contract documented in
+        // roster_writer_db::update_wallet_status. Keying on last_trade_at alone
+        // made the scout promoter and this rotation fight: promote (trailing
+        // shadow bar) → demote (stale last_trade_at) every 2h cycle, measured
+        // on 8jfDh7hABX/9bzPrKYb 2026-08-28/29. Wallets with BOTH timestamps
+        // NULL keep the legacy skip (inactivity rotation's own logic).
         let result = sqlx::query(
             r#"
             UPDATE wallets
             SET status = 'CANDIDATE',
                 updated_at = CURRENT_TIMESTAMP
             WHERE status = 'ACTIVE'
-              AND last_trade_at IS NOT NULL
-              AND last_trade_at <= NOW() - make_interval(days => $1::integer)
+              AND (promoted_at IS NOT NULL OR last_trade_at IS NOT NULL)
+              AND GREATEST(
+                    COALESCE(promoted_at, '-infinity'::timestamptz),
+                    COALESCE(last_trade_at, '-infinity'::timestamptz)
+                  ) <= NOW() - make_interval(days => $1::integer)
             "#,
         )
         .bind(max_age_days)

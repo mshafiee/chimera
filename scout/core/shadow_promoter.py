@@ -28,6 +28,7 @@ import argparse
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional
@@ -77,6 +78,15 @@ DEMOTE_MIN_SAMPLES = int(os.environ.get("SCOUT_DEMOTE_MIN_SAMPLES", "10"))
 PROVING_ROSTER_SIZE = int(os.environ.get("SCOUT_PROVING_ROSTER_SIZE", "30"))
 PROVE_STAGNATION_DAYS = int(os.environ.get("SCOUT_PROVE_STAGNATION_DAYS", "14"))
 
+# Promotion recency guard (2026-08-29): a wallet whose newest shadow exit is
+# older than this has a DORMANT whale — the operator's dormancy rotation
+# (GREATEST(promoted_at, last_trade_at) anchor) reclaims it within days, and
+# a dormant whale generates no signals to copy. Requiring recent edge stops
+# the promote→demote→promote flap (measured: 8jfDh7hABX/9bzPrKYb flapped
+# every 2h cycle on 2026-08-28/29) and stops re-promoting stale books the
+# trailing window still scores highly.
+PROMOTE_RECENCY_DAYS = int(os.environ.get("SCOUT_PROMOTE_RECENCY_DAYS", "7"))
+
 
 @dataclass(frozen=True)
 class WalletPerf:
@@ -88,6 +98,9 @@ class WalletPerf:
     win_rate: float
     notional: Decimal = Decimal("0")
     max_win: Optional[Decimal] = None
+    # Age (days) of the wallet's newest deduped shadow exit. None = unknown
+    # (no exits) — treated as stale by the promotion recency guard.
+    last_exit_age_days: Optional[float] = None
 
 
 def fetch_shadow_performance(window_days: Optional[int] = None) -> list[WalletPerf]:
@@ -111,7 +124,8 @@ def fetch_shadow_performance(window_days: Optional[int] = None) -> list[WalletPe
                AVG(se.pnl_sol)                            AS avg_pnl,
                COUNT(*) FILTER (WHERE se.pnl_sol > 0)::FLOAT / NULLIF(COUNT(*), 0) AS win_rate,
                COALESCE(SUM(COALESCE(sp.entry_amount_sol, 0)), 0) AS notional,
-               MAX(se.pnl_sol)                            AS max_win
+               MAX(se.pnl_sol)                            AS max_win,
+               MAX(se.exited_at)                          AS last_exit_at
         FROM shadow_positions sp
         JOIN shadow_exits se ON se.shadow_id = sp.shadow_id
         LEFT JOIN wallets w ON w.address = sp.wallet_address
@@ -127,8 +141,12 @@ def fetch_shadow_performance(window_days: Optional[int] = None) -> list[WalletPe
             addr, status = r["wallet_address"], r.get("status")
             samples, total, avg, win = r["samples"], r["total_pnl"], r["avg_pnl"], r["win_rate"]
             notional, max_win = r["notional"], r["max_win"]
+            last_exit = r.get("last_exit_at")
         else:  # tuple
-            addr, status, samples, total, avg, win, notional, max_win = r
+            addr, status, samples, total, avg, win, notional, max_win, last_exit = r
+        last_exit_age_days: Optional[float] = None
+        if last_exit is not None:
+            last_exit_age_days = (datetime.now(timezone.utc) - last_exit).total_seconds() / 86400.0
         out.append(
             WalletPerf(
                 address=addr,
@@ -139,6 +157,7 @@ def fetch_shadow_performance(window_days: Optional[int] = None) -> list[WalletPe
                 win_rate=float(win) if win is not None else 0.0,
                 notional=Decimal(notional or 0),
                 max_win=Decimal(max_win) if max_win is not None else None,
+                last_exit_age_days=last_exit_age_days,
             )
         )
     return out
@@ -155,6 +174,16 @@ def _not_tail_only(w: WalletPerf) -> bool:
     if w.max_win is None:
         return True
     return (w.total_pnl - w.max_win) > Decimal("0")
+
+
+def _recent_edge(w: WalletPerf) -> bool:
+    """Promotion requires CURRENT edge, not a strong historical book: a wallet
+    whose newest shadow exit is older than PROMOTE_RECENCY_DAYS has a dormant
+    whale — the operator's dormancy rotation reclaims it within days, and a
+    dormant whale generates no signals to copy."""
+    if w.last_exit_age_days is None:
+        return False
+    return w.last_exit_age_days <= PROMOTE_RECENCY_DAYS
 
 
 def select_promotions(
@@ -240,7 +269,7 @@ def optimize_paper_roster(
         clear = (
             (net_pct is not None and net_pct >= Decimal(str(min_net_pct)))
             or (net_pct is None and p.total_pnl >= Decimal(str(PROMOTE_MIN_PNL)))
-        ) and _not_tail_only(p)
+        ) and _not_tail_only(p) and _recent_edge(p)
         if clear and p.status in ("PROVING", "CANDIDATE", None):
             to_promote.append((p, net))
         elif p.status == "ACTIVE" and net <= Decimal("0"):
