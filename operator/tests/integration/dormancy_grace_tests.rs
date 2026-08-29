@@ -123,3 +123,29 @@ async fn test_null_timestamps_are_skipped() {
         .unwrap();
     assert_eq!(status, "ACTIVE", "NULL timestamps must be skipped (legacy behavior)");
 }
+
+/// Regression (2026-08-29, first deployment of the GREATEST anchor): an
+/// over-broad NULL guard demoted 24 last_trade_at-NULL wallets — including
+/// the 132Tkgf5YE star — on the first post-deploy sweep. The contract:
+/// last_trade_at-NULL wallets are NEVER demoted here, regardless of
+/// promoted_at; they belong to the inactivity rotation's own logic.
+#[tokio::test]
+async fn test_promoted_at_only_wallet_with_null_last_trade_is_never_demoted() {
+    let (db, _guard) = common::create_test_db().await;
+
+    // Exactly the demoted-star shape: stale promoted_at, NULL last_trade_at.
+    sqlx::query(
+        "INSERT INTO wallets (address, status, wqs_score, wqs_confidence, promoted_at) \
+         VALUES ('null-lt-promoted-1111111111111111111', 'ACTIVE', 10.0, 0.9, NOW() - INTERVAL '11 days')",
+    )
+    .execute(&pg_pool(&db))
+    .await
+    .unwrap();
+
+    db.demote_dormant_active_wallets(7).await.unwrap();
+    let status: String = sqlx::query_scalar("SELECT status FROM wallets WHERE address = 'null-lt-promoted-1111111111111111111'")
+        .fetch_one(&pg_pool(&db))
+        .await
+        .unwrap();
+    assert_eq!(status, "ACTIVE", "last_trade_at-NULL wallets must never be demoted here (legacy skip)");
+}

@@ -854,18 +854,24 @@ impl Database for PostgresBackend {
         // roster_writer_db::update_wallet_status. Keying on last_trade_at alone
         // made the scout promoter and this rotation fight: promote (trailing
         // shadow bar) → demote (stale last_trade_at) every 2h cycle, measured
-        // on 8jfDh7hABX/9bzPrKYb 2026-08-28/29. Wallets with BOTH timestamps
-        // NULL keep the legacy skip (inactivity rotation's own logic).
+        // on 8jfDh7hABX/9bzPrKYb 2026-08-28/29.
+        //
+        // NULL contract preserved EXACTLY (first deployment 2026-08-29 demoted
+        // 24 last_trade_at-NULL wallets incl. the 132Tkgf5YE star — reverted
+        // same day): wallets with last_trade_at NULL are skipped here and left
+        // to the inactivity rotation's own logic, regardless of promoted_at.
+        // The GREATEST anchor therefore only ever WIDENS the old rule's grace
+        // (fresh promoted_at shields a stale trader), never narrows it.
         let result = sqlx::query(
             r#"
             UPDATE wallets
             SET status = 'CANDIDATE',
                 updated_at = CURRENT_TIMESTAMP
             WHERE status = 'ACTIVE'
-              AND (promoted_at IS NOT NULL OR last_trade_at IS NOT NULL)
+              AND last_trade_at IS NOT NULL
               AND GREATEST(
-                    COALESCE(promoted_at, '-infinity'::timestamptz),
-                    COALESCE(last_trade_at, '-infinity'::timestamptz)
+                    COALESCE(promoted_at, last_trade_at),
+                    last_trade_at
                   ) <= NOW() - make_interval(days => $1::integer)
             "#,
         )
