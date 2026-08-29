@@ -101,6 +101,7 @@ impl RateLimiter {
             NotificationEvent::JitoRecovered { .. } => "jito_recovered".to_string(),
             NotificationEvent::JitoHealthChanged { .. } => "jito_health".to_string(),
             NotificationEvent::ShadowRecordingGap { .. } => "shadow_recording_gap".to_string(),
+            NotificationEvent::ProvingLaneStarved { .. } => "proving_lane_starved".to_string(),
         }
     }
 }

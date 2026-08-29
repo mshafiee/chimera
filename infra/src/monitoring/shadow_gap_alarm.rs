@@ -56,6 +56,26 @@ async fn count_missing_shadow_rows(db: &Arc<dyn Database>) -> anyhow::Result<i64
     Ok(missing)
 }
 
+/// PROVING pool size and how many provers produced at least one decision in
+/// the trailing 24h. Zero decisions from a populated pool is the 2026-08-28
+/// cache-starve signature (12h of provers trading with zero evidence).
+async fn count_proving_decisions_24h(db: &Arc<dyn Database>) -> anyhow::Result<(i64, i64)> {
+    use crate::db_abstraction::DbPool;
+    let DbPool::PostgreSQL(pool) = db.pool();
+    let row: (i64, i64) = sqlx::query_as(
+        r#"SELECT
+             (SELECT COUNT(*) FROM wallets WHERE status = 'PROVING'),
+             (SELECT COUNT(DISTINCT dr.wallet_address)
+              FROM decision_records dr
+              JOIN wallets w ON w.address = dr.wallet_address
+              WHERE w.status = 'PROVING'
+                AND dr.received_at > NOW() - INTERVAL '24 hours')"#,
+    )
+    .fetch_one(&pool)
+    .await?;
+    Ok(row)
+}
+
 /// Spawned alarm loop. `check_interval_secs` controls both cadence and how
 /// fast a sustained gap escalates (two consecutive positive checks).
 pub async fn start_shadow_gap_alarm(
@@ -75,6 +95,13 @@ pub async fn start_shadow_gap_alarm(
     let mut consecutive_positive: u32 = 0;
     let mut last_alert: Option<tokio::time::Instant> = None;
     let realert_after = Duration::from_secs(3600);
+
+    // Proving-lane starvation state: mirrors the gap machinery — a populated
+    // PROVING pool with zero decisions in 24h must persist across two
+    // consecutive checks before alerting, then re-alerts hourly until
+    // decisions resume.
+    let mut consecutive_positive_starved: u32 = 0;
+    let mut last_alert_starved: Option<tokio::time::Instant> = None;
 
     loop {
         tokio::select! {
@@ -112,6 +139,43 @@ pub async fn start_shadow_gap_alarm(
                             }
                             consecutive_positive = 0;
                             last_alert = None;
+                        }
+
+                        match count_proving_decisions_24h(&db).await {
+                            Ok((provers, with_decisions)) => {
+                                let starved = provers >= 5 && with_decisions == 0;
+                                if starved {
+                                    consecutive_positive_starved =
+                                        consecutive_positive_starved.saturating_add(1);
+                                    let sustained = consecutive_positive_starved >= 2;
+                                    let due = last_alert_starved
+                                        .map(|t| t.elapsed() >= realert_after)
+                                        .unwrap_or(true);
+                                    if sustained && due {
+                                        error!(
+                                            provers,
+                                            with_decisions,
+                                            "Proving lane starved: zero decisions from populated pool in 24h"
+                                        );
+                                        notifier
+                                            .notify(NotificationEvent::ProvingLaneStarved {
+                                                provers,
+                                                with_decisions,
+                                            })
+                                            .await;
+                                        last_alert_starved = Some(tokio::time::Instant::now());
+                                    }
+                                } else {
+                                    if consecutive_positive_starved > 0 {
+                                        info!("Proving lane starvation cleared");
+                                    }
+                                    consecutive_positive_starved = 0;
+                                    last_alert_starved = None;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "Proving-lane starvation probe failed");
+                            }
                         }
                     }
                     Err(e) => {

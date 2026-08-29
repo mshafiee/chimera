@@ -88,6 +88,11 @@ pub enum NotificationEvent {
     /// Admitted decisions recorded without a linked shadow position — the
     /// shadow-measurement loop is silently losing admitted signals.
     ShadowRecordingGap { missing: i64 },
+    /// The candidate-proving pool produced zero decisions over a full day
+    /// while populated — either every prover went quiet (check Helius) or
+    /// prover signals are being dropped upstream (the 2026-08-28 cache
+    /// starve class). Data only; no action possible from the DB alone.
+    ProvingLaneStarved { provers: i64, with_decisions: i64 },
 }
 
 impl NotificationEvent {
@@ -112,6 +117,7 @@ impl NotificationEvent {
                 }
             }
             NotificationEvent::ShadowRecordingGap { .. } => AlertLevel::Important,
+            NotificationEvent::ProvingLaneStarved { .. } => AlertLevel::Important,
         }
     }
 
@@ -230,6 +236,14 @@ impl NotificationEvent {
                 format!(
                     "{prefix}🕳️ Shadow recording gap: {} admitted decision(s) in the last 24h have no shadow position — measurement loop is blind",
                     missing
+                )
+            }
+            NotificationEvent::ProvingLaneStarved {
+                provers,
+                with_decisions,
+            } => {
+                format!(
+                    "{prefix}🕳️ Proving lane starved: {with_decisions}/{provers} PROVING wallets produced a decision in 24h — prover signals are being dropped or every prover went quiet. Check Helius activity for PROVING addresses."
                 )
             }
         }
