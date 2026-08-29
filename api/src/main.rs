@@ -2132,11 +2132,22 @@ async fn main() -> anyhow::Result<()> {
                             let elapsed_secs = chrono::Utc::now()
                                 .signed_duration_since(pos.entry_time)
                                 .num_seconds();
+                            // First sighting (fresh restart or newly opened
+                            // position) must EVALUATE, not throttle: treating
+                            // "never checked" as "checked 0s ago" made the
+                            // throttle `continue` before `last_checked.insert`
+                            // — any position older than FAST_WINDOW_SECS at
+                            // process (re)start was skipped every tick forever,
+                            // invisible to the stop-loss (found 2026-08-29:
+                            // 7voKer bled to -13.88% past its -8% hard stop
+                            // after the 07:54 restart; zero ticks for 21h).
+                            let is_first_sighting = last_checked.get(&pos.trade_uuid).is_none();
                             let since_last = match last_checked.get(&pos.trade_uuid) {
                                 Some(&last) => now.duration_since(last),
-                                None => std::time::Duration::from_secs(0),
+                                None => std::time::Duration::from_secs(u64::MAX),
                             };
-                            if elapsed_secs >= FAST_WINDOW_SECS
+                            if !is_first_sighting
+                                && elapsed_secs >= FAST_WINDOW_SECS
                                 && since_last
                                     < std::time::Duration::from_secs(STEADY_STATE_THROTTLE_SECS)
                             {
