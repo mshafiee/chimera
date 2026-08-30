@@ -378,9 +378,16 @@ impl WalletPerformanceTracker {
                                     format!("Inactivity demotion: wallet inactive for tiered threshold, oscillation limit ({}) reached", max_cycles)
                                 )
                             } else {
+                                // M1 (2026-08-30): demote to PROVING, not
+                                // CANDIDATE — the wallet keeps webhook
+                                // coverage and shadow forking, so a flow-
+                                // quality change is re-measured and the
+                                // promoter can re-graduate it. Coverage loss
+                                // on parked wallets is the 132Tkgf5YE
+                                // blackout failure mode.
                                 (
-                                    "CANDIDATE",
-                                    format!("Inactivity demotion: wallet inactive for tiered threshold (demotion #{}/{})", demotion_count + 1, max_cycles)
+                                    "PROVING",
+                                    format!("Inactivity demotion: wallet inactive for tiered threshold (demotion #{}/{}) — parked in proving (coverage retained)", demotion_count + 1, max_cycles)
                                 )
                             };
 
@@ -556,6 +563,34 @@ impl WalletPerformanceTracker {
     }
 
     pub async fn should_demote(&self, wallet_address: &str) -> Option<DemotionReason> {
+        // Shadow-proof exemption (2026-08-30, M1): a wallet whose trailing
+        // deduped mirror_main book holds ≥ min samples with positive gross
+        // expectancy is carrying proven edge — no secondary heuristic
+        // (inactivity timer, copy-PnL shortfall) may demote it. The shadow
+        // book is the platform's strongest evidence (2026-08-30 backtest:
+        // shadow-proven roster simulated +120.46 SOL/60d vs −1.44 status quo;
+        // measured victim: 12kNFpfihj, +71.2 SOL book demoted by stale
+        // heuristics). Fail-open: a stats lookup error must not suppress
+        // demotion — fall through to the normal checks.
+        const SHADOW_PROOF_MIN_SAMPLES: i64 = 20;
+        if let Ok(Some(stats)) = self
+            .db
+            .get_wallet_shadow_kelly_stats(wallet_address, 30)
+            .await
+        {
+            if crate::engine::shadow_proof::shadow_proven_edge(
+                &stats,
+                SHADOW_PROOF_MIN_SAMPLES,
+            ) {
+                tracing::debug!(
+                    wallet_address = %wallet_address,
+                    samples = stats.samples,
+                    "Demotion suppressed: shadow book proven-positive"
+                );
+                return None;
+            }
+        }
+
         // Phase 1: Inactivity-based rotation
         if let Some(monitoring_config) = &self.config.monitoring {
             if monitoring_config.inactivity_rotation_enabled {

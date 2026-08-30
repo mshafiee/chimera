@@ -102,3 +102,8 @@ mod profitability_verdict_tests;
 
 #[path = "integration/dormancy_grace_tests.rs"]
 mod dormancy_grace_tests;
+
+// ── M1 shadow-proof demotion exemption (2026-08-30) ─────────────────────────
+
+#[path = "integration/demotion_shadow_proof_tests.rs"]
+mod demotion_shadow_proof_tests;

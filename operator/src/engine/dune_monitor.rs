@@ -1254,14 +1254,46 @@ impl DunePnlMonitor {
                             warn!(wallet = %wallet, error = %e, "On-chain audit: exit profile upsert failed");
                         }
                     }
-                    let pass = a.round_trips >= self.onchain_config.min_round_trips
+                    let base_pass = a.round_trips >= self.onchain_config.min_round_trips
                         && a.expectancy_pct > self.onchain_config.min_expectancy_pct;
+                    // M2 (2026-08-30): shadow-proof override. The Helius
+                    // round-trip view is a cruder instrument than the
+                    // platform's own shadow book (measured: round_trips=1 vs
+                    // 98 shadow exits on 12kNFpfihj, +71.2 SOL/14h). A wallet
+                    // whose trailing deduped mirror_main book meets the
+                    // proven-edge bar (≥ min_round_trips exits, positive
+                    // expectancy) cannot be demoted by this audit.
+                    let mut shadow_override = false;
+                    if !base_pass {
+                        match self.db.get_wallet_shadow_kelly_stats(wallet, 30).await {
+                            Ok(Some(stats)) => {
+                                if chimera_infra::engine::shadow_proof::shadow_proven_edge(
+                                    &stats,
+                                    self.onchain_config.min_round_trips as i64,
+                                ) {
+                                    shadow_override = true;
+                                    info!(
+                                        wallet = %wallet,
+                                        samples = stats.samples,
+                                        onchain_round_trips = a.round_trips,
+                                        "On-chain audit overruled: shadow book proven-positive"
+                                    );
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                warn!(wallet = %wallet, error = %e, "Shadow-proof lookup failed — audit proceeds (fail-closed to legacy behavior)");
+                            }
+                        }
+                    }
+                    let pass = base_pass || shadow_override;
                     info!(
                         wallet = %wallet,
                         txs_fetched = a.txs_fetched,
                         round_trips = a.round_trips,
                         win_rate = a.win_rate_pct,
                         expectancy = a.expectancy_pct,
+                        shadow_override,
                         pass,
                         "On-chain audit of ACTIVE wallet"
                     );

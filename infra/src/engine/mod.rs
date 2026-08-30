@@ -5,6 +5,7 @@
 pub mod kelly_sizer;
 pub mod momentum_exit;
 pub mod portfolio_heat;
+pub mod shadow_proof;
 pub mod tips;
 
 pub use kelly_sizer::{KellyResult, KellySizer};
