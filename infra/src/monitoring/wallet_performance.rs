@@ -60,6 +60,12 @@ pub enum DemotionReason {
     Inactivity,
     /// Copy PnL < 70% of expected for 7+ continuous days.
     CopyPnl,
+    /// Zero-yield rotation (2026-08-30): no executed copy trades in 7d after
+    /// the promotion grace elapsed — the wallet's flow does not pass gates
+    /// (e.g., 100% honeypot/honeypot-adjacent flow). Target is PROVING, not
+    /// CANDIDATE: webhook coverage and shadow forking are retained so a flow-
+    /// quality change re-measures automatically.
+    ZeroYield,
 }
 
 /// Wallet performance tracker
@@ -364,32 +370,46 @@ impl WalletPerformanceTracker {
                 // Phase 1: Inactivity-based rotation (separate from auto_demote_enabled)
                 if let Some(monitoring_config) = &self.config.monitoring {
                     if monitoring_config.inactivity_rotation_enabled {
-                        if matches!(demotion_reason, Some(DemotionReason::Inactivity)) {
-                            // Determine target status and reason
-                            let demotion_count = self.db.get_inactivity_demotion_count(wallet_address).await.unwrap_or(0);
-                            let max_cycles = monitoring_config.inactivity_rotation
-                                .as_ref()
-                                .map(|cfg| cfg.max_oscillation_cycles)
-                                .unwrap_or(3);
-                            
-                            let (target_status, reason) = if demotion_count >= max_cycles as i32 {
-                                (
-                                    "REJECTED",
-                                    format!("Inactivity demotion: wallet inactive for tiered threshold, oscillation limit ({}) reached", max_cycles)
-                                )
-                            } else {
-                                // M1 (2026-08-30): demote to PROVING, not
-                                // CANDIDATE — the wallet keeps webhook
-                                // coverage and shadow forking, so a flow-
-                                // quality change is re-measured and the
-                                // promoter can re-graduate it. Coverage loss
-                                // on parked wallets is the 132Tkgf5YE
-                                // blackout failure mode.
-                                (
-                                    "PROVING",
-                                    format!("Inactivity demotion: wallet inactive for tiered threshold (demotion #{}/{}) — parked in proving (coverage retained)", demotion_count + 1, max_cycles)
-                                )
-                            };
+                        if matches!(
+                            demotion_reason,
+                            Some(DemotionReason::Inactivity | DemotionReason::ZeroYield)
+                        ) {
+                            // ZeroYield always parks in PROVING with its own
+                            // reason (no oscillation counting — the wallet is
+                            // active on-chain, its flow just doesn't convert).
+                            let (target_status, reason) =
+                                if matches!(demotion_reason, Some(DemotionReason::ZeroYield)) {
+                                    (
+                                        "PROVING",
+                                        "Zero-yield rotation: no executed copy trades in 7d past promotion grace — parked in proving (coverage retained)".to_string(),
+                                    )
+                                } else {
+                                    // Determine target status and reason
+                                    let demotion_count = self.db.get_inactivity_demotion_count(wallet_address).await.unwrap_or(0);
+                                    let max_cycles = monitoring_config.inactivity_rotation
+                                        .as_ref()
+                                        .map(|cfg| cfg.max_oscillation_cycles)
+                                        .unwrap_or(3);
+
+                                    if demotion_count >= max_cycles as i32 {
+                                        (
+                                            "REJECTED",
+                                            format!("Inactivity demotion: wallet inactive for tiered threshold, oscillation limit ({}) reached", max_cycles)
+                                        )
+                                    } else {
+                                        // M1 (2026-08-30): demote to PROVING, not
+                                        // CANDIDATE — the wallet keeps webhook
+                                        // coverage and shadow forking, so a flow-
+                                        // quality change is re-measured and the
+                                        // promoter can re-graduate it. Coverage loss
+                                        // on parked wallets is the 132Tkgf5YE
+                                        // blackout failure mode.
+                                        (
+                                            "PROVING",
+                                            format!("Inactivity demotion: wallet inactive for tiered threshold (demotion #{}/{}) — parked in proving (coverage retained)", demotion_count + 1, max_cycles)
+                                        )
+                                    }
+                                };
 
                             tracing::warn!(
                                 wallet_address = %wallet_address,
@@ -398,8 +418,11 @@ impl WalletPerformanceTracker {
                                 "Auto-demoting wallet due to inactivity"
                             );
 
-                            // Increment demotion count
-                            let _ = self.db.increment_inactivity_demotion_count(wallet_address).await;
+                            // Increment demotion count (inactivity-specific;
+                            // ZeroYield carries no oscillation counting)
+                            if matches!(demotion_reason, Some(DemotionReason::Inactivity)) {
+                                let _ = self.db.increment_inactivity_demotion_count(wallet_address).await;
+                            }
 
                             // Update wallet status
                             match self
@@ -628,6 +651,33 @@ impl WalletPerformanceTracker {
                                     return Some(DemotionReason::Inactivity);
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            // Zero-yield rotation (M1, 2026-08-30): the wallet's flow keeps
+            // the activity anchors fresh but produces NO executed copy trades
+            // — 100%-honeypot flow, or flow the gates always refuse. After a
+            // 7d promotion grace, park it in PROVING (coverage + shadow
+            // forking retained; the promoter re-graduates it if the flow
+            // quality changes). Shadow-proven wallets were already exempted
+            // at the top of this function.
+            if let Ok(Some(wallet)) = self.db.get_wallet(wallet_address).await {
+                let in_promotion_grace = wallet
+                    .promoted_at
+                    .map(|t| {
+                        chrono::Utc::now().signed_duration_since(t).num_days() < 7
+                    })
+                    .unwrap_or(false);
+                if !in_promotion_grace {
+                    if let Some(metrics) = self.get_metrics(wallet_address).await {
+                        if metrics.recent_trade_count == 0 {
+                            tracing::warn!(
+                                wallet_address = %wallet_address,
+                                "Zero-yield rotation: no executed copy trades in 7d past promotion grace"
+                            );
+                            return Some(DemotionReason::ZeroYield);
                         }
                     }
                 }

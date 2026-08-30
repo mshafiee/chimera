@@ -4181,7 +4181,9 @@ fn init_tracing() {
     std::fs::create_dir_all(&log_dir).ok();
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "chimera_operator=debug,tower_http=debug".into());
+        // B1 (2026-08-30): INFO in production — the DEBUG firehose was
+        // ~650MB/day of file logs. Override with RUST_LOG when needed.
+        .unwrap_or_else(|_| "info,chimera_operator=info,tower_http=info".into());
 
     let appender = tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
@@ -4195,9 +4197,16 @@ fn init_tracing() {
             // Keep the writer thread alive for the process lifetime — dropping
             // the guard would shut it down and silently stop file logging.
             std::mem::forget(guard);
+            // B2 (2026-08-30): also emit to stdout so `docker logs` works for
+            // incident response (the file-only setup left docker logs empty).
+            // Stdout capped at INFO — docker captures unbounded growth.
+            let stdout_layer = tracing_subscriber::fmt::layer()
+                .json()
+                .with_max_level(tracing::Level::INFO);
             tracing_subscriber::registry()
                 .with(filter)
                 .with(tracing_subscriber::fmt::layer().json().with_writer(writer))
+                .with(stdout_layer)
                 .init();
             tracing::info!(
                 log_dir = %log_dir,

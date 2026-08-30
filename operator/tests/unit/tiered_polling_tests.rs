@@ -7,9 +7,9 @@ mod tests {
     #[test]
     fn test_tiered_polling_config_defaults() {
         let config = TieredPollingConfig::default();
-        assert_eq!(config.high_conviction_interval_secs, 5);
-        assert_eq!(config.regular_conviction_interval_secs, 8);
-        assert_eq!(config.emerging_conviction_interval_secs, 30);
+        assert_eq!(config.high_conviction_interval_secs, 30);
+        assert_eq!(config.regular_conviction_interval_secs, 60);
+        assert_eq!(config.emerging_conviction_interval_secs, 120);
         assert_eq!(config.high_conviction_wqs_threshold, 80);
         assert_eq!(config.regular_conviction_wqs_threshold, 60);
     }
@@ -25,37 +25,37 @@ mod tests {
         // High conviction (WQS 85, ACTIVE)
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(85)), "ACTIVE"),
-            5
+            30
         );
 
         // Regular conviction (WQS 70, ACTIVE)
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(70)), "ACTIVE"),
-            8
+            60
         );
 
         // Emerging conviction (WQS 50, ACTIVE)
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(50)), "ACTIVE"),
-            30
+            120
         );
 
         // CANDIDATE status always uses emerging interval
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(85)), "CANDIDATE"),
-            30
+            120
         );
 
         // WQS exactly at high threshold
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(80)), "ACTIVE"),
-            5
+            30
         );
 
         // WQS exactly at regular threshold
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(60)), "ACTIVE"),
-            8
+            60
         );
     }
 
@@ -96,16 +96,16 @@ mod tests {
 
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(85)), "ACTIVE"),
-            5,
+            30,
             "None config must fall back to default high interval"
         );
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(70)), "ACTIVE"),
-            8
+            60
         );
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(50)), "ACTIVE"),
-            30
+            120
         );
     }
 
@@ -117,26 +117,26 @@ mod tests {
             ..Default::default()
         };
 
-        // Just below the high threshold (>= 80) → regular (8).
+        // Just below the high threshold (>= 80) → regular (60).
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(79)), "ACTIVE"),
-            8
+            60
         );
-        // Just below the regular threshold (>= 60) → emerging (30).
+        // Just below the regular threshold (>= 60) → emerging (120).
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(59)), "ACTIVE"),
-            30
+            120
         );
         // Fractional WQS rounds to nearest integer BEFORE the comparison:
-        // 79.5 → 80 → high (5).
+        // 79.5 → 80 → high (30).
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from_str("79.5").unwrap()), "ACTIVE"),
-            5
+            30
         );
-        // 79.49 → 79 → regular (8).
+        // 79.49 → 79 → regular (60).
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from_str("79.49").unwrap()), "ACTIVE"),
-            8
+            60
         );
     }
 
@@ -152,19 +152,19 @@ mod tests {
         // string (including case variants and empty) uses WQS tiering.
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(85)), "candidate"),
-            5
+            30
         );
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(85)), "Candidate"),
-            5
+            30
         );
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(85)), ""),
-            5
+            30
         );
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(85)), "ACTIVE "),
-            5
+            30
         );
     }
 
@@ -228,7 +228,7 @@ mod tests {
         // WQS is None should default to emerging interval
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(None, "ACTIVE"),
-            30
+            120
         );
     }
 
@@ -243,17 +243,17 @@ mod tests {
         // CANDIDATE wallets should always use emerging interval regardless of WQS
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(90)), "CANDIDATE"),
-            30
+            120
         );
 
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(70)), "CANDIDATE"),
-            30
+            120
         );
 
         assert_eq!(
             monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from(50)), "CANDIDATE"),
-            30
+            120
         );
     }
 }

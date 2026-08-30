@@ -626,6 +626,21 @@ impl Database for PostgresBackend {
         .execute(&self.pool)
         .await?;
 
+        // C1 (2026-08-30): anchor the wallet's last copied-trade time. The
+        // dormancy/zero-yield rotations key on this column; it previously
+        // never updated (NULL for 29/29 ACTIVE wallets), forcing permanent
+        // NULL-class special cases in every rotation query.
+        sqlx::query(
+            r#"
+            UPDATE wallets w
+            SET last_trade_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            WHERE w.address = (SELECT wallet_address FROM positions WHERE trade_uuid = $1)
+            "#,
+        )
+        .bind(trade_uuid)
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 

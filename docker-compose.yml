@@ -136,7 +136,14 @@ services:
       - ./data:/app/data
       - ./config:/app/config:ro
     environment:
-       - RUST_LOG=info,chimera_operator=debug
+       - RUST_LOG=info
+       # Token-age trial lane (enabled 2026-08-30): sub-floor tokens in the
+       # [proven-floor(6min), global-min(15min)) band admit at 0.25 SOL for
+       # SHIELD. Shadow evidence pending whale exits (222 signals/7d from the
+       # star wallet alone); the lane is the capped live-measurement vehicle.
+       # REVERT if trial-size realized PnL is negative over ~50 signals.
+       - CHIMERA_SELECTION__TOKEN_AGE_TRIAL_ENABLED=true
+       - CHIMERA_SELECTION__TOKEN_AGE_TRIAL_MAX_SIZE_SOL=0.25
        # Logs go to the host-mounted ./data volume (never inside the container layer)
        - CHIMERA_LOG_DIR=/app/data/logs
        - CHIMERA_SERVER__HOST=0.0.0.0
