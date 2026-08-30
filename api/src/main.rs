@@ -4202,7 +4202,7 @@ fn init_tracing() {
             // Stdout capped at INFO — docker captures unbounded growth.
             let stdout_layer = tracing_subscriber::fmt::layer()
                 .json()
-                .with_max_level(tracing::Level::INFO);
+                .with_filter(tracing_subscriber::filter::LevelFilter::INFO);
             tracing_subscriber::registry()
                 .with(filter)
                 .with(tracing_subscriber::fmt::layer().json().with_writer(writer))
