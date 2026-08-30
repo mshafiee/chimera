@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{filter::LevelFilter, layer::Layer as _, layer::SubscriberExt, util::SubscriberInitExt};
 
 use tokio_util::sync::CancellationToken;
 
@@ -4202,8 +4202,7 @@ fn init_tracing() {
             // Stdout capped at INFO — docker captures unbounded growth.
             let stdout_layer = tracing_subscriber::fmt::layer()
                 .json()
-                .with_filter(tracing_subscriber::filter::LevelFilter::INFO);
-            tracing_subscriber::registry()
+                .with_filter(tracing_subscriber::filter::LevelFilter::INFO);            tracing_subscriber::registry()
                 .with(filter)
                 .with(tracing_subscriber::fmt::layer().json().with_writer(writer))
                 .with(stdout_layer)
