@@ -244,6 +244,7 @@ def optimize_paper_roster(
     min_samples: int = MIN_SAMPLES,
     min_net_pct: float = PROMOTE_MIN_NET_PCT,
     cost_per_sol: Optional[Decimal] = None,
+    recent_net_pct: Optional[dict] = None,
 ) -> dict:
     """Roster rebalance that maximizes PAPER copy profitability (Phase 2H).
 
@@ -256,7 +257,17 @@ def optimize_paper_roster(
       promote : every CLEAR candidate -> ACTIVE (no 25-rollover cap)
       demote  : ACTIVE with post-cost net <= 0 -> CANDIDATE (cut burners now)
 
-    REJECTED status is respected (never resurrected by this path)."""
+    REJECTED status is respected (never resurrected by this path).
+
+    N3 (2026-08-31, current-flow quality): `recent_net_pct` maps wallet ->
+    trailing-7d shadow net %. A candidate whose RECENT book is net-negative
+    is held back even when its 30d book clears the bar — measured 2026-08-31:
+    all three graduated books (129i4zsF9E, 5jahCqsAv9, 132Tkgf5YE) had zero
+    admits from their current flow because the whales' present-tense behavior
+    (launch-sniping, thin liquidity) diverged from the historical books the
+    promotion bar scored. Promotion must price the flow being delivered NOW,
+    not only the flow that existed. None (no recent exits) passes — the
+    recency guard already blocks dormant whales."""
     cps = observed_cost_per_sol() if cost_per_sol is None else cost_per_sol
     to_promote: list[tuple[WalletPerf, Decimal]] = []
     to_demote: list[tuple[WalletPerf, Decimal]] = []
@@ -266,10 +277,12 @@ def optimize_paper_roster(
         notional = p.notional or Decimal("0")
         net = _net_pnl(p, cps)
         net_pct = (net / notional * Decimal("100")) if notional > 0 else None
+        recent_net = (recent_net_pct or {}).get(p.address)
+        recent_ok = recent_net is None or recent_net >= 0
         clear = (
             (net_pct is not None and net_pct >= Decimal(str(min_net_pct)))
             or (net_pct is None and p.total_pnl >= Decimal(str(PROMOTE_MIN_PNL)))
-        ) and _not_tail_only(p) and _recent_edge(p)
+        ) and _not_tail_only(p) and _recent_edge(p) and recent_ok
         if clear and p.status in ("PROVING", "CANDIDATE", None):
             to_promote.append((p, net))
         elif p.status == "ACTIVE" and net <= Decimal("0"):
@@ -382,6 +395,39 @@ def proving_pool_stats() -> dict:
     return {"provers": int(r[0]), "with_evidence": int(r[1])}
 
 
+def fetch_recent_shadow_net(window_days: int = 7) -> dict:
+    """Trailing-7d shadow net % per wallet — the CURRENT-flow quality signal.
+
+    N3 (2026-08-31): a 30d book can be excellent while the whale's present-
+    tense flow is toxic (launch-sniping, thin liquidity) — all three graduated
+    books had zero gate-passing signals from their current flow. Promotion
+    prices both: the 30d bar AND a non-negative 7d book."""
+    rows = execute_and_fetchall(
+        """
+        SELECT sp.wallet_address, w.status,
+               SUM(se.pnl_sol) AS pnl, COALESCE(SUM(sp.entry_amount_sol),0) AS notional
+        FROM shadow_positions sp
+        JOIN shadow_exits se ON se.shadow_id = sp.shadow_id
+        LEFT JOIN wallets w ON w.address = sp.wallet_address
+        WHERE se.exit_strategy = 'mirror_main' AND se.pnl_sol IS NOT NULL
+          AND se.exited_at > NOW() - (%s || ' days')::INTERVAL
+        GROUP BY sp.wallet_address, w.status
+        """,
+        (str(window_days),),
+    )
+    out: dict = {}
+    for r in rows:
+        if isinstance(r, dict):
+            addr, pnl, notional = r["wallet_address"], r["pnl"], r["notional"]
+        else:
+            addr, pnl, notional = r[0], r[1], r[2]
+        if notional and Decimal(str(notional)) > 0:
+            out[addr] = (Decimal(str(pnl)) - Decimal(str(notional)) * Decimal("0.0065")) / Decimal(str(notional)) * 100
+        else:
+            out[addr] = None
+    return out
+
+
 def run_cycle(
     dry_run: bool = False,
     prune: bool = False,
@@ -423,11 +469,20 @@ def run_cycle(
         logger.warning("proving pool stats failed: %s", e)
     promote_perf = fetch_shadow_performance(PROMOTE_WINDOW_DAYS)
     demote_perf = fetch_shadow_performance(DEMOTE_WINDOW_DAYS)
+    # N3 (2026-08-30/31): current-flow quality — a 7d-negative book holds a
+    # candidate back even when its 30d book clears the bar.
+    try:
+        recent_net_pct = fetch_recent_shadow_net(7)
+    except Exception as e:  # noqa: BLE001 — advisory; promote on 30d bar alone.
+        logger.warning("recent-flow fetch failed — promotion uses 30d book only: %s", e)
+        recent_net_pct = None
     cost_per_sol = observed_cost_per_sol()    # Keep the PAPER copy set at the post-cost-CLEAR optimum every scheduled
     # cycle (Phase 2H): promote CLEAR candidates from the trailing promote
     # window, demote ACTIVE cost-burners (net <= 0) from the shorter trailing
     # demote window. Caps remain as guardrails against roster flapping.
-    promote_roster = optimize_paper_roster(promote_perf, cost_per_sol=cost_per_sol)
+    promote_roster = optimize_paper_roster(
+        promote_perf, cost_per_sol=cost_per_sol, recent_net_pct=recent_net_pct,
+    )
     demote_roster = optimize_paper_roster(
         demote_perf, cost_per_sol=cost_per_sol, min_samples=DEMOTE_MIN_SAMPLES,
     )

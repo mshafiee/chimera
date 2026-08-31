@@ -313,3 +313,53 @@ def test_promotion_rejects_unknown_recency():
     )
     res = sp.optimize_paper_roster([unknown], cost_per_sol=Decimal("0.02"))
     assert res["promote"] == []
+
+
+# ── N3: current-flow quality in the promotion bar (2026-08-31) ──────────────
+
+def test_promotion_held_back_when_recent_flow_negative():
+    # 30d book clears the bar (+2.5% net) but the whale's PRESENT flow is
+    # toxic (7d net −9%): measured 2026-08-31 — all three graduated books had
+    # zero gate-passing signals from current flow. Promotion prices the flow
+    # being delivered NOW.
+    perf = _perf("TOXIC_NOW", "PROVING", 30, 6.0, win=0.5, notional=100.0)
+    res = sp.optimize_paper_roster(
+        [perf], cost_per_sol=Decimal("0.02"),
+        recent_net_pct={"TOXIC_NOW": Decimal("-9.0")},
+    )
+    assert res["promote"] == []
+
+
+def test_promotion_passes_when_recent_flow_non_negative():
+    # Same 30d book, current 7d flow non-negative → clear to promote.
+    perf = _perf("HEALTHY_NOW", "PROVING", 30, 6.0, win=0.5, notional=100.0)
+    res = sp.optimize_paper_roster(
+        [perf], cost_per_sol=Decimal("0.02"),
+        recent_net_pct={"HEALTHY_NOW": Decimal("0.5")},
+    )
+    assert [p.address for p in res["promote"]] == ["HEALTHY_NOW"]
+
+
+def test_promotion_without_recent_data_falls_back_to_30d_bar():
+    # No 7d exits (dormant whale) → recency guard blocks promotion anyway;
+    # the recent-flow check must be neutral (None passes) so the two guards
+    # compose without double-penalizing.
+    perf = _perf("NO_RECENT", "PROVING", 30, 6.0, win=0.5, notional=100.0, last_exit_age_days=1.0)
+    res = sp.optimize_paper_roster([perf], cost_per_sol=Decimal("0.02"), recent_net_pct={})
+    assert [p.address for p in res["promote"]] == ["NO_RECENT"]
+
+
+def test_fetch_recent_shadow_net_maps_rows():
+    def fake_fetch(query, params=()):
+        if "7 days" in query or "INTERVAL" in query:
+            return [
+                {"wallet_address": "W1", "pnl": "2.0", "notional": "100"},
+                {"wallet_address": "W2", "pnl": "-1.0", "notional": "0"},
+            ]
+        return []
+
+    monkeypatched = sp
+    monkeypatched.execute_and_fetchall = fake_fetch
+    out = monkeypatched.fetch_recent_shadow_net(7)
+    assert out["W1"] == sp.Decimal("1.35")  # (2.0 - 0.65)/100*100 = 1.35
+    assert out["W2"] is None                # zero notional → None (neutral)
