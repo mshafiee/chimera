@@ -132,6 +132,13 @@ services:
       - "8080:8080"
     expose:
       - "8080"
+    # Fix 4 (2026-08-31): stdout logging (B2) streams into docker's json-file
+    # driver — bound it before it grows unbounded (default: no limit).
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     volumes:
       - ./data:/app/data
       - ./config:/app/config:ro

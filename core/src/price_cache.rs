@@ -562,7 +562,16 @@ impl PriceCache {
                         );
                     }
                     Err(fallback_err) => {
-                        tracing::warn!(token = token_address, error = %fallback_err, "Eager price fetch fallback failed");
+                        // Fix 3 (2026-08-31): Unpriceable = tombstoned dead
+                        // token re-requested for an already-REJECTED decision
+                        // — 1,720 warns/5h of pure noise (B3 sweep). The
+                        // fallback for a dead token is guaranteed to fail the
+                        // same way; demote to debug. Other errors stay warn.
+                        if matches!(fallback_err, PriceCacheError::Unpriceable(_)) {
+                            tracing::debug!(token = token_address, "Eager price fetch fallback: token unpriceable (tombstoned)");
+                        } else {
+                            tracing::warn!(token = token_address, error = %fallback_err, "Eager price fetch fallback failed");
+                        }
                     }
                 }
             }

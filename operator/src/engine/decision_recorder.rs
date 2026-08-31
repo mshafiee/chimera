@@ -30,6 +30,10 @@ pub struct DecisionRecorder {
     attempted: Arc<AtomicU64>,
     /// Every successful insert increments this.
     persisted: Arc<AtomicU64>,
+    /// Rejected-decision records dropped on semaphore saturation (admitted
+    /// records are never dropped — they wait for a permit). ADR: analytics
+    /// records are droppable; capital-bearing records are not.
+    dropped: Arc<AtomicU64>,
     /// Caps the number of in-flight persistence tasks so a decision flood (or
     /// slow DB) cannot pile up unbounded tasks and saturate the connection pool.
     write_semaphore: Arc<tokio::sync::Semaphore>,
@@ -42,8 +46,21 @@ impl DecisionRecorder {
             run_context,
             attempted: Arc::new(AtomicU64::new(0)),
             persisted: Arc::new(AtomicU64::new(0)),
+            dropped: Arc::new(AtomicU64::new(0)),
             write_semaphore: Arc::new(tokio::sync::Semaphore::new(64)),
         }
+    }
+
+    /// Persistence reconciliation counters (attempted / persisted / dropped).
+    ///
+    /// Drift between attempted and persisted+dropped means a record was lost
+    /// without being counted — an invariant violation.
+    pub fn stats(&self) -> (u64, u64, u64) {
+        (
+            self.attempted.load(Ordering::Relaxed),
+            self.persisted.load(Ordering::Relaxed),
+            self.dropped.load(Ordering::Relaxed),
+        )
     }
 
     pub fn run_context(&self) -> &Arc<RunContext> {
@@ -60,37 +77,66 @@ impl DecisionRecorder {
         received_at: DateTime<Utc>,
     ) {
         self.attempted.fetch_add(1, Ordering::Relaxed);
+        // Reconciliation heartbeat (2026-08-31): attempted vs persisted vs
+        // dropped. Any drift = silently lost records — the 2026-08-30 trial
+        // incident's signature. INFO so it survives the lossy-log bursts.
+        let attempted_now = self.attempted.load(Ordering::Relaxed);
+        if attempted_now % 1000 == 0 {
+            tracing::info!(
+                attempted = attempted_now,
+                persisted = self.persisted.load(Ordering::Relaxed),
+                dropped = self.dropped.load(Ordering::Relaxed),
+                "Decision persistence reconciliation"
+            );
+        }
 
         let db = self.db.clone();
         let run_context = self.run_context.clone();
         let persisted = self.persisted.clone();
+        let dropped = self.dropped.clone();
         let write_semaphore = self.write_semaphore.clone();
 
         // Snapshot everything the insert needs before spawning so the spawned
         // task is 'static and does not borrow the decision.
         let row = DecisionRow::from_decision(decision, req, trade_uuid, received_at, &run_context);
+        let decision_row_admitted = row.admitted;
 
         tokio::spawn(async move {
-            // Bound concurrent writes: when the semaphore is saturated, skip
-            // the insert rather than queue unboundedly. The completeness
-            // metric surfaces the loss immediately.
-            let Ok(permit) = write_semaphore.try_acquire_owned() else {
-                tracing::warn!(
-                    decision_id = %row.decision_id,
-                    "Decision persistence saturated; dropping decision record"
-                );
-                return;
+            // Persistence policy (2026-08-31, silent-loss fix):
+            // - ADMITTED decisions are capital-bearing: they WAIT for a
+            //   permit (bounded queueing) and are never dropped. The 2026-08-30
+            //   incident lost two trial admissions exactly this way — decided,
+            //   logged, then silently dropped on saturation with the warn
+            //   itself lost to the lossy log channel.
+            // - REJECTED decisions are analytics: droppable on saturation,
+            //   counted in `dropped` for reconciliation.
+            let is_admitted = decision_row_admitted;
+            let permit = if is_admitted {
+                Some(write_semaphore.acquire_owned().await.expect("semaphore closed"))
+            } else {
+                match write_semaphore.try_acquire_owned() {
+                    Ok(p) => Some(p),
+                    Err(_) => {
+                        dropped.fetch_add(1, Ordering::Relaxed);
+                        tracing::debug!(
+                            decision_id = %row.decision_id,
+                            "Rejected-decision persistence saturated; dropping analytics record"
+                        );
+                        return;
+                    }
+                }
             };
+            let _permit = permit;
             if let Err(e) = insert_decision_record(&db, &row).await {
                 tracing::warn!(
                     error = %e,
                     decision_id = %row.decision_id,
+                    admitted = is_admitted,
                     "Failed to persist decision record"
                 );
             } else {
                 persisted.fetch_add(1, Ordering::Relaxed);
             }
-            drop(permit);
         });
     }
 
@@ -402,6 +448,7 @@ mod tests {
     use crate::monitoring::test_db::MockDb;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+    use std::str::FromStr;
     use std::sync::atomic::Ordering;
 
     fn mock_run_context() -> Arc<RunContext> {
@@ -580,5 +627,92 @@ mod tests {
         assert_eq!(rec.attempted.load(Ordering::Relaxed), 0);
         assert_eq!(rec.persisted.load(Ordering::Relaxed), 0);
         assert!(rec.run_context().run_id.contains("-"));
+}
+
+// ── Persistence policy tests (2026-08-31, silent-loss fix) ──────────────────
+
+    fn sample_decision_admitted(req: &SelectionRequest) -> BuyDecision {
+        let mut d = sample_decision(req);
+        d.admitted = true;
+        d.size_sol = Some(Decimal::from_str("0.25").unwrap());
+        d
+    }
+
+    fn sample_decision_rejected(req: &SelectionRequest) -> BuyDecision {
+        let mut d = sample_decision(req);
+        d.admitted = false;
+        d.rejection_code = Some("TOKEN_TOO_NEW");
+        d.rejection_reason = Some("test".to_string());
+        d
+    }
+
+    fn saturate(rec: &DecisionRecorder) -> Vec<tokio::sync::OwnedSemaphorePermit> {
+        (0..64)
+            .map(|_| {
+                rec.write_semaphore
+                    .clone()
+                    .try_acquire_owned()
+                    .expect("semaphore must have 64 permits")
+            })
+            .collect()
+    }
+
+    /// ADMITTED decisions must WAIT for a permit under saturation, never be
+    /// dropped: the 2026-08-30 trial incident lost two capital-bearing
+    /// decisions exactly this way.
+    #[tokio::test]
+    async fn test_admitted_persists_under_saturation() {
+        let db = Arc::new(MockDb::new());
+        let rec = DecisionRecorder::new(db.clone(), mock_run_context());
+        let _guards = saturate(&rec);
+
+        let req = sample_request(Action::Buy);
+        let decision = sample_decision_admitted(&req);
+        rec.record(&decision, &req, None, chrono::Utc::now());
+
+        // Release the permits so the waiting persist can proceed.
+        drop(_guards);
+
+        // The spawned persist waits on a permit (MockDb cannot exercise the
+        // real insert — pool() is unimplemented — so persistence itself is
+        // verified in the DB-backed suites). The invariant under test:
+        // admitted records are NEVER dropped, they queue.
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert_eq!(rec.dropped.load(Ordering::Relaxed), 0, "admitted must never drop, even saturated");
+    }
+
+    /// REJECTED decisions are droppable analytics: under saturation they are
+    /// counted in `dropped` and not persisted.
+    #[tokio::test]
+    async fn test_rejected_drops_under_saturation_and_counts() {
+        let db = Arc::new(MockDb::new());
+        let rec = DecisionRecorder::new(db.clone(), mock_run_context());
+        let _guards = saturate(&rec);
+
+        let req = sample_request(Action::Buy);
+        let decision = sample_decision_rejected(&req);
+        rec.record(&decision, &req, None, chrono::Utc::now());
+
+        // Give the spawned task a moment; it must have dropped immediately.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(rec.dropped.load(Ordering::Relaxed), 1, "rejected drop counted");
+        assert_eq!(rec.persisted.load(Ordering::Relaxed), 0);
+
+        // After release, nothing further happens for the dropped record.
+        drop(_guards);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(rec.persisted.load(Ordering::Relaxed), 0);
+    }
+
+    /// stats() reconciles the three counters.
+    #[test]
+    fn test_stats_reconciliation() {
+        let db = Arc::new(MockDb::new());
+        let rec = DecisionRecorder::new(db, mock_run_context());
+        rec.attempted.fetch_add(10, Ordering::Relaxed);
+        rec.persisted.fetch_add(8, Ordering::Relaxed);
+        rec.dropped.fetch_add(2, Ordering::Relaxed);
+        let (a, p, d) = rec.stats();
+        assert_eq!((a, p, d), (10, 8, 2));
     }
 }
