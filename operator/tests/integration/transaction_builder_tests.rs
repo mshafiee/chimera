@@ -125,6 +125,7 @@ fn test_signal_creation() {
         wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
         trade_uuid: None,
         exit_fraction: None,
+        trial_admission: false,
     };
 
     let signal = Signal::new(payload, chrono::Utc::now().timestamp(), None);

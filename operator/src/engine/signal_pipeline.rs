@@ -453,7 +453,16 @@ impl SignalProcessor {
             // the minimum exists to prevent. Reject observably instead.
             let pre_floor_sol = signal.payload.amount_sol;
             let min_size_sol = self.config.position_sizing.min_size_sol;
-            if self.config.position_sizing.skip_below_min_size {
+            // Trial-lane exemption (2026-09-01, Fix A): the 0.25 SOL trial
+            // cap IS the risk bound for trial admissions — the off-hours
+            // floor would otherwise kill every night trial (measured
+            // 2026-08-29: 4 dead-letters; ~50% of the day lost for the lane,
+            // whose shadow verdict on that flow was +9.9 SOL/12h). The flag
+            // is authoritative: only the selection trial gate sets it, and
+            // that gate requires the trial config enabled + the size already
+            // clamped to the trial cap.
+            let trial_exempt = signal.payload.trial_admission;
+            if self.config.position_sizing.skip_below_min_size && !trial_exempt {
                 if signal.payload.amount_sol < min_size_sol {
                     let reason = format!(
                         "OFF_HOURS_BELOW_MIN: size {} SOL below minimum {} SOL after off-hours multiplier — skipping (cost-uneconomical)",

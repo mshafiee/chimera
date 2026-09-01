@@ -902,6 +902,17 @@ pub trait Database: Send + Sync {
         window_days: i32,
     ) -> AppResult<Option<ShadowKellyStats>>;
 
+    /// Net shadow PnL (SOL) over the trailing window from deduped mirror_main
+    /// exits. Time-decay anchor for the shadow-proof demotion exemption
+    /// (2026-09-01): a 30d-positive book with a 48h-negative net means the
+    /// whale's CURRENT flow is bleeding — the exemption must not shield it
+    /// (measured: 12kNFpfihj, 24h book −4.39 SOL after a +73.8 outlier day).
+    async fn get_wallet_shadow_recent_net(
+        &self,
+        wallet_address: &str,
+        window_hours: i32,
+    ) -> AppResult<Option<Decimal>>;
+
     /// Sum of the wallet's REALIZED copy-trade PnL (`trades.net_pnl_sol` on
     /// CLOSED trades) within the trailing window in hours. Feeds the
     /// per-wallet loss-pause gate: a wallet that just burned capital keeps

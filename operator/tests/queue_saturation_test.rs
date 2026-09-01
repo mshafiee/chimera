@@ -21,6 +21,7 @@ fn make_signal(strategy: Strategy, id: u32) -> Signal {
         wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
         trade_uuid: Some(format!("test-uuid-{}", id)),
         exit_fraction: None,
+        trial_admission: false,
     };
     Signal::new(payload, 12345, None)
 }

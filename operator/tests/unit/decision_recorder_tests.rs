@@ -78,6 +78,7 @@ fn make_decision(admitted: bool, code: Option<&'static str>) -> BuyDecision {
         token_age_hours: Some(12.0),
         liquidity_usd: Some(dec("50000")),
         volume_24h_usd: Some(dec("100000")),
+        trial_admission: false,
         price_impact_pct: Some(dec("0.5")),
         config_hash: "ch".to_string(),
         ingress: Ingress::Webhook,

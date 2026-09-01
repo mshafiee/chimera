@@ -229,6 +229,8 @@ def test_rebalance_recycles_stagnant_and_fills(monkeypatch):
             return [{"address": "STAGNANT_1"}]
         if "count(*)" in query:
             return [{"count": 3}]  # 3 proving, 1 recycling -> deficit = 30 - 2 = 28
+        if "SUM(dedup.pnl_sol)" in query:
+            return []  # no negative-evidence provers in this scenario
         return [{"address": f"CAND_{i}"} for i in range(28)]
 
     monkeypatch.setattr(sp, "execute_and_fetchall", fake_fetch)
@@ -241,6 +243,8 @@ def test_rebalance_recycles_stagnant_and_fills(monkeypatch):
 def test_rebalance_no_fill_when_pool_full(monkeypatch):
     def fake_fetch(query, params=()):
         if "NOT EXISTS" in query:
+            return []
+        if "SUM(dedup.pnl_sol)" in query:
             return []
         return [{"count": 30}]
 
@@ -363,3 +367,46 @@ def test_fetch_recent_shadow_net_maps_rows():
     out = monkeypatched.fetch_recent_shadow_net(7)
     assert out["W1"] == sp.Decimal("1.35")  # (2.0 - 0.65)/100*100 = 1.35
     assert out["W2"] is None                # zero notional → None (neutral)
+
+
+def test_negative_evidence_prover_recycles_immediately(monkeypatch):
+    # Fix C: a prover bleeding past the threshold recycles to CANDIDATE
+    # immediately (its slot measures a loser), without waiting out the
+    # 14d stagnation window.
+    def fake_fetch(query, params=()):
+        if "NOT EXISTS" in query:
+            return []  # no stagnant (zero-evidence) provers
+        if "SUM(dedup.pnl_sol)" in query:
+            # Simulate the SQL's per-wallet threshold filter: params[1] is the
+            # SOL floor; a prover bleeding −1.5 breaches it.
+            if params and params[1] and float(params[1]) < 0:
+                return [{"address": "ACTIVE_LOSER"}]  # bleeding −1.5 ≤ floor
+            return []
+        if "count(*)" in query:
+            return [{"count": 2}]
+        # CANDIDATE fill rows
+        return [{"address": "FRESH_1"}, {"address": "FRESH_2"}]
+
+    monkeypatch.setattr(sp, "execute_and_fetchall", fake_fetch)
+    res = sp.rebalance_proving_pool(stagnation_days=14, target_size=30)
+    assert "ACTIVE_LOSER" in res["to_candidate"], res
+    assert res["to_proving"] == ["FRESH_1", "FRESH_2"]
+
+
+def test_healthy_prover_not_recycled(monkeypatch):
+    # A prover with positive trailing book must survive the negative-evidence
+    # recycle (the whole point of the pool).
+    def fake_fetch(query, params=()):
+        if "NOT EXISTS" in query:
+            return []
+        if "SUM(dedup.pnl_sol)" in query:
+            # Profitable prover (+2 SOL) is ABOVE the −1.0 floor: the SQL's
+            # per-wallet filter returns no rows for it.
+            return []
+        if "count(*)" in query:
+            return [{"count": 2}]
+        return [{"address": "SPARE"}]
+
+    monkeypatch.setattr(sp, "execute_and_fetchall", fake_fetch)
+    res = sp.rebalance_proving_pool(stagnation_days=14, target_size=30)
+    assert "PROFITABLE_PROVER" not in res["to_candidate"]

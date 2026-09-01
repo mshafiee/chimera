@@ -78,6 +78,13 @@ DEMOTE_MIN_SAMPLES = int(os.environ.get("SCOUT_DEMOTE_MIN_SAMPLES", "10"))
 PROVING_ROSTER_SIZE = int(os.environ.get("SCOUT_PROVING_ROSTER_SIZE", "30"))
 PROVE_STAGNATION_DAYS = int(os.environ.get("SCOUT_PROVE_STAGNATION_DAYS", "14"))
 
+# Fix C (2026-09-01): negative-evidence fast recycle. A PROVING wallet whose
+# trailing-72h deduped shadow book is bleeding ≤ this SOL threshold recycles
+# to CANDIDATE immediately instead of squatting on the slot for the full
+# stagnation window (measured: 111134RmVr −10.0 SOL/24h, 3nMNd89Axw −2.8).
+PROVER_NEGATIVE_RECYCLE_SOL = float(os.environ.get("SCOUT_PROVER_NEGATIVE_RECYCLE_SOL", "-1.0"))
+PROVER_NEGATIVE_RECYCLE_DAYS = int(os.environ.get("SCOUT_PROVER_NEGATIVE_RECYCLE_DAYS", "3"))
+
 # Promotion recency guard (2026-08-29): a wallet whose newest shadow exit is
 # older than this has a DORMANT whale — the operator's dormancy rotation
 # (GREATEST(promoted_at, last_trade_at) anchor) reclaims it within days, and
@@ -347,6 +354,42 @@ def rebalance_proving_pool(
         (str(stagnation_days),),
     )
     to_candidate = [r["address"] if isinstance(r, dict) else r[0] for r in rows]
+
+    # Negative-evidence fast recycle (Fix C, 2026-09-01): a prover whose
+    # trailing-72h deduped mirror_main book is bleeding worse than
+    # PROVER_NEGATIVE_RECYCLE_SOL is consuming a slot to measure a loser —
+    # measured 2026-09-01: 111134RmVr −10.0 SOL/24h, 3nMNd89Axw grinding
+    # −2.8. Active-losing provers recycle immediately (an active whale is
+    # re-discovered by webhook_discovery quickly if its flow improves; the
+    # dormant-star coverage risk does not apply to active losers).
+    neg_rows = execute_and_fetchall(
+        """
+        SELECT w.address
+        FROM wallets w
+        WHERE w.status = 'PROVING'
+          AND COALESCE((
+                SELECT SUM(dedup.pnl_sol)
+                FROM (
+                    SELECT DISTINCT ON (sp.token_address, date_trunc('hour', sp.opened_at))
+                           se.pnl_sol
+                    FROM shadow_exits se
+                    JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
+                    WHERE sp.wallet_address = w.address
+                      AND se.exit_strategy = 'mirror_main'
+                      AND se.exit_reason IS DISTINCT FROM 'no_price'
+                      AND se.pnl_sol IS NOT NULL
+                      AND se.exited_at > NOW() - (%s || ' days')::interval
+                    ORDER BY sp.token_address, date_trunc('hour', sp.opened_at), sp.opened_at
+                ) dedup
+              ), 0) <= %s
+        ORDER BY w.promoted_at ASC
+        """,
+        (str(PROVER_NEGATIVE_RECYCLE_DAYS), str(PROVER_NEGATIVE_RECYCLE_SOL)),
+    )
+    for r in neg_rows:
+        addr = r["address"] if isinstance(r, dict) else r[0]
+        if addr not in to_candidate:
+            to_candidate.append(addr)
 
     count_rows = execute_and_fetchall(
         "SELECT count(*) FROM wallets WHERE status = 'PROVING'",

@@ -306,6 +306,9 @@ pub(crate) async fn queue_monitoring_signal(
         amount_sol: trade_amount_sol,
         trade_uuid: Some(monitoring_uuid),
         exit_fraction: None,
+        // Trial-lane marker (2026-09-01): thread the trial admission through
+        // so the pipeline's off-hours minimum-size floor exempts it.
+        trial_admission: decision.trial_admission,
     };
 
     let mut signal = Signal::new(signal_payload, chrono::Utc::now().timestamp(), None);

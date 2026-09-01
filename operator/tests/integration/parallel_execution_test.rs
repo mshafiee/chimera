@@ -103,6 +103,7 @@ fn make_signal(id: usize, strategy: Strategy, token: &str) -> Signal {
         wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
         trade_uuid: Some(format!("parallel-test-{}-{}", token, id)),
         exit_fraction: None,
+        trial_admission: false,
     };
     Signal::new(payload, 12345, None)
 }

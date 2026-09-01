@@ -85,6 +85,12 @@ pub struct SignalPayload {
     /// Optional fraction of the position to exit (used for partial exits)
     #[serde(default)]
     pub exit_fraction: Option<Decimal>,
+    /// Trial-lane admission marker (2026-09-01): the pipeline exempts trial
+    /// payloads from the off-hours minimum-size floor — the 0.25 SOL trial
+    /// cap IS the risk bound. Without this, every night trial dies at the
+    /// floor (measured 2026-08-29: 4 dead-letters, half the day lost).
+    #[serde(default)]
+    pub trial_admission: bool,
 }
 
 fn default_amount() -> Decimal {
@@ -241,6 +247,7 @@ mod tests {
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: None,
             exit_fraction: None,
+                trial_admission: false,
         };
 
         assert!(valid_signal.validate().is_ok());
@@ -257,6 +264,7 @@ mod tests {
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: None,
             exit_fraction: None,
+                trial_admission: false,
         };
 
         let uuid1 = signal.generate_trade_uuid(1234567890);
@@ -281,6 +289,7 @@ mod tests {
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: Some("custom-uuid-123".to_string()),
             exit_fraction: None,
+                trial_admission: false,
         };
 
         assert_eq!(signal.generate_trade_uuid(0), "custom-uuid-123");
@@ -312,6 +321,7 @@ mod tests {
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: None,
             exit_fraction: None,
+                trial_admission: false,
         }
     }
 

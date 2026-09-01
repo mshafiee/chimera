@@ -82,6 +82,7 @@ fn create_test_signal() -> Signal {
         wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
         trade_uuid: None,
         exit_fraction: None,
+        trial_admission: false,
     };
     payload.validate().expect("test signal payload must be valid");
     Signal::new(payload, chrono::Utc::now().timestamp(), None)

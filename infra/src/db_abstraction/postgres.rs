@@ -4177,6 +4177,37 @@ impl Database for PostgresBackend {
         )
     }
 
+    async fn get_wallet_shadow_recent_net(
+        &self,
+        wallet_address: &str,
+        window_hours: i32,
+    ) -> AppResult<Option<Decimal>> {
+        // Trailing-window net from deduped mirror_main exits (same dedup
+        // shape as get_wallet_pnl_statistics: one exit per (token, hour of
+        // opened_at)). None when the wallet has no exits in the window.
+        let net: Option<Decimal> = sqlx::query_scalar(
+            r#"WITH dedup AS (
+                 SELECT DISTINCT ON (sp.token_address, date_trunc('hour', sp.opened_at))
+                        se.pnl_sol
+                 FROM shadow_exits se
+                 JOIN shadow_positions sp ON sp.shadow_id = se.shadow_id
+                 WHERE sp.wallet_address = $1
+                   AND se.exit_strategy = 'mirror_main'
+                   AND se.exit_reason IS DISTINCT FROM 'no_price'
+                   AND se.pnl_sol IS NOT NULL
+                   AND se.exited_at > NOW() - ($2 || ' hours')::interval
+                 ORDER BY sp.token_address, date_trunc('hour', sp.opened_at), sp.opened_at
+               )
+               SELECT SUM(pnl_sol) FROM dedup HAVING COUNT(*) > 0"#,
+        )
+        .bind(wallet_address)
+        .bind(window_hours)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+        Ok(net)
+    }
+
     async fn get_wallet_realized_pnl_window(
         &self,
         wallet_address: &str,

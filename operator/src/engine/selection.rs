@@ -412,6 +412,12 @@ pub struct BuyDecision {
     /// failure, not a clean pass/reject). The caller sets `force_slow_path` on
     /// the signal so the engine enforces slow-path verification before entry.
     pub fast_check_errored: bool,
+    /// True when this BUY was admitted via the token-age trial lane (2026-09-01):
+    /// sub-floor token, micro-cap size. The pipeline exempts trial payloads
+    /// from the off-hours minimum-size floor — the 0.25 SOL trial cap IS the
+    /// risk bound, and the off-hours floor was killing every night trial
+    /// (measured 2026-08-29: 4 dead-letters, ~50% of the day lost).
+    pub trial_admission: bool,
 }
 
 impl BuyDecision {
@@ -442,6 +448,7 @@ impl BuyDecision {
             ingress: req.ingress,
             is_consensus: false,
             fast_check_errored: false,
+            trial_admission: false,
         }
     }
 }
@@ -834,6 +841,7 @@ impl SelectionService {
             ingress: req.ingress,
             is_consensus: false,
             fast_check_errored: false,
+            trial_admission: false,
         }
     }
 
@@ -2366,6 +2374,7 @@ impl SelectionService {
             ingress: req.ingress,
             is_consensus,
             fast_check_errored,
+            trial_admission: age_trial_cap.is_some(),
         }
     }
 

@@ -479,6 +479,7 @@ mod tests {
             admitted: true,
             rejection_reason: None,
             rejection_code: None,
+            trial_admission: false,
             strategy: Some(Strategy::Shield),
             size_sol: Some(dec!(2.5)),
             source_amount_sol: req.source_amount_sol,

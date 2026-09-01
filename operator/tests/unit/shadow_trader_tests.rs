@@ -86,6 +86,7 @@ fn decision(admitted: bool, strategy: Option<Strategy>) -> BuyDecision {
         token_age_hours: Some(5.0),
         liquidity_usd: Some(dec("50000")),
         volume_24h_usd: None,
+        trial_admission: false,
         price_impact_pct: None,
         config_hash: "ch".to_string(),
         ingress: Ingress::Webhook,

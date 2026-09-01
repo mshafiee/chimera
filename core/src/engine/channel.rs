@@ -283,6 +283,7 @@ mod tests {
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: None,
             exit_fraction: None,
+            trial_admission: false,
         };
         Signal::new(payload, 12345, None)
     }

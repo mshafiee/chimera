@@ -23,6 +23,7 @@ fn create_test_signal(trade_uuid: &str, strategy: Strategy, token: &str) -> Sign
         wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
         trade_uuid: Some(trade_uuid.to_string()),
         exit_fraction: None,
+        trial_admission: false,
     };
     Signal::new(payload, chrono::Utc::now().timestamp(), None)
 }

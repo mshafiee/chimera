@@ -605,12 +605,33 @@ impl WalletPerformanceTracker {
                 &stats,
                 SHADOW_PROOF_MIN_SAMPLES,
             ) {
-                tracing::debug!(
+                // Time-decay condition (2026-09-01, Fix B): the 30d book
+                // proves historical edge, but the EXEMPTION must also require
+                // the trailing-48h net to be non-negative — a 30d-positive
+                // book with a bleeding present (12kNFpfihj: +73.8 outlier day
+                // followed by −4.39/24h at −36.6%) must rotate out while it
+                // bleeds. Fail-open: lookup error → exemption holds.
+                let recent_ok = match self
+                    .db
+                    .get_wallet_shadow_recent_net(wallet_address, 48)
+                    .await
+                {
+                    Ok(Some(net)) => net >= Decimal::ZERO,
+                    Ok(None) => true, // no recent exits — not actively bleeding
+                    Err(_) => true,   // fail-open
+                };
+                if recent_ok {
+                    tracing::debug!(
+                        wallet_address = %wallet_address,
+                        samples = stats.samples,
+                        "Demotion suppressed: shadow book proven-positive (30d + 48h)"
+                    );
+                    return None;
+                }
+                tracing::info!(
                     wallet_address = %wallet_address,
-                    samples = stats.samples,
-                    "Demotion suppressed: shadow book proven-positive"
+                    "Shadow-proof exemption lapsed: trailing 48h net negative — demotion proceeds"
                 );
-                return None;
             }
         }
 

@@ -154,3 +154,77 @@ async fn test_negative_expectancy_book_does_not_exempt() {
     let verdict = monitor.should_demote(wallet).await;
     assert!(verdict.is_some(), "negative-expectancy book must not exempt");
 }
+
+// ── Fix B: time-decayed shadow-proof exemption (2026-09-01) ─────────────────
+
+/// Seed exits with EXPLICIT exited_at timestamps (for the 48h-net condition).
+async fn seed_exits_with_age(
+    db: &Arc<dyn Database>,
+    wallet: &str,
+    prefix: &str,
+    hours_ago: i32,
+    count: usize,
+    pct: &str,
+) {
+    for i in 0..count {
+        let sid = format!("{prefix}-{wallet}-{i}");
+        sqlx::query(
+            "INSERT INTO shadow_positions (shadow_id, decision_id, run_id, wallet_address, token_address, main_admitted, entry_amount_sol, ingress, opened_at) \
+             VALUES ($1, 'd', 'run', $2, 'seedtoken', false, 0.1, 'webhook', NOW() - make_interval(hours => $3))",
+        )
+        .bind(&sid)
+        .bind(wallet)
+        .bind(i as i32 + hours_ago + 1)
+        .execute(&pg_pool(db))
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO shadow_exits (shadow_id, exit_strategy, pnl_pct, exit_reason, pnl_sol, exited_at) \
+             VALUES ($1, 'mirror_main', $2, 'profit_target', $4, NOW() - make_interval(hours => $3))",
+        )
+        .bind(&sid)
+        .bind(Decimal::from_str(pct).unwrap())
+        .bind(i as i32 + hours_ago)
+        .bind(Decimal::from_str(pct).unwrap())
+        .execute(&pg_pool(db))
+        .await
+        .unwrap();
+    }
+}
+
+/// Fix B: a 30d-proven book whose trailing-48h net is NEGATIVE loses the
+/// demotion exemption — the whale's CURRENT flow is bleeding (12kNFpfihj:
+/// +73.8 outlier day then −4.39/24h at −36.6%).
+#[tokio::test]
+async fn test_exemption_lapses_when_recent_48h_net_negative() {
+    let (db, _guard) = common::create_test_db().await;
+    let wallet = "m1decay-neg-wallet-1111111111111111111";
+    seed_stale_active_wallet(&db, wallet).await;
+    // 20 old positive exits (+20% each, exited 3-23d ago) → 30d-proven ✓
+    seed_exits_with_age(&db, wallet, "old", 72, 20, "20.0").await;
+    // 6 recent NEGATIVE exits (−30% each, within 48h) → 48h net −1.8 SOL
+    seed_exits_with_age(&db, wallet, "new", 6, 6, "-30.0").await;
+
+    let monitor = monitor_with_rotation(db.clone());
+    let verdict = monitor.should_demote(wallet).await;
+    assert!(
+        verdict.is_some(),
+        "48h-negative book must lapse the shadow-proof exemption, got {:?}",
+        verdict
+    );
+}
+
+/// Control: a 30d-proven book with POSITIVE 48h net keeps the exemption.
+#[tokio::test]
+async fn test_exemption_holds_when_recent_48h_net_positive() {
+    let (db, _guard) = common::create_test_db().await;
+    let wallet = "m1decay-pos-wallet-1111111111111111111";
+    seed_stale_active_wallet(&db, wallet).await;
+    seed_exits_with_age(&db, wallet, "old", 72, 20, "20.0").await;
+    // Recent exits POSITIVE (+5% each, within 48h) → 48h net positive.
+    seed_exits_with_age(&db, wallet, "new", 6, 6, "5.0").await;
+
+    let monitor = monitor_with_rotation(db.clone());
+    let verdict = monitor.should_demote(wallet).await;
+    assert!(verdict.is_none(), "positive 48h net must keep the exemption");
+}

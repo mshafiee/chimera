@@ -540,6 +540,7 @@ impl LaserStreamClient {
             wallet_address: wallet_address.to_string(),
             trade_uuid: None,
             exit_fraction: None,
+            trial_admission: false,
         };
 
         Ok(Signal {

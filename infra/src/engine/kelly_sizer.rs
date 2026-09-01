@@ -406,6 +406,7 @@ pub(crate) mod tests {
         pub deleted_snapshot_days: RwLock<Vec<i32>>,
         pub wallet_pnl_stats: RwLock<HashMap<String, Option<(i64, Decimal, Decimal)>>>,
         pub shadow_kelly_stats: RwLock<HashMap<String, Option<ShadowKellyStats>>>,
+        pub shadow_recent_net: RwLock<HashMap<String, Option<Decimal>>>,
         /// When true, `insert_trade` returns an error (used to exercise the
         /// write-queue retry/failure path in shared infra tests).
         pub fail_insert_trade: RwLock<bool>,
@@ -1261,6 +1262,19 @@ pub(crate) mod tests {
         ) -> AppResult<Option<ShadowKellyStats>> {
             Ok(self
                 .shadow_kelly_stats
+                .read()
+                .get(wallet_address)
+                .cloned()
+                .unwrap_or(None))
+        }
+
+        async fn get_wallet_shadow_recent_net(
+            &self,
+            wallet_address: &str,
+            _window_hours: i32,
+        ) -> AppResult<Option<Decimal>> {
+            Ok(*self
+                .shadow_recent_net
                 .read()
                 .get(wallet_address)
                 .cloned()

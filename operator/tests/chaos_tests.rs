@@ -103,6 +103,7 @@ fn shield_signal(trade_uuid: &str, token: &str) -> Signal {
         wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
         trade_uuid: Some(trade_uuid.to_string()),
         exit_fraction: None,
+        trial_admission: false,
     };
     Signal::new(payload, 1_700_000_000, None)
 }
@@ -226,6 +227,7 @@ async fn test_queue_load_shedding() {
         wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
         trade_uuid: Some("uuid-spear-shed".to_string()),
         exit_fraction: None,
+        trial_admission: false,
     };
     let spear_signal = Signal::new(spear_payload, 1_700_001_000_i64, None);
 

@@ -515,6 +515,7 @@ async fn test_deterministic_uuid_generation() {
         wallet_address: WALLET.to_string(),
         trade_uuid: None,
         exit_fraction: None,
+        trial_admission: false,
     };
 
     let uuid1 = payload.generate_trade_uuid(1_733_500_000);

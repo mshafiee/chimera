@@ -6,7 +6,8 @@
 //! Error injection: each `*_error` flag makes the corresponding method
 //! return `Err` so error paths can be exercised deterministically.
 
-use crate::db_abstraction::*;
+use rust_decimal::Decimal;
+    use crate::db_abstraction::*;
 use crate::error::{AppError, AppResult};
 use rust_decimal::prelude::ToPrimitive;
 use std::collections::HashMap;
@@ -1010,6 +1011,14 @@ impl Database for MockDb {
         _wallet_address: &str,
         _window_days: i32,
     ) -> AppResult<Option<ShadowKellyStats>> {
+        Ok(None)
+    }
+
+    async fn get_wallet_shadow_recent_net(
+        &self,
+        _wallet_address: &str,
+        _window_hours: i32,
+    ) -> AppResult<Option<Decimal>> {
         Ok(None)
     }
 

@@ -304,6 +304,7 @@ pub async fn start_polling_task(
 
                         let timestamp = chrono::Utc::now().timestamp();
                         let payload = SignalPayload {
+                            trial_admission: false,
                             strategy: Strategy::Exit,
                             token: exit_signal.token_address.clone(),
                             token_address: Some(exit_signal.token_address.clone()),
@@ -662,6 +663,7 @@ async fn process_transaction(
         wallet_address: tx.wallet_address.clone(),
         trade_uuid: None, // Will be auto-generated
         exit_fraction: None,
+        trial_admission: false,
     };
 
     // Gate 3: duplicate UUID check — prevents re-processing on restart/pagination gaps
@@ -1175,6 +1177,7 @@ mod tests {
             wallet_address: WALLET_A.to_string(),
             trade_uuid: None,
             exit_fraction: None,
+            trial_admission: false,
         };
         let uuid = payload.generate_trade_uuid(1700000000);
         db.add_trade_uuid(&uuid);
