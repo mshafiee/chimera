@@ -4100,6 +4100,7 @@ fn build_exit_signal(pos: &ActivePositionEntry, fraction: rust_decimal::Decimal)
         wallet_address: pos.wallet_address.clone(),
         trade_uuid: Some(pos.trade_uuid.clone()),
         exit_fraction: Some(fraction),
+        trial_admission: false,
     };
     tracing::debug!(
         trade_uuid = %pos.trade_uuid,
@@ -4148,6 +4149,7 @@ fn build_exit_signal_amount(
         wallet_address: pos.wallet_address.clone(),
         trade_uuid: Some(pos.trade_uuid.clone()),
         exit_fraction: Some(fraction),
+        trial_admission: false,
     };
     tracing::debug!(
         trade_uuid = %pos.trade_uuid,
