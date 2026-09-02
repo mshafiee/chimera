@@ -207,13 +207,15 @@ services:
        # Position cap for low-WQS wallets (WQS < 40 → max 0.25 SOL = min_size_sol)
        - CHIMERA_SELECTION__SPEAR_LITE_MAX_SIZE_SOL=0.25
        - CHIMERA_SELECTION__SPEAR_LITE_WQS_THRESHOLD=40.0
-        # Profitability gate (2026-08-06): BUY requires consensus (≥2 wallets)
-        # OR a wallet with >=3 closed copy-trades and positive 30d copy PnL
-        # (lowered from 10 on 2026-08-22 and 5 on 2026-09-02: star wallet 2qG8 at 2 trades stuck).
-        # Single-wallet signals from unproven wallets were the negative-EV class.
-        - CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN=true
-        - CHIMERA_SELECTION__MIN_PROVEN_TRADES=3
-        - CHIMERA_SELECTION__REQUIRE_PROVEN_POSITIVE_PNL=true
+       # Profitability gate (2026-08-06): BUY requires consensus (≥2 wallets)
+       # OR a wallet with >=3 closed copy-trades and positive 30d copy PnL
+       # (lowered from 10 on 2026-08-22 and 5 on 2026-09-02: proven-positive wallets like ArcebC
+       # at 8 closed trades were stuck in the consensus wait — the 33-310s
+       # entry lag behind the measured execution gap).
+       # Single-wallet signals from unproven wallets were the negative-EV class.
+       - CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN=true
+       - CHIMERA_SELECTION__MIN_PROVEN_TRADES=3
+       - CHIMERA_SELECTION__REQUIRE_PROVEN_POSITIVE_PNL=true
        # Entry confirmation (2026-08-06): single-wallet unproven BUYs are
        # deferred and admitted only if the whale's entry price holds within
        # the drawdown tolerance for the wait window — stops buying the top of
@@ -236,19 +238,19 @@ services:
        # min_samples=3 with a 72h window (34 tokens qualify, 4.25x) while
        # MIN_AVG_PCT stays at 1.5 (>= post-cost breakeven; qualifying averages
        # cluster well above it, so no safe token is lost).
-        - CHIMERA_SELECTION__MIRROR_GATE_ENABLED=false
-        - CHIMERA_SELECTION__MIRROR_GATE_MIN_AVG_PCT=1.5
-        - CHIMERA_SELECTION__MIRROR_GATE_MIN_SAMPLES=3
-        - CHIMERA_SELECTION__MIRROR_GATE_WINDOW_HOURS=72
-        # Wallet profitability gate (2026-08-07): only wallets with
-        # statistically significant shadow PnL (t-stat > 1.645, >=5 samples,
-        # 30d) are proven signal sources. Research: wallet selection is the
-        # dominant copier-profitability factor (arxiv 2601.08641).
-        # Relaxed 2026-09-02: 10→5 samples to prove faster (mirrors cost fix, Helius rate-limit recovery).
-        - CHIMERA_SELECTION__WALLET_TSTAT_ENABLED=true
-        - CHIMERA_SELECTION__WALLET_TSTAT_THRESHOLD=1.645
-        - CHIMERA_SELECTION__WALLET_TSTAT_MIN_SAMPLES=5
-        - CHIMERA_SELECTION__WALLET_TSTAT_WINDOW_DAYS=30
+       - CHIMERA_SELECTION__MIRROR_GATE_ENABLED=false
+       - CHIMERA_SELECTION__MIRROR_GATE_MIN_AVG_PCT=1.5
+       - CHIMERA_SELECTION__MIRROR_GATE_MIN_SAMPLES=3
+       - CHIMERA_SELECTION__MIRROR_GATE_WINDOW_HOURS=72
+       # Wallet profitability gate (2026-08-07): only wallets with
+       # statistically significant shadow PnL (t-stat > 1.645, >=5 samples,
+       # 30d) are proven signal sources. Research: wallet selection is the
+       # dominant copier-profitability factor (arxiv 2601.08641).
+       # Relaxed 2026-09-02: 10→5 samples to prove faster (mirrors cost fix, Helius rate-limit recovery).
+       - CHIMERA_SELECTION__WALLET_TSTAT_ENABLED=true
+       - CHIMERA_SELECTION__WALLET_TSTAT_THRESHOLD=1.645
+       - CHIMERA_SELECTION__WALLET_TSTAT_MIN_SAMPLES=5
+       - CHIMERA_SELECTION__WALLET_TSTAT_WINDOW_DAYS=30
        # Token liquidity-velocity gate (2026-08-07): pump.fun curve tokens
        # only — require fast accumulation (>=0.10 SOL/trade) and reject the
        # late-curve dump zone (completion > 0.85). "Liquidity velocity is the
@@ -292,21 +294,21 @@ services:
         # fail-closes any non-GO verdict; Paper mode always proceeds so shadow
         # evidence keeps accumulating. See docs/profitability-gates.md.
        - CHIMERA_PROFITABILITY_GATE__ENABLED=true
-        # Execution cost gate (2026-09-02): 0.25 SOL micro-size blocked by 0.3% friction (cost 0.42% → DEAD_LETTER, 3/3 last 6h).
-        # Raised Shield 0.3%→1.2% and disabled Kelly friction so tail micro-trades can fill; Spear 2.5% covers 1.5 SOL tail.
-        - CHIMERA_STRATEGY__SHIELD_MAX_TOTAL_COST_PERCENT=0.012
-        - CHIMERA_STRATEGY__SPEAR_MAX_TOTAL_COST_PERCENT=0.025
-        - CHIMERA_STRATEGY__FRICTION_GATING_ENABLED=false
-        # Liquidity floor (2026-09-02): $25k Shield / $30k Spear filtered 39 BUYs/2h ($56-$9720 dust) but also blocked fresh pump.fun that shadow shows still ev-positive.
-        # Lowered to $10k (Helius 429 recovery, see webhook health 36/87 unhealthy).
-        - CHIMERA_TOKEN_SAFETY__MIN_LIQUIDITY_SHIELD_USD=10000
-        - CHIMERA_TOKEN_SAFETY__MIN_LIQUIDITY_SPEAR_USD=10000
-        # Dune Analytics API key for wallet PnL monitoring
-        - DUNE_API_KEY=${DUNE_API_KEY:-}
-        # Shadow paper trader: close positions after 24h (was 168h default) so
-        # the open-position set stays bounded — 10k+ open positions caused a
-        # ~4.7k qps monitor loop that inflated postgres session memory
-        - CHIMERA_SHADOW_MAX_LIFETIME_HOURS=${CHIMERA_SHADOW_MAX_LIFETIME_HOURS:-24}
+       # Execution cost gate (2026-09-02): 0.25 SOL micro-size blocked by 0.3% friction (cost 0.42% -> DEAD_LETTER, 3/3 last 6h).
+       # Raised Shield 0.3%->1.2% and disabled Kelly friction so tail micro-trades can fill; Spear 2.5% covers 1.5 SOL tail.
+       - CHIMERA_STRATEGY__SHIELD_MAX_TOTAL_COST_PERCENT=0.012
+       - CHIMERA_STRATEGY__SPEAR_MAX_TOTAL_COST_PERCENT=0.025
+       - CHIMERA_STRATEGY__FRICTION_GATING_ENABLED=false
+       # Liquidity floor (2026-09-02): k Shield / k Spear filtered 39 BUYs/2h.
+       # Lowered to k (Helius 429 recovery).
+       - CHIMERA_TOKEN_SAFETY__MIN_LIQUIDITY_SHIELD_USD=10000
+       - CHIMERA_TOKEN_SAFETY__MIN_LIQUIDITY_SPEAR_USD=10000
+       # Dune Analytics API key for wallet PnL monitoring
+       - DUNE_API_KEY=${DUNE_API_KEY:-}
+       # Shadow paper trader: close positions after 24h (was 168h default) so
+       # the open-position set stays bounded — 10k+ open positions caused a
+       # ~4.7k qps monitor loop that inflated postgres session memory
+       - CHIMERA_SHADOW_MAX_LIFETIME_HOURS=${CHIMERA_SHADOW_MAX_LIFETIME_HOURS:-24}
     env_file:
       - .env
     depends_on:
