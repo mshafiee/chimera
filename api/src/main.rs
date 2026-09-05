@@ -16,7 +16,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing_subscriber::{filter::LevelFilter, layer::Layer as _, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{
+    filter::LevelFilter, layer::Layer as _, layer::SubscriberExt, util::SubscriberInitExt,
+};
 
 use tokio_util::sync::CancellationToken;
 
@@ -1326,6 +1328,32 @@ async fn main() -> anyhow::Result<()> {
                 if ap_cfg.0 {
                     auto_promote_wallets(&exec_cleanup_db, ap_cfg.3, ap_cfg.1, ap_cfg.2, ap_cfg.4)
                         .await;
+                }
+            }
+        }));
+    }
+
+    // Periodic zero-yield/inactivity demotion sweep over the ACTIVE roster
+    // (2026-09-05): should_demote only ran on trade-close events, so
+    // never-traded ACTIVE wallets were never evaluated — 27/29 stayed ACTIVE
+    // with last_trade_at NULL. Hourly cadence; the promotion-grace guard
+    // inside should_demote protects fresh promotions.
+    {
+        let demotion_tracker = wallet_performance_tracker.clone();
+        task_handles.push(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            interval.tick().await; // first tick fires immediately — skip it (startup)
+            loop {
+                interval.tick().await;
+                match demotion_tracker.run_active_wallet_demotion_sweep().await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::warn!(
+                        demoted = n,
+                        "Periodic sweep: demoted zero-yield/inactive ACTIVE wallets"
+                    ),
+                    Err(e) => {
+                        tracing::error!(error = %e, "Periodic ACTIVE-roster demotion sweep failed")
+                    }
                 }
             }
         }));
@@ -4204,7 +4232,8 @@ fn init_tracing() {
             // Stdout capped at INFO — docker captures unbounded growth.
             let stdout_layer = tracing_subscriber::fmt::layer()
                 .json()
-                .with_filter(tracing_subscriber::filter::LevelFilter::INFO);            tracing_subscriber::registry()
+                .with_filter(tracing_subscriber::filter::LevelFilter::INFO);
+            tracing_subscriber::registry()
                 .with(filter)
                 .with(tracing_subscriber::fmt::layer().json().with_writer(writer))
                 .with(stdout_layer)

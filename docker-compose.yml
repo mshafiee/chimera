@@ -288,7 +288,15 @@ services:
        - CHIMERA_SELECTION__ENTRY_DRIFT_GUARD_ENABLED=true
        - CHIMERA_SELECTION__MAX_ENTRY_DRIFT_PCT=3.0
         # Paper trading mode (simulated execution, no real SOL)
-       - CHIMERA_TRADE_MODE=paper
+        - CHIMERA_TRADE_MODE=paper
+        # Circuit breaker (2026-09-05): 5-loss streak tripped 5x/24h at the
+        # current 18.8%-win paper book — near-certain at n=16/day — dropping
+        # live signals (27 blocked in one window) and fragmenting evidence
+        # windows. 5->10: a real 10-loss streak at this win rate is still a
+        # >6-sigma day. Paired with the livelock fix (trip now baselines the
+        # streak, cooldown can actually expire to Active). Revisit at >=31%
+        # win (break-even) before any live mode.
+        - CHIMERA_CIRCUIT_BREAKERS__MAX_CONSECUTIVE_LOSSES=10
         # Profitability verdict enforcement (Phase C): populate the verdict
         # cache so live entry BUYs can reach GO. In Live mode the SignalProcessor
         # fail-closes any non-GO verdict; Paper mode always proceeds so shadow

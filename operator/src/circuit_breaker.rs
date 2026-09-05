@@ -669,12 +669,24 @@ impl CircuitBreaker {
 
         let reason_str = reason.to_string();
         let now = Utc::now();
+        // Baseline the consecutive-loss counter when the trip was caused by a
+        // losing streak (same semantics as reset()/restore_from_db). Without
+        // this, the historical losing streak that caused the trip still counts
+        // when cooldown expires, so exit_cooldown() re-trips on the SAME
+        // losses every cooldown cycle — a livelock where the breaker never
+        // returns to Active without a manual reset. Losses closed after the
+        // trip (e.g. exits that ran during cooldown) still count toward a
+        // fresh streak, so sustained losing still re-trips.
+        let rebaseline_loss_streak = matches!(reason, TripReason::ConsecutiveLosses { .. });
 
         {
             let mut state = self.state.write();
             state.state = CircuitBreakerState::Tripped;
             state.tripped_at = Some(now);
             state.trip_reason = Some(reason);
+            if rebaseline_loss_streak {
+                state.last_reset_at = Some(now);
+            }
         }
 
         let trip_reason = self.state.read().trip_reason.clone();
@@ -1774,6 +1786,50 @@ mod tests {
         cb.state.write().tripped_at = Some(Utc::now() - Duration::hours(1));
         cb.evaluate().await.unwrap();
         assert_eq!(cb.current_state(), CircuitBreakerState::Tripped);
+    }
+
+    #[tokio::test]
+    async fn test_consecutive_loss_trip_does_not_livelock_across_cooldowns() {
+        // Regression: a ConsecutiveLosses trip must baseline the streak at
+        // trip time. Without the baseline, exit_cooldown() re-trips on the
+        // SAME historical losses every cooldown cycle and the breaker never
+        // returns to Active without a manual reset (observed on prod:
+        // 5 trips in 24h, perpetual COOLDOWN).
+        let db = Arc::new(MockDb::new());
+        let cb = make_cb(db.clone()); // threshold = 3
+        let streak_time = Utc::now();
+        *db.consecutive_losses.lock().unwrap() = Some(5);
+        *db.consecutive_losses_as_of.lock().unwrap() = Some(streak_time);
+
+        evaluate_now(&cb).await;
+        assert!(matches!(
+            cb.trip_reason(),
+            Some(TripReason::ConsecutiveLosses { .. })
+        ));
+        // Trip baselined the streak.
+        let tripped_at = cb.state.read().tripped_at.unwrap();
+        assert_eq!(cb.state.read().last_reset_at, Some(tripped_at));
+
+        cb.enter_cooldown().await.unwrap();
+        cb.state.write().tripped_at = Some(Utc::now() - Duration::hours(1));
+        cb.evaluate().await.unwrap();
+        // The pre-trip streak must NOT re-trip on cooldown exit — the
+        // historical losses predate the trip baseline.
+        assert_eq!(
+            cb.current_state(),
+            CircuitBreakerState::Active,
+            "pre-trip losing streak must not re-trip after cooldown"
+        );
+
+        // A NEW streak closed after the trip still re-trips: sustained losing
+        // remains protected.
+        *db.consecutive_losses.lock().unwrap() = Some(5);
+        *db.consecutive_losses_as_of.lock().unwrap() = Some(tripped_at + Duration::seconds(1));
+        evaluate_now(&cb).await;
+        assert!(matches!(
+            cb.trip_reason(),
+            Some(TripReason::ConsecutiveLosses { .. })
+        ));
     }
 
     #[tokio::test]

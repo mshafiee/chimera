@@ -6,8 +6,9 @@
 //! - Average return per trade
 //! - Exit timing accuracy
 
-use chimera_core::config::AppConfig;
 use crate::db_abstraction::Database;
+use chimera_core::config::AppConfig;
+use chimera_core::error::AppResult;
 use rust_decimal::prelude::*;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -202,19 +203,20 @@ impl WalletPerformanceTracker {
         // snapshot out, then release the guard before the WQS update below.
         let metrics_snapshot: WalletCopyMetrics = {
             let mut cache = self.metrics_cache.write().await;
-            let metrics = cache
-                .entry(wallet_address.to_string())
-                .or_insert_with(|| WalletCopyMetrics {
-                    wallet_address: wallet_address.to_string(),
-                    copy_pnl_7d: Decimal::ZERO,
-                    signal_success_rate: 0.0,
-                    avg_return_per_trade: Decimal::ZERO,
-                    total_trades: 0,
-                    winning_trades: 0,
-                    recent_trade_count: 0,
-                    last_updated: std::time::SystemTime::now(),
-                    breach_started_at: None,
-                });
+            let metrics =
+                cache
+                    .entry(wallet_address.to_string())
+                    .or_insert_with(|| WalletCopyMetrics {
+                        wallet_address: wallet_address.to_string(),
+                        copy_pnl_7d: Decimal::ZERO,
+                        signal_success_rate: 0.0,
+                        avg_return_per_trade: Decimal::ZERO,
+                        total_trades: 0,
+                        winning_trades: 0,
+                        recent_trade_count: 0,
+                        last_updated: std::time::SystemTime::now(),
+                        breach_started_at: None,
+                    });
 
             metrics.copy_pnl_7d = copy_pnl_7d;
             metrics.recent_trade_count = trades_7d_count as u32;
@@ -324,7 +326,8 @@ impl WalletPerformanceTracker {
             // copy-PnL branch first (when auto_demote_enabled) and skipped the
             // inactivity oscillation / REJECTED escalation path.
             let demotion_reason = self.should_demote(wallet_address).await;
-            if matches!(demotion_reason, Some(DemotionReason::CopyPnl)) && self.auto_demote_enabled {
+            if matches!(demotion_reason, Some(DemotionReason::CopyPnl)) && self.auto_demote_enabled
+            {
                 tracing::warn!(
                     wallet_address = %wallet_address,
                     "Auto-demoting wallet due to poor copy performance"
@@ -374,89 +377,8 @@ impl WalletPerformanceTracker {
                             demotion_reason,
                             Some(DemotionReason::Inactivity | DemotionReason::ZeroYield)
                         ) {
-                            // ZeroYield always parks in PROVING with its own
-                            // reason (no oscillation counting — the wallet is
-                            // active on-chain, its flow just doesn't convert).
-                            let (target_status, reason) =
-                                if matches!(demotion_reason, Some(DemotionReason::ZeroYield)) {
-                                    (
-                                        "PROVING",
-                                        "Zero-yield rotation: no executed copy trades in 7d past promotion grace — parked in proving (coverage retained)".to_string(),
-                                    )
-                                } else {
-                                    // Determine target status and reason
-                                    let demotion_count = self.db.get_inactivity_demotion_count(wallet_address).await.unwrap_or(0);
-                                    let max_cycles = monitoring_config.inactivity_rotation
-                                        .as_ref()
-                                        .map(|cfg| cfg.max_oscillation_cycles)
-                                        .unwrap_or(3);
-
-                                    if demotion_count >= max_cycles as i32 {
-                                        (
-                                            "REJECTED",
-                                            format!("Inactivity demotion: wallet inactive for tiered threshold, oscillation limit ({}) reached", max_cycles)
-                                        )
-                                    } else {
-                                        // M1 (2026-08-30): demote to PROVING, not
-                                        // CANDIDATE — the wallet keeps webhook
-                                        // coverage and shadow forking, so a flow-
-                                        // quality change is re-measured and the
-                                        // promoter can re-graduate it. Coverage loss
-                                        // on parked wallets is the 132Tkgf5YE
-                                        // blackout failure mode.
-                                        (
-                                            "PROVING",
-                                            format!("Inactivity demotion: wallet inactive for tiered threshold (demotion #{}/{}) — parked in proving (coverage retained)", demotion_count + 1, max_cycles)
-                                        )
-                                    }
-                                };
-
-                            tracing::warn!(
-                                wallet_address = %wallet_address,
-                                target = %target_status,
-                                reason = %reason,
-                                "Auto-demoting wallet due to inactivity"
-                            );
-
-                            // Increment demotion count (inactivity-specific;
-                            // ZeroYield carries no oscillation counting)
-                            if matches!(demotion_reason, Some(DemotionReason::Inactivity)) {
-                                let _ = self.db.increment_inactivity_demotion_count(wallet_address).await;
-                            }
-
-                            // Update wallet status
-                            match self
-                                .db
-                                .update_wallet_status_ext(
-                                    wallet_address,
-                                    target_status,
-                                    None,
-                                    Some(&reason),
-                                )
-                                .await
-                            {
-                                Ok(true) => {
-                                    tracing::info!(
-                                        wallet_address = %wallet_address,
-                                        from = "ACTIVE",
-                                        to = %target_status,
-                                        "Wallet auto-demoted due to inactivity"
-                                    );
-                                }
-                                Ok(false) => {
-                                    tracing::warn!(
-                                        wallet_address = %wallet_address,
-                                        "Wallet inactivity demotion attempted but wallet not found or already demoted"
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        wallet_address = %wallet_address,
-                                        error = %e,
-                                        "Failed to auto-demote wallet due to inactivity"
-                                    );
-                                }
-                            }
+                            self.apply_inactivity_demotion(wallet_address, demotion_reason)
+                                .await;
                         } else {
                             tracing::debug!(
                                 wallet_address = %wallet_address,
@@ -475,6 +397,163 @@ impl WalletPerformanceTracker {
     pub async fn get_metrics(&self, wallet_address: &str) -> Option<WalletCopyMetrics> {
         let cache = self.metrics_cache.read().await;
         cache.get(wallet_address).cloned()
+    }
+
+    /// Periodic zero-yield/inactivity sweep over the ACTIVE roster.
+    ///
+    /// `should_demote` only runs on trade-close events (record_trade_result →
+    /// update_wqs_from_copy_performance), so a wallet that never records a
+    /// copy trade is never evaluated — exactly how never-traded ACTIVE
+    /// wallets got stuck on prod (27/29 ACTIVE with last_trade_at NULL,
+    /// 2026-09-05). This sweep evaluates every ACTIVE wallet on a timer and
+    /// applies the same Inactivity/ZeroYield demotion path as the
+    /// trade-close handler. Returns the number of wallets demoted.
+    pub async fn run_active_wallet_demotion_sweep(&self) -> AppResult<usize> {
+        let inactivity_enabled = self
+            .config
+            .monitoring
+            .as_ref()
+            .map(|m| m.inactivity_rotation_enabled)
+            .unwrap_or(false);
+        if !inactivity_enabled {
+            return Ok(0);
+        }
+        let wallets = self.db.get_wallets_by_status("ACTIVE").await?;
+        let mut demoted = 0usize;
+        for wallet in &wallets {
+            // Same promotion-grace guard as the zero-yield branch of
+            // should_demote — freshly promoted wallets get their 7 days.
+            if let Some(promoted_at) = wallet.promoted_at {
+                if chrono::Utc::now()
+                    .signed_duration_since(promoted_at)
+                    .num_days()
+                    < 7
+                {
+                    continue;
+                }
+            }
+            let reason = self.should_demote(&wallet.address).await;
+            if matches!(
+                reason,
+                Some(DemotionReason::Inactivity | DemotionReason::ZeroYield)
+            ) && self
+                .apply_inactivity_demotion(&wallet.address, reason)
+                .await
+            {
+                demoted += 1;
+            }
+        }
+        if demoted > 0 {
+            tracing::info!(
+                evaluated = wallets.len(),
+                demoted,
+                "Active-roster demotion sweep complete"
+            );
+        }
+        Ok(demoted)
+    }
+
+    /// Apply the Inactivity/ZeroYield demotion policy: ZeroYield always parks
+    /// in PROVING (coverage retained, no oscillation counting); Inactivity
+    /// follows the oscillation-count escalation to REJECTED. Returns true
+    /// when the wallet status actually changed.
+    async fn apply_inactivity_demotion(
+        &self,
+        wallet_address: &str,
+        demotion_reason: Option<DemotionReason>,
+    ) -> bool {
+        let monitoring_config = match self.config.monitoring.as_ref() {
+            Some(m) => m,
+            None => return false,
+        };
+
+        // ZeroYield always parks in PROVING with its own reason (no
+        // oscillation counting — the wallet is active on-chain, its flow just
+        // doesn't convert).
+        let (target_status, reason) = if matches!(demotion_reason, Some(DemotionReason::ZeroYield))
+        {
+            (
+                    "PROVING",
+                    "Zero-yield rotation: no executed copy trades in 7d past promotion grace — parked in proving (coverage retained)".to_string(),
+                )
+        } else {
+            // Determine target status and reason
+            let demotion_count = self
+                .db
+                .get_inactivity_demotion_count(wallet_address)
+                .await
+                .unwrap_or(0);
+            let max_cycles = monitoring_config
+                .inactivity_rotation
+                .as_ref()
+                .map(|cfg| cfg.max_oscillation_cycles)
+                .unwrap_or(3);
+
+            if demotion_count >= max_cycles as i32 {
+                (
+                        "REJECTED",
+                        format!("Inactivity demotion: wallet inactive for tiered threshold, oscillation limit ({}) reached", max_cycles),
+                    )
+            } else {
+                // M1 (2026-08-30): demote to PROVING, not CANDIDATE — the
+                // wallet keeps webhook coverage and shadow forking, so a
+                // flow-quality change is re-measured and the promoter can
+                // re-graduate it. Coverage loss on parked wallets is the
+                // 132Tkgf5YE blackout failure mode.
+                (
+                        "PROVING",
+                        format!("Inactivity demotion: wallet inactive for tiered threshold (demotion #{}/{}) — parked in proving (coverage retained)", demotion_count + 1, max_cycles),
+                    )
+            }
+        };
+
+        tracing::warn!(
+            wallet_address = %wallet_address,
+            target = %target_status,
+            reason = %reason,
+            "Auto-demoting wallet due to inactivity"
+        );
+
+        // Increment demotion count (inactivity-specific; ZeroYield carries no
+        // oscillation counting)
+        if matches!(demotion_reason, Some(DemotionReason::Inactivity)) {
+            let _ = self
+                .db
+                .increment_inactivity_demotion_count(wallet_address)
+                .await;
+        }
+
+        // Update wallet status
+        match self
+            .db
+            .update_wallet_status_ext(wallet_address, target_status, None, Some(&reason))
+            .await
+        {
+            Ok(true) => {
+                tracing::info!(
+                    wallet_address = %wallet_address,
+                    from = "ACTIVE",
+                    to = %target_status,
+                    "Wallet auto-demoted due to inactivity"
+                );
+                true
+            }
+            Ok(false) => {
+                tracing::warn!(
+                    wallet_address = %wallet_address,
+                    "Wallet inactivity demotion attempted but wallet not found or already demoted"
+                );
+                false
+            }
+            Err(e) => {
+                tracing::error!(
+                    wallet_address = %wallet_address,
+                    error = %e,
+                    "Failed to auto-demote wallet due to inactivity"
+                );
+                false
+            }
+        }
     }
 
     /// Check if (and why) a wallet should be auto-demoted.
@@ -601,10 +680,7 @@ impl WalletPerformanceTracker {
             .get_wallet_shadow_kelly_stats(wallet_address, 30)
             .await
         {
-            if crate::engine::shadow_proof::shadow_proven_edge(
-                &stats,
-                SHADOW_PROOF_MIN_SAMPLES,
-            ) {
+            if crate::engine::shadow_proof::shadow_proven_edge(&stats, SHADOW_PROOF_MIN_SAMPLES) {
                 // Time-decay condition (2026-09-01, Fix B): the 30d book
                 // proves historical edge, but the EXEMPTION must also require
                 // the trailing-48h net to be non-negative — a 30d-positive
@@ -644,7 +720,9 @@ impl WalletPerformanceTracker {
                             // Determine tiered threshold based on WQS
                             let wqs = wallet.wqs_score.unwrap_or(Decimal::ZERO);
                             let wqs_f64 = wqs.to_f64().unwrap_or(0.0);
-                            let threshold_secs = if wqs_f64 >= rotation_config.high_conviction_wqs_threshold {
+                            let threshold_secs = if wqs_f64
+                                >= rotation_config.high_conviction_wqs_threshold
+                            {
                                 rotation_config.high_conviction_threshold_secs
                             } else if wqs_f64 >= rotation_config.regular_conviction_wqs_threshold {
                                 rotation_config.regular_conviction_threshold_secs
@@ -657,17 +735,21 @@ impl WalletPerformanceTracker {
                             // Using max() avoids demoting wallets whose last_trade_at
                             // is stale (scout hasn't re-analyzed) but are actively
                             // generating signals right now.
-                            let spec_signal = wm.last_speculative_signal_at.as_ref()
+                            let spec_signal = wm
+                                .last_speculative_signal_at
+                                .as_ref()
                                 .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                                 .map(|dt| dt.with_timezone(&chrono::Utc));
 
-                            let last_activity = [spec_signal, wallet.last_trade_at, wallet.promoted_at]
-                                .into_iter()
-                                .flatten()
-                                .max();
+                            let last_activity =
+                                [spec_signal, wallet.last_trade_at, wallet.promoted_at]
+                                    .into_iter()
+                                    .flatten()
+                                    .max();
 
                             if let Some(last_activity_dt) = last_activity {
-                                let elapsed = chrono::Utc::now().signed_duration_since(last_activity_dt);
+                                let elapsed =
+                                    chrono::Utc::now().signed_duration_since(last_activity_dt);
                                 if elapsed.num_seconds() >= threshold_secs as i64 {
                                     return Some(DemotionReason::Inactivity);
                                 }
@@ -687,19 +769,26 @@ impl WalletPerformanceTracker {
             if let Ok(Some(wallet)) = self.db.get_wallet(wallet_address).await {
                 let in_promotion_grace = wallet
                     .promoted_at
-                    .map(|t| {
-                        chrono::Utc::now().signed_duration_since(t).num_days() < 7
-                    })
+                    .map(|t| chrono::Utc::now().signed_duration_since(t).num_days() < 7)
                     .unwrap_or(false);
                 if !in_promotion_grace {
-                    if let Some(metrics) = self.get_metrics(wallet_address).await {
-                        if metrics.recent_trade_count == 0 {
-                            tracing::warn!(
-                                wallet_address = %wallet_address,
-                                "Zero-yield rotation: no executed copy trades in 7d past promotion grace"
-                            );
-                            return Some(DemotionReason::ZeroYield);
-                        }
+                    // A missing metrics entry means the wallet has NEVER
+                    // recorded a copy trade — record_trade_result is the only
+                    // cache writer. That is the same zero-yield class as
+                    // recent_trade_count == 0, and it is the dominant live
+                    // case: 27/29 ACTIVE wallets on 2026-09-05 had never
+                    // traded, but the previous Some(metrics)-only check never
+                    // fired for them and they stayed ACTIVE indefinitely.
+                    let zero_yield = match self.get_metrics(wallet_address).await {
+                        Some(metrics) => metrics.recent_trade_count == 0,
+                        None => true,
+                    };
+                    if zero_yield {
+                        tracing::warn!(
+                            wallet_address = %wallet_address,
+                            "Zero-yield rotation: no executed copy trades in 7d past promotion grace"
+                        );
+                        return Some(DemotionReason::ZeroYield);
                     }
                 }
             }
@@ -717,8 +806,7 @@ impl WalletPerformanceTracker {
                     // one token) within hours. The count guard prevents one
                     // unlucky trade from triggering it.
                     const FAST_DEMOTE_MIN_TRADES: u32 = 5;
-                    let fast_demote_net =
-                        Decimal::from_str("-0.03").unwrap_or(Decimal::ZERO);
+                    let fast_demote_net = Decimal::from_str("-0.03").unwrap_or(Decimal::ZERO);
                     if metrics.recent_trade_count >= FAST_DEMOTE_MIN_TRADES
                         && metrics.copy_pnl_7d < fast_demote_net
                     {

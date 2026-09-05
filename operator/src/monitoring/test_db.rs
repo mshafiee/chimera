@@ -6,10 +6,10 @@
 //! Error injection: each `*_error` flag makes the corresponding method
 //! return `Err` so error paths can be exercised deterministically.
 
-use rust_decimal::Decimal;
-    use crate::db_abstraction::*;
+use crate::db_abstraction::*;
 use crate::error::{AppError, AppResult};
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -41,6 +41,11 @@ pub struct MockDb {
         >,
     >,
     pub consecutive_losses: Arc<Mutex<Option<u32>>>,
+    /// "As of" timestamp of the configured `consecutive_losses` streak, used
+    /// by `get_consecutive_losses_since` to model the real baseline filter:
+    /// a streak recorded BEFORE the caller's `since` baseline predates it and
+    /// must not count.
+    pub consecutive_losses_as_of: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
     pub drawdown: Arc<Mutex<Option<(rust_decimal::Decimal, rust_decimal::Decimal)>>>,
     pub evaluation_error: Arc<AtomicBool>,
     pub consecutive_error: Arc<AtomicBool>,
@@ -1105,12 +1110,23 @@ impl Database for MockDb {
 
     async fn get_consecutive_losses_since(
         &self,
-        _since: Option<chrono::DateTime<chrono::Utc>>,
+        since: Option<chrono::DateTime<chrono::Utc>>,
     ) -> AppResult<u32> {
         if self.consecutive_error.load(Ordering::Relaxed) {
             return Err(AppError::Internal("injected consecutive error".to_string()));
         }
-        Ok(self.consecutive_losses.lock().unwrap().unwrap_or(0))
+        let count = self.consecutive_losses.lock().unwrap().unwrap_or(0);
+        if let Some(baseline) = since {
+            // A streak recorded before the baseline predates it and does not
+            // count — mirrors the real query filtering trades by closed_at.
+            let as_of = *self.consecutive_losses_as_of.lock().unwrap();
+            match as_of {
+                Some(as_of) if as_of <= baseline => return Ok(0),
+                None => return Ok(0),
+                _ => {}
+            }
+        }
+        Ok(count)
     }
 
     async fn get_max_drawdown_percent(

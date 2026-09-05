@@ -11,9 +11,9 @@ use chimera_infra::monitoring::wallet_performance::{DemotionReason, WalletPerfor
 use chimera_operator::config::AppConfig;
 use chimera_operator::db_abstraction::{Database, DbPool};
 use rust_decimal::Decimal;
-use std::str::FromStr;
 use sqlx::Pool;
 use sqlx::Postgres;
+use std::str::FromStr;
 use std::sync::Arc;
 
 #[path = "../common/mod.rs"]
@@ -152,7 +152,10 @@ async fn test_negative_expectancy_book_does_not_exempt() {
 
     let monitor = monitor_with_rotation(db.clone());
     let verdict = monitor.should_demote(wallet).await;
-    assert!(verdict.is_some(), "negative-expectancy book must not exempt");
+    assert!(
+        verdict.is_some(),
+        "negative-expectancy book must not exempt"
+    );
 }
 
 // ── Fix B: time-decayed shadow-proof exemption (2026-09-01) ─────────────────
@@ -226,5 +229,107 @@ async fn test_exemption_holds_when_recent_48h_net_positive() {
 
     let monitor = monitor_with_rotation(db.clone());
     let verdict = monitor.should_demote(wallet).await;
-    assert!(verdict.is_none(), "positive 48h net must keep the exemption");
+    assert!(
+        verdict.is_none(),
+        "positive 48h net must keep the exemption"
+    );
+}
+
+// ── Zero-yield rotation for NEVER-traded wallets (2026-09-05) ───────────────
+//
+// The metrics cache is written only by record_trade_result (trade-close
+// events), so a wallet with ZERO copy trades ever has no cache entry. The
+// old Some(metrics)-only check never fired for it — 27/29 ACTIVE wallets on
+// prod had last_trade_at NULL and stayed ACTIVE indefinitely.
+
+/// Seed an ACTIVE wallet past promotion grace with FRESH on-chain activity
+/// (speculative signal now) but zero copy trades — the zero-yield class.
+async fn seed_active_never_traded_wallet(db: &Arc<dyn Database>, address: &str) {
+    sqlx::query(
+        "INSERT INTO wallets (address, status, wqs_score, wqs_confidence, last_trade_at, promoted_at) \
+         VALUES ($1, 'ACTIVE', 80.0, 0.9, NULL, NOW() - INTERVAL '30 days')",
+    )
+    .bind(address)
+    .execute(&pg_pool(db))
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO wallet_monitoring (wallet_address, last_speculative_signal_at) \
+         VALUES ($1, NOW())",
+    )
+    .bind(address)
+    .execute(&pg_pool(db))
+    .await
+    .unwrap();
+}
+
+/// A never-traded wallet (no metrics entry) with FRESH activity anchors must
+/// be classified ZeroYield — not slip through because the cache is empty.
+#[tokio::test]
+async fn test_zero_yield_never_traded_wallet_demoted() {
+    let (db, _guard) = common::create_test_db().await;
+    let wallet = "m1zeroyield-wallet-1111111111111111111";
+    seed_active_never_traded_wallet(&db, wallet).await;
+
+    let monitor = monitor_with_rotation(db.clone());
+    let verdict = monitor.should_demote(wallet).await;
+    assert!(
+        matches!(verdict, Some(DemotionReason::ZeroYield)),
+        "never-traded ACTIVE wallet must be ZeroYield, got {:?}",
+        verdict
+    );
+}
+
+/// The periodic sweep must park never-traded ACTIVE wallets in PROVING while
+/// leaving freshly promoted wallets untouched.
+#[tokio::test]
+async fn test_demotion_sweep_parks_never_traded_wallets() {
+    let (db, _guard) = common::create_test_db().await;
+    let stale_wallet = "m1sweep-nevertraded-1111111111111111111";
+    let fresh_promoted = "m1sweep-freshpromo-111111111111111111";
+    seed_active_never_traded_wallet(&db, stale_wallet).await;
+
+    // Freshly promoted 1h ago, also never traded — inside the 7d grace.
+    sqlx::query(
+        "INSERT INTO wallets (address, status, wqs_score, wqs_confidence, last_trade_at, promoted_at) \
+         VALUES ($1, 'ACTIVE', 80.0, 0.9, NULL, NOW() - INTERVAL '1 hour')",
+    )
+    .bind(fresh_promoted)
+    .execute(&pg_pool(&db))
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO wallet_monitoring (wallet_address, last_speculative_signal_at) \
+         VALUES ($1, NOW())",
+    )
+    .bind(fresh_promoted)
+    .execute(&pg_pool(&db))
+    .await
+    .unwrap();
+
+    let monitor = monitor_with_rotation(db.clone());
+    let demoted = monitor.run_active_wallet_demotion_sweep().await.unwrap();
+    assert!(
+        demoted >= 1,
+        "at least the never-traded wallet must be demoted"
+    );
+
+    async fn status(db: &Arc<dyn Database>, addr: &str) -> String {
+        sqlx::query_scalar::<_, String>("SELECT status FROM wallets WHERE address = $1")
+            .bind(addr)
+            .fetch_one(&pg_pool(db))
+            .await
+            .unwrap()
+    }
+
+    assert_eq!(
+        status(&db, stale_wallet).await,
+        "PROVING",
+        "never-traded wallet must be parked in PROVING"
+    );
+    assert_eq!(
+        status(&db, fresh_promoted).await,
+        "ACTIVE",
+        "fresh promotion grace must protect the wallet"
+    );
 }
