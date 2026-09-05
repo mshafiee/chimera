@@ -212,11 +212,11 @@ services:
        # (lowered from 10 on 2026-08-22 and 5 on 2026-09-02: proven-positive wallets like ArcebC
        # at 8 closed trades were stuck in the consensus wait — the 33-310s
        # entry lag behind the measured execution gap).
-        # Single-wallet signals from unproven wallets were the negative-EV class.
-        # Server hotfix 2026-09-02 preserved upstream: env-default false (paper
-        # evidence loop needs the admitted+rejected twin book; the proven-
-        # positive PnL gate still applies when re-enabled for live).
-        - CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN=${CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN:-false}
+       # Single-wallet signals from unproven wallets were the negative-EV class.
+       # Server hotfix 2026-09-02 preserved upstream: env-default false (paper
+       # evidence loop needs the admitted+rejected twin book; the proven-
+       # positive PnL gate still applies when re-enabled for live).
+       - CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN=${CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN:-false}
        - CHIMERA_SELECTION__MIN_PROVEN_TRADES=3
        - CHIMERA_SELECTION__REQUIRE_PROVEN_POSITIVE_PNL=true
        # Entry confirmation (2026-08-06): single-wallet unproven BUYs are
@@ -290,20 +290,20 @@ services:
        # guard it shares the unit-verified conversion with).
        - CHIMERA_SELECTION__ENTRY_DRIFT_GUARD_ENABLED=true
        - CHIMERA_SELECTION__MAX_ENTRY_DRIFT_PCT=3.0
-        # Paper trading mode (simulated execution, no real SOL)
-        - CHIMERA_TRADE_MODE=paper
-        # Circuit breaker (2026-09-05): 5-loss streak tripped 5x/24h at the
-        # current 18.8%-win paper book — near-certain at n=16/day — dropping
-        # live signals (27 blocked in one window) and fragmenting evidence
-        # windows. 5->10: a real 10-loss streak at this win rate is still a
-        # >6-sigma day. Paired with the livelock fix (trip now baselines the
-        # streak, cooldown can actually expire to Active). Revisit at >=31%
-        # win (break-even) before any live mode.
-        - CHIMERA_CIRCUIT_BREAKERS__MAX_CONSECUTIVE_LOSSES=10
-        # Profitability verdict enforcement (Phase C): populate the verdict
-        # cache so live entry BUYs can reach GO. In Live mode the SignalProcessor
-        # fail-closes any non-GO verdict; Paper mode always proceeds so shadow
-        # evidence keeps accumulating. See docs/profitability-gates.md.
+       # Paper trading mode (simulated execution, no real SOL)
+       - CHIMERA_TRADE_MODE=paper
+       # Circuit breaker (2026-09-05): 5-loss streak tripped 5x/24h at the
+       # current 18.8%-win paper book — near-certain at n=16/day — dropping
+       # live signals (27 blocked in one window) and fragmenting evidence
+       # windows. 5->10: a real 10-loss streak at this win rate is still a
+       # >6-sigma day. Paired with the livelock fix (trip now baselines the
+       # streak, cooldown can actually expire to Active). Revisit at >=31%
+       # win (break-even) before any live mode.
+       - CHIMERA_CIRCUIT_BREAKERS__MAX_CONSECUTIVE_LOSSES=10
+       # Profitability verdict enforcement (Phase C): populate the verdict
+       # cache so live entry BUYs can reach GO. In Live mode the SignalProcessor
+       # fail-closes any non-GO verdict; Paper mode always proceeds so shadow
+       # evidence keeps accumulating. See docs/profitability-gates.md.
        - CHIMERA_PROFITABILITY_GATE__ENABLED=true
        # Execution cost gate (2026-09-02): 0.25 SOL micro-size blocked by 0.3% friction (cost 0.42% -> DEAD_LETTER, 3/3 last 6h).
        # Raised Shield 0.3%->1.2% and disabled Kelly friction so tail micro-trades can fill; Spear 2.5% covers 1.5 SOL tail.
