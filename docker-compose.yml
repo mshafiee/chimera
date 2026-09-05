@@ -212,8 +212,11 @@ services:
        # (lowered from 10 on 2026-08-22 and 5 on 2026-09-02: proven-positive wallets like ArcebC
        # at 8 closed trades were stuck in the consensus wait — the 33-310s
        # entry lag behind the measured execution gap).
-       # Single-wallet signals from unproven wallets were the negative-EV class.
-       - CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN=true
+        # Single-wallet signals from unproven wallets were the negative-EV class.
+        # Server hotfix 2026-09-02 preserved upstream: env-default false (paper
+        # evidence loop needs the admitted+rejected twin book; the proven-
+        # positive PnL gate still applies when re-enabled for live).
+        - CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN=${CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN:-false}
        - CHIMERA_SELECTION__MIN_PROVEN_TRADES=3
        - CHIMERA_SELECTION__REQUIRE_PROVEN_POSITIVE_PNL=true
        # Entry confirmation (2026-08-06): single-wallet unproven BUYs are
