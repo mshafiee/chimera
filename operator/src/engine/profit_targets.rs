@@ -1848,10 +1848,11 @@ mod vol_scale_tests {
             mgr.register_position("mom2", dec!(1), dec!(1), TOKEN, entry_time())
                 .await;
             // A -10% drop triggers the momentum exit (5% base threshold, no
-            // wick protection).
+            // wick protection). Since 2026-08-25 the momentum cut is its own
+            // action (MomentumExit, not FullExit) so monitors can label it.
             cache.set_price(TOKEN, dec!(0.90), PriceSource::Jupiter, Some(9));
             let action = mgr.check_targets("mom2", WALLET, TOKEN, "SHIELD").await;
-            assert!(matches!(action, ProfitTargetAction::FullExit));
+            assert!(matches!(action, ProfitTargetAction::MomentumExit));
         }
 
         #[tokio::test]

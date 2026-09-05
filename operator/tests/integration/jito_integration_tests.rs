@@ -84,7 +84,9 @@ fn create_test_signal() -> Signal {
         exit_fraction: None,
         trial_admission: false,
     };
-    payload.validate().expect("test signal payload must be valid");
+    payload
+        .validate()
+        .expect("test signal payload must be valid");
     Signal::new(payload, chrono::Utc::now().timestamp(), None)
 }
 
@@ -171,10 +173,18 @@ async fn test_notification_jito_fallback_event() {
 
     notifier.notify(&event, "Live").await.unwrap();
     let delivered = notifier.get_events();
-    assert_eq!(delivered.len(), 1, "notify() must deliver the event to the notifier");
+    assert_eq!(
+        delivered.len(),
+        1,
+        "notify() must deliver the event to the notifier"
+    );
     assert!(matches!(
         delivered[0],
-        NotificationEvent::JitoFallbackTriggered { failure_count: 10, threshold: 10, .. }
+        NotificationEvent::JitoFallbackTriggered {
+            failure_count: 10,
+            threshold: 10,
+            ..
+        }
     ));
 
     // Verify event can be created and formatted
@@ -192,8 +202,15 @@ async fn test_notification_jito_recovery_event() {
 
     notifier.notify(&event, "Live").await.unwrap();
     let delivered = notifier.get_events();
-    assert_eq!(delivered.len(), 1, "notify() must deliver the event to the notifier");
-    assert!(matches!(delivered[0], NotificationEvent::JitoRecovered { latency_ms: 45 }));
+    assert_eq!(
+        delivered.len(),
+        1,
+        "notify() must deliver the event to the notifier"
+    );
+    assert!(matches!(
+        delivered[0],
+        NotificationEvent::JitoRecovered { latency_ms: 45 }
+    ));
 
     let message = event.format_message("Live");
     assert!(message.contains("recovered"));
@@ -213,7 +230,11 @@ async fn test_notification_jito_health_change_event() {
 
     notifier.notify(&event_unhealthy, "Live").await.unwrap();
     let delivered = notifier.get_events();
-    assert_eq!(delivered.len(), 1, "notify() must deliver the event to the notifier");
+    assert_eq!(
+        delivered.len(),
+        1,
+        "notify() must deliver the event to the notifier"
+    );
     assert!(matches!(
         delivered[0],
         NotificationEvent::JitoHealthChanged { healthy: false, success_rate, .. } if success_rate == 0.65
@@ -289,10 +310,31 @@ async fn test_metrics_initialization() {
     let metrics = MetricsState::new().expect("metrics state must initialize");
 
     // Jito counters start at zero
-    assert_eq!(metrics.jito_submissions.with_label_values(&["jito"]).get(), 0);
-    assert_eq!(metrics.jito_submissions.with_label_values(&["helius"]).get(), 0);
-    assert_eq!(metrics.jito_resolutions.with_label_values(&["success"]).get(), 0);
-    assert_eq!(metrics.jito_resolutions.with_label_values(&["failed"]).get(), 0);
+    assert_eq!(
+        metrics.jito_submissions.with_label_values(&["jito"]).get(),
+        0
+    );
+    assert_eq!(
+        metrics
+            .jito_submissions
+            .with_label_values(&["helius"])
+            .get(),
+        0
+    );
+    assert_eq!(
+        metrics
+            .jito_resolutions
+            .with_label_values(&["success"])
+            .get(),
+        0
+    );
+    assert_eq!(
+        metrics
+            .jito_resolutions
+            .with_label_values(&["failed"])
+            .get(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -302,7 +344,10 @@ async fn test_signal_creation_for_jito() {
 
     assert_eq!(signal.payload.strategy, Strategy::Shield);
     assert_eq!(signal.payload.token, "BONK");
-    assert_eq!(signal.payload.token_address.as_deref(), Some("DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"));
+    assert_eq!(
+        signal.payload.token_address.as_deref(),
+        Some("DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263")
+    );
     assert!(signal.payload.amount_sol > Decimal::ZERO);
 }
 
@@ -378,11 +423,11 @@ async fn test_jito_health_various_scenarios() {
     // Test various health scenarios
     let scenarios = vec![
         // (healthy, latency, success_rate, total, successful)
-        (true, Some(20), 1.0, 100, 100),   // Perfect
-        (true, Some(50), 0.95, 100, 95),   // Good
-        (true, Some(100), 0.85, 100, 85),  // Acceptable
-        (false, Some(500), 0.5, 100, 50),  // Poor
-        (false, None, 0.3, 100, 30),       // Bad
+        (true, Some(20), 1.0, 100, 100),  // Perfect
+        (true, Some(50), 0.95, 100, 95),  // Good
+        (true, Some(100), 0.85, 100, 85), // Acceptable
+        (false, Some(500), 0.5, 100, 50), // Poor
+        (false, None, 0.3, 100, 30),      // Bad
     ];
 
     for (healthy, latency, success_rate, total, successful) in scenarios {
@@ -453,7 +498,7 @@ async fn test_jito_error_retryable_conditions() {
         match error {
             JitoError::Retryable(msg) => {
                 assert!(msg.contains("timeout") || msg.contains("tip") || msg.contains("slow"));
-            },
+            }
             _ => panic!("Expected retryable error"),
         }
     }
@@ -473,8 +518,13 @@ async fn test_jito_error_fatal_conditions() {
         let error = JitoError::Fatal(error_msg.to_string());
         match error {
             JitoError::Fatal(msg) => {
-                assert!(msg.contains("balance") || msg.contains("invalid") || msg.contains("not found") || msg.contains("large"));
-            },
+                assert!(
+                    msg.contains("balance")
+                        || msg.contains("invalid")
+                        || msg.contains("not found")
+                        || msg.contains("large")
+                );
+            }
             _ => panic!("Expected fatal error"),
         }
     }
@@ -494,8 +544,13 @@ async fn test_jito_error_network_conditions() {
         let error = JitoError::Network(error_msg.to_string());
         match error {
             JitoError::Network(msg) => {
-                assert!(msg.contains("unavailable") || msg.contains("refused") || msg.contains("DNS") || msg.contains("unreachable"));
-            },
+                assert!(
+                    msg.contains("unavailable")
+                        || msg.contains("refused")
+                        || msg.contains("DNS")
+                        || msg.contains("unreachable")
+                );
+            }
             _ => panic!("Expected network error"),
         }
     }

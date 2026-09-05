@@ -19,6 +19,7 @@ fn make_payload(action: Action, strategy: Strategy, amount_sol: &str) -> SignalP
         wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
         trade_uuid: None,
         exit_fraction: None,
+        trial_admission: false,
     }
 }
 

@@ -214,7 +214,8 @@ impl KellySizer {
                 .map(|d| d.with_timezone(&chrono::Utc))
                 .ok()
                 .or_else(|| {
-                    let naive = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()?;
+                    let naive =
+                        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()?;
                     Some(chrono::DateTime::from_naive_utc_and_offset(
                         naive,
                         chrono::Utc,
@@ -232,14 +233,13 @@ impl KellySizer {
                 oldest_time = Some(oldest_time.map_or(t, |o| o.min(t)));
             }
         }
-        let true_timespan_days = if let (Some(newest_time), Some(oldest_time)) =
-            (newest_time, oldest_time)
-        {
-            let span = (newest_time - oldest_time).num_seconds() as f64 / 86400.0;
-            span.min(lookback_days as f64).max(1.0)
-        } else {
-            lookback_days as f64
-        };
+        let true_timespan_days =
+            if let (Some(newest_time), Some(oldest_time)) = (newest_time, oldest_time) {
+                let span = (newest_time - oldest_time).num_seconds() as f64 / 86400.0;
+                span.min(lookback_days as f64).max(1.0)
+            } else {
+                lookback_days as f64
+            };
 
         let trades_per_day = if true_timespan_days > 0.0 {
             valid_trades_count as f64 / true_timespan_days
@@ -488,7 +488,10 @@ pub(crate) mod tests {
             Ok(self.active_positions.read().clone())
         }
 
-        async fn get_position_by_trade_uuid(&self, _trade_uuid: &str) -> AppResult<Option<Position>> {
+        async fn get_position_by_trade_uuid(
+            &self,
+            _trade_uuid: &str,
+        ) -> AppResult<Option<Position>> {
             unimplemented!()
         }
 
@@ -519,7 +522,11 @@ pub(crate) mod tests {
             unimplemented!()
         }
 
-        async fn force_close_orphan_position(&self, _trade_uuid: &str, _reason: &str) -> AppResult<()> {
+        async fn force_close_orphan_position(
+            &self,
+            _trade_uuid: &str,
+            _reason: &str,
+        ) -> AppResult<()> {
             unimplemented!()
         }
 
@@ -528,7 +535,12 @@ pub(crate) mod tests {
         }
 
         async fn get_active_wallets(&self) -> AppResult<Vec<Wallet>> {
-            Ok(self.wallets_by_status.read().get("ACTIVE").cloned().unwrap_or_default())
+            Ok(self
+                .wallets_by_status
+                .read()
+                .get("ACTIVE")
+                .cloned()
+                .unwrap_or_default())
         }
 
         async fn update_wallet_status(&self, address: &str, status: &str) -> AppResult<()> {
@@ -597,7 +609,11 @@ pub(crate) mod tests {
             unimplemented!()
         }
 
-        async fn set_kill_switch_state(&self, _state: &str, _reason: Option<&str>) -> AppResult<()> {
+        async fn set_kill_switch_state(
+            &self,
+            _state: &str,
+            _reason: Option<&str>,
+        ) -> AppResult<()> {
             unimplemented!()
         }
 
@@ -810,7 +826,11 @@ pub(crate) mod tests {
             unimplemented!()
         }
 
-        async fn update_position_token_amount(&self, _trade_uuid: &str, _token_amount: u64) -> AppResult<()> {
+        async fn update_position_token_amount(
+            &self,
+            _trade_uuid: &str,
+            _token_amount: u64,
+        ) -> AppResult<()> {
             unimplemented!()
         }
 
@@ -826,7 +846,11 @@ pub(crate) mod tests {
             Ok(0)
         }
 
-        async fn update_position_state(&self, _trade_uuid: &str, _new_state: &str) -> AppResult<()> {
+        async fn update_position_state(
+            &self,
+            _trade_uuid: &str,
+            _new_state: &str,
+        ) -> AppResult<()> {
             unimplemented!()
         }
 
@@ -1048,7 +1072,10 @@ pub(crate) mod tests {
             Ok(())
         }
 
-        async fn get_orphaned_webhooks(&self, _helius_webhook_ids: &[String]) -> AppResult<Vec<String>> {
+        async fn get_orphaned_webhooks(
+            &self,
+            _helius_webhook_ids: &[String],
+        ) -> AppResult<Vec<String>> {
             unimplemented!()
         }
 
@@ -1094,7 +1121,10 @@ pub(crate) mod tests {
             unimplemented!()
         }
 
-        async fn get_reconciliation_history(&self, _limit: i32) -> AppResult<Vec<ReconciliationRun>> {
+        async fn get_reconciliation_history(
+            &self,
+            _limit: i32,
+        ) -> AppResult<Vec<ReconciliationRun>> {
             unimplemented!()
         }
 
@@ -1102,11 +1132,19 @@ pub(crate) mod tests {
             unimplemented!()
         }
 
-        async fn get_reconciliation_stats(&self, _time_range: &str) -> AppResult<ReconciliationStats> {
+        async fn get_reconciliation_stats(
+            &self,
+            _time_range: &str,
+        ) -> AppResult<ReconciliationStats> {
             unimplemented!()
         }
 
-        async fn resolve_discrepancy(&self, _id: i64, _resolved_by: &str, _resolution: &str) -> AppResult<()> {
+        async fn resolve_discrepancy(
+            &self,
+            _id: i64,
+            _resolved_by: &str,
+            _resolution: &str,
+        ) -> AppResult<()> {
             unimplemented!()
         }
 
@@ -1147,7 +1185,12 @@ pub(crate) mod tests {
             unimplemented!()
         }
 
-        async fn mark_trade_dead_letter(&self, _trade_uuid: &str, _payload: &str, _error: &str) -> AppResult<()> {
+        async fn mark_trade_dead_letter(
+            &self,
+            _trade_uuid: &str,
+            _payload: &str,
+            _error: &str,
+        ) -> AppResult<()> {
             unimplemented!()
         }
 
@@ -1162,11 +1205,18 @@ pub(crate) mod tests {
             unimplemented!()
         }
 
-        async fn get_dead_letter_entries(&self, _limit: i32, _offset: i32) -> AppResult<Vec<DeadLetterItem>> {
+        async fn get_dead_letter_entries(
+            &self,
+            _limit: i32,
+            _offset: i32,
+        ) -> AppResult<Vec<DeadLetterItem>> {
             unimplemented!()
         }
 
-        async fn get_dead_letter_entry(&self, _trade_uuid: &str) -> AppResult<Option<DeadLetterItem>> {
+        async fn get_dead_letter_entry(
+            &self,
+            _trade_uuid: &str,
+        ) -> AppResult<Option<DeadLetterItem>> {
             unimplemented!()
         }
 
@@ -1188,11 +1238,18 @@ pub(crate) mod tests {
             unimplemented!()
         }
 
-        async fn update_dlq_items_batch(&self, _items: Vec<UpdateDlqItemParams>) -> AppResult<usize> {
+        async fn update_dlq_items_batch(
+            &self,
+            _items: Vec<UpdateDlqItemParams>,
+        ) -> AppResult<usize> {
             unimplemented!()
         }
 
-        async fn get_config_audit_entries(&self, _limit: i32, _offset: i32) -> AppResult<Vec<ConfigAuditItem>> {
+        async fn get_config_audit_entries(
+            &self,
+            _limit: i32,
+            _offset: i32,
+        ) -> AppResult<Vec<ConfigAuditItem>> {
             unimplemented!()
         }
 
@@ -1226,10 +1283,7 @@ pub(crate) mod tests {
             unimplemented!()
         }
 
-        async fn get_wallet_copy_stats(
-            &self,
-            _wallet_address: &str,
-        ) -> AppResult<(i64, Decimal)> {
+        async fn get_wallet_copy_stats(&self, _wallet_address: &str) -> AppResult<(i64, Decimal)> {
             unimplemented!()
         }
 
@@ -1273,7 +1327,7 @@ pub(crate) mod tests {
             wallet_address: &str,
             _window_hours: i32,
         ) -> AppResult<Option<Decimal>> {
-            Ok(*self
+            Ok(self
                 .shadow_recent_net
                 .read()
                 .get(wallet_address)
@@ -1308,7 +1362,10 @@ pub(crate) mod tests {
             unimplemented!()
         }
 
-        async fn get_positions(&self, _state_filter: Option<&str>) -> AppResult<Vec<PositionDetail>> {
+        async fn get_positions(
+            &self,
+            _state_filter: Option<&str>,
+        ) -> AppResult<Vec<PositionDetail>> {
             unimplemented!()
         }
 
@@ -1355,9 +1412,7 @@ pub(crate) mod tests {
             unimplemented!()
         }
 
-        async fn get_evaluation_data(
-            &self,
-        ) -> AppResult<(Decimal, Decimal, Decimal, Decimal)> {
+        async fn get_evaluation_data(&self) -> AppResult<(Decimal, Decimal, Decimal, Decimal)> {
             unimplemented!()
         }
     }
@@ -1449,7 +1504,9 @@ pub(crate) mod tests {
         let k = compute_full_kelly(dec!(0.6), dec!(0.4), dec!(0.1), dec!(0.05));
         let full_capped = k.max(Decimal::ZERO).min(dec!(0.5));
         assert_eq!(full_capped, dec!(0.5));
-        let conservative = (full_capped * dec!(0.25)).min(full_capped).min(Decimal::ONE);
+        let conservative = (full_capped * dec!(0.25))
+            .min(full_capped)
+            .min(Decimal::ONE);
         assert_eq!(conservative, dec!(0.125));
     }
 
@@ -1471,10 +1528,7 @@ pub(crate) mod tests {
         let expected = dec!(0.6) * dec!(0.1) - dec!(0.3) * dec!(0.05);
         assert_eq!(result.expected_return_pct(), expected);
         assert_eq!(result.expected_return_pct(), dec!(0.045));
-        assert_eq!(
-            result.expected_profit_sol(dec!(1.0)),
-            dec!(0.045)
-        );
+        assert_eq!(result.expected_profit_sol(dec!(1.0)), dec!(0.045));
     }
 
     // ==========================================================================
@@ -1583,15 +1637,7 @@ pub(crate) mod tests {
     async fn test_kelly_loss_floor_applied() {
         // Losses of 0.5% (below the 1% floor) must be floored to 1%.
         let mut trades: Vec<TradeDetail> = (0..10)
-            .map(|i| {
-                trade_detail(
-                    &format!("w{i}"),
-                    dec!(0.1),
-                    Decimal::ONE,
-                    &rfc3339(i),
-                    true,
-                )
-            })
+            .map(|i| trade_detail(&format!("w{i}"), dec!(0.1), Decimal::ONE, &rfc3339(i), true))
             .collect();
         for i in 0..6 {
             trades.push(trade_detail(
@@ -1764,7 +1810,15 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_kelly_all_invalid_pnl_rows_error() {
         let trades: Vec<TradeDetail> = (0..16)
-            .map(|i| trade_detail(&format!("bad{i}"), dec!(0.1), Decimal::ONE, &rfc3339(i), false))
+            .map(|i| {
+                trade_detail(
+                    &format!("bad{i}"),
+                    dec!(0.1),
+                    Decimal::ONE,
+                    &rfc3339(i),
+                    false,
+                )
+            })
             .collect();
         let sizer = KellySizer::new(kelly_db(trades));
         let err = sizer
@@ -1838,6 +1892,9 @@ pub(crate) mod tests {
 
     #[test]
     fn test_compute_full_kelly_zero_avg_loss() {
-        assert_eq!(compute_full_kelly(dec!(0.5), dec!(0.5), dec!(0.1), Decimal::ZERO), Decimal::ZERO);
+        assert_eq!(
+            compute_full_kelly(dec!(0.5), dec!(0.5), dec!(0.1), Decimal::ZERO),
+            Decimal::ZERO
+        );
     }
 }

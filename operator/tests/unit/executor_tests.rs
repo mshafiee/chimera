@@ -8,9 +8,9 @@ use chimera_operator::circuit_breaker::CircuitBreaker;
 use chimera_operator::config::AppConfig;
 use chimera_operator::db_abstraction::{Database, DbPool, InsertPosition, InsertTrade};
 use chimera_operator::engine::executor::{
-    convert_fill_price, derive_token_amount, enforce_price_impact_cap,
-    executed_output_sol_for, lamports_per_base_to_sol_per_token, max_price_impact_pct,
-    ExecutionOutcome, Executor, ExecutorError, JitoError, RpcMode,
+    convert_fill_price, derive_token_amount, enforce_price_impact_cap, executed_output_sol_for,
+    lamports_per_base_to_sol_per_token, max_price_impact_pct, ExecutionOutcome, Executor,
+    ExecutorError, JitoError, RpcMode,
 };
 use chimera_operator::engine::transaction_builder::BuiltTransaction;
 use chimera_operator::engine::TipManager;
@@ -77,6 +77,7 @@ fn make_signal(action: Action, strategy: Strategy, amount_sol: &str) -> Signal {
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: None,
             exit_fraction: None,
+            trial_admission: false,
         },
         timestamp: chrono::Utc::now().timestamp(),
         source_ip: Some("127.0.0.1".to_string()),
@@ -134,11 +135,23 @@ fn test_convert_fill_price() {
 
 #[test]
 fn test_derive_token_amount_edges() {
-    assert_eq!(derive_token_amount(dec("0.25"), Some(dec("0.001")), Some(9)), Some(250_000_000_000));
-    assert_eq!(derive_token_amount(dec("1"), Some(dec("0.5")), Some(6)), Some(2_000_000));
+    assert_eq!(
+        derive_token_amount(dec("0.25"), Some(dec("0.001")), Some(9)),
+        Some(250_000_000_000)
+    );
+    assert_eq!(
+        derive_token_amount(dec("1"), Some(dec("0.5")), Some(6)),
+        Some(2_000_000)
+    );
     assert_eq!(derive_token_amount(dec("0.25"), None, Some(9)), None);
-    assert_eq!(derive_token_amount(dec("0.25"), Some(dec("0")), Some(9)), None);
-    assert_eq!(derive_token_amount(dec("0.25"), Some(dec("0.001")), None), None);
+    assert_eq!(
+        derive_token_amount(dec("0.25"), Some(dec("0")), Some(9)),
+        None
+    );
+    assert_eq!(
+        derive_token_amount(dec("0.25"), Some(dec("0.001")), None),
+        None
+    );
 }
 
 #[test]
@@ -175,10 +188,7 @@ fn test_executed_output_sol_for() {
         route_fee_sol: None,
         out_amount: Some(5_000_000_000),
     };
-    assert_eq!(
-        executed_output_sol_for(&legacy, &sell),
-        Some(dec("5"))
-    );
+    assert_eq!(executed_output_sol_for(&legacy, &sell), Some(dec("5")));
     // Zero out amount -> None
     let zero_out = BuiltTransaction::Legacy {
         transaction: solana_sdk::transaction::Transaction::new_unsigned(
