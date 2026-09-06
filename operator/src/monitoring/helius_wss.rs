@@ -827,6 +827,7 @@ mod tests {
             direction: crate::monitoring::SwapDirection::Buy,
             dex: "Jupiter".to_string(),
             slippage: None,
+            token_decimals: None,
         };
         let signal = client.generate_signal(&buy, WALLET_A).unwrap();
         assert_eq!(signal.payload.action, Action::Buy);
@@ -842,6 +843,7 @@ mod tests {
             direction: crate::monitoring::SwapDirection::Sell,
             dex: "Raydium".to_string(),
             slippage: None,
+            token_decimals: None,
         };
         let signal = client.generate_signal(&sell, WALLET_A).unwrap();
         assert_eq!(signal.payload.action, Action::Sell);

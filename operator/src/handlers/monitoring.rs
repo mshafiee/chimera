@@ -257,6 +257,61 @@ pub async fn helius_webhook_handler(
                     "Parsed swap from webhook"
                 );
 
+                // ── Gate 0: durable pre-admission signal recording ────────
+                // Every parsed swap of a tracked wallet is recorded BEFORE
+                // circuit breaker / selection / admission, so multi-wallet
+                // cluster behaviour is observable in the shadow book
+                // (decision_records.consensus_wallet_count was NULL for
+                // 178K of 180K decisions under the in-memory-only design).
+                // Fire-and-forget: recording must never add webhook latency
+                // and must never fail the event. Idempotent via UNIQUE
+                // (tx_signature, token_address, side).
+                {
+                    let (side, target_token, amount_sol, amount_tokens) = match swap.direction {
+                        crate::monitoring::SwapDirection::Buy => (
+                            "BUY",
+                            swap.token_out.clone(),
+                            swap.amount_in,
+                            swap.amount_out,
+                        ),
+                        crate::monitoring::SwapDirection::Sell => (
+                            "SELL",
+                            swap.token_in.clone(),
+                            swap.amount_in,
+                            swap.amount_out,
+                        ),
+                    };
+                    let signal = crate::db_abstraction::SmartMoneySignal {
+                        wallet_address: wallet_address.clone(),
+                        token_address: target_token,
+                        token_symbol: None,
+                        side: side.to_string(),
+                        amount_sol,
+                        amount_tokens,
+                        token_decimals: swap.token_decimals,
+                        price_usd: None,
+                        price_sol: None,
+                        tx_signature: event.signature.clone(),
+                        slot: event.slot as i64,
+                        block_time: chrono::DateTime::<chrono::Utc>::from_timestamp(
+                            event.timestamp.max(0),
+                            0,
+                        )
+                        .unwrap_or_else(chrono::Utc::now),
+                    };
+                    let db_for_signal = state.db.clone();
+                    let sig_for_log = event.signature.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = db_for_signal.record_smart_money_signal(&signal).await {
+                            tracing::error!(
+                                signature = %sig_for_log,
+                                error = %e,
+                                "smart_money_signal_record_failed"
+                            );
+                        }
+                    });
+                }
+
                 // Record speculative activity for inactivity tracking
                 crate::monitoring::record_speculative_activity(
                     state.db.clone(),

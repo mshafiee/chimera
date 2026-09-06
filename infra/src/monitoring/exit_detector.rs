@@ -269,6 +269,7 @@ mod tests {
             direction: SwapDirection::Sell,
             dex: "Jupiter".to_string(),
             slippage: None,
+            token_decimals: None,
         }
     }
 
@@ -281,6 +282,7 @@ mod tests {
             direction: SwapDirection::Buy,
             dex: "Jupiter".to_string(),
             slippage: None,
+            token_decimals: None,
         }
     }
 

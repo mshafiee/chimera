@@ -25,6 +25,11 @@ pub struct ParsedSwap {
     pub direction: SwapDirection,
     pub dex: String,
     pub slippage: Option<f64>, // Percentage, not a financial amount
+    /// Mint decimals of `token_out` (the target token) at parse time, when the
+    /// payload exposes them. Gate 0: lets consumers normalize raw token
+    /// amounts to UI units explicitly (audit finding: parser mixes uiAmount
+    /// and raw token_amount paths).
+    pub token_decimals: Option<i32>,
 }
 
 /// Swap direction
@@ -144,6 +149,7 @@ fn parse_jupiter_swap(tx_json: &Value, wallet_address: &str) -> Result<ParsedSwa
         direction,
         dex: "Jupiter".to_string(),
         slippage: None,
+            token_decimals: None,
     })
 }
 
@@ -213,6 +219,7 @@ fn parse_raydium_swap(tx_json: &Value, wallet_address: &str) -> Result<ParsedSwa
         direction,
         dex: "Raydium".to_string(),
         slippage: None,
+            token_decimals: None,
     })
 }
 
@@ -244,6 +251,7 @@ fn parse_orca_swap(tx_json: &Value, wallet_address: &str) -> Result<ParsedSwap> 
         direction,
         dex: "Orca".to_string(),
         slippage: None,
+            token_decimals: None,
     })
 }
 
@@ -275,6 +283,7 @@ fn parse_pumpfun_swap(tx_json: &Value, wallet_address: &str) -> Result<ParsedSwa
         direction,
         dex: "Pump.fun".to_string(),
         slippage: None,
+            token_decimals: None,
     })
 }
 
@@ -494,7 +503,8 @@ pub fn parse_laserstream_message(
         amount_out,
         direction,
         dex,
-        slippage: None, // Could be calculated from price data if available
+        slippage: None,
+            token_decimals: None, // Could be calculated from price data if available
     }))
 }
 
@@ -638,6 +648,7 @@ fn parse_from_swap_event(
         direction,
         dex: dex.to_string(),
         slippage: None,
+            token_decimals: None,
     }))
 }
 
@@ -797,6 +808,7 @@ pub fn parse_helius_webhook(
         direction,
         dex,
         slippage: None,
+            token_decimals: None,
     }))
 }
 
