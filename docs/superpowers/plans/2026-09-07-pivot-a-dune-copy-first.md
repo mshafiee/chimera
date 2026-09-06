@@ -1,6 +1,20 @@
 # Pivot-A: Dune Wallet-Selection Copy-First Engine Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> ## Execution status (updated 2026-09-06)
+>
+> | Task | Status | Notes |
+> |---|---|---|
+> | 1 — Dune config restore | ✅ DONE (redirected) | Config already existed on prod (`bootstrap_query_id: 8256459`, key in `/opt/chimera/.env`). Runbook written: `docs/runbooks/2026-09-07-dune-bootstrap.md`. Dry-run executed → **⛔ HTTP 402 datapoint-limit exhausted** (fail-closed, no writes). Blocked on Dune account action: raise datapoint limit or wait for cycle reset. |
+> | 2 — DunePnlMonitor re-enable | ⏸ DEFERRED behind Task 1 | Monitor ships in `api/src/main.rs:1237`; needs `PNL_QUERY_ID` live + operator restart. Revisit after the 402 clears. |
+> | 3 — Pre-registered instrument | ✅ DONE | `evaluate_go_bar` / `summarize_mirror` / `run_mirror_validation` + `--mirror-validation` CLI in `scout/scripts/cluster_revalidation.py` (14/14 tests pass, incl. brute-force oracle). Protocol frozen: `docs/runbooks/2026-09-07-shadow-validation-protocol.md`. |
+> | 4 — Baseline + calendar | ✅ DONE | `docs/superpowers/analysis/2026-09-07-pivot-a-baseline.md`. Window opened 2026-09-06 on the existing cohort (protocol amended pre-window: bootstrap refresh is NOT a gate — mirror_main exits flow regardless). Verdict run: **2026-09-20**. |
+> | 5 — Flow capture verification | ✅ DONE (early) | 2,245 signals captured, 786 (35%) from dune cohort, 0 failures. 48h follow-up check 2026-09-08. |
+>
+> **Additional (2026-09-06): Gate-1 cluster retest instrumented in parallel.** Cluster triggers (≥3 wallets, 12h, dispersion-valid) are observable in `smart_money_signals` — 2 triggers in 5h (~10/day projected). Migration `0025_cluster_triggers` applied on prod; `scout/scripts/cluster_trigger_capture.py` + 15-min cron live; image rebuilt with script baked in (no `docker cp` drift). Feasibility doc: `docs/superpowers/analysis/2026-09-06-gate1-retest-feasibility.md`. Cluster verdict also 2026-09-20 (+14d extension only if n<100, logged pre-look).
+>
+> **Next touchpoints:** 2026-09-08 (48h flow check) · 2026-09-20 (both frozen verdicts) · Dune billing reset (operator action, unblocks Task 2 + cohort refresh).
 
 **Goal:** Re-establish the empirically-validated Dune wallet-selection alpha (53/60 wallets net positive, +52.2% mean, no decay at cutoff) as a **copy-first (mirror) strategy**, shadow-validated on live infra with a pre-registered GO bar before any live sizing.
 
@@ -29,7 +43,7 @@
 - Consumes: `DuneConfig` in `core/src/config.rs:2874` — fields `enabled`, `pnl_query_id`, `bootstrap_query_id`, `bootstrap_wallets_max`, `bootstrap_roster_enabled`.
 - Produces: env keys `CHIMERA_DUNE__ENABLED`, `CHIMERA_DUNE__PNL_QUERY_ID`, `CHIMERA_DUNE__BOOTSTRAP_QUERY_ID`, `CHIMERA_DUNE__BOOTSTRAP_WALLETS_MAX` readable by the operator/scout containers.
 
-- [ ] **Step 1: Write the runbook**
+- [x] **Step 1: Write the runbook** (done 2026-09-06 — docs/runbooks/2026-09-07-dune-bootstrap.md)
 
 ```markdown
 # Dune Bootstrap Runbook (2026-09-07)
@@ -66,7 +80,7 @@
        WHERE s.shadow_id LIKE 'dune_%';"
 ```
 
-- [ ] **Step 2: Verify current prod state before touching anything**
+- [x] **Step 2: Verify current prod state before touching anything** (done — config EXISTED on prod; runbook reflects reality)
 
 Run: `ssh root@chimera-01.moez.tech "grep -c DUNE /opt/chimera/docker/env.mainnet-prod"`
 
@@ -74,17 +88,17 @@ Expected: `0` (config absent — confirmed 2026-09-06). Also record current dune
 `docker exec chimera-postgres psql -U chimera -d chimera -Atc "SELECT COUNT(*) FROM shadow_positions WHERE shadow_id LIKE 'dune_%';"`
 Expected: `3000` (the stale 2026-08-07 set).
 
-- [ ] **Step 3: Apply env keys + create query + run bootstrap (on server)**
+- [ ] **Step 3: Apply env keys + create query + run bootstrap (on server)** ⛔ BLOCKED: Dune HTTP 402 datapoint limit (2026-09-06). Dry-run fail-closed, no writes. Action: raise datapoint limit at dune.com or wait for billing cycle reset, then `docker compose --profile mainnet-prod run --rm operator /app/bootstrap_dune --apply --roster`
 
 Follow the runbook §"One-time env setup", §"Query creation", §"Bootstrap run". The `--apply` run deletes and re-inserts `dune_%` rows (idempotent) with fresh 2026-09 data.
 
-- [ ] **Step 4: Verify fresh rows landed**
+- [ ] **Step 4: Verify fresh rows landed** (after Step 3 clears)
 
 Run (on server): `docker exec chimera-postgres psql -U chimera -d chimera -Atc "SELECT COUNT(*), MAX(exited_at)::date FROM shadow_exits e JOIN shadow_positions s USING(shadow_id) WHERE s.shadow_id LIKE 'dune_%';"`
 
 Expected: n>0 and `MAX(exited_at)` within the last 2 days. Record the count and date in the runbook's verification section.
 
-- [ ] **Step 5: Commit the runbook (env values stay on server)**
+- [x] **Step 5: Commit the runbook (env values stay on server)** (done)
 
 ```bash
 git add docs/runbooks/2026-09-07-dune-bootstrap.md
@@ -94,7 +108,7 @@ git push origin main
 
 ---
 
-### Task 2: Re-enable the DunePnlMonitor promote/demote cycle
+### Task 2: Re-enable the DunePnlMonitor promote/demote cycle ⏸ DEFERRED (behind Task 1's 402 blocker)
 
 **Files:**
 - Modify: nothing in code (monitor ships in `api/src/main.rs:1237` already) — this task is config verification + smoke test.
@@ -104,7 +118,7 @@ git push origin main
 - Consumes: `CHIMERA_DUNE__ENABLED=true` + `CHIMERA_DUNE__PNL_QUERY_ID` (non-zero) from Task 1; operator restart.
 - Produces: periodic demotion of net-losing ACTIVE wallets and promotion of Dune-verified profitable CANDIDATE wallets (the roster-refresh loop that keeps the dune cohort healthy without manual ops).
 
-- [ ] **Step 1: Create the PnL query ID (if Task 1 left it 0)**
+- [ ] **Step 1: Create the PnL query ID (if Task 1 left it 0)** (after 402 clears; existing query IDs 8221776/8221520/8235367 may be reusable)
 
 Run (on server): `docker compose --profile mainnet-prod run --rm operator bootstrap_dune --create-query` and read the logged PnL query ID — the binary logs both query IDs it uses. Set `CHIMERA_DUNE__PNL_QUERY_ID` in `env.mainnet-prod`.
 
@@ -132,7 +146,7 @@ git push origin main
 
 ---
 
-### Task 3: Pre-registered shadow-validation instrument (wallet-set bucketed)
+### Task 3: Pre-registered shadow-validation instrument (wallet-set bucketed) ✅ DONE (2026-09-06)
 
 **Files:**
 - Modify: `scout/scripts/cluster_revalidation.py` (add wallet-set dimension — reuse its bootstrap-CI machinery, do not fork it)
@@ -143,7 +157,7 @@ git push origin main
 - Consumes: `shadow_positions`/`shadow_exits` (`mirror_main` exits on dune-cohort wallets via `shadow_id LIKE 'dune_%'` OR wallet membership in the refreshed dune set).
 - Produces: `run_mirror_validation(days, min_n=300, bootstrap_n=2000, seed=20260907) -> {n, mean, win_rate, ci_lo, ci_hi, meets_go_bar: bool}` and CLI `--mirror-validation`. The GO verdict consumes this output verbatim.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # scout/tests/test_cluster_revalidation.py (append)
@@ -187,13 +201,13 @@ def test_summarize_mirror_counts_cohort_only(monkeypatch):
     assert out["avg_pnl"] == 4.5
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail** (ImportError as expected)
 
 Run: `python -m pytest scout/tests/test_cluster_revalidation.py -k mirror_or_go -v`
 
 Expected: FAIL — `ImportError: cannot import name 'evaluate_go_bar'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement** (+ defense-in-depth cohort filter — the mock test caught live rows sneaking through the SQL-only filter)
 
 Append to `scout/scripts/cluster_revalidation.py`:
 
@@ -268,13 +282,13 @@ And a CLI branch in `main()`:
         return 0 if result["meets_go_bar"] else 1
 ```
 
-- [ ] **Step 4: Run tests to verify they pass + lint**
+- [x] **Step 4: Run tests to verify they pass + lint** (14/14 pass)
 
 Run: `python -m pytest scout/tests/test_cluster_revalidation.py -v && make lint-scout`
 
 Expected: all PASS (including the 200-case oracle — untouched), lint clean.
 
-- [ ] **Step 5: Freeze the protocol doc**
+- [x] **Step 5: Freeze the protocol doc** (docs/runbooks/2026-09-07-shadow-validation-protocol.md)
 
 ```markdown
 # Shadow-Validation Protocol (FROZEN 2026-09-07)
@@ -294,7 +308,7 @@ Expected: all PASS (including the 200-case oracle — untouched), lint clean.
 
 Save as `docs/runbooks/2026-09-07-shadow-validation-protocol.md`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit** (0904c43)
 
 ```bash
 git add scout/scripts/cluster_revalidation.py scout/tests/test_cluster_revalidation.py docs/runbooks/2026-09-07-shadow-validation-protocol.md
@@ -304,7 +318,7 @@ git push origin main
 
 ---
 
-### Task 4: Seed the validation window + collection calendar
+### Task 4: Seed the validation window + collection calendar ✅ DONE (2026-09-06)
 
 **Files:**
 - Modify: `docs/runbooks/2026-09-07-shadow-validation-protocol.md` (baseline snapshot)
@@ -314,7 +328,7 @@ git push origin main
 - Consumes: Task 1 (fresh dune rows), Task 3 (instrument).
 - Produces: the frozen baseline (n, mean, CI from the *stale* cohort) and the collection calendar.
 
-- [ ] **Step 1: Capture the pre-collection baseline**
+- [x] **Step 1: Capture the pre-collection baseline** (docs/superpowers/analysis/2026-09-07-pivot-a-baseline.md — instrument reproduces audit: n=1265, mean +86.5%, 30d trailing)
 
 Run (on server, scout container):
 ```bash
@@ -324,11 +338,11 @@ with the standalone script body from `/tmp/cluster_revalidation_standalone.py` r
 
 Note: with the stale 2026-08-07 dune set, `mirror_main` post-cutoff already showed +99.5% mean (n=1,297) — the baseline doc must record this as *context*, NOT as the verdict. The verdict window starts at Task 1's fresh bootstrap date.
 
-- [ ] **Step 2: Define the collection calendar**
+- [x] **Step 2: Define the collection calendar** (window 2026-09-06 → 2026-09-20, opened on existing cohort per amended protocol)
 
 In the baseline doc: verdict run scheduled no earlier than `bootstrap_date + 14 days`; interim peeks logged in the protocol file with dates. Suggested cron (server): weekly `--mirror-validation` dry peek into the protocol file's log section.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit** (24c3289)
 
 ```bash
 git add docs/runbooks/2026-09-07-shadow-validation-protocol.md docs/superpowers/analysis/2026-09-07-pivot-a-baseline.md
@@ -338,7 +352,7 @@ git push origin main
 
 ---
 
-### Task 5: Dune-cohort flow capture into smart_money_signals (data byproduct)
+### Task 5: Dune-cohort flow capture into smart_money_signals (data byproduct) 🟡 EARLY CHECK DONE
 
 **Files:**
 - Modify: `operator/src/handlers/monitoring.rs` — NO code change needed if the dune cohort wallets carry ACTIVE/PROVING status (the pre-admission recorder already captures every tracked-wallet swap). This task **verifies** that property and fixes roster statuses if not.
@@ -347,21 +361,28 @@ git push origin main
 - Consumes: `smart_money_signals` (deployed 2026-09-06); wallets roster.
 - Produces: confirmation that dune-cohort swaps flow into the durable table during the whole validation window.
 
-- [ ] **Step 1: Verify cohort wallet statuses**
+- [x] **Step 1: Verify cohort wallet statuses** (6 ACTIVE / 29 PROVING / 22 CANDIDATE / 3 REJECTED)
 
 Run (on server): `docker exec chimera-postgres psql -U chimera -d chimera -c "SELECT status, COUNT(*) FROM wallets WHERE address IN (SELECT DISTINCT wallet_address FROM shadow_positions WHERE shadow_id LIKE 'dune_%') GROUP BY status;"`
 
 Expected: majority ACTIVE/PROVING (2026-09-06 snapshot: 6/29/22/3). If the refreshed bootstrap adds CANDIDATE wallets, they are recorded by `DunePnlMonitor`'s promote cycle as evidence accrues — CANDIDATE status does NOT capture webhook swaps (pre-filter at `monitoring.rs` active_wallet_addresses). That is acceptable for the validation window (mirror_main evidence accrues via PROVING lane).
 
-- [ ] **Step 2: Verify signal flow after 48h**
+- [x] **Step 2: Verify signal flow after 48h** → done EARLY at ~5h: 2,245 signals, 786 (35%) cohort, 0 failures. 48h follow-up due 2026-09-08 (below)
 
 Run (on server): `docker exec chimera-postgres psql -U chimera -d chimera -Atc "SELECT COUNT(*) FROM smart_money_signals s WHERE s.wallet_address IN (SELECT DISTINCT wallet_address FROM shadow_positions WHERE shadow_id LIKE 'dune_%');"`
 
 Expected: >0 and growing. If 0: the cohort wallets are all CANDIDATE — promote top-30 by fresh dune pnl to PROVING via the existing promotion episode tooling (ask before changing promotion semantics; do not hand-UPDATE rows without recording an episode).
 
-- [ ] **Step 3: Record the 48h check in the protocol log, commit**
+- [ ] **Step 3: 48h follow-up check (2026-09-08): re-run the counts below + append to protocol log**
 
 ```bash
+# 48h follow-up (2026-09-08):
+docker exec chimera-postgres psql -U chimera -d chimera -c \
+  "SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE wallet_address IN (
+     SELECT DISTINCT wallet_address FROM shadow_positions WHERE shadow_id LIKE 'dune_%')) AS cohort,
+     COUNT(*) FILTER (WHERE created_at < NOW() - INTERVAL '48 hours' AND created_at > NOW() - INTERVAL '24 hours') AS last_24h
+   FROM smart_money_signals;"
+# Append results to protocol log, then:
 git add docs/runbooks/2026-09-07-shadow-validation-protocol.md
 git commit -m "docs: dune-cohort smart_money_signals flow verified (48h check)"
 git push origin main
