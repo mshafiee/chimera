@@ -1,7 +1,7 @@
 # Smart Money Cluster Accumulation Engine Implementation Plan
 
 **Date:** 2026-09-06  
-**Status:** APPROVED WITH CRITICAL ARCHITECTURAL REVISIONS  
+**Status:** APPROVED — ARCHITECTURAL SHOWSTOPPERS & EDGE CASES RESOLVED  
 **Branch:** `engine/cluster-accumulation` (Legacy archived at `archive/v1-copy-trading-legacy`)  
 **Scope:** Pivot Chimera from reactive 1:1 micro copy-trading to an automated Smart Money Cluster Accumulation Engine.
 
@@ -30,16 +30,25 @@ A historical query across all shadow positions in the production PostgreSQL data
 
 ### 1.3 Core Architectural Axioms
 1. **Strict Confluence ($\ge 3$ Distinct Wallets):** 2-wallet pairs perform terribly (−13.31%) because they are frequently dev + burner wallets or wash bots. Cluster trigger requires $\ge 3$ distinct smart wallets.
-2. **Distinct Wallet Temporal Dispersion Guard:** Total span between first and last distinct wallet first-buy must be $\ge 180\text{ seconds}$ (3 minutes), with minimum inter-arrival time $\ge 5\text{ seconds}$ between consecutive distinct wallet arrivals (evaluated via `MIN(block_time)` per wallet to prevent split-order false rejections).
+2. **Subset-Valid Temporal Dispersion Guard:** At least one valid subset of $\ge 3$ distinct smart wallets must satisfy both total span $\ge 180\text{ seconds}$ and consecutive inter-arrival $\ge 5\text{ seconds}$. Subsequent entries within $<5\text{s}$ do not invalidate an existing valid cluster.
 3. **Dimensionally Accurate Volume-Weighted Average Price (VWAP):**
-   $$\text{VWAP}_{\text{USD}} = \frac{\sum (\text{price\_usd} \times \text{amount\_tokens})}{\sum \text{amount\_tokens}} \equiv \frac{\text{Total USD Spent}}{\text{Total Tokens Acquired}}$$
-   $$\text{VWAP}_{\text{SOL}} = \frac{\sum \text{amount\_sol}}{\sum \text{amount\_tokens}}$$
+   $$\text{VWAP}_{\text{SOL}} = \frac{\sum \text{amount\_sol}_i}{\sum \text{amount\_tokens}_i}, \quad \text{VWAP}_{\text{USD}} = \frac{\sum (\text{price\_usd}_i \times \text{amount\_tokens}_i)}{\sum \text{amount\_tokens}_i}$$
+   Intermediate precision is retained fully in PostgreSQL `numeric` and mapped to `rust_decimal::Decimal`.
 4. **Symmetric Price Drift Envelope (SOL-denominated):** Token price must reside strictly within $[0.90 \times \text{VWAP}_{\text{SOL}},\, 1.15 \times \text{VWAP}_{\text{SOL}}]$ to prevent buying runaway pumps ($>+15\%$) or collapsing distribution ($<-10\%$) while eliminating SOL/USD currency drift over multi-hour accumulation windows.
-5. **Transactional Advisory Lock & Cooldown Index:** Wrap cluster admission in PostgreSQL `pg_try_advisory_xact_lock(hashtext(token_address))` to eliminate TOCTOU multi-worker race conditions. Once executed, record in `cluster_executions` (with `id BIGSERIAL PRIMARY KEY` to allow future re-entries after 24h cooldown).
-6. **Cumulative Bilateral Disinvestment Exit:** Ingest both `BUY` and `SELL` swaps. Track cumulative tokens sold vs bought per wallet: $\text{Dump Pct}(W) = \sum \text{Sold} / \sum \text{Bought}$. If $\ge 2$ cluster wallets liquidate $\ge 70\%$ of their accumulated holdings, trigger an Emergency Cluster Disinvestment Market Sell.
-7. **Established Liquidity ($>\$100\text{k}$) & CLMM Slippage Guard:** Enforce $>\$100\text{k}$ pool liquidity AND verify Jupiter quote `priceImpactPct < 1.5%` for a 0.5 SOL order to avoid out-of-range CLMM bins.
-8. **Jito Tip Protection:** Cap Jito tips to $\le 0.0005\text{ SOL}$ for $0.25\text{ SOL}$ sizing (and $\le 0.001\text{ SOL}$ for $0.50\text{ SOL}$) to prevent tip drag from eating profits on non-sniper entries.
-9. **Expanded Swing Roster (150–200 Wallets):** Track 150–200 validated swing wallets ($>4\text{h}$ average hold time, $>55\%$ win rate) to ensure healthy cluster candidate velocity ($\sim 2-5$ clusters/week) without sacrificing selection quality.
+5. **Atomic Reservation Pattern (Zero TOCTOU, No Open Trans Locks):**
+   Uses an atomic reservation row in `cluster_executions` with a partial unique index:
+   ```sql
+   CREATE UNIQUE INDEX idx_cluster_active_lock ON cluster_executions(token_address) 
+   WHERE status IN ('EVALUATING', 'ACTIVE');
+   ```
+   This prevents concurrent Tokio tasks from evaluating or buying the same token simultaneously, without holding open database transactions across async HTTP calls.
+6. **Anchored Bilateral Disinvestment Exit:** Stores `cluster_wallets TEXT[]` in `cluster_executions`. Evaluates cumulative holdings starting from $(T_{\text{entered}} - 12\text{h})$ up to `NOW()`. If $\ge 2$ cluster constituent wallets dump $\ge 70\%$ of their accumulated holdings, triggers an immediate market sell.
+7. **24-Hour Cooldown Independent of Trade Status:** Cooldown evaluates `entered_at > NOW() - INTERVAL '24 hours'` regardless of whether the position is `ACTIVE` or `CLOSED`.
+8. **Fee-Optimized Sizing & Take-Profits:**
+   * For base sizes ($\le 0.35\text{ SOL}$), consolidate to 2 exit tiers: 50% at $+35\%$, 50% at $+75\%$ (with $+40\%$ activation / $15\%$ trailing stop) to avoid fixed fee drag.
+   * Jito tip hard cap: $\le 0.0005\text{ SOL}$ for $0.25\text{ SOL}$ sizing.
+9. **Verified Liquidity & CLMM Slippage:** Pool TVL $\ge \$100,000$ (verified via DexScreener client in `TokenMetadataClient`) AND Jupiter quote `priceImpactPct < 1.5%` for a 0.5 SOL order.
+10. **Expanded Swing Roster (150–200 Wallets):** Track 150–200 validated swing wallets ($>4\text{h}$ average hold time, $>55\%$ win rate) to ensure healthy cluster candidate velocity without lowering confluence requirements.
 
 ---
 
@@ -56,23 +65,24 @@ A historical query across all shadow positions in the production PostgreSQL data
                                     │ Webhook swaps (BUY / SELL)
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│             PHASE 2 & 3: INGESTION & DECOUPLED PERSISTENCE (Rust)      │
+│             PHASE 2 & 3: INGESTION & ATOMIC RESERVATION (Rust)         │
 │                                                                        │
 │  • Ingest swap at /api/v1/monitoring/helius-webhook                    │
 │  • Immediately persist to `smart_money_signals` (side: BUY | SELL)     │
-│  • Transactional Advisory Lock: pg_try_advisory_xact_lock(token)       │
-│  • Token Cooldown Check: Ignore if token entered within 24h            │
+│  • 24h Cooldown check: Any entry in last 24h? (Ignore if yes)          │
+│  • Atomic Reservation: INSERT ... status='EVALUATING'                  │
+│    (Partial unique index prevents concurrent Tokio multi-buys)         │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │             PHASE 4: CLUSTER CONFLUENCE TRIGGER (Rust)                 │
 │                                                                        │
-│  • Query 12-hour window on token: Distinct smart BUY wallets >= 3?     │
-│  • Distinct Wallet Arrivals: Span >= 180s, inter-arrival >= 5s         │
+│  • Query 12-hour window: Distinct smart BUY wallets >= 3?              │
+│  • Subset Temporal Dispersion: Any triplet with span >= 180s, gap >= 5s│
 │  • Symmetric Drift Guard: 0.90 * VWAP_SOL <= price <= 1.15 * VWAP_SOL  │
-│  • Liquidity & CLMM Guard: TVL >= $100k AND priceImpactPct < 1.5%      │
-│  • Record into cluster_executions (BIGSERIAL PK)                       │
+│  • Liquidity & CLMM Guard: DexScreener TVL >= $100k & Impact < 1.5%    │
+│  • Update cluster_executions to status='ACTIVE' with cluster_wallets   │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
                                     ▼
@@ -87,11 +97,12 @@ A historical query across all shadow positions in the production PostgreSQL data
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│             PHASE 6: BILATERAL SWING POSITION MONITOR (Rust)           │
+│             PHASE 6: ANCHORED SWING POSITION MONITOR (Rust)            │
 │                                                                        │
 │  • Disaster Stop: -20.0% hard stop                                     │
-│  • Smart Money Disinvestment: If >= 2 cluster wallets dump >= 70% sell │
-│  • Tiered Profit Targets: +35% (sell 33%), +75% (sell 33%), +150% (34%)│
+│  • Anchored Disinvestment: If >= 2 constituent cluster wallets dump    │
+│    >= 70% of tokens (anchored to entry - 12h), liquidate position now  │
+│  • Tiered Profit Targets (0.25 SOL): 50% at +35%, 50% at +75%         │
 │  • Trailing Stop: Activate at +40%, trail 15%                          │
 │  • Stagnation Exit: 72h exit if flat/neg; if in profit, breakeven stop │
 └────────────────────────────────────────────────────────────────────────┘
@@ -118,7 +129,7 @@ A historical query across all shadow positions in the production PostgreSQL data
 ---
 
 ### Phase 2: Database Schema & Optimized Persistence Layer
-**Goal:** Provide durable storage for all smart-money transactions with bilateral support (`BUY` / `SELL`), dimensionally correct VWAP, composite indexes, and reusable cooldown tracking.
+**Goal:** Provide durable storage for all smart-money transactions with bilateral support (`BUY` / `SELL`), full `numeric` precision VWAP, constituent wallet tracking, and atomic reservation partial indexes.
 
 - [ ] **Task 2.1: PostgreSQL Migration `infra/migrations_postgres/0023_smart_money_clusters.sql`**
   ```sql
@@ -141,7 +152,7 @@ A historical query across all shadow positions in the production PostgreSQL data
 
   CREATE INDEX IF NOT EXISTS idx_smart_signals_token_window 
   ON smart_money_signals(token_address, side, block_time DESC) 
-  INCLUDE (wallet_address, amount_sol, amount_tokens, price_usd, price_sol);
+  INCLUDE (wallet_address, amount_sol, amount_tokens, price_sol);
 
   CREATE INDEX IF NOT EXISTS idx_smart_signals_wallet_time 
   ON smart_money_signals(wallet_address, block_time DESC);
@@ -151,14 +162,22 @@ A historical query across all shadow positions in the production PostgreSQL data
       token_address TEXT NOT NULL,
       cluster_vwap_usd NUMERIC(30, 18) NOT NULL,
       cluster_vwap_sol NUMERIC(30, 18) NOT NULL,
+      cluster_wallets TEXT[] NOT NULL,
       wallet_count INT NOT NULL,
       entered_at TIMESTAMPTZ DEFAULT NOW(),
-      status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'CLOSED', 'EXPIRED'))
+      status TEXT NOT NULL DEFAULT 'EVALUATING' CHECK (status IN ('EVALUATING', 'ACTIVE', 'CLOSED', 'EXPIRED'))
   );
 
+  -- Cooldown index covering both ACTIVE and CLOSED trades
   CREATE INDEX IF NOT EXISTS idx_cluster_executions_cooldown 
   ON cluster_executions(token_address, entered_at DESC);
 
+  -- Partial unique index for atomic reservation (prevents concurrent double-buys without locking connections)
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_cluster_executions_active_lock 
+  ON cluster_executions(token_address) 
+  WHERE status IN ('EVALUATING', 'ACTIVE');
+
+  -- Global cluster view with full precision base-token weighting
   CREATE OR REPLACE VIEW v_active_clusters_12h AS
   SELECT 
       token_address,
@@ -167,8 +186,8 @@ A historical query across all shadow positions in the production PostgreSQL data
       SUM(amount_tokens) AS total_token_volume,
       MIN(block_time) AS first_signal_at,
       MAX(block_time) AS last_signal_at,
-      ROUND((SUM(price_usd * amount_tokens) / NULLIF(SUM(amount_tokens), 0))::numeric, 8) AS vwap_price_usd,
-      ROUND((SUM(amount_sol) / NULLIF(SUM(amount_tokens), 0))::numeric, 12) AS vwap_price_sol,
+      (SUM(price_usd * amount_tokens) / NULLIF(SUM(amount_tokens), 0)) AS vwap_price_usd,
+      (SUM(amount_sol) / NULLIF(SUM(amount_tokens), 0)) AS vwap_price_sol,
       EXTRACT(EPOCH FROM (MAX(block_time) - MIN(block_time))) AS cluster_duration_secs
   FROM smart_money_signals
   WHERE side = 'BUY'
@@ -195,21 +214,31 @@ A historical query across all shadow positions in the production PostgreSQL data
     )
     SELECT 
         COUNT(DISTINCT wallet_address) AS distinct_wallets,
-        ROUND((SUM(wallet_sol) / NULLIF(SUM(wallet_tokens), 0))::numeric, 12) AS vwap_price_sol,
+        (SUM(wallet_sol) / NULLIF(SUM(wallet_tokens), 0)) AS vwap_price_sol,
+        ARRAY_AGG(wallet_address ORDER BY first_buy_at ASC) AS distinct_wallets_list,
         ARRAY_AGG(first_buy_at ORDER BY first_buy_at ASC) AS distinct_wallet_arrivals
     FROM wallet_first_buys;
     ```
-  - Implement `is_token_cluster_locked(&self, token_address: &str, cooldown_hours: i64) -> AppResult<bool>`:
+  - Implement `is_token_in_cooldown(&self, token_address: &str, cooldown_hours: i64) -> AppResult<bool>`:
     ```sql
     SELECT EXISTS (
         SELECT 1 FROM cluster_executions
         WHERE token_address = $1
-          AND status = 'ACTIVE'
           AND entered_at > NOW() - (INTERVAL '1 hour' * $2)
     );
     ```
-  - Implement `record_cluster_execution(&self, token_address: &str, vwap_sol: Decimal, vwap_usd: Decimal, wallet_count: i32) -> AppResult<()>`.
-  - Implement `get_cluster_wallet_holdings(&self, token_address: &str, window_hours: i64) -> AppResult<Vec<WalletHoldingSummary>>`:
+  - Implement atomic reservation:
+    `try_reserve_cluster_evaluation(&self, token_address: &str) -> AppResult<Option<i64>>`:
+    ```sql
+    INSERT INTO cluster_executions (token_address, status, entered_at, cluster_vwap_sol, cluster_vwap_usd, cluster_wallets, wallet_count)
+    VALUES ($1, 'EVALUATING', NOW(), 0, 0, '{}', 0)
+    ON CONFLICT (token_address) WHERE status IN ('EVALUATING', 'ACTIVE') DO NOTHING
+    RETURNING id;
+    ```
+  - Implement `confirm_cluster_execution(&self, id: i64, vwap_sol: Decimal, vwap_usd: Decimal, wallets: &[String]) -> AppResult<()>`.
+  - Implement `cancel_cluster_evaluation(&self, id: i64) -> AppResult<()>`.
+  - Implement anchored disinvestment holdings query:
+    `get_cluster_disinvestment_holdings(&self, token_address: &str, cluster_wallets: &[String], lookback_anchor: DateTime<Utc>) -> AppResult<Vec<WalletHoldingSummary>>`:
     ```sql
     SELECT 
         wallet_address,
@@ -219,14 +248,15 @@ A historical query across all shadow positions in the production PostgreSQL data
             NULLIF(SUM(amount_tokens) FILTER (WHERE side = 'BUY'), 0) AS dump_ratio
     FROM smart_money_signals
     WHERE token_address = $1 
-      AND block_time > NOW() - (INTERVAL '1 hour' * $2)
+      AND wallet_address = ANY($2)
+      AND block_time >= $3
     GROUP BY wallet_address;
     ```
 
 ---
 
-### Phase 3: Decoupled Ingestion & Advisory Lock Concurrency
-**Goal:** Persist every raw smart-money swap immediately upon receipt. Eliminate TOCTOU race conditions.
+### Phase 3: Decoupled Ingestion & Atomic Reservation Concurrency
+**Goal:** Persist every raw smart-money swap immediately. Prevent race conditions and duplicate orders without holding open DB connections.
 
 - [ ] **Task 3.1: Ingestion Pipeline in `operator/src/handlers/monitoring.rs`**
   - On incoming swap from Helius:
@@ -237,15 +267,14 @@ A historical query across all shadow positions in the production PostgreSQL data
        - If yes, pass sell event to `PositionManager::handle_cluster_sell_event(token, wallet)`.
        - Return `Ok(200)`.
     4. If `side == BUY`:
-       - Acquire transactional advisory lock: `SELECT pg_try_advisory_xact_lock(hashtext($1))` on `token_address`. If not acquired, another task is evaluating this token; return `Ok(200)`.
-       - Check `db.is_token_cluster_locked(token, 24)`. If locked, return `Ok(200)`.
+       - Check `db.is_token_in_cooldown(token, 24)`. If locked, return `Ok(200)`.
        - Query `db.get_token_cluster_metrics(token, 12)`.
        - If `distinct_wallets < 3`: Return `Ok(200)` (holding state).
        - If `distinct_wallets >= 3`:
-         - Verify **Distinct Wallet Temporal Dispersion**:
-           - Total span `arrivals[N-1] - arrivals[0] >= 180 seconds`.
-           - Inter-arrival times `arrivals[i] - arrivals[i-1] >= 5 seconds` for all consecutive distinct wallet first buys.
-         - Forward cluster payload to `signal_pipeline.process_signal()`.
+         - Verify **Subset Temporal Dispersion** via `validate_temporal_dispersion(&arrivals)`.
+         - Attempt atomic reservation: `db.try_reserve_cluster_evaluation(token)`.
+           - If `None`, another worker is already evaluating; return `Ok(200)`.
+           - If `Some(reservation_id)`, proceed to admission evaluation.
 
 ---
 
@@ -253,42 +282,45 @@ A historical query across all shadow positions in the production PostgreSQL data
 **Goal:** Ensure entry only occurs within safe price bounds and verified pool liquidity.
 
 - [ ] **Task 4.1: Selection Gates in `operator/src/engine/selection.rs`**
-  - **Cluster Confluence Gate:** Strictly require $\ge 3$ distinct wallets.
+  - **Cluster Confluence Gate:** Strictly require $\ge 3$ distinct wallets with valid subset dispersion.
   - **Symmetric Entry Drift Guard (SOL Denominated):**
     - Fetch current Jupiter quote for price (Token/SOL):
-    - If `current_price_sol > 1.15 * vwap_price_sol` $\to$ Reject with `CLUSTER_ENTRY_DRIFT_EXCEEDED` (protect against runaway pumps).
-    - If `current_price_sol < 0.90 * vwap_price_sol` $\to$ Reject with `CLUSTER_ENTRY_PRICE_COLLAPSED` (protect against pool dumps / developer rugs).
-  - **Liquidity Floor:** Pool TVL $\ge \$100,000$.
+    - If `current_price_sol > 1.15 * vwap_price_sol` $\to$ Cancel reservation & reject with `CLUSTER_ENTRY_DRIFT_EXCEEDED`.
+    - If `current_price_sol < 0.90 * vwap_price_sol` $\to$ Cancel reservation & reject with `CLUSTER_ENTRY_PRICE_COLLAPSED`.
+  - **Liquidity Floor:** Check `token_metadata_client.get_liquidity(token) >= $100,000` (DexScreener cached).
   - **CLMM Slippage / Price Impact Guard:**
     - Query Jupiter Quote API for 0.5 SOL swap.
-    - If `quote.price_impact_pct > 1.5%` $\to$ Reject with `CLMM_OUT_OF_RANGE_IMPACT_HIGH` (protect against concentrated liquidity traps).
+    - If `quote.price_impact_pct > 1.5%` $\to$ Cancel reservation & reject with `CLMM_OUT_OF_RANGE_IMPACT_HIGH`.
   - **Token Age Floor:** $\ge 24\text{ hours}$ old.
-  - On successful admission, insert record into `cluster_executions` table to lock re-entry for 24 hours.
+  - On successful trade fill, call `db.confirm_cluster_execution(reservation_id, vwap_sol, vwap_usd, &distinct_wallets)`.
 
 ---
 
 ### Phase 5: Position Sizing & Swing Exit Engine
-**Goal:** Provide room to breathe through Solana volatility, cap Jito tip drag, and enforce cumulative smart-money exit invalidation.
+**Goal:** Provide room to breathe through Solana volatility, curb partial-exit fee drag, and enforce anchored disinvestment exits.
 
 - [ ] **Task 5.1: Sizing in `operator/src/engine/position_sizer.rs`**
   - Base cluster size: `0.25 SOL` (tokens with $\$100\text{k}$–$\$250\text{k}$ liquidity).
   - High-conviction boost: `0.50 SOL` (tokens with $>\$250\text{k}$ liquidity or $\ge 4$ wallets).
   - Portfolio Cap: Maximum 4 concurrent open positions (Max portfolio risk: 2.0 SOL).
   - **Jito Tip Ceiling:** Cap tip at $\le 0.0005\text{ SOL}$ for $0.25\text{ SOL}$ orders, and $\le 0.001\text{ SOL}$ for $0.50\text{ SOL}$ orders.
-- [ ] **Task 5.2: Swing Exit Parameters in `core/src/config.rs` & `operator/src/engine/exit_rules.rs`**
+- [ ] **Task 5.2: Fee-Optimized Swing Exit Parameters in `core/src/config.rs` & `operator/src/engine/exit_rules.rs`**
   - `recovery_gate_enabled = false` (eliminate the 15-minute loss cut).
   - `hard_stop_loss_pct = -20.0%` (wide disaster stop).
-  - `profit_targets = [35.0, 75.0, 150.0]`.
-  - `target_fractions = [0.33, 0.33, 0.34]`.
+  - **For base size ($\le 0.35\text{ SOL}$):**
+    - `profit_targets = [35.0, 75.0]` (2 legs: 50% at +35%, 50% at +75%).
+    - `target_fractions = [0.50, 0.50]`.
+    - Eliminates micro-partial fee drag.
   - `trailing_stop_activation_pct = +40.0%`, with `15.0%` trailing pullback.
   - `max_hold_time_hours = 72`: If position is in profit, convert to Breakeven stop (+0.5%) with 5% trail; if flat/loss, market sell.
-- [ ] **Task 5.3: Cumulative Disinvestment Exit in `operator/src/engine/position_manager.rs`**
+- [ ] **Task 5.3: Anchored Disinvestment Exit in `operator/src/engine/position_manager.rs`**
   - When `PositionManager::handle_cluster_sell_event(token, wallet)` is called:
-    - Query `db.get_cluster_wallet_holdings(token, 12)`.
+    - Retrieve active position and its originating `cluster_wallets` and `entered_at`.
+    - Query `db.get_cluster_disinvestment_holdings(token, &cluster_wallets, entered_at - 12h)`.
     - Count wallets where `dump_ratio >= 0.70`.
-    - If $\ge 2$ cluster wallets have `dump_ratio >= 0.70`:
+    - If $\ge 2$ cluster constituent wallets have `dump_ratio >= 0.70`:
       - Trigger **Emergency Cluster Disinvestment Market Sell**.
-      - Log: `"Cluster invalidation: 2+ smart wallets dumped >= 70% of accumulated tokens on {token}. Liquidating position."`
+      - Log: `"Cluster invalidation: 2+ constituent smart wallets dumped >= 70% of accumulated tokens on {token}. Liquidating position."`
 
 ---
 
@@ -296,21 +328,18 @@ A historical query across all shadow positions in the production PostgreSQL data
 
 ### 4.1 Automated Tests
 1. **Mathematical VWAP Unit Tests (`infra/tests/vwap_calculation_test.rs`):**
-   - Verify volume weighting matches $\sum(P \times V) / \sum V$, rejecting arithmetic means and verifying quote/base separation.
-2. **Distinct Wallet Temporal Dispersion Tests (`operator/tests/unit/temporal_dispersion_tests.rs`):**
+   - Verify volume weighting matches $\sum(P \times V) / \sum V$, retaining full numeric precision.
+2. **Subset Temporal Dispersion Tests (`operator/tests/unit/temporal_dispersion_tests.rs`):**
    - 3 wallets spanning 35 seconds $\to$ Rejected ($<180\text{s}$).
-   - 3 distinct wallets spanning 200 seconds with 1 wallet having split orders 1s apart $\to$ Approved (split order grouped by wallet).
-   - 3 distinct wallets with first buys 2s apart $\to$ Rejected (inter-arrival $<5\text{s}$).
-3. **Drift Guard Bounds Tests (`operator/tests/unit/drift_guard_tests.rs`):**
-   - Price at $1.16 \times \text{VWAP}$ $\to$ Rejected (`CLUSTER_ENTRY_DRIFT_EXCEEDED`).
-   - Price at $0.88 \times \text{VWAP}$ $\to$ Rejected (`CLUSTER_ENTRY_PRICE_COLLAPSED`).
-   - Price at $1.05 \times \text{VWAP}$ $\to$ Approved.
-4. **Advisory Lock & Re-Entry Tests (`operator/tests/integration/cluster_lock_tests.rs`):**
-   - Simultaneous webhooks on 2 threads for same token $\to$ Only 1 evaluates, 2nd skips via `pg_try_advisory_xact_lock`.
-   - Token entered $\to$ 2nd buy 1h later rejected with `is_token_cluster_locked`.
-   - Token re-entered 25h later $\to$ Allowed (index on `entered_at DESC` with `BIGSERIAL PK`).
-5. **Cumulative Disinvestment Exit Tests (`operator/tests/integration/cluster_exit_tests.rs`):**
-   - Wallet A bought 1000 tokens, sold 400 then 400 (80% total). Wallet B bought 500, sold 400 (80% total) $\to$ Emergency sell triggered.
+   - 4 wallets where Wallet 4 buys 2s after Wallet 3, but Wallets 1, 2, 3 span 200s with $\ge 5$s gaps $\to$ **Approved** (greedy DoS protection verified).
+3. **Atomic Reservation Tests (`operator/tests/integration/atomic_reservation_tests.rs`):**
+   - Concurrent tasks attempt `try_reserve_cluster_evaluation` for same token $\to$ Exactly 1 succeeds, 2nd receives `None`.
+   - After reservation is confirmed `ACTIVE`, concurrent inserts still return `None`.
+   - After 24 hours or `CLOSED`, new reservation succeeds.
+4. **Anchored Disinvestment Lookback Tests (`operator/tests/integration/cluster_exit_tests.rs`):**
+   - Position open for 16 hours. Wallets A and B dump tokens bought 16 hours ago $\to$ Correctly detected as $\ge 70\%$ dump and triggers emergency exit (rolling window bug solved).
+5. **Cooldown Re-Entry Tests (`operator/tests/integration/cooldown_tests.rs`):**
+   - Trade closed after 30 minutes $\to$ `is_token_in_cooldown` returns `true` for next 23.5 hours.
 
 ### 4.2 Production Server Verification (`chimera-01.moez.tech`)
 1. Create and deploy branch `engine/cluster-accumulation`.
