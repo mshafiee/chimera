@@ -4278,10 +4278,12 @@ fn load_config() -> anyhow::Result<AppConfig> {
         ));
     }
 
-    let config = AppConfig::load_config().map_err(|e| {
+    let mut config = AppConfig::load_config().map_err(|e| {
         tracing::error!(error = %e, "Failed to load configuration");
         anyhow::anyhow!("Configuration error: {}", e)
     })?;
+
+    apply_chimera_env_overrides(&mut config);
 
     // Validate configuration
     if let Err(e) = config.validate() {
@@ -4301,6 +4303,39 @@ fn load_config() -> anyhow::Result<AppConfig> {
     }
 
     Ok(config)
+}
+
+/// Explicit env overrides for fields that must be tunable per-deploy.
+///
+/// Rationale: config-rs 0.15's `Environment::with_prefix("CHIMERA")
+/// .separator("__")` silently produces an EMPTY source for
+/// `CHIMERA_SECTION__FIELD`-style variables — the separator strips at the
+/// first boundary and the deserialized tree ends up without the section key
+/// (verified against config 0.15.24 with a standalone probe). Every override
+/// that actually works in this binary is therefore read via std::env::var
+/// (see SelectionConfig construction and the profitability-gate override
+/// below); this helper centralizes the pattern instead of sprinkling
+/// std::env::var over field initializers.
+fn apply_chimera_env_overrides(config: &mut AppConfig) {
+    // Sizing drought fix (2026-09-06): paper floor 0.25 -> 0.10. The WQS x
+    // confidence x hybrid x regime(0.8) sizer chain computed 0.108-0.131 SOL
+    // against the 0.25 floor -> POSITION_SIZE_ZERO on 100% of BUY flow
+    // (1,074 rejections in 5d; admissions 0 for 2 consecutive days). REVERT
+    // if sub-0.25 entries are net-negative over ~50 signals.
+    if let Ok(v) = std::env::var("CHIMERA_POSITION_SIZING__MIN_SIZE_SOL") {
+        if let Ok(min_size) = rust_decimal::Decimal::from_str_exact(&v) {
+            config.position_sizing.min_size_sol = min_size;
+            tracing::info!(
+                min_size_sol = %min_size,
+                "position_sizing.min_size_sol overridden from CHIMERA_POSITION_SIZING__MIN_SIZE_SOL"
+            );
+        } else {
+            tracing::warn!(
+                value = %v,
+                "CHIMERA_POSITION_SIZING__MIN_SIZE_SOL is not a valid decimal — ignoring"
+            );
+        }
+    }
 }
 
 /// Generate daily trading summary from database
@@ -4358,6 +4393,8 @@ async fn generate_daily_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Env vars are process-global; serialize tests that set/remove them.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_validate_jwt_secret_too_short() {
@@ -4394,6 +4431,40 @@ mod tests {
         assert_eq!(secret.len(), 64);
         assert!(secret.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(validate_jwt_secret(&secret).is_ok());
+    }
+
+    /// The sizer-floor env override must bind; without it the paper book
+    /// dead-locks at the YAML floor (observed 2026-09-06: the deployed env
+    /// var was present in the container but the sizer kept logging min_size
+    /// 0.25 and every BUY died at POSITION_SIZE_ZERO for 2 days).
+    #[test]
+    fn test_chimera_env_overrides_min_size_sol() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("CHIMERA_POSITION_SIZING__MIN_SIZE_SOL", "0.10");
+        let mut config = AppConfig::load_config().unwrap();
+        // Baseline is cwd-dependent (YAML 0.25 in prod, default 0.05 in the
+        // test cwd) — only the override result is asserted.
+        apply_chimera_env_overrides(&mut config);
+        assert_eq!(
+            config.position_sizing.min_size_sol,
+            rust_decimal::Decimal::new(10, 2),
+            "env override must set the sizer floor to 0.10"
+        );
+        std::env::remove_var("CHIMERA_POSITION_SIZING__MIN_SIZE_SOL");
+    }
+
+    #[test]
+    fn test_chimera_env_overrides_ignores_garbage() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("CHIMERA_POSITION_SIZING__MIN_SIZE_SOL", "not-a-number");
+        let mut config = AppConfig::load_config().unwrap();
+        let before = config.position_sizing.min_size_sol;
+        apply_chimera_env_overrides(&mut config);
+        assert_eq!(
+            config.position_sizing.min_size_sol, before,
+            "invalid env value must be ignored (fail-open to YAML/default)"
+        );
+        std::env::remove_var("CHIMERA_POSITION_SIZING__MIN_SIZE_SOL");
     }
 
     #[test]
