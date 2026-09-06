@@ -80,3 +80,33 @@ def test_bootstrap_ci_deterministic_and_sane():
 
 def test_bootstrap_ci_empty():
     assert bootstrap_ci([], n_boot=100, seed=1) == (0.0, 0.0)
+
+
+# ── Pivot-A: mirror shadow-validation on the dune cohort ────────────────
+from scout.scripts.cluster_revalidation import (
+    evaluate_go_bar,
+    summarize_mirror,
+)
+
+
+def test_evaluate_go_bar_frozen_thresholds():
+    # Below n bar → fail even with great stats.
+    assert evaluate_go_bar({"n": 299, "avg_pnl": 5.0, "ci_lo": 1.0}) is False
+    # Negative mean → fail even with big n.
+    assert evaluate_go_bar({"n": 400, "avg_pnl": -1.0, "ci_lo": 0.5}) is False
+    # CI-lo <= 0 → fail.
+    assert evaluate_go_bar({"n": 400, "avg_pnl": 2.0, "ci_lo": 0.0}) is False
+    assert evaluate_go_bar({"n": 400, "avg_pnl": 2.0, "ci_lo": -0.1}) is False
+    # All three cleared → pass.
+    assert evaluate_go_bar({"n": 400, "avg_pnl": 2.0, "ci_lo": 0.3}) is True
+
+
+def test_summarize_mirror_counts_cohort_only(monkeypatch):
+    from scout.scripts import cluster_revalidation as cr
+
+    rows = [("dune_1", 12.0), ("dune_2", -3.0), ("live_1", 100.0)]
+    monkeypatch.setattr(cr, "load_mirror_exits", lambda days: rows)
+    out = cr.summarize_mirror(days=14)
+    assert out["n"] == 2, "live-path rows must be excluded"
+    assert out["win_rate"] == 0.5
+    assert out["avg_pnl"] == 4.5

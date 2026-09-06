@@ -212,7 +212,14 @@ def main(argv=None) -> int:
     ap.add_argument("--bootstrap-n", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=20260906)
     ap.add_argument("--json", action="store_true", help="emit JSON instead of markdown")
+    ap.add_argument("--mirror-validation", type=int, metavar="DAYS",
+                    help="run the Pivot-A mirror shadow-validation verdict")
     args = ap.parse_args(argv)
+
+    if args.mirror_validation:
+        result = run_mirror_validation(args.mirror_validation)
+        print(json.dumps(result, indent=2, default=str))
+        return 0 if result["meets_go_bar"] else 1
 
     results = run_analysis(args.days, args.window_hours, args.min_gap_s,
                            args.min_span_s, args.bootstrap_n, args.seed)
@@ -236,3 +243,64 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# ── Pivot-A: mirror-first shadow validation on the dune cohort ──────────
+# Pre-registered GO bar (frozen 2026-09-07, before collection starts):
+#   n >= 300 AND avg_pnl > 0 AND bootstrap 95% CI lower bound > 0
+# window: >= 14 days of collection, seed 20260907. Verdict consumed from
+# run_mirror_validation output verbatim — no post-hoc threshold tuning.
+
+MIN_MIRROR_N = 300
+
+MIRROR_EXITS_SQL = """
+SELECT s.shadow_id,
+       e.pnl_pct::float8
+FROM shadow_positions s
+JOIN shadow_exits e USING (shadow_id)
+WHERE e.exit_strategy = 'mirror_main'
+  AND e.exited_at > NOW() - make_interval(days => %s)
+  AND (
+        s.shadow_id LIKE 'dune\\_%'
+        OR s.wallet_address IN (
+            SELECT DISTINCT wallet_address FROM shadow_positions
+            WHERE shadow_id LIKE 'dune\\_%')
+      )
+"""
+
+
+def load_mirror_exits(days: int):
+    """[(shadow_id, pnl_pct)] for mirror_main exits on the dune cohort."""
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(MIRROR_EXITS_SQL, (days,))
+        return cur.fetchall()
+
+
+def summarize_mirror(days: int) -> dict:
+    # Cohort filter is defense-in-depth: the SQL already scopes to the dune
+    # cohort, but a mock/stub (or future SQL drift) must not silently admit
+    # live-path rows into the validation sample.
+    pnls = [p for sid, p in load_mirror_exits(days) if sid.startswith("dune_")]
+    n = len(pnls)
+    ci_lo, ci_hi = bootstrap_ci(pnls, 2000, 20260907)
+    return {
+        "n": n,
+        "avg_pnl": sum(pnls) / n if n else 0.0,
+        "win_rate": sum(1 for p in pnls if p > 0) / n if n else 0.0,
+        "ci_lo": ci_lo,
+        "ci_hi": ci_hi,
+    }
+
+
+def evaluate_go_bar(metrics: dict) -> bool:
+    return (
+        metrics["n"] >= MIN_MIRROR_N
+        and metrics["avg_pnl"] > 0.0
+        and metrics["ci_lo"] > 0.0
+    )
+
+
+def run_mirror_validation(days: int) -> dict:
+    metrics = summarize_mirror(days)
+    metrics["meets_go_bar"] = evaluate_go_bar(metrics)
+    return metrics
