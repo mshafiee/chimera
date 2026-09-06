@@ -45,6 +45,10 @@ STRATEGIES = ("wallet_sell", "fixed_24h", "fixed_4h")
 MIN_BUCKET_N = 300
 MIN_AVG_PNL_PCT = 0.0
 
+# NOTE: strategy lives on shadow_exits.exit_strategy, NOT on
+# shadow_positions.strategy (which is mostly NULL) — the same attribution
+# mistake §1.2 made. We therefore attribute ALL positions once, then bucket
+# exits by exit_strategy downstream.
 ATTRIBUTION_SQL = """
 WITH tracked AS (
     SELECT s.shadow_id,
@@ -53,7 +57,6 @@ WITH tracked AS (
            s.opened_at
     FROM shadow_positions s
     WHERE s.opened_at > NOW() - make_interval(days => %s)
-      AND s.strategy = %s
 ),
 arrivals AS (
     SELECT t.shadow_id, o.wallet_address, MIN(o.opened_at) AS arrival
@@ -75,6 +78,7 @@ EXITS_SQL = """
 SELECT COALESCE(pnl_pct, 0)::float8
 FROM shadow_exits
 WHERE shadow_id = %s
+  AND exit_strategy = %s
 """
 
 
@@ -118,14 +122,14 @@ def bootstrap_ci(values, n_boot: int, seed: int, confidence: float = 0.95):
 
 
 def load_attributions(days: int, window_hours: int, strategy: str):
-    """[(shadow_id, cluster_size, [arrival,...])] for one strategy."""
+    """[(shadow_id, cluster_size, [arrival,...])] — strategy-agnostic."""
     with connect() as conn, conn.cursor() as cur:
-        cur.execute(ATTRIBUTION_SQL, (days, strategy, window_hours))
+        cur.execute(ATTRIBUTION_SQL, (days, window_hours))
         return cur.fetchall()
 
 
 def summarize(rows, apply_dispersion: bool, min_gap_s: int, min_span_s: int,
-              bootstrap_n: int, seed: int) -> dict:
+              bootstrap_n: int, seed: int, strategy: str) -> dict:
     """bucket -> {n, win_rate, avg_pnl, ci_lo, ci_hi} over joined exits."""
     pnl_by_bucket: dict[str, list[float]] = defaultdict(list)
     with connect() as conn, conn.cursor() as cur:
@@ -134,7 +138,7 @@ def summarize(rows, apply_dispersion: bool, min_gap_s: int, min_span_s: int,
                 size < 3 or not passes_dispersion(arrivals, min_gap_s, min_span_s)
             ):
                 continue
-            cur.execute(EXITS_SQL, (shadow_id,))
+            cur.execute(EXITS_SQL, (shadow_id, strategy))
             pnl_by_bucket[bucket_for_count(size)].extend(r[0] for r in cur.fetchall())
 
     out = {}
@@ -158,9 +162,10 @@ def run_analysis(days: int, window_hours: int, min_gap_s: int, min_span_s: int,
     for strategy in STRATEGIES:
         rows = load_attributions(days, window_hours, strategy)
         results[strategy] = {
-            "all": summarize(rows, False, min_gap_s, min_span_s, bootstrap_n, seed),
+            "all": summarize(rows, False, min_gap_s, min_span_s, bootstrap_n, seed,
+                             strategy),
             "dispersion": summarize(rows, True, min_gap_s, min_span_s,
-                                    bootstrap_n, seed),
+                                    bootstrap_n, seed, strategy),
         }
     return results
 

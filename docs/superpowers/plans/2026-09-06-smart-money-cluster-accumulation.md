@@ -20,6 +20,10 @@
 > - **Gate 0:** Recover/locate the §1.2 query; audit for lookahead & survivorship bias. Fix signal ingestion so every tracked-wallet BUY is recorded (`smart_money_signals`-style, pre-admission) and `consensus_wallet_count` is actually populated. Expand the roster so consensus is testable.
 > - **Gate 1:** Re-test the cluster hypothesis on repaired data with a pre-registered definition (window, liquidity floor, archetype filters). If cluster EV is confirmed negative, pivot strategy (e.g., high-conviction solo swingers) — do not build the engine.
 > - **Gate 2:** Only then apply the reviewed engine fixes (stale `EVALUATING` lease takeover, status-aware cooldown, atomic portfolio cap in the reservation INSERT, canonical UI token units, `mpsc`-decoupled webhook ingestion, `CloseAccount` on terminal exits) and proceed to Phase 1.
+>
+> **Gate 0 outcome (2026-09-06):** §1.2 query unrecoverable (no artifact in repo). Ingestion fix shipped: migration `0023`+`0024` (`smart_money_signals`, pre-admission, idempotent, live in prod), durable 12h consensus attribution in `selection.rs` step 7. See `docs/superpowers/plans/2026-09-06-gate0-gate1-signal-recording-revalidation.md`.
+>
+> **Gate 1 outcome (2026-09-06): PIVOT.** Pre-registered rule (n≥300, avg>0, bootstrap 95% CI-lo>0) rejected every 3+ cluster bucket across wallet_sell/fixed_24h/fixed_4h — all negative: −5.37% / −7.86% / −3.28%. Pairs are the worst bucket (−6.5% to −12.7%); solo is also negative. Edge is in wallet selection, not cluster size. Full results: `docs/superpowers/analysis/2026-09-06-cluster-revalidation-results.md`. **Engine remains HELD — pivot review required.**
 
 ---
 
