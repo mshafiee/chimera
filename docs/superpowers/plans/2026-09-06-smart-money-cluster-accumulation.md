@@ -1,9 +1,25 @@
 # Smart Money Cluster Accumulation Engine Implementation Plan
 
 **Date:** 2026-09-06  
-**Status:** APPROVED — ARCHITECTURAL SHOWSTOPPERS & EDGE CASES RESOLVED  
+**Status:** ⛔ HELD FOR EMPIRICAL RE-VALIDATION (was: APPROVED)  
 **Branch:** `engine/cluster-accumulation` (Legacy archived at `archive/v1-copy-trading-legacy`)  
 **Scope:** Pivot Chimera from reactive 1:1 micro copy-trading to an automated Smart Money Cluster Accumulation Engine.
+
+---
+
+> ## ⛔ HOLD NOTICE — 2026-09-06 Production Audit
+>
+> The empirical foundation in §1.2 **does not reproduce against the production database** and may not be used to justify Phase 1:
+>
+> 1. **The cluster dimension was never recorded.** `shadow_positions.consensus_wallet_count` contains only `1` (205 rows) or `NULL` (26,317 rows). `decision_records`: 178,307 NULL / 2,430× count=1 / **1× count=2**. Zero ≥3-wallet clusters have ever been observed by the pipeline.
+> 2. **Root cause (aggregator deadlock, confirmed):** `SignalAggregator::add_signal` (`infra/src/monitoring/signal_aggregator.rs:105`) only counts signals from the tracked roster. The roster currently has **5 ACTIVE wallets** (`SELECT status, COUNT(*) FROM wallets` → 5 ACTIVE / 57 PROVING), making multi-wallet consensus unobservable. §1.1 already names this defect; §1.2 presents statistics it could not have produced.
+> 3. **No generating artifact exists.** No script/query in the repo produces §1.2's table. Provenance unknown — treat those numbers as unvalidated until the exact query is recovered and reviewed for lookahead/survivorship bias.
+> 4. **Honest 12h token-window self-join reconstruction INVERTS the result** (trailing 30d): wallet_sell solo −2.02% (n=8,424), pair −6.31% (n=1,489), 3+ cluster **−5.32%** (n=761); fixed_24h 3+ **−8.03%** (n=729) vs. claimed +4.56%. The only profitable historical signal is the retired `dune_wallet` strategy (+52% avg, ended 2026-08-07) — wallet selection alpha, not a cluster property.
+>
+> **Re-validation sequence before any Phase 1 work:**
+> - **Gate 0:** Recover/locate the §1.2 query; audit for lookahead & survivorship bias. Fix signal ingestion so every tracked-wallet BUY is recorded (`smart_money_signals`-style, pre-admission) and `consensus_wallet_count` is actually populated. Expand the roster so consensus is testable.
+> - **Gate 1:** Re-test the cluster hypothesis on repaired data with a pre-registered definition (window, liquidity floor, archetype filters). If cluster EV is confirmed negative, pivot strategy (e.g., high-conviction solo swingers) — do not build the engine.
+> - **Gate 2:** Only then apply the reviewed engine fixes (stale `EVALUATING` lease takeover, status-aware cooldown, atomic portfolio cap in the reservation INSERT, canonical UI token units, `mpsc`-decoupled webhook ingestion, `CloseAccount` on terminal exits) and proceed to Phase 1.
 
 ---
 
