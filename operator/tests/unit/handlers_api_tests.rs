@@ -98,6 +98,67 @@ async fn list_positions_empty_and_with_state_filter() {
     assert_eq!(body["positions"][0]["state"], "ACTIVE");
 }
 
+/// `status` is accepted as an alias for `state` on the positions list.
+/// The old behavior silently ignored `?status=ACTIVE` and returned the whole
+/// book — a read-only footgun for anything polling with the wrong param.
+#[tokio::test]
+async fn list_positions_status_param_aliased_to_state() {
+    let h = build(test_config()).await;
+
+    seed_wallet(&h.pool, WALLET_A, "ACTIVE", Some(80.0)).await;
+    seed_trade(
+        &h.pool, "t1", WALLET_A, TOKEN_A, "BUY", "ACTIVE", "SHIELD", "1.5", None,
+    )
+    .await;
+    seed_position(
+        &h.pool, "t1", WALLET_A, TOKEN_A, "SHIELD", "ACTIVE", "1.5", "0.01", None,
+    )
+    .await;
+    seed_trade(
+        &h.pool, "t3", WALLET_A, TOKEN_A, "BUY", "CLOSED", "SHIELD", "1.0", None,
+    )
+    .await;
+    seed_position(
+        &h.pool,
+        "t3",
+        WALLET_A,
+        TOKEN_A,
+        "SHIELD",
+        "CLOSED",
+        "1.0",
+        "0.03",
+        Some(chrono::Utc::now()),
+    )
+    .await;
+
+    // Unfiltered: both positions.
+    let resp = api_get(&h.app, "/api/v1/positions", Default::default()).await;
+    assert_eq!(json_body(resp).await["total"], 2);
+
+    // Alias: ?status=ACTIVE filters exactly like ?state=ACTIVE.
+    let resp = api_get(
+        &h.app,
+        "/api/v1/positions?status=ACTIVE",
+        Default::default(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    assert_eq!(body["total"], 1);
+    assert_eq!(body["positions"][0]["state"], "ACTIVE");
+
+    // Canonical param still wins when both are present.
+    let resp = api_get(
+        &h.app,
+        "/api/v1/positions?state=CLOSED&status=ACTIVE",
+        Default::default(),
+    )
+    .await;
+    let body = json_body(resp).await;
+    assert_eq!(body["total"], 1);
+    assert_eq!(body["positions"][0]["state"], "CLOSED");
+}
+
 #[tokio::test]
 async fn get_position_found_and_not_found() {
     let h = build(test_config()).await;

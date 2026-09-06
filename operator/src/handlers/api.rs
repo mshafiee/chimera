@@ -18,15 +18,15 @@ use std::sync::Arc;
 use crate::circuit_breaker::CircuitBreaker;
 use crate::config::AppConfig;
 use crate::db_abstraction::{
-    trades_to_csv, trades_to_pdf, ConfigAuditItem, Database, DbPool, DeadLetterItem,
-    LatencyBucket, PositionDetail, TradeDetail, UpdateTradeStatus, WalletDetail,
+    trades_to_csv, trades_to_pdf, ConfigAuditItem, Database, DbPool, DeadLetterItem, LatencyBucket,
+    PositionDetail, TradeDetail, UpdateTradeStatus, WalletDetail,
 };
 use crate::error::{AppError, AppResult};
+use crate::metrics::QueryLatencyStats;
 use crate::middleware::{AuthExtension, Role};
-use crate::{Signal, SignalPayload};
 use crate::monitoring::signal_aggregator::SignalAggregator;
 use crate::notifications::{CompositeNotifier, NotificationEvent};
-use crate::metrics::QueryLatencyStats;
+use crate::{Signal, SignalPayload};
 use rust_decimal::prelude::*;
 use solana_sdk::pubkey::Pubkey;
 
@@ -72,8 +72,13 @@ pub struct ApiState {
 /// Query parameters for positions list
 #[derive(Debug, Deserialize)]
 pub struct PositionsQuery {
-    /// Filter by state: ACTIVE, EXITING, CLOSED
+    /// Filter by state: ACTIVE, EXITING, CLOSED.
+    /// `status` accepted as an alias — the dashboard history previously sent
+    /// `?status=ACTIVE`, which was silently ignored and returned the full
+    /// book (read-only footgun, found 2026-09-06).
     pub state: Option<String>,
+    /// Alias for `state`; takes effect only when `state` is absent.
+    pub status: Option<String>,
 }
 
 /// Response for positions list
@@ -92,7 +97,8 @@ pub async fn list_positions(
     State(state): State<Arc<ApiState>>,
     Query(params): Query<PositionsQuery>,
 ) -> Result<Json<PositionsResponse>, AppError> {
-    let positions = state.db.get_positions(params.state.as_deref()).await?;
+    let state_filter = params.state.or(params.status);
+    let positions = state.db.get_positions(state_filter.as_deref()).await?;
     let total = positions.len();
 
     // Calculate total unrealized PnL from active positions
@@ -299,11 +305,9 @@ pub async fn update_wallet(
                 "TTL hours cannot be negative".to_string(),
             ));
         }
-        Some(h) => Some(
-            i32::try_from(h).map_err(|_| {
-                AppError::Validation(format!("TTL hours out of range: {} (max: {})", h, i32::MAX))
-            })?,
-        ),
+        Some(h) => Some(i32::try_from(h).map_err(|_| {
+            AppError::Validation(format!("TTL hours out of range: {} (max: {})", h, i32::MAX))
+        })?),
         None => None,
     };
 
@@ -316,12 +320,7 @@ pub async fn update_wallet(
     // Update wallet
     let updated = state
         .db
-        .update_wallet_status_ext(
-            &address,
-            &body.status,
-            ttl_hours,
-            body.reason.as_deref(),
-        )
+        .update_wallet_status_ext(&address, &body.status, ttl_hours, body.reason.as_deref())
         .await?;
 
     if !updated {
@@ -467,8 +466,8 @@ pub async fn update_wallet(
     }
 
     // Trigger automatic webhook cleanup for demoted wallet
-    let was_demoted = existing.as_ref().map(|w| w.status.as_str()) == Some("ACTIVE")
-        && body.status != "ACTIVE";
+    let was_demoted =
+        existing.as_ref().map(|w| w.status.as_str()) == Some("ACTIVE") && body.status != "ACTIVE";
 
     if was_demoted {
         let config = state.config.read().await;
@@ -945,11 +944,7 @@ pub async fn get_config(
                 .shield_max_pct
                 .to_f64()
                 .unwrap_or(0.0),
-            spear_max_pct: config
-                .position_sizing
-                .spear_max_pct
-                .to_f64()
-                .unwrap_or(0.0),
+            spear_max_pct: config.position_sizing.spear_max_pct.to_f64().unwrap_or(0.0),
             proven_size_pct: config
                 .position_sizing
                 .proven_size_pct
@@ -1058,708 +1053,710 @@ pub async fn update_config(
             // audit_entries: Vec<(key, old_value, new_value)>
             let mut audit_entries: Vec<(String, Option<String>, String)> = Vec::new();
 
-        // Update circuit breakers if provided
-        if let Some(cb) = body.circuit_breakers {
-            if let Some(v) = cb.max_loss_24h {
-                use rust_decimal::prelude::*;
-                let old = config.circuit_breakers.max_loss_24h_usd;
-                config.circuit_breakers.max_loss_24h_usd =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "circuit_breakers.max_loss_24h".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
+            // Update circuit breakers if provided
+            if let Some(cb) = body.circuit_breakers {
+                if let Some(v) = cb.max_loss_24h {
+                    use rust_decimal::prelude::*;
+                    let old = config.circuit_breakers.max_loss_24h_usd;
+                    config.circuit_breakers.max_loss_24h_usd =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "circuit_breakers.max_loss_24h".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = cb.max_consecutive_losses {
+                    let old = config.circuit_breakers.max_consecutive_losses;
+                    config.circuit_breakers.max_consecutive_losses = v;
+                    audit_entries.push((
+                        "circuit_breakers.max_consecutive_losses".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = cb.max_drawdown_percent {
+                    use rust_decimal::prelude::*;
+                    let old = config.circuit_breakers.max_drawdown_percent;
+                    config.circuit_breakers.max_drawdown_percent =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "circuit_breakers.max_drawdown_percent".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = cb.cool_down_minutes {
+                    let old = config.circuit_breakers.cooldown_minutes;
+                    config.circuit_breakers.cooldown_minutes = v;
+                    audit_entries.push((
+                        "circuit_breakers.cooldown_minutes".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
             }
-            if let Some(v) = cb.max_consecutive_losses {
-                let old = config.circuit_breakers.max_consecutive_losses;
-                config.circuit_breakers.max_consecutive_losses = v;
-                audit_entries.push((
-                    "circuit_breakers.max_consecutive_losses".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = cb.max_drawdown_percent {
-                use rust_decimal::prelude::*;
-                let old = config.circuit_breakers.max_drawdown_percent;
-                config.circuit_breakers.max_drawdown_percent =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "circuit_breakers.max_drawdown_percent".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = cb.cool_down_minutes {
-                let old = config.circuit_breakers.cooldown_minutes;
-                config.circuit_breakers.cooldown_minutes = v;
-                audit_entries.push((
-                    "circuit_breakers.cooldown_minutes".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-        }
 
-        // Update strategy allocation if provided
-        // FIX 3: Always validate sum regardless of which field is provided
-        if let Some(sa) = body.strategy_allocation {
-            // Apply any provided values on top of current config, then validate sum
-            let new_shield = sa.shield_percent.unwrap_or(config.strategy.shield_percent);
-            let new_spear = sa.spear_percent.unwrap_or(config.strategy.spear_percent);
-            if new_shield + new_spear != 100 {
-                return Err(AppError::Validation(format!(
-                    "Strategy allocation must sum to 100% (shield: {} + spear: {} = {})",
-                    new_shield,
-                    new_spear,
-                    new_shield + new_spear,
-                )));
-            }
-            let old_shield = config.strategy.shield_percent;
-            let old_spear = config.strategy.spear_percent;
-            config.strategy.shield_percent = new_shield;
-            config.strategy.spear_percent = new_spear;
-            audit_entries.push((
-                "strategy.allocation".to_string(),
-                Some(format!("shield:{}/spear:{}", old_shield, old_spear)),
-                format!("shield:{}/spear:{}", new_shield, new_spear),
-            ));
-        }
-
-        // Update strategy position limits if provided
-        if let Some(s) = body.strategy {
-            if let Some(v) = s.max_position_sol {
-                use rust_decimal::prelude::*;
-                let old = config.strategy.max_position_sol;
-                config.strategy.max_position_sol =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "strategy.max_position_sol".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = s.min_position_sol {
-                use rust_decimal::prelude::*;
-                let old = config.strategy.min_position_sol;
-                config.strategy.min_position_sol =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "strategy.min_position_sol".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-        }
-
-        // Update monitoring if provided
-        if let Some(m) = body.monitoring {
-            if config.monitoring.is_none() {
-                config.monitoring = Some(crate::config::MonitoringConfig::default());
-            }
-            if let Some(ref mut mon) = config.monitoring {
-                if let Some(v) = m.enabled {
-                    let old = mon.enabled;
-                    mon.enabled = v;
-                    audit_entries.push((
-                        "monitoring.enabled".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
-                }
-                if let Some(v) = m.webhook_registration_batch_size {
-                    let old = mon.webhook_registration_batch_size;
-                    mon.webhook_registration_batch_size = v;
-                    audit_entries.push((
-                        "monitoring.webhook_registration_batch_size".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
-                }
-                if let Some(v) = m.webhook_registration_delay_ms {
-                    let old = mon.webhook_registration_delay_ms;
-                    mon.webhook_registration_delay_ms = v;
-                    audit_entries.push((
-                        "monitoring.webhook_registration_delay_ms".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
-                }
-                if let Some(v) = m.webhook_processing_rate_limit {
-                    if v > 50 {
-                        return Err(AppError::Validation(
-                            "Webhook rate limit cannot exceed 50 req/sec (Helius limit)"
-                                .to_string(),
-                        ));
-                    }
-                    let old = mon.webhook_processing_rate_limit;
-                    mon.webhook_processing_rate_limit = v;
-                    audit_entries.push((
-                        "monitoring.webhook_processing_rate_limit".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
-                }
-                if let Some(v) = m.rpc_polling_enabled {
-                    let old = mon.rpc_polling_enabled;
-                    mon.rpc_polling_enabled = v;
-                    audit_entries.push((
-                        "monitoring.rpc_polling_enabled".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
-                }
-                if let Some(v) = m.rpc_poll_interval_secs {
-                    let old = mon.rpc_poll_interval_secs;
-                    mon.rpc_poll_interval_secs = v;
-                    audit_entries.push((
-                        "monitoring.rpc_poll_interval_secs".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
-                }
-                if let Some(v) = m.rpc_poll_batch_size {
-                    let old = mon.rpc_poll_batch_size;
-                    mon.rpc_poll_batch_size = v;
-                    audit_entries.push((
-                        "monitoring.rpc_poll_batch_size".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
-                }
-                if let Some(v) = m.rpc_poll_rate_limit {
-                    if v > 50 {
-                        return Err(AppError::Validation(
-                            "RPC poll rate limit cannot exceed 50 req/sec (Helius limit)"
-                                .to_string(),
-                        ));
-                    }
-                    let old = mon.rpc_poll_rate_limit;
-                    mon.rpc_poll_rate_limit = v;
-                    audit_entries.push((
-                        "monitoring.rpc_poll_rate_limit".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
-                }
-                if let Some(v) = m.max_active_wallets {
-                    let old = mon.max_active_wallets;
-                    mon.max_active_wallets = v;
-                    audit_entries.push((
-                        "monitoring.max_active_wallets".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
-                }
-            }
-        }
-
-        // Update profit management if provided
-        if let Some(pm) = body.profit_management {
-            if let Some(v) = pm.targets {
-                // Validate targets are positive and ascending
-                let mut prev = Decimal::ZERO;
-                for target in &v {
-                    let target_dec = Decimal::from_f64_retain(*target).unwrap_or(Decimal::ZERO);
-                    if target_dec <= prev {
-                        return Err(AppError::Validation(
-                            "Profit targets must be positive and in ascending order".to_string(),
-                        ));
-                    }
-                    prev = target_dec;
-                }
-                let old = format!("{:?}", config.profit_management.targets);
-                config.profit_management.targets = v
-                    .iter()
-                    .map(|t| Decimal::from_f64_retain(*t).unwrap_or(Decimal::ZERO))
-                    .collect();
-                audit_entries.push((
-                    "profit_management.targets".to_string(),
-                    Some(old),
-                    format!("{:?}", v),
-                ));
-            }
-            if let Some(v) = pm.tiered_exit_percent {
-                if !(0.0..=100.0).contains(&v) {
-                    return Err(AppError::Validation(
-                        "Tiered exit percent must be between 0 and 100".to_string(),
-                    ));
-                }
-                let old = config.profit_management.tiered_exit_percent;
-                config.profit_management.tiered_exit_percent =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "profit_management.tiered_exit_percent".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = pm.trailing_stop_activation {
-                let old = config.profit_management.trailing_stop_activation;
-                config.profit_management.trailing_stop_activation =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "profit_management.trailing_stop_activation".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = pm.trailing_stop_distance {
-                let old = config.profit_management.trailing_stop_distance;
-                config.profit_management.trailing_stop_distance =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "profit_management.trailing_stop_distance".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = pm.hard_stop_loss {
-                if !(0.0..=100.0).contains(&v) {
-                    return Err(AppError::Validation(
-                        "Hard stop loss must be between 0 and 100".to_string(),
-                    ));
-                }
-                let old = config.profit_management.max_stop_loss_distance;
-                // Config stores max_stop_loss_distance as a negative percentage (e.g. -25.0 means 25% loss).
-                // API accepts positive values (e.g. 25 = "stop at 25% loss"), so negate on store.
-                config.profit_management.max_stop_loss_distance =
-                    -Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "profit_management.hard_stop_loss".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = pm.time_exit_hours {
-                let old = config.profit_management.time_exit_hours;
-                config.profit_management.time_exit_hours = v;
-                audit_entries.push((
-                    "profit_management.time_exit_hours".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-        }
-
-        // Update position sizing if provided
-        if let Some(ps) = body.position_sizing {
-            if let Some(v) = ps.base_size_sol {
-                let v_dec = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                if v_dec < config.position_sizing.min_size_sol
-                    || v_dec > config.position_sizing.max_size_sol
-                {
+            // Update strategy allocation if provided
+            // FIX 3: Always validate sum regardless of which field is provided
+            if let Some(sa) = body.strategy_allocation {
+                // Apply any provided values on top of current config, then validate sum
+                let new_shield = sa.shield_percent.unwrap_or(config.strategy.shield_percent);
+                let new_spear = sa.spear_percent.unwrap_or(config.strategy.spear_percent);
+                if new_shield + new_spear != 100 {
                     return Err(AppError::Validation(format!(
-                        "Base size must be between {} and {} SOL",
-                        config.position_sizing.min_size_sol, config.position_sizing.max_size_sol
+                        "Strategy allocation must sum to 100% (shield: {} + spear: {} = {})",
+                        new_shield,
+                        new_spear,
+                        new_shield + new_spear,
                     )));
                 }
-                let old = config.position_sizing.base_size_sol;
-                config.position_sizing.base_size_sol = v_dec;
+                let old_shield = config.strategy.shield_percent;
+                let old_spear = config.strategy.spear_percent;
+                config.strategy.shield_percent = new_shield;
+                config.strategy.spear_percent = new_spear;
                 audit_entries.push((
-                    "position_sizing.base_size_sol".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
+                    "strategy.allocation".to_string(),
+                    Some(format!("shield:{}/spear:{}", old_shield, old_spear)),
+                    format!("shield:{}/spear:{}", new_shield, new_spear),
                 ));
             }
-            if let Some(v) = ps.max_size_sol {
-                let v_dec = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                if v_dec < config.position_sizing.base_size_sol {
-                    return Err(AppError::Validation(
-                        "Max size must be >= base size".to_string(),
-                    ));
-                }
-                let old = config.position_sizing.max_size_sol;
-                config.position_sizing.max_size_sol = v_dec;
-                audit_entries.push((
-                    "position_sizing.max_size_sol".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = ps.min_size_sol {
-                let v_dec = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                if v_dec > config.position_sizing.base_size_sol {
-                    return Err(AppError::Validation(
-                        "Min size must be <= base size".to_string(),
-                    ));
-                }
-                let old = config.position_sizing.min_size_sol;
-                config.position_sizing.min_size_sol = v_dec;
-                audit_entries.push((
-                    "position_sizing.min_size_sol".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = ps.consensus_multiplier {
-                if !(1.0..=5.0).contains(&v) {
-                    return Err(AppError::Validation(
-                        "Consensus multiplier must be between 1.0 and 5.0".to_string(),
-                    ));
-                }
-                let old = config.position_sizing.consensus_multiplier;
-                config.position_sizing.consensus_multiplier =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "position_sizing.consensus_multiplier".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = ps.max_concurrent_positions {
-                let old = config.position_sizing.max_concurrent_positions;
-                config.position_sizing.max_concurrent_positions = v;
-                audit_entries.push((
-                    "position_sizing.max_concurrent_positions".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            // Capital-relative pct fields (2026-08-20). Fractions in (0, 1].
-            if let Some(v) = ps.base_size_pct {
-                if !(0.0..=1.0).contains(&v) {
-                    return Err(AppError::Validation(
-                        "base_size_pct must be between 0.0 and 1.0".to_string(),
-                    ));
-                }
-                let old = config.position_sizing.base_size_pct;
-                config.position_sizing.base_size_pct =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "position_sizing.base_size_pct".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = ps.max_position_pct {
-                if !(0.0..=1.0).contains(&v) {
-                    return Err(AppError::Validation(
-                        "max_position_pct must be between 0.0 and 1.0".to_string(),
-                    ));
-                }
-                let old = config.position_sizing.max_position_pct;
-                config.position_sizing.max_position_pct =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "position_sizing.max_position_pct".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = ps.proven_size_pct {
-                if !(0.0..=1.0).contains(&v) {
-                    return Err(AppError::Validation(
-                        "proven_size_pct must be between 0.0 and 1.0".to_string(),
-                    ));
-                }
-                let old = config.position_sizing.proven_size_pct;
-                config.position_sizing.proven_size_pct =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "position_sizing.proven_size_pct".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = ps.shield_max_pct {
-                if !(0.0..=1.0).contains(&v) {
-                    return Err(AppError::Validation(
-                        "shield_max_pct must be between 0.0 and 1.0".to_string(),
-                    ));
-                }
-                let old = config.position_sizing.shield_max_pct;
-                config.position_sizing.shield_max_pct =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "position_sizing.shield_max_pct".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = ps.spear_max_pct {
-                if !(0.0..=1.0).contains(&v) {
-                    return Err(AppError::Validation(
-                        "spear_max_pct must be between 0.0 and 1.0".to_string(),
-                    ));
-                }
-                let old = config.position_sizing.spear_max_pct;
-                config.position_sizing.spear_max_pct =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "position_sizing.spear_max_pct".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = ps.portfolio_heat_percent {
-                if !(0.0..=1.0).contains(&v) {
-                    return Err(AppError::Validation(
-                        "portfolio_heat_percent must be between 0.0 and 1.0".to_string(),
-                    ));
-                }
-                let old = config.position_sizing.portfolio_heat_percent;
-                config.position_sizing.portfolio_heat_percent =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "position_sizing.portfolio_heat_percent".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-        }
 
-        // Update MEV protection if provided
-        if let Some(mp) = body.mev_protection {
-            if let Some(v) = mp.always_use_jito {
-                let old = config.mev_protection.always_use_jito;
-                config.mev_protection.always_use_jito = v;
-                audit_entries.push((
-                    "mev_protection.always_use_jito".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
+            // Update strategy position limits if provided
+            if let Some(s) = body.strategy {
+                if let Some(v) = s.max_position_sol {
+                    use rust_decimal::prelude::*;
+                    let old = config.strategy.max_position_sol;
+                    config.strategy.max_position_sol =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "strategy.max_position_sol".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = s.min_position_sol {
+                    use rust_decimal::prelude::*;
+                    let old = config.strategy.min_position_sol;
+                    config.strategy.min_position_sol =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "strategy.min_position_sol".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
             }
-            if let Some(v) = mp.exit_tip_sol {
-                let old = config.mev_protection.exit_tip_sol;
-                config.mev_protection.exit_tip_sol =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "mev_protection.exit_tip_sol".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = mp.consensus_tip_sol {
-                let old = config.mev_protection.consensus_tip_sol;
-                config.mev_protection.consensus_tip_sol =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "mev_protection.consensus_tip_sol".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = mp.standard_tip_sol {
-                let old = config.mev_protection.standard_tip_sol;
-                config.mev_protection.standard_tip_sol =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "mev_protection.standard_tip_sol".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-        }
 
-        // Update token safety if provided
-        if let Some(ts) = body.token_safety {
-            if let Some(v) = ts.min_liquidity_shield_usd {
-                let old = config.token_safety.min_liquidity_shield_usd;
-                config.token_safety.min_liquidity_shield_usd =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "token_safety.min_liquidity_shield_usd".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = ts.min_liquidity_spear_usd {
-                let old = config.token_safety.min_liquidity_spear_usd;
-                config.token_safety.min_liquidity_spear_usd =
-                    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-                audit_entries.push((
-                    "token_safety.min_liquidity_spear_usd".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = ts.honeypot_detection_enabled {
-                let old = config.token_safety.honeypot_detection_enabled;
-                config.token_safety.honeypot_detection_enabled = v;
-                audit_entries.push((
-                    "token_safety.honeypot_detection_enabled".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = ts.cache_capacity {
-                let old = config.token_safety.cache_capacity;
-                config.token_safety.cache_capacity = v;
-                audit_entries.push((
-                    "token_safety.cache_capacity".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = ts.cache_ttl_seconds {
-                let old = config.token_safety.cache_ttl_seconds;
-                config.token_safety.cache_ttl_seconds = v;
-                audit_entries.push((
-                    "token_safety.cache_ttl_seconds".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-        }
-
-        // Update notifications if provided
-        if let Some(n) = body.notifications {
-            if let Some(t) = n.telegram {
-                if let Some(v) = t.enabled {
-                    let old = config.notifications.telegram.enabled;
-                    config.notifications.telegram.enabled = v;
-                    audit_entries.push((
-                        "notifications.telegram.enabled".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
+            // Update monitoring if provided
+            if let Some(m) = body.monitoring {
+                if config.monitoring.is_none() {
+                    config.monitoring = Some(crate::config::MonitoringConfig::default());
                 }
-                if let Some(v) = t.rate_limit_seconds {
-                    let old = config.notifications.telegram.rate_limit_seconds;
-                    config.notifications.telegram.rate_limit_seconds = v;
-                    audit_entries.push((
-                        "notifications.telegram.rate_limit_seconds".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
-                }
-            }
-            if let Some(r) = n.rules {
-                if let Some(v) = r.circuit_breaker_triggered {
-                    let old = config.notifications.rules.circuit_breaker_triggered;
-                    config.notifications.rules.circuit_breaker_triggered = v;
-                    audit_entries.push((
-                        "notifications.rules.circuit_breaker_triggered".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
-                }
-                if let Some(v) = r.wallet_drained {
-                    let old = config.notifications.rules.wallet_drained;
-                    config.notifications.rules.wallet_drained = v;
-                    audit_entries.push((
-                        "notifications.rules.wallet_drained".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
-                }
-                if let Some(v) = r.position_exited {
-                    let old = config.notifications.rules.position_exited;
-                    config.notifications.rules.position_exited = v;
-                    audit_entries.push((
-                        "notifications.rules.position_exited".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
-                }
-                if let Some(v) = r.wallet_promoted {
-                    let old = config.notifications.rules.wallet_promoted;
-                    config.notifications.rules.wallet_promoted = v;
-                    audit_entries.push((
-                        "notifications.rules.wallet_promoted".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
-                }
-                if let Some(v) = r.daily_summary {
-                    let old = config.notifications.rules.daily_summary;
-                    config.notifications.rules.daily_summary = v;
-                    audit_entries.push((
-                        "notifications.rules.daily_summary".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
-                }
-                if let Some(v) = r.rpc_fallback {
-                    let old = config.notifications.rules.rpc_fallback;
-                    config.notifications.rules.rpc_fallback = v;
-                    audit_entries.push((
-                        "notifications.rules.rpc_fallback".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
-                }
-            }
-            if let Some(ds) = n.daily_summary {
-                if let Some(v) = ds.enabled {
-                    let old = config.notifications.daily_summary.enabled;
-                    config.notifications.daily_summary.enabled = v;
-                    audit_entries.push((
-                        "notifications.daily_summary.enabled".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
-                }
-                if let Some(v) = ds.hour_utc {
-                    if v > 23 {
-                        return Err(AppError::Validation(
-                            "Hour must be between 0 and 23".to_string(),
+                if let Some(ref mut mon) = config.monitoring {
+                    if let Some(v) = m.enabled {
+                        let old = mon.enabled;
+                        mon.enabled = v;
+                        audit_entries.push((
+                            "monitoring.enabled".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
                         ));
                     }
-                    let old = config.notifications.daily_summary.hour_utc;
-                    config.notifications.daily_summary.hour_utc = v;
-                    audit_entries.push((
-                        "notifications.daily_summary.hour_utc".to_string(),
-                        Some(old.to_string()),
-                        v.to_string(),
-                    ));
-                }
-                if let Some(v) = ds.minute {
-                    if v > 59 {
-                        return Err(AppError::Validation(
-                            "Minute must be between 0 and 59".to_string(),
+                    if let Some(v) = m.webhook_registration_batch_size {
+                        let old = mon.webhook_registration_batch_size;
+                        mon.webhook_registration_batch_size = v;
+                        audit_entries.push((
+                            "monitoring.webhook_registration_batch_size".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
                         ));
                     }
-                    let old = config.notifications.daily_summary.minute;
-                    config.notifications.daily_summary.minute = v;
+                    if let Some(v) = m.webhook_registration_delay_ms {
+                        let old = mon.webhook_registration_delay_ms;
+                        mon.webhook_registration_delay_ms = v;
+                        audit_entries.push((
+                            "monitoring.webhook_registration_delay_ms".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
+                        ));
+                    }
+                    if let Some(v) = m.webhook_processing_rate_limit {
+                        if v > 50 {
+                            return Err(AppError::Validation(
+                                "Webhook rate limit cannot exceed 50 req/sec (Helius limit)"
+                                    .to_string(),
+                            ));
+                        }
+                        let old = mon.webhook_processing_rate_limit;
+                        mon.webhook_processing_rate_limit = v;
+                        audit_entries.push((
+                            "monitoring.webhook_processing_rate_limit".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
+                        ));
+                    }
+                    if let Some(v) = m.rpc_polling_enabled {
+                        let old = mon.rpc_polling_enabled;
+                        mon.rpc_polling_enabled = v;
+                        audit_entries.push((
+                            "monitoring.rpc_polling_enabled".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
+                        ));
+                    }
+                    if let Some(v) = m.rpc_poll_interval_secs {
+                        let old = mon.rpc_poll_interval_secs;
+                        mon.rpc_poll_interval_secs = v;
+                        audit_entries.push((
+                            "monitoring.rpc_poll_interval_secs".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
+                        ));
+                    }
+                    if let Some(v) = m.rpc_poll_batch_size {
+                        let old = mon.rpc_poll_batch_size;
+                        mon.rpc_poll_batch_size = v;
+                        audit_entries.push((
+                            "monitoring.rpc_poll_batch_size".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
+                        ));
+                    }
+                    if let Some(v) = m.rpc_poll_rate_limit {
+                        if v > 50 {
+                            return Err(AppError::Validation(
+                                "RPC poll rate limit cannot exceed 50 req/sec (Helius limit)"
+                                    .to_string(),
+                            ));
+                        }
+                        let old = mon.rpc_poll_rate_limit;
+                        mon.rpc_poll_rate_limit = v;
+                        audit_entries.push((
+                            "monitoring.rpc_poll_rate_limit".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
+                        ));
+                    }
+                    if let Some(v) = m.max_active_wallets {
+                        let old = mon.max_active_wallets;
+                        mon.max_active_wallets = v;
+                        audit_entries.push((
+                            "monitoring.max_active_wallets".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
+                        ));
+                    }
+                }
+            }
+
+            // Update profit management if provided
+            if let Some(pm) = body.profit_management {
+                if let Some(v) = pm.targets {
+                    // Validate targets are positive and ascending
+                    let mut prev = Decimal::ZERO;
+                    for target in &v {
+                        let target_dec = Decimal::from_f64_retain(*target).unwrap_or(Decimal::ZERO);
+                        if target_dec <= prev {
+                            return Err(AppError::Validation(
+                                "Profit targets must be positive and in ascending order"
+                                    .to_string(),
+                            ));
+                        }
+                        prev = target_dec;
+                    }
+                    let old = format!("{:?}", config.profit_management.targets);
+                    config.profit_management.targets = v
+                        .iter()
+                        .map(|t| Decimal::from_f64_retain(*t).unwrap_or(Decimal::ZERO))
+                        .collect();
                     audit_entries.push((
-                        "notifications.daily_summary.minute".to_string(),
+                        "profit_management.targets".to_string(),
+                        Some(old),
+                        format!("{:?}", v),
+                    ));
+                }
+                if let Some(v) = pm.tiered_exit_percent {
+                    if !(0.0..=100.0).contains(&v) {
+                        return Err(AppError::Validation(
+                            "Tiered exit percent must be between 0 and 100".to_string(),
+                        ));
+                    }
+                    let old = config.profit_management.tiered_exit_percent;
+                    config.profit_management.tiered_exit_percent =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "profit_management.tiered_exit_percent".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = pm.trailing_stop_activation {
+                    let old = config.profit_management.trailing_stop_activation;
+                    config.profit_management.trailing_stop_activation =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "profit_management.trailing_stop_activation".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = pm.trailing_stop_distance {
+                    let old = config.profit_management.trailing_stop_distance;
+                    config.profit_management.trailing_stop_distance =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "profit_management.trailing_stop_distance".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = pm.hard_stop_loss {
+                    if !(0.0..=100.0).contains(&v) {
+                        return Err(AppError::Validation(
+                            "Hard stop loss must be between 0 and 100".to_string(),
+                        ));
+                    }
+                    let old = config.profit_management.max_stop_loss_distance;
+                    // Config stores max_stop_loss_distance as a negative percentage (e.g. -25.0 means 25% loss).
+                    // API accepts positive values (e.g. 25 = "stop at 25% loss"), so negate on store.
+                    config.profit_management.max_stop_loss_distance =
+                        -Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "profit_management.hard_stop_loss".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = pm.time_exit_hours {
+                    let old = config.profit_management.time_exit_hours;
+                    config.profit_management.time_exit_hours = v;
+                    audit_entries.push((
+                        "profit_management.time_exit_hours".to_string(),
                         Some(old.to_string()),
                         v.to_string(),
                     ));
                 }
             }
-        }
 
-        // Update queue if provided
-        if let Some(q) = body.queue {
-            if let Some(v) = q.capacity {
-                let old = config.queue.capacity;
-                config.queue.capacity = v;
-                audit_entries.push((
-                    "queue.capacity".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
-            }
-            if let Some(v) = q.load_shed_threshold_percent {
-                if v > 100 {
-                    return Err(AppError::Validation(
-                        "Load shed threshold must be <= 100%".to_string(),
+            // Update position sizing if provided
+            if let Some(ps) = body.position_sizing {
+                if let Some(v) = ps.base_size_sol {
+                    let v_dec = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    if v_dec < config.position_sizing.min_size_sol
+                        || v_dec > config.position_sizing.max_size_sol
+                    {
+                        return Err(AppError::Validation(format!(
+                            "Base size must be between {} and {} SOL",
+                            config.position_sizing.min_size_sol,
+                            config.position_sizing.max_size_sol
+                        )));
+                    }
+                    let old = config.position_sizing.base_size_sol;
+                    config.position_sizing.base_size_sol = v_dec;
+                    audit_entries.push((
+                        "position_sizing.base_size_sol".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
                     ));
                 }
-                let old = config.queue.load_shed_threshold_percent;
-                config.queue.load_shed_threshold_percent = v;
-                audit_entries.push((
-                    "queue.load_shed_threshold_percent".to_string(),
-                    Some(old.to_string()),
-                    v.to_string(),
-                ));
+                if let Some(v) = ps.max_size_sol {
+                    let v_dec = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    if v_dec < config.position_sizing.base_size_sol {
+                        return Err(AppError::Validation(
+                            "Max size must be >= base size".to_string(),
+                        ));
+                    }
+                    let old = config.position_sizing.max_size_sol;
+                    config.position_sizing.max_size_sol = v_dec;
+                    audit_entries.push((
+                        "position_sizing.max_size_sol".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = ps.min_size_sol {
+                    let v_dec = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    if v_dec > config.position_sizing.base_size_sol {
+                        return Err(AppError::Validation(
+                            "Min size must be <= base size".to_string(),
+                        ));
+                    }
+                    let old = config.position_sizing.min_size_sol;
+                    config.position_sizing.min_size_sol = v_dec;
+                    audit_entries.push((
+                        "position_sizing.min_size_sol".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = ps.consensus_multiplier {
+                    if !(1.0..=5.0).contains(&v) {
+                        return Err(AppError::Validation(
+                            "Consensus multiplier must be between 1.0 and 5.0".to_string(),
+                        ));
+                    }
+                    let old = config.position_sizing.consensus_multiplier;
+                    config.position_sizing.consensus_multiplier =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "position_sizing.consensus_multiplier".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = ps.max_concurrent_positions {
+                    let old = config.position_sizing.max_concurrent_positions;
+                    config.position_sizing.max_concurrent_positions = v;
+                    audit_entries.push((
+                        "position_sizing.max_concurrent_positions".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                // Capital-relative pct fields (2026-08-20). Fractions in (0, 1].
+                if let Some(v) = ps.base_size_pct {
+                    if !(0.0..=1.0).contains(&v) {
+                        return Err(AppError::Validation(
+                            "base_size_pct must be between 0.0 and 1.0".to_string(),
+                        ));
+                    }
+                    let old = config.position_sizing.base_size_pct;
+                    config.position_sizing.base_size_pct =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "position_sizing.base_size_pct".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = ps.max_position_pct {
+                    if !(0.0..=1.0).contains(&v) {
+                        return Err(AppError::Validation(
+                            "max_position_pct must be between 0.0 and 1.0".to_string(),
+                        ));
+                    }
+                    let old = config.position_sizing.max_position_pct;
+                    config.position_sizing.max_position_pct =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "position_sizing.max_position_pct".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = ps.proven_size_pct {
+                    if !(0.0..=1.0).contains(&v) {
+                        return Err(AppError::Validation(
+                            "proven_size_pct must be between 0.0 and 1.0".to_string(),
+                        ));
+                    }
+                    let old = config.position_sizing.proven_size_pct;
+                    config.position_sizing.proven_size_pct =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "position_sizing.proven_size_pct".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = ps.shield_max_pct {
+                    if !(0.0..=1.0).contains(&v) {
+                        return Err(AppError::Validation(
+                            "shield_max_pct must be between 0.0 and 1.0".to_string(),
+                        ));
+                    }
+                    let old = config.position_sizing.shield_max_pct;
+                    config.position_sizing.shield_max_pct =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "position_sizing.shield_max_pct".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = ps.spear_max_pct {
+                    if !(0.0..=1.0).contains(&v) {
+                        return Err(AppError::Validation(
+                            "spear_max_pct must be between 0.0 and 1.0".to_string(),
+                        ));
+                    }
+                    let old = config.position_sizing.spear_max_pct;
+                    config.position_sizing.spear_max_pct =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "position_sizing.spear_max_pct".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = ps.portfolio_heat_percent {
+                    if !(0.0..=1.0).contains(&v) {
+                        return Err(AppError::Validation(
+                            "portfolio_heat_percent must be between 0.0 and 1.0".to_string(),
+                        ));
+                    }
+                    let old = config.position_sizing.portfolio_heat_percent;
+                    config.position_sizing.portfolio_heat_percent =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "position_sizing.portfolio_heat_percent".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
             }
-        }
 
-        // FIX 4: Validate the mutated config before committing
-        if let Err(e) = config.validate() {
-            tracing::warn!(error = %e, "Config update rejected by validate()");
-            return Err(AppError::Validation(format!(
-                "Config validation failed: {}",
-                e
-            )));
-        }
+            // Update MEV protection if provided
+            if let Some(mp) = body.mev_protection {
+                if let Some(v) = mp.always_use_jito {
+                    let old = config.mev_protection.always_use_jito;
+                    config.mev_protection.always_use_jito = v;
+                    audit_entries.push((
+                        "mev_protection.always_use_jito".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = mp.exit_tip_sol {
+                    let old = config.mev_protection.exit_tip_sol;
+                    config.mev_protection.exit_tip_sol =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "mev_protection.exit_tip_sol".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = mp.consensus_tip_sol {
+                    let old = config.mev_protection.consensus_tip_sol;
+                    config.mev_protection.consensus_tip_sol =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "mev_protection.consensus_tip_sol".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = mp.standard_tip_sol {
+                    let old = config.mev_protection.standard_tip_sol;
+                    config.mev_protection.standard_tip_sol =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "mev_protection.standard_tip_sol".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+            }
 
-        Ok(audit_entries)
+            // Update token safety if provided
+            if let Some(ts) = body.token_safety {
+                if let Some(v) = ts.min_liquidity_shield_usd {
+                    let old = config.token_safety.min_liquidity_shield_usd;
+                    config.token_safety.min_liquidity_shield_usd =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "token_safety.min_liquidity_shield_usd".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = ts.min_liquidity_spear_usd {
+                    let old = config.token_safety.min_liquidity_spear_usd;
+                    config.token_safety.min_liquidity_spear_usd =
+                        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                    audit_entries.push((
+                        "token_safety.min_liquidity_spear_usd".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = ts.honeypot_detection_enabled {
+                    let old = config.token_safety.honeypot_detection_enabled;
+                    config.token_safety.honeypot_detection_enabled = v;
+                    audit_entries.push((
+                        "token_safety.honeypot_detection_enabled".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = ts.cache_capacity {
+                    let old = config.token_safety.cache_capacity;
+                    config.token_safety.cache_capacity = v;
+                    audit_entries.push((
+                        "token_safety.cache_capacity".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = ts.cache_ttl_seconds {
+                    let old = config.token_safety.cache_ttl_seconds;
+                    config.token_safety.cache_ttl_seconds = v;
+                    audit_entries.push((
+                        "token_safety.cache_ttl_seconds".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+            }
+
+            // Update notifications if provided
+            if let Some(n) = body.notifications {
+                if let Some(t) = n.telegram {
+                    if let Some(v) = t.enabled {
+                        let old = config.notifications.telegram.enabled;
+                        config.notifications.telegram.enabled = v;
+                        audit_entries.push((
+                            "notifications.telegram.enabled".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
+                        ));
+                    }
+                    if let Some(v) = t.rate_limit_seconds {
+                        let old = config.notifications.telegram.rate_limit_seconds;
+                        config.notifications.telegram.rate_limit_seconds = v;
+                        audit_entries.push((
+                            "notifications.telegram.rate_limit_seconds".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
+                        ));
+                    }
+                }
+                if let Some(r) = n.rules {
+                    if let Some(v) = r.circuit_breaker_triggered {
+                        let old = config.notifications.rules.circuit_breaker_triggered;
+                        config.notifications.rules.circuit_breaker_triggered = v;
+                        audit_entries.push((
+                            "notifications.rules.circuit_breaker_triggered".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
+                        ));
+                    }
+                    if let Some(v) = r.wallet_drained {
+                        let old = config.notifications.rules.wallet_drained;
+                        config.notifications.rules.wallet_drained = v;
+                        audit_entries.push((
+                            "notifications.rules.wallet_drained".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
+                        ));
+                    }
+                    if let Some(v) = r.position_exited {
+                        let old = config.notifications.rules.position_exited;
+                        config.notifications.rules.position_exited = v;
+                        audit_entries.push((
+                            "notifications.rules.position_exited".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
+                        ));
+                    }
+                    if let Some(v) = r.wallet_promoted {
+                        let old = config.notifications.rules.wallet_promoted;
+                        config.notifications.rules.wallet_promoted = v;
+                        audit_entries.push((
+                            "notifications.rules.wallet_promoted".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
+                        ));
+                    }
+                    if let Some(v) = r.daily_summary {
+                        let old = config.notifications.rules.daily_summary;
+                        config.notifications.rules.daily_summary = v;
+                        audit_entries.push((
+                            "notifications.rules.daily_summary".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
+                        ));
+                    }
+                    if let Some(v) = r.rpc_fallback {
+                        let old = config.notifications.rules.rpc_fallback;
+                        config.notifications.rules.rpc_fallback = v;
+                        audit_entries.push((
+                            "notifications.rules.rpc_fallback".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
+                        ));
+                    }
+                }
+                if let Some(ds) = n.daily_summary {
+                    if let Some(v) = ds.enabled {
+                        let old = config.notifications.daily_summary.enabled;
+                        config.notifications.daily_summary.enabled = v;
+                        audit_entries.push((
+                            "notifications.daily_summary.enabled".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
+                        ));
+                    }
+                    if let Some(v) = ds.hour_utc {
+                        if v > 23 {
+                            return Err(AppError::Validation(
+                                "Hour must be between 0 and 23".to_string(),
+                            ));
+                        }
+                        let old = config.notifications.daily_summary.hour_utc;
+                        config.notifications.daily_summary.hour_utc = v;
+                        audit_entries.push((
+                            "notifications.daily_summary.hour_utc".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
+                        ));
+                    }
+                    if let Some(v) = ds.minute {
+                        if v > 59 {
+                            return Err(AppError::Validation(
+                                "Minute must be between 0 and 59".to_string(),
+                            ));
+                        }
+                        let old = config.notifications.daily_summary.minute;
+                        config.notifications.daily_summary.minute = v;
+                        audit_entries.push((
+                            "notifications.daily_summary.minute".to_string(),
+                            Some(old.to_string()),
+                            v.to_string(),
+                        ));
+                    }
+                }
+            }
+
+            // Update queue if provided
+            if let Some(q) = body.queue {
+                if let Some(v) = q.capacity {
+                    let old = config.queue.capacity;
+                    config.queue.capacity = v;
+                    audit_entries.push((
+                        "queue.capacity".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+                if let Some(v) = q.load_shed_threshold_percent {
+                    if v > 100 {
+                        return Err(AppError::Validation(
+                            "Load shed threshold must be <= 100%".to_string(),
+                        ));
+                    }
+                    let old = config.queue.load_shed_threshold_percent;
+                    config.queue.load_shed_threshold_percent = v;
+                    audit_entries.push((
+                        "queue.load_shed_threshold_percent".to_string(),
+                        Some(old.to_string()),
+                        v.to_string(),
+                    ));
+                }
+            }
+
+            // FIX 4: Validate the mutated config before committing
+            if let Err(e) = config.validate() {
+                tracing::warn!(error = %e, "Config update rejected by validate()");
+                return Err(AppError::Validation(format!(
+                    "Config validation failed: {}",
+                    e
+                )));
+            }
+
+            Ok(audit_entries)
         })();
 
         match apply_result {
@@ -2054,7 +2051,10 @@ pub async fn export_trades(
             Ok((
                 StatusCode::OK,
                 [
-                    (header::CONTENT_TYPE, header::HeaderValue::from_static("application/pdf")),
+                    (
+                        header::CONTENT_TYPE,
+                        header::HeaderValue::from_static("application/pdf"),
+                    ),
                     (header::CONTENT_DISPOSITION, disposition),
                 ],
                 pdf_content,
@@ -2076,7 +2076,10 @@ pub async fn export_trades(
             Ok((
                 StatusCode::OK,
                 [
-                    (header::CONTENT_TYPE, header::HeaderValue::from_static("application/json")),
+                    (
+                        header::CONTENT_TYPE,
+                        header::HeaderValue::from_static("application/json"),
+                    ),
                     (header::CONTENT_DISPOSITION, disposition),
                 ],
                 json_content,
@@ -2097,7 +2100,10 @@ pub async fn export_trades(
             Ok((
                 StatusCode::OK,
                 [
-                    (header::CONTENT_TYPE, header::HeaderValue::from_static("text/csv")),
+                    (
+                        header::CONTENT_TYPE,
+                        header::HeaderValue::from_static("text/csv"),
+                    ),
                     (header::CONTENT_DISPOSITION, disposition),
                 ],
                 csv_content,
@@ -2290,7 +2296,11 @@ pub async fn get_performance_metrics(
             // Cap at ±200% to avoid meaningless extremes when prior value was small.
             // Beyond 200% the percentage is no longer informative — the direction
             // simply reversed (e.g. +0.008 → -0.017 = -307% is misleading).
-            if pct.abs() > 200.0 { None } else { Some(pct) }
+            if pct.abs() > 200.0 {
+                None
+            } else {
+                Some(pct)
+            }
         }
     };
 
@@ -2586,7 +2596,11 @@ pub async fn get_rpc_latency(
             // don't reset bounds), but only emit rows for children with samples.
             if merged_bounds.is_empty() {
                 merged_bounds = hist.get_bucket().iter().map(|b| b.upper_bound()).collect();
-                merged_cum = hist.get_bucket().iter().map(|b| b.cumulative_count()).collect();
+                merged_cum = hist
+                    .get_bucket()
+                    .iter()
+                    .map(|b| b.cumulative_count())
+                    .collect();
             } else {
                 for (mc, b) in merged_cum.iter_mut().zip(hist.get_bucket().iter()) {
                     *mc += b.cumulative_count();
@@ -2832,15 +2846,19 @@ pub async fn retry_dead_letter_item(
 
     // Check circuit breaker state
     let cb_state = state.circuit_breaker.current_state();
-    if !matches!(cb_state, crate::circuit_breaker::CircuitBreakerState::Active) {
+    if !matches!(
+        cb_state,
+        crate::circuit_breaker::CircuitBreakerState::Active
+    ) {
         return Err(AppError::ServiceUnavailable(
             "Cannot retry while circuit breaker is tripped".to_string(),
         ));
     }
 
-    let engine = state.engine.as_ref().ok_or_else(|| {
-        AppError::Internal("Retry engine not available".to_string())
-    })?;
+    let engine = state
+        .engine
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Retry engine not available".to_string()))?;
 
     // Reconstruct the signal from the stored SignalPayload (same JSON the
     // automatic DLQ retry worker consumes). This is a REAL re-queue — it moves
@@ -2901,11 +2919,19 @@ pub async fn retry_dead_letter_item(
             let can_still_retry = new_retry_count < MAX_RETRIES;
             let _ = state
                 .db
-                .update_dlq_item(&trade_uuid_for_update, new_retry_count, can_still_retry, true)
+                .update_dlq_item(
+                    &trade_uuid_for_update,
+                    new_retry_count,
+                    can_still_retry,
+                    true,
+                )
                 .await;
             Ok(Json(RetryResponse {
                 success: true,
-                message: format!("Trade {} re-queued for execution (attempt {}/{})", trade_uuid, new_retry_count, MAX_RETRIES),
+                message: format!(
+                    "Trade {} re-queued for execution (attempt {}/{})",
+                    trade_uuid, new_retry_count, MAX_RETRIES
+                ),
                 trade_uuid,
                 retry_attempt: new_retry_count as i32,
             }))
@@ -3481,8 +3507,7 @@ pub async fn trigger_reconciliation(
                 ));
             }
         };
-        let checker =
-            crate::engine::reconciliation::RpcOnChainChecker::new(client);
+        let checker = crate::engine::reconciliation::RpcOnChainChecker::new(client);
         tokio::spawn(async move {
             let result =
                 crate::engine::reconciliation::run_reconciliation(db.as_ref(), &checker, &metrics)
@@ -3581,9 +3606,7 @@ pub async fn clear_monitoring_caches(
     axum::Extension(auth): axum::Extension<AuthExtension>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     if !auth.0.role.has_permission(Role::Admin) {
-        return Err(AppError::Forbidden(
-            "Requires admin role".to_string(),
-        ));
+        return Err(AppError::Forbidden("Requires admin role".to_string()));
     }
 
     tracing::warn!(
@@ -3611,12 +3634,11 @@ pub async fn debug_backtest_smoke(
         ));
     }
 
-    let total_trades: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM trades WHERE wallet_address = $1",
-    )
-    .bind(&wallet_address)
-    .fetch_one(&pool)
-    .await?;
+    let total_trades: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE wallet_address = $1")
+            .bind(&wallet_address)
+            .fetch_one(&pool)
+            .await?;
 
     let closed_trades: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM trades WHERE wallet_address = $1 AND status = 'CLOSED'",
