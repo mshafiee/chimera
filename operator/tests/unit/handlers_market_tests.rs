@@ -91,9 +91,7 @@ async fn market_bull_regime_full_response() {
     // +10% over 13h → Bull.
     let h = build_with_market_regime(
         test_config(),
-        Some(
-            detector_with_history(&[("100.0", 13), ("105.0", 6), ("110.0", 0)]).await,
-        ),
+        Some(detector_with_history(&[("100.0", 13), ("105.0", 6), ("110.0", 0)]).await),
     )
     .await;
 
@@ -118,9 +116,7 @@ async fn market_bear_regime_allocation() {
     // -10% over 13h → Bear.
     let h = build_with_market_regime(
         test_config(),
-        Some(
-            detector_with_history(&[("110.0", 13), ("105.0", 6), ("100.0", 0)]).await,
-        ),
+        Some(detector_with_history(&[("110.0", 13), ("105.0", 6), ("100.0", 0)]).await),
     )
     .await;
 
@@ -142,9 +138,7 @@ async fn market_sideways_insufficient_span() {
     // of the +10% move (the <12h-span branch).
     let h = build_with_market_regime(
         test_config(),
-        Some(
-            detector_with_history(&[("100.0", 3), ("105.0", 1), ("110.0", 0)]).await,
-        ),
+        Some(detector_with_history(&[("100.0", 3), ("105.0", 1), ("110.0", 0)]).await),
     )
     .await;
 
@@ -191,9 +185,7 @@ async fn market_zero_prices_yield_no_metrics() {
     // trend None; regime defaults to Sideways.
     let h = build_with_market_regime(
         test_config(),
-        Some(
-            detector_with_history(&[("0.0", 13), ("0.0", 6), ("0.0", 0)]).await,
-        ),
+        Some(detector_with_history(&[("0.0", 13), ("0.0", 6), ("0.0", 0)]).await),
     )
     .await;
 

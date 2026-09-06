@@ -1429,8 +1429,7 @@ impl SelectionService {
         match self.db.get_token_wallet_count(&req.token_address, 12).await {
             Ok(db_count) if db_count > 0 => {
                 let db_count = db_count as usize;
-                consensus_wallet_count =
-                    Some(consensus_wallet_count.unwrap_or(1).max(db_count));
+                consensus_wallet_count = Some(consensus_wallet_count.unwrap_or(1).max(db_count));
             }
             Ok(_) => {}
             Err(e) => {
@@ -1611,8 +1610,7 @@ impl SelectionService {
                     if !momentum_bypassed {
                         let reason = format!(
                             "Token has <{} shadow-mirror samples in {}h — insufficient evidence",
-                            effective_min_samples,
-                            self.config.mirror_gate_window_hours
+                            effective_min_samples, self.config.mirror_gate_window_hours
                         );
                         tracing::info!(
                             ingress = ?req.ingress,

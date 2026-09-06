@@ -150,7 +150,10 @@ pub async fn profitability_verdict(
     // empty run_id is the DEFAULT and intended behavior — it accumulates
     // evidence across restarts rather than resetting to 0/60 on every deploy.
     // An explicit ?run_id= still scopes to that run if requested.
-    let run_id = params.run_id.filter(|id| !id.is_empty()).unwrap_or_default();
+    let run_id = params
+        .run_id
+        .filter(|id| !id.is_empty())
+        .unwrap_or_default();
 
     let total_capital_sol: f64 = state
         .config
@@ -237,10 +240,7 @@ pub fn evaluate_gates(
     // ── Paper/live bias: mean modeled slippage from price_impact_pct ──
     // Missing bias data must not read as zero bias (fail-open) — report
     // INCONCLUSIVE instead so consumers can distinguish "no data" from "no bias".
-    let bias_vals: Vec<f64> = outcomes
-        .iter()
-        .filter_map(|o| o.price_impact_pct)
-        .collect();
+    let bias_vals: Vec<f64> = outcomes.iter().filter_map(|o| o.price_impact_pct).collect();
     let (declared_bias, bias_status) = if bias_vals.is_empty() {
         (0.0, "INCONCLUSIVE")
     } else {
@@ -263,7 +263,11 @@ pub fn evaluate_gates(
     let worst_loss_pct = outcomes
         .iter()
         .map(|o| {
-            let loss = if o.net_pnl_sol < 0.0 { -o.net_pnl_sol } else { 0.0 };
+            let loss = if o.net_pnl_sol < 0.0 {
+                -o.net_pnl_sol
+            } else {
+                0.0
+            };
             loss / total_capital_sol
         })
         .fold(0.0_f64, f64::max);
@@ -634,8 +638,7 @@ mod tests {
 
     #[test]
     fn cohort_positivity_negative_mean_fails() {
-        let outcomes: Vec<Outcome> =
-            (0..12).map(|i| outcome(-0.01, i, Some("SPEAR"))).collect();
+        let outcomes: Vec<Outcome> = (0..12).map(|i| outcome(-0.01, i, Some("SPEAR"))).collect();
         let (eval, _pos, status) = cohort_positivity(&outcomes, 10);
         assert_eq!(eval, 1);
         assert_eq!(status, "FAIL");
@@ -643,8 +646,7 @@ mod tests {
 
     #[test]
     fn cohort_positivity_below_min_count_is_inconclusive() {
-        let outcomes: Vec<Outcome> =
-            (0..5).map(|i| outcome(0.1, i, Some("SHIELD"))).collect();
+        let outcomes: Vec<Outcome> = (0..5).map(|i| outcome(0.1, i, Some("SHIELD"))).collect();
         let (eval, _pos, status) = cohort_positivity(&outcomes, 10);
         assert_eq!(eval, 0);
         assert_eq!(status, "INCONCLUSIVE");
@@ -695,7 +697,8 @@ mod tests {
     fn evaluate_gates_go() {
         // 60 positive outcomes, single positive cohort, no bias/loss/drawdown,
         // integrity & completeness clean → GO.
-        let mut outcomes: Vec<Outcome> = (0..60).map(|i| outcome(0.01, i, Some("SHIELD"))).collect();
+        let mut outcomes: Vec<Outcome> =
+            (0..60).map(|i| outcome(0.01, i, Some("SHIELD"))).collect();
         for o in &mut outcomes {
             o.price_impact_pct = Some(0.0); // bias data present and zero
         }
@@ -720,7 +723,8 @@ mod tests {
     #[test]
     fn evaluate_gates_no_recorder_fails_closed() {
         // No decision recorder → completeness FAIL → STOP even with clean data.
-        let mut outcomes: Vec<Outcome> = (0..60).map(|i| outcome(0.01, i, Some("SHIELD"))).collect();
+        let mut outcomes: Vec<Outcome> =
+            (0..60).map(|i| outcome(0.01, i, Some("SHIELD"))).collect();
         for o in &mut outcomes {
             o.price_impact_pct = Some(0.0);
         }

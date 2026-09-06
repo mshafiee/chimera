@@ -183,10 +183,7 @@ pub async fn hmac_verify(
                     max_allowed = MAX_HEADER_SIZE,
                     "Signature header exceeds maximum size"
                 );
-                return error_response(
-                    StatusCode::BAD_REQUEST,
-                    "Signature header too large",
-                );
+                return error_response(StatusCode::BAD_REQUEST, "Signature header too large");
             }
             match sig.to_str() {
                 Ok(s) => {
@@ -202,7 +199,7 @@ pub async fn hmac_verify(
                         );
                     }
                     s.to_string()
-                },
+                }
                 Err(_) => {
                     return error_response(
                         StatusCode::BAD_REQUEST,
@@ -210,7 +207,7 @@ pub async fn hmac_verify(
                     );
                 }
             }
-        },
+        }
         None => {
             return error_response(StatusCode::UNAUTHORIZED, "Missing X-Signature header");
         }
@@ -226,10 +223,7 @@ pub async fn hmac_verify(
                     max_allowed = MAX_HEADER_SIZE,
                     "Timestamp header exceeds maximum size"
                 );
-                return error_response(
-                    StatusCode::BAD_REQUEST,
-                    "Timestamp header too large",
-                );
+                return error_response(StatusCode::BAD_REQUEST, "Timestamp header too large");
             }
             match ts.to_str() {
                 Ok(s) => {
@@ -245,7 +239,7 @@ pub async fn hmac_verify(
                         );
                     }
                     s.to_string()
-                },
+                }
                 Err(_) => {
                     return error_response(
                         StatusCode::BAD_REQUEST,
@@ -253,7 +247,7 @@ pub async fn hmac_verify(
                     );
                 }
             }
-        },
+        }
         None => {
             return error_response(StatusCode::UNAUTHORIZED, "Missing X-Timestamp header");
         }
@@ -322,10 +316,7 @@ pub async fn hmac_verify(
                         store_size = state.seen_nonces.lock().len(),
                         "Nonce store at capacity — rejecting request with 503"
                     );
-                    return error_response(
-                        StatusCode::TOO_MANY_REQUESTS,
-                        "Too many requests",
-                    );
+                    return error_response(StatusCode::TOO_MANY_REQUESTS, "Too many requests");
                 }
             }
 
@@ -726,24 +717,39 @@ mod tests {
     #[test]
     fn test_nonce_store_basic_accept() {
         let state = HmacState::with_rotation(vec!["test".to_string()], 60).unwrap();
-        assert_eq!(state.check_and_record_nonce("nonce-1", 1000), NonceResult::Accepted);
+        assert_eq!(
+            state.check_and_record_nonce("nonce-1", 1000),
+            NonceResult::Accepted
+        );
     }
 
     #[test]
     fn test_nonce_store_replay_rejected() {
         let state = HmacState::with_rotation(vec!["test".to_string()], 60).unwrap();
-        assert_eq!(state.check_and_record_nonce("nonce-1", 1000), NonceResult::Accepted);
-        assert_eq!(state.check_and_record_nonce("nonce-1", 1001), NonceResult::Replay);
+        assert_eq!(
+            state.check_and_record_nonce("nonce-1", 1000),
+            NonceResult::Accepted
+        );
+        assert_eq!(
+            state.check_and_record_nonce("nonce-1", 1001),
+            NonceResult::Replay
+        );
     }
 
     #[test]
     fn test_nonce_store_expired_evicted() {
         let state = HmacState::with_rotation(vec!["test".to_string()], 60).unwrap();
         // Insert a nonce at t=0
-        assert_eq!(state.check_and_record_nonce("old-nonce", 0), NonceResult::Accepted);
+        assert_eq!(
+            state.check_and_record_nonce("old-nonce", 0),
+            NonceResult::Accepted
+        );
         // At t=120 (past 60s drift), old-nonce should be evicted
         // The new nonce is accepted because old was evicted during retain
-        assert_eq!(state.check_and_record_nonce("new-nonce", 120), NonceResult::Accepted);
+        assert_eq!(
+            state.check_and_record_nonce("new-nonce", 120),
+            NonceResult::Accepted
+        );
     }
 
     #[test]
@@ -755,9 +761,15 @@ mod tests {
         }
         // The store can hold more than 2001 entries (MAX is 100_000).
         // Verify retain logic still works: old entry evicted when drift expired
-        assert_eq!(state.check_and_record_nonce("recent", 1000), NonceResult::Accepted);
+        assert_eq!(
+            state.check_and_record_nonce("recent", 1000),
+            NonceResult::Accepted
+        );
         // Verify replay is still detected
-        assert_eq!(state.check_and_record_nonce("nonce-0", 1000), NonceResult::Replay);
+        assert_eq!(
+            state.check_and_record_nonce("nonce-0", 1000),
+            NonceResult::Replay
+        );
     }
 
     #[test]
@@ -765,9 +777,15 @@ mod tests {
         let state = HmacState::with_rotation(vec!["test".to_string()], 1).unwrap();
         // With 1-second drift, inserting at t=0 then checking at t=2
         // should evict the first entry and accept a new one.
-        assert_eq!(state.check_and_record_nonce("first", 0), NonceResult::Accepted);
+        assert_eq!(
+            state.check_and_record_nonce("first", 0),
+            NonceResult::Accepted
+        );
         // At t=2 (past 1s drift), the first entry should be evicted
-        assert_eq!(state.check_and_record_nonce("second", 2), NonceResult::Accepted);
+        assert_eq!(
+            state.check_and_record_nonce("second", 2),
+            NonceResult::Accepted
+        );
     }
 
     #[test]

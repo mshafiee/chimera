@@ -45,11 +45,9 @@ impl Drop for TestDbGuard {
                 else {
                     return;
                 };
-                let _ = sqlx::query(&format!(
-                    "DROP DATABASE IF EXISTS {db_name} WITH (FORCE)"
-                ))
-                .execute(&pool)
-                .await;
+                let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db_name} WITH (FORCE)"))
+                    .execute(&pool)
+                    .await;
                 pool.close().await;
             });
         });
@@ -76,7 +74,10 @@ fn assert_valid_db_name(db_name: &str) {
         && db_name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        && db_name.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_');
+        && db_name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c == '_');
     assert!(valid, "invalid generated test database name: {db_name}");
 }
 
@@ -99,11 +100,14 @@ pub async fn create_test_db() -> (Arc<dyn Database>, TestDbGuard) {
 /// - If `TEST_DATABASE_URL` environment variable is not set
 /// - If database connection or migration fails
 pub async fn create_test_pg_db() -> (Arc<dyn Database>, TestDbGuard) {
-    let database_url = std::env::var("TEST_DATABASE_URL")
-        .expect("TEST_DATABASE_URL must be set for tests");
+    let database_url =
+        std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set for tests");
 
     // Create a unique database name to avoid conflicts between concurrent tests
-    let db_name = format!("test_{}", uuid::Uuid::new_v4().to_string().replace('-', "_"));
+    let db_name = format!(
+        "test_{}",
+        uuid::Uuid::new_v4().to_string().replace('-', "_")
+    );
     assert_valid_db_name(&db_name);
 
     let (base_url, _original_db, query) = split_database_url(&database_url);
@@ -135,11 +139,14 @@ pub async fn create_test_pg_db() -> (Arc<dyn Database>, TestDbGuard) {
     db.run_migrations().await.unwrap();
 
     let temp_dir = TempDir::new().unwrap();
-    (db, TestDbGuard {
-        db_name,
-        server_url,
-        _temp_dir: temp_dir,
-    })
+    (
+        db,
+        TestDbGuard {
+            db_name,
+            server_url,
+            _temp_dir: temp_dir,
+        },
+    )
 }
 
 /// Extract PostgreSQL pool from a generic database
@@ -186,13 +193,15 @@ mod tests {
 
         // Verify migrations ran by checking for expected tables
         let pool = pg_pool(&db);
-        let result: (String,) = sqlx::query_as(
-            "SELECT tablename FROM pg_tables WHERE tablename='wallets'"
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let result: (String,) =
+            sqlx::query_as("SELECT tablename FROM pg_tables WHERE tablename='wallets'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
 
-        assert_eq!(result.0, "wallets", "wallets table should exist after migrations");
+        assert_eq!(
+            result.0, "wallets",
+            "wallets table should exist after migrations"
+        );
     }
 }

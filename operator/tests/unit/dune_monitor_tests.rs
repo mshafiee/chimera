@@ -285,10 +285,7 @@ async fn test_run_check_failed_status_and_timeout() {
     let dune2 = mock_rpc::DuneMock::spawn().await;
     dune2.state.lock().await.status = "QUERY_STATE_PENDING".to_string();
     let m2 = monitor(&cfg, db.clone(), &format!("{}/api/v1", dune2.url), None);
-    let err = m2
-        .run_check()
-        .await
-        .unwrap_err();
+    let err = m2.run_check().await.unwrap_err();
     assert!(err.to_string().contains("timed out"), "{err}");
 }
 
@@ -311,12 +308,7 @@ async fn test_promote_disabled_or_no_key_returns_zero() {
     let mut cfg = base_config();
     cfg.promote_enabled = false;
     let m = monitor(&cfg, db.clone(), &format!("{}/api/v1", dune.url), None);
-    assert_eq!(
-        m.promote_dune_verified()
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(m.promote_dune_verified().await.unwrap(), 0);
 
     // No DUNE_API_KEY at construction → api_key empty → guard.
     let _guard = ENV_LOCK.lock();
@@ -326,12 +318,7 @@ async fn test_promote_disabled_or_no_key_returns_zero() {
     std::env::remove_var("DUNE_API_BASE_URL");
     std::env::set_var("DUNE_API_KEY", "test-key");
     drop(_guard);
-    assert_eq!(
-        m.promote_dune_verified()
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(m.promote_dune_verified().await.unwrap(), 0);
 }
 
 #[tokio::test]
@@ -354,10 +341,7 @@ async fn test_promote_full_flow_with_onchain_gate_disabled() {
         Some(promotion_ctx(None)),
     );
 
-    let promoted = m
-        .promote_dune_verified()
-        .await
-        .unwrap();
+    let promoted = m.promote_dune_verified().await.unwrap();
     assert_eq!(promoted, 1);
 
     let (status, wqs): (String, f64) =
@@ -396,10 +380,7 @@ async fn test_promote_active_cap_stops_cycle() {
         &format!("{}/api/v1", dune.url),
         Some(promotion_ctx(None)),
     );
-    let promoted = m
-        .promote_dune_verified()
-        .await
-        .unwrap();
+    let promoted = m.promote_dune_verified().await.unwrap();
     assert_eq!(promoted, 0);
     let status: String = sqlx::query_scalar("SELECT status FROM wallets WHERE address = $1")
         .bind(WALLET)
@@ -433,10 +414,7 @@ async fn test_promote_with_onchain_gate_and_webhook_registration() {
         Some(promotion_ctx(Some(helius_client))),
     );
 
-    let promoted = m
-        .promote_dune_verified()
-        .await
-        .unwrap();
+    let promoted = m.promote_dune_verified().await.unwrap();
     assert_eq!(promoted, 1);
 
     let status: String = sqlx::query_scalar("SELECT status FROM wallets WHERE address = $1")
@@ -479,10 +457,7 @@ async fn test_promote_onchain_gate_fails_and_skips() {
         Some(promotion_ctx(Some(helius_client))),
     );
 
-    let promoted = m
-        .promote_dune_verified()
-        .await
-        .unwrap();
+    let promoted = m.promote_dune_verified().await.unwrap();
     assert_eq!(
         promoted, 0,
         "wallet failing the on-chain gate must not promote"
@@ -525,10 +500,7 @@ async fn test_promote_parse_filters_and_query_failures() {
         &format!("{}/api/v1", dune.url),
         Some(promotion_ctx(None)),
     );
-    let promoted = m
-        .promote_dune_verified()
-        .await
-        .unwrap();
+    let promoted = m.promote_dune_verified().await.unwrap();
     assert_eq!(promoted, 1, "only the fully-qualified wallet promotes");
 
     // 24h query execution fails → warn + continue (7d query still runs).
@@ -541,10 +513,7 @@ async fn test_promote_parse_filters_and_query_failures() {
         &format!("{}/api/v1", dune2.url),
         Some(promotion_ctx(None)),
     );
-    let promoted = m2
-        .promote_dune_verified()
-        .await
-        .unwrap();
+    let promoted = m2.promote_dune_verified().await.unwrap();
     assert_eq!(
         promoted, 1,
         "7d query still promotes when 24h execute fails"
@@ -560,10 +529,7 @@ async fn test_promote_parse_filters_and_query_failures() {
         &format!("{}/api/v1", dune3.url),
         Some(promotion_ctx(None)),
     );
-    let promoted = m3
-        .promote_dune_verified()
-        .await
-        .unwrap();
+    let promoted = m3.promote_dune_verified().await.unwrap();
     assert_eq!(promoted, 1);
 
     // Both queries return empty CSV → JSON fallback with profitable rows.
@@ -587,10 +553,7 @@ async fn test_promote_parse_filters_and_query_failures() {
         &format!("{}/api/v1", dune4.url),
         Some(promotion_ctx(None)),
     );
-    let promoted = m4
-        .promote_dune_verified()
-        .await
-        .unwrap();
+    let promoted = m4.promote_dune_verified().await.unwrap();
     // rows_to_csv stringifies JSON strings WITH quotes, so the parsed address
     // never matches the DB row — the fallback runs but cannot promote.
     assert_eq!(
@@ -607,10 +570,7 @@ async fn test_promote_parse_filters_and_query_failures() {
         &format!("{}/api/v1", dune5.url),
         Some(promotion_ctx(None)),
     );
-    let promoted = m5
-        .promote_dune_verified()
-        .await
-        .unwrap();
+    let promoted = m5.promote_dune_verified().await.unwrap();
     assert_eq!(promoted, 0);
 }
 
@@ -639,10 +599,7 @@ async fn test_promote_demoted_wallet_in_cooldown_skipped() {
         &format!("{}/api/v1", dune.url),
         Some(promotion_ctx(None)),
     );
-    let promoted = m
-        .promote_dune_verified()
-        .await
-        .unwrap();
+    let promoted = m.promote_dune_verified().await.unwrap();
     assert_eq!(promoted, 0);
     let status: String = sqlx::query_scalar("SELECT status FROM wallets WHERE address = $1")
         .bind(WALLET)
@@ -963,14 +920,12 @@ async fn test_demote_shadow_losers_grades_on_wallet_sell_exit() {
     // wallet_sell exits (would otherwise falsely demote under the old code).
     seed_wallet_status(&db, WALLET_B, "ACTIVE", 80.0).await;
     for i in 0..3 {
-        sqlx::query(
-            "UPDATE shadow_positions SET wallet_address = $2 WHERE shadow_id = $1",
-        )
-        .bind(format!("qws-{i}"))
-        .bind(WALLET_B)
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("UPDATE shadow_positions SET wallet_address = $2 WHERE shadow_id = $1")
+            .bind(format!("qws-{i}"))
+            .bind(WALLET_B)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
     let m_mm = {
         let _guard = ENV_LOCK.lock();
@@ -1112,7 +1067,11 @@ async fn test_run_without_dune_key_still_runs_onchain_cycles() {
     let old_url = std::env::var("DUNE_API_BASE_URL").ok();
     std::env::set_var("DUNE_API_BASE_URL", format!("{}/api/v1", dune.url));
     std::env::remove_var("DUNE_API_KEY");
-    let m = Arc::new(DunePnlMonitor::new(&cfg, db.clone(), "mirror_main".to_string()));
+    let m = Arc::new(DunePnlMonitor::new(
+        &cfg,
+        db.clone(),
+        "mirror_main".to_string(),
+    ));
     match old_url {
         Some(v) => std::env::set_var("DUNE_API_BASE_URL", v),
         None => std::env::remove_var("DUNE_API_BASE_URL"),

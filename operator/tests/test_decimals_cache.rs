@@ -70,11 +70,12 @@ async fn test_metadata_fetcher_with_price_cache() {
     );
 
     // Create TokenMetadataFetcher with PriceCache reference
-    let fetcher = TokenMetadataFetcher::new(CLOSED_LOOPBACK_RPC)
-        .with_price_cache(Arc::new(cache));
+    let fetcher = TokenMetadataFetcher::new(CLOSED_LOOPBACK_RPC).with_price_cache(Arc::new(cache));
 
     // Try to get decimals (should use fast path from PriceCache)
-    let decimals = fetcher.get_decimals_only("So11111111111111111111111111111111111111112").await;
+    let decimals = fetcher
+        .get_decimals_only("So11111111111111111111111111111111111111112")
+        .await;
 
     assert_eq!(decimals, Some(9), "Should get decimals from PriceCache");
 }
@@ -85,8 +86,7 @@ async fn test_metadata_fetcher_fallback() {
     let cache = PriceCache::new().expect("Failed to create PriceCache");
 
     // Create TokenMetadataFetcher with PriceCache reference
-    let fetcher = TokenMetadataFetcher::new(CLOSED_LOOPBACK_RPC)
-        .with_price_cache(Arc::new(cache));
+    let fetcher = TokenMetadataFetcher::new(CLOSED_LOOPBACK_RPC).with_price_cache(Arc::new(cache));
 
     // Use a VALID mint pubkey so the cache miss passes pubkey validation and
     // genuinely exercises the RPC fallback path (the RPC call itself fails
@@ -96,5 +96,8 @@ async fn test_metadata_fetcher_fallback() {
         .get_decimals_only("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
         .await;
 
-    assert_eq!(decimals, None, "Should return None when not in cache and RPC fails");
+    assert_eq!(
+        decimals, None,
+        "Should return None when not in cache and RPC fails"
+    );
 }

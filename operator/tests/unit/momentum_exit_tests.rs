@@ -147,8 +147,7 @@ async fn test_min_hold_secs_suppresses_momentum_exit() {
 
     // 60-second-old position with min_hold_secs=150: suppressed
     let entry_time = SystemTime::now() - Duration::from_secs(60);
-    let detector = MomentumExit::new(db.clone(), price_cache.clone(), 30)
-        .with_min_hold_secs(150);
+    let detector = MomentumExit::new(db.clone(), price_cache.clone(), 30).with_min_hold_secs(150);
     let action = detector
         .check_momentum("uuid-minhold", token, entry_price, entry_time)
         .await;

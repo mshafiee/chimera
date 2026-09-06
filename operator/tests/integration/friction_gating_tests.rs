@@ -5,8 +5,8 @@
 //! pins the expected-profit arithmetic that gates the decision so the formula
 //! (expected return = win_rate*avg_win - (1-win_rate)*avg_loss) cannot regress.
 
-use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
 
 /// Helper function to calculate expected profit manually
 /// This can be used in other tests to verify friction gating behavior
@@ -30,12 +30,8 @@ fn test_expected_profit_calculation_helper() {
     let avg_loss = Decimal::from_str("0.08").unwrap();
     let position_size = Decimal::from_str("1.0").unwrap();
 
-    let expected_profit = calculate_expected_profit_manually(
-        win_rate,
-        avg_win,
-        avg_loss,
-        position_size,
-    );
+    let expected_profit =
+        calculate_expected_profit_manually(win_rate, avg_win, avg_loss, position_size);
 
     // Expected: 1.0 * ((0.6 * 0.15) - (0.4 * 0.08)) = 1.0 * (0.09 - 0.032) = 0.058
     let expected = Decimal::from_str("0.058").unwrap();
@@ -82,12 +78,8 @@ fn test_expected_profit_scales_with_position_size() {
     let avg_win = Decimal::from_str("0.15").unwrap();
     let avg_loss = Decimal::from_str("0.08").unwrap();
 
-    let one_sol = calculate_expected_profit_manually(
-        win_rate, avg_win, avg_loss, Decimal::ONE,
-    );
-    let two_sol = calculate_expected_profit_manually(
-        win_rate, avg_win, avg_loss, Decimal::from(2),
-    );
+    let one_sol = calculate_expected_profit_manually(win_rate, avg_win, avg_loss, Decimal::ONE);
+    let two_sol = calculate_expected_profit_manually(win_rate, avg_win, avg_loss, Decimal::from(2));
 
     assert_eq!(two_sol, one_sol * Decimal::from(2));
 }

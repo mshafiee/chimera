@@ -582,7 +582,6 @@ mod tests {
         TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig, TokenSafetyResult,
     };
     use chrono::Utc;
-    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use std::collections::HashMap;
     use std::sync::atomic::Ordering;

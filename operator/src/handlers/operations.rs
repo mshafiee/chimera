@@ -433,10 +433,18 @@ pub async fn get_rate_limit_status(
     // than reported with fabricated utilization.
     let mut endpoints: Vec<RateLimitEndpoint> = Vec::new();
     if let Some(limiter) = &state.webhook_rate_limiter {
-        endpoints.push(build_rate_limit_endpoint("/api/v1/webhook", limiter, &reset_at_str));
+        endpoints.push(build_rate_limit_endpoint(
+            "/api/v1/webhook",
+            limiter,
+            &reset_at_str,
+        ));
     }
     if let Some(limiter) = &state.rpc_rate_limiter {
-        endpoints.push(build_rate_limit_endpoint("/api/v1/rpc", limiter, &reset_at_str));
+        endpoints.push(build_rate_limit_endpoint(
+            "/api/v1/rpc",
+            limiter,
+            &reset_at_str,
+        ));
     }
 
     // Determine overall status

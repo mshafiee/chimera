@@ -179,11 +179,10 @@ impl Vault {
             .map_err(|e| VaultError::InvalidKey(format!("Failed to create cipher: {}", e)))?;
 
         // Zeroizing so the decrypted plaintext does not linger in memory.
-        let plaintext = zeroize::Zeroizing::new(
-            cipher.decrypt(nonce, ciphertext).map_err(|e| {
+        let plaintext =
+            zeroize::Zeroizing::new(cipher.decrypt(nonce, ciphertext).map_err(|e| {
                 VaultError::DecryptionFailed(format!("AES-GCM decryption failed: {}", e))
-            })?,
-        );
+            })?);
 
         // Parse JSON
         let mut secrets: VaultSecrets = serde_json::from_slice(&plaintext)?;
@@ -240,9 +239,9 @@ impl Vault {
             .to_string();
         // Random suffix: O_EXCL is only safe against symlink/pre-create attacks
         // when the target name is unpredictable.
-        let tmp_path = path
-            .as_ref()
-            .with_file_name(format!("{}.{}.tmp", name, rand::random::<u32>()));
+        let tmp_path =
+            path.as_ref()
+                .with_file_name(format!("{}.{}.tmp", name, rand::random::<u32>()));
 
         let result = (|| -> Result<(), VaultError> {
             // OpenOptions with create_new(true) = O_CREAT|O_EXCL: fails if the
@@ -333,7 +332,10 @@ fn open_vault_tmp(path: &Path) -> std::io::Result<std::fs::File> {
 /// Non-unix variant of [`open_vault_tmp`] (no mode bit support).
 #[cfg(not(unix))]
 fn open_vault_tmp(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new().write(true).create_new(true).open(path)
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
 }
 
 /// Generate random nonce for AES-GCM
@@ -635,7 +637,14 @@ mod tests {
         vault.save_secrets(&make_secrets(), &path).unwrap();
         let loaded = vault.load_secrets(&path).unwrap();
         assert_eq!(loaded.webhook_secret, "test-secret-123");
-        assert_eq!(loaded.wallet_private_key.as_deref(), Some("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20".repeat(2).as_str()));
+        assert_eq!(
+            loaded.wallet_private_key.as_deref(),
+            Some(
+                "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+                    .repeat(2)
+                    .as_str()
+            )
+        );
 
         // No leftover .tmp files
         let leftovers: Vec<_> = std::fs::read_dir(&dir)
@@ -652,10 +661,7 @@ mod tests {
     fn test_save_secrets_error_cleans_temp() {
         let vault = test_vault();
         // Path in a nonexistent directory -> open fails -> temp file cleaned up
-        let dir = std::env::temp_dir().join(format!(
-            "vault-missing-{}",
-            rand::random::<u32>()
-        ));
+        let dir = std::env::temp_dir().join(format!("vault-missing-{}", rand::random::<u32>()));
         let path = dir.join("secrets.enc");
         assert!(vault.save_secrets(&make_secrets(), &path).is_err());
         assert!(!path.exists());
@@ -735,14 +741,8 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let key = Vault::generate_key().unwrap();
         std::env::set_var("CHIMERA_VAULT_KEY", &key);
-        std::env::set_var(
-            "CHIMERA_VAULT_PATH",
-            "/nonexistent/vault/file/secrets.enc",
-        );
-        std::env::set_var(
-            "CHIMERA_SECURITY__WEBHOOK_SECRET",
-            "env-webhook-secret",
-        );
+        std::env::set_var("CHIMERA_VAULT_PATH", "/nonexistent/vault/file/secrets.enc");
+        std::env::set_var("CHIMERA_SECURITY__WEBHOOK_SECRET", "env-webhook-secret");
         std::env::set_var("CHIMERA_SECURITY__WEBHOOK_SECRET_PREVIOUS", "env-old");
         std::env::set_var(
             "CHIMERA_WALLET__PRIVATE_KEY",
@@ -754,9 +754,15 @@ mod tests {
         let secrets = load_secrets_with_fallback().unwrap();
         assert_eq!(secrets.webhook_secret, "env-webhook-secret");
         assert_eq!(secrets.webhook_secret_previous.as_deref(), Some("env-old"));
-        assert_eq!(secrets.wallet_private_key.as_deref(), Some("env-wallet-key"));
+        assert_eq!(
+            secrets.wallet_private_key.as_deref(),
+            Some("env-wallet-key")
+        );
         assert_eq!(secrets.rpc_api_key.as_deref(), Some("env-rpc"));
-        assert_eq!(secrets.fallback_rpc_api_key.as_deref(), Some("env-fallback-rpc"));
+        assert_eq!(
+            secrets.fallback_rpc_api_key.as_deref(),
+            Some("env-fallback-rpc")
+        );
 
         std::env::remove_var("CHIMERA_VAULT_KEY");
         std::env::remove_var("CHIMERA_VAULT_PATH");

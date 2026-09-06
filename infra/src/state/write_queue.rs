@@ -3,7 +3,9 @@
 //! Provides asynchronous database writes with automatic batching, exponential backoff retry,
 //! and circuit breaker functionality to remove write latency from the critical path.
 
-use crate::db_abstraction::{Database, InsertPosition, InsertTrade, UpdatePosition, UpdateTradeStatus};
+use crate::db_abstraction::{
+    Database, InsertPosition, InsertTrade, UpdatePosition, UpdateTradeStatus,
+};
 use crate::state::registry::{TradeState, TradeStatus};
 use rust_decimal::Decimal;
 use std::sync::Arc;
@@ -131,7 +133,11 @@ pub struct QueueMetrics {
 
 impl AsyncWriteQueue {
     /// Create a new async write queue
-    pub fn new(db: Arc<dyn Database>, retry_config: RetryConfig, batch_config: BatchConfig) -> Self {
+    pub fn new(
+        db: Arc<dyn Database>,
+        retry_config: RetryConfig,
+        batch_config: BatchConfig,
+    ) -> Self {
         let (operation_tx, operation_rx) = mpsc::channel(batch_config.max_queue_depth);
 
         Self {
@@ -159,7 +165,16 @@ impl AsyncWriteQueue {
             let shutdown = Arc::clone(&self.shutdown);
 
             let worker = tokio::spawn(async move {
-                Self::worker_loop(worker_id, rx, db, retry_config, batch_config, metrics, shutdown).await;
+                Self::worker_loop(
+                    worker_id,
+                    rx,
+                    db,
+                    retry_config,
+                    batch_config,
+                    metrics,
+                    shutdown,
+                )
+                .await;
             });
 
             self.workers.push(worker);
@@ -170,11 +185,16 @@ impl AsyncWriteQueue {
 
     /// Queue a write operation
     pub async fn enqueue(&self, operation: WriteOperation) -> Result<(), QueueError> {
-        self.metrics.operations_queued.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.metrics
+            .operations_queued
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         match self.operation_tx.try_send(operation) {
             Ok(_) => {
-                let depth = self.metrics.current_queue_depth.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let depth = self
+                    .metrics
+                    .current_queue_depth
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if depth > (self.batch_config.max_queue_depth / 2) as u64 {
                     warn!("Write queue depth high: {}", depth);
                 }
@@ -184,27 +204,48 @@ impl AsyncWriteQueue {
                 error!("Write queue full, rejecting operation");
                 Err(QueueError::QueueFull)
             }
-            Err(mpsc::error::TrySendError::Closed(_op)) => {
-                Err(QueueError::QueueClosed)
-            }
+            Err(mpsc::error::TrySendError::Closed(_op)) => Err(QueueError::QueueClosed),
         }
     }
 
     /// Get current queue depth
     pub fn queue_depth(&self) -> u64 {
-        self.metrics.current_queue_depth.load(std::sync::atomic::Ordering::Relaxed)
+        self.metrics
+            .current_queue_depth
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Get metrics snapshot
     pub fn get_metrics(&self) -> QueueMetricsSnapshot {
         QueueMetricsSnapshot {
-            operations_queued: self.metrics.operations_queued.load(std::sync::atomic::Ordering::Relaxed),
-            operations_completed: self.metrics.operations_completed.load(std::sync::atomic::Ordering::Relaxed),
-            operations_failed: self.metrics.operations_failed.load(std::sync::atomic::Ordering::Relaxed),
-            operations_retried: self.metrics.operations_retried.load(std::sync::atomic::Ordering::Relaxed),
-            batches_processed: self.metrics.batches_processed.load(std::sync::atomic::Ordering::Relaxed),
-            current_queue_depth: self.metrics.current_queue_depth.load(std::sync::atomic::Ordering::Relaxed),
-            total_write_duration_ms: self.metrics.total_write_duration_ms.load(std::sync::atomic::Ordering::Relaxed),
+            operations_queued: self
+                .metrics
+                .operations_queued
+                .load(std::sync::atomic::Ordering::Relaxed),
+            operations_completed: self
+                .metrics
+                .operations_completed
+                .load(std::sync::atomic::Ordering::Relaxed),
+            operations_failed: self
+                .metrics
+                .operations_failed
+                .load(std::sync::atomic::Ordering::Relaxed),
+            operations_retried: self
+                .metrics
+                .operations_retried
+                .load(std::sync::atomic::Ordering::Relaxed),
+            batches_processed: self
+                .metrics
+                .batches_processed
+                .load(std::sync::atomic::Ordering::Relaxed),
+            current_queue_depth: self
+                .metrics
+                .current_queue_depth
+                .load(std::sync::atomic::Ordering::Relaxed),
+            total_write_duration_ms: self
+                .metrics
+                .total_write_duration_ms
+                .load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 
@@ -308,7 +349,8 @@ impl AsyncWriteQueue {
         debug!("Processing batch of {} operations", batch.len());
 
         for operation in batch {
-            let result = Self::execute_operation_with_retry(db, operation.clone(), retry_config, 0).await;
+            let result =
+                Self::execute_operation_with_retry(db, operation.clone(), retry_config, 0).await;
 
             if result.success {
                 success_count += 1;
@@ -316,12 +358,18 @@ impl AsyncWriteQueue {
                 failure_count += 1;
             }
 
-            metrics.operations_completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            metrics
+                .operations_completed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         let duration_ms = start.elapsed().as_millis() as u64;
-        metrics.total_write_duration_ms.fetch_add(duration_ms, std::sync::atomic::Ordering::Relaxed);
-        metrics.batches_processed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        metrics
+            .total_write_duration_ms
+            .fetch_add(duration_ms, std::sync::atomic::Ordering::Relaxed);
+        metrics
+            .batches_processed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         debug!(
             "Batch completed: {} success, {} failure, {}ms",
@@ -342,8 +390,8 @@ impl AsyncWriteQueue {
             let start = Instant::now();
 
             let result = match &current_operation {
-                WriteOperation::InsertTrade(trade) => {
-                    db.insert_trade(&InsertTrade {
+                WriteOperation::InsertTrade(trade) => db
+                    .insert_trade(&InsertTrade {
                         trade_uuid: trade.trade_uuid.clone(),
                         wallet_address: trade.wallet_address.clone(),
                         token_address: trade.token_address.clone(),
@@ -352,8 +400,9 @@ impl AsyncWriteQueue {
                         side: trade.side.clone(),
                         amount_sol: trade.amount_sol,
                         status: (trade.status.clone()).into(),
-                    }).await.map(|_| ())
-                }
+                    })
+                    .await
+                    .map(|_| ()),
 
                 WriteOperation::UpdateTradeStatus {
                     trade_uuid,
@@ -368,7 +417,8 @@ impl AsyncWriteQueue {
                         tx_signature: tx_signature.clone(),
                         error_message: error_message.clone(),
                         network_fee_sol: *network_fee_sol,
-                    }).await
+                    })
+                    .await
                 }
 
                 WriteOperation::InsertPosition {
@@ -380,8 +430,8 @@ impl AsyncWriteQueue {
                     entry_amount_sol,
                     entry_price,
                     entry_tx_signature,
-                } => {
-                    db.insert_position(&InsertPosition {
+                } => db
+                    .insert_position(&InsertPosition {
                         trade_uuid: trade_uuid.clone(),
                         wallet_address: wallet_address.clone(),
                         token_address: token_address.clone(),
@@ -390,8 +440,9 @@ impl AsyncWriteQueue {
                         entry_amount_sol: *entry_amount_sol,
                         entry_price: *entry_price,
                         entry_tx_signature: entry_tx_signature.clone(),
-                    }).await.map(|_| ())
-                }
+                    })
+                    .await
+                    .map(|_| ()),
 
                 WriteOperation::UpdatePositionState { trade_uuid, state } => {
                     db.update_position(&UpdatePosition {
@@ -404,22 +455,26 @@ impl AsyncWriteQueue {
                         exit_tx_signature: None,
                         realized_pnl_sol: None,
                         realized_pnl_usd: None,
-                    }).await
+                    })
+                    .await
                 }
 
-                WriteOperation::UpsertWallet { address, status, wqs_score, win_rate } => {
-                    match db.upsert_wallet(
-                        address,
-                        *wqs_score,
-                        None,
-                        None,
-                        None,
-                        *win_rate,
-                        None,
-                        None,
-                        None,
-                    ).await {
-                        Ok(_) => db.update_wallet_status_ext(address, status, None, None).await.map(|_| ()),
+                WriteOperation::UpsertWallet {
+                    address,
+                    status,
+                    wqs_score,
+                    win_rate,
+                } => {
+                    match db
+                        .upsert_wallet(
+                            address, *wqs_score, None, None, None, *win_rate, None, None, None,
+                        )
+                        .await
+                    {
+                        Ok(_) => db
+                            .update_wallet_status_ext(address, status, None, None)
+                            .await
+                            .map(|_| ()),
                         Err(e) => Err(e),
                     }
                 }
@@ -442,18 +497,24 @@ impl AsyncWriteQueue {
                         // Exponential backoff
                         let backoff_ms = (retry_config.initial_backoff_ms as f64
                             * retry_config.backoff_multiplier.powi(retry_count as i32))
-                            .min(retry_config.max_backoff_ms as f64) as u64;
+                        .min(retry_config.max_backoff_ms as f64)
+                            as u64;
 
                         warn!(
                             "Operation failed (attempt {}), retrying in {}ms: {}",
-                            retry_count + 1, backoff_ms, e
+                            retry_count + 1,
+                            backoff_ms,
+                            e
                         );
                         tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
 
                         retry_count += 1;
                         // Continue loop to retry
                     } else {
-                        error!("Operation failed after {} retries: {}", retry_config.max_retries, e);
+                        error!(
+                            "Operation failed after {} retries: {}",
+                            retry_config.max_retries, e
+                        );
                         return WriteResult {
                             operation: current_operation,
                             success: false,
@@ -546,45 +607,67 @@ mod tests {
             ..Default::default()
         };
         let queue = AsyncWriteQueue::new(db, RetryConfig::default(), batch);
-        queue.enqueue(WriteOperation::InsertTrade(trade("t1"))).await.unwrap();
-        let err = queue.enqueue(WriteOperation::InsertTrade(trade("t2"))).await.unwrap_err();
+        queue
+            .enqueue(WriteOperation::InsertTrade(trade("t1")))
+            .await
+            .unwrap();
+        let err = queue
+            .enqueue(WriteOperation::InsertTrade(trade("t2")))
+            .await
+            .unwrap_err();
         assert!(matches!(err, QueueError::QueueFull));
     }
 
     #[tokio::test]
     async fn test_worker_processes_all_operation_types() {
         let db = Arc::new(MockDatabase::default());
-        let mut queue = AsyncWriteQueue::new(db.clone(), RetryConfig::default(), BatchConfig::default());
+        let mut queue =
+            AsyncWriteQueue::new(db.clone(), RetryConfig::default(), BatchConfig::default());
         queue.start(1).await.unwrap();
 
-        queue.enqueue(WriteOperation::InsertTrade(trade("t1"))).await.unwrap();
-        queue.enqueue(WriteOperation::InsertPosition {
-            trade_uuid: "p1".to_string(),
-            wallet_address: "wallet".to_string(),
-            token_address: "token".to_string(),
-            token_symbol: None,
-            strategy: "SHIELD".to_string(),
-            entry_amount_sol: Decimal::ONE,
-            entry_price: Decimal::from(2),
-            entry_tx_signature: "sig".to_string(),
-        }).await.unwrap();
-        queue.enqueue(WriteOperation::UpdateTradeStatus {
-            trade_uuid: "t1".to_string(),
-            status: TradeStatus::Active,
-            tx_signature: Some("sig".to_string()),
-            error_message: None,
-            network_fee_sol: None,
-        }).await.unwrap();
-        queue.enqueue(WriteOperation::UpdatePositionState {
-            trade_uuid: "p1".to_string(),
-            state: "ACTIVE".to_string(),
-        }).await.unwrap();
-        queue.enqueue(WriteOperation::UpsertWallet {
-            address: "wallet".to_string(),
-            status: "ACTIVE".to_string(),
-            wqs_score: None,
-            win_rate: None,
-        }).await.unwrap();
+        queue
+            .enqueue(WriteOperation::InsertTrade(trade("t1")))
+            .await
+            .unwrap();
+        queue
+            .enqueue(WriteOperation::InsertPosition {
+                trade_uuid: "p1".to_string(),
+                wallet_address: "wallet".to_string(),
+                token_address: "token".to_string(),
+                token_symbol: None,
+                strategy: "SHIELD".to_string(),
+                entry_amount_sol: Decimal::ONE,
+                entry_price: Decimal::from(2),
+                entry_tx_signature: "sig".to_string(),
+            })
+            .await
+            .unwrap();
+        queue
+            .enqueue(WriteOperation::UpdateTradeStatus {
+                trade_uuid: "t1".to_string(),
+                status: TradeStatus::Active,
+                tx_signature: Some("sig".to_string()),
+                error_message: None,
+                network_fee_sol: None,
+            })
+            .await
+            .unwrap();
+        queue
+            .enqueue(WriteOperation::UpdatePositionState {
+                trade_uuid: "p1".to_string(),
+                state: "ACTIVE".to_string(),
+            })
+            .await
+            .unwrap();
+        queue
+            .enqueue(WriteOperation::UpsertWallet {
+                address: "wallet".to_string(),
+                status: "ACTIVE".to_string(),
+                wqs_score: None,
+                win_rate: None,
+            })
+            .await
+            .unwrap();
 
         // Give the worker time to drain (batch window is 100ms).
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -593,7 +676,10 @@ mod tests {
             if snap.current_queue_depth == 0 {
                 break snap;
             }
-            assert!(std::time::Instant::now() < deadline, "worker never drained queue");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker never drained queue"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         };
         assert_eq!(depth_zero.operations_queued, 5);
@@ -617,11 +703,17 @@ mod tests {
         };
         let mut queue = AsyncWriteQueue::new(db.clone(), RetryConfig::default(), batch);
         queue.start(1).await.unwrap();
-        queue.enqueue(WriteOperation::InsertTrade(trade("t0"))).await.unwrap();
+        queue
+            .enqueue(WriteOperation::InsertTrade(trade("t0")))
+            .await
+            .unwrap();
         // Exceed the 10ms batch window before the next arrival so the worker
         // flushes the pending batch on receipt.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        queue.enqueue(WriteOperation::InsertTrade(trade("t1"))).await.unwrap();
+        queue
+            .enqueue(WriteOperation::InsertTrade(trade("t1")))
+            .await
+            .unwrap();
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let snapshot = loop {
@@ -629,12 +721,18 @@ mod tests {
             if snap.operations_completed >= 1 {
                 break snap;
             }
-            assert!(std::time::Instant::now() < deadline, "worker never flushed batch");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker never flushed batch"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         };
         queue.shutdown().await.unwrap();
         assert_eq!(db.inserted_trades.read().len(), 2);
-        assert!(snapshot.batches_processed >= 1, "batch window should have flushed");
+        assert!(
+            snapshot.batches_processed >= 1,
+            "batch window should have flushed"
+        );
         // The window-based flush ran before shutdown (completed >= 1).
         assert!(snapshot.operations_completed >= 1);
     }
@@ -654,7 +752,10 @@ mod tests {
         let result = AsyncWriteQueue::execute_operation_with_retry(&db_dyn, op, &retry, 0).await;
         assert!(!result.success);
         assert!(result.error.is_some());
-        assert_eq!(result.retry_count, 1, "one retry attempted before giving up");
+        assert_eq!(
+            result.retry_count, 1,
+            "one retry attempted before giving up"
+        );
         // DB never recorded the trade because it always failed.
         assert!(db.inserted_trades.read().is_empty());
     }
@@ -681,7 +782,9 @@ mod tests {
         let db = Arc::new(MockDatabase::default());
         let db_dyn: Arc<dyn Database> = db.clone();
         let op = WriteOperation::InsertTrade(trade("t1"));
-        let result = AsyncWriteQueue::execute_operation_with_retry(&db_dyn, op, &RetryConfig::default(), 0).await;
+        let result =
+            AsyncWriteQueue::execute_operation_with_retry(&db_dyn, op, &RetryConfig::default(), 0)
+                .await;
         assert!(result.success);
         assert_eq!(result.retry_count, 0);
         assert_eq!(db.inserted_trades.read().len(), 1);

@@ -7,14 +7,16 @@
 //! - Error handling and retry logic
 //! - Circuit breaker integration
 
+use chimera_operator::circuit_breaker::CircuitBreaker;
 use chimera_operator::config::{AppConfig, JupiterConfig};
 use chimera_operator::db_abstraction::Database;
 use chimera_operator::engine::transaction_builder::TransactionBuilder;
-use chimera_operator::jupiter_error_handling::{JupiterError, JupiterErrorType, RetryConfig, calculate_retry_delay};
-use chimera_operator::circuit_breaker::CircuitBreaker;
+use chimera_operator::jupiter_error_handling::{
+    calculate_retry_delay, JupiterError, JupiterErrorType, RetryConfig,
+};
 use chimera_operator::models::{Action, Signal, SignalPayload};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use solana_sdk::{
     pubkey::Pubkey,
@@ -36,7 +38,9 @@ async fn test_jupiter_v2_order_endpoint() {
         ..Default::default()
     });
 
-    let rpc_client = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new("https://api.mainnet-beta.solana.com".to_string()));
+    let rpc_client = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new(
+        "https://api.mainnet-beta.solana.com".to_string(),
+    ));
 
     let tx_builder = TransactionBuilder::new(rpc_client, config).unwrap();
 
@@ -66,8 +70,14 @@ async fn test_jupiter_v2_order_endpoint() {
     let built_tx = result.unwrap();
 
     // Verify v2 response fields
-    assert!(built_tx.price_impact_pct().is_some(), "Should have price impact from v2");
-    assert!(built_tx.fill_price_lamports_per_base().is_some(), "Should have fill price from v2");
+    assert!(
+        built_tx.price_impact_pct().is_some(),
+        "Should have price impact from v2"
+    );
+    assert!(
+        built_tx.fill_price_lamports_per_base().is_some(),
+        "Should have fill price from v2"
+    );
 }
 
 #[tokio::test]
@@ -84,7 +94,9 @@ async fn test_jupiter_v2_rtse_support() {
         ..Default::default()
     });
 
-    let rpc_client = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new("https://api.mainnet-beta.solana.com".to_string()));
+    let rpc_client = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new(
+        "https://api.mainnet-beta.solana.com".to_string(),
+    ));
     let tx_builder = TransactionBuilder::new(rpc_client, config).unwrap();
 
     let keypair = Keypair::new();
@@ -116,7 +128,10 @@ async fn test_jupiter_v2_rtse_support() {
     let price_impact = built_tx
         .price_impact_pct()
         .expect("RTSE should provide price impact for a valid swap");
-    assert!(price_impact < dec!(5.0), "RTSE should keep price impact under 5%");
+    assert!(
+        price_impact < dec!(5.0),
+        "RTSE should keep price impact under 5%"
+    );
 }
 
 #[tokio::test]
@@ -132,7 +147,9 @@ async fn test_jupiter_v2_error_handling() {
         ..Default::default()
     });
 
-    let rpc_client = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new("https://api.mainnet-beta.solana.com".to_string()));
+    let rpc_client = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new(
+        "https://api.mainnet-beta.solana.com".to_string(),
+    ));
     let tx_builder = TransactionBuilder::new(rpc_client, config).unwrap();
 
     let keypair = Keypair::new();
@@ -182,8 +199,14 @@ fn test_jupiter_error_classification() {
     // Rate limit error (429)
     let rate_limit_error = JupiterError::from_http_error(429, "Rate limit exceeded".to_string());
     assert_eq!(rate_limit_error.error_type, JupiterErrorType::RateLimit);
-    assert!(rate_limit_error.retryable, "Rate limit errors should be retryable");
-    assert!(rate_limit_error.retry_delay.is_some(), "Rate limit should have retry delay");
+    assert!(
+        rate_limit_error.retryable,
+        "Rate limit errors should be retryable"
+    );
+    assert!(
+        rate_limit_error.retry_delay.is_some(),
+        "Rate limit should have retry delay"
+    );
 
     // Authentication error (401)
     let auth_error = JupiterError::from_http_error(401, "Unauthorized".to_string());
@@ -198,12 +221,18 @@ fn test_jupiter_error_classification() {
     // Network error
     let network_error = JupiterError::network_error("Connection failed".to_string());
     assert_eq!(network_error.error_type, JupiterErrorType::NetworkError);
-    assert!(network_error.retryable, "Network errors should be retryable");
+    assert!(
+        network_error.retryable,
+        "Network errors should be retryable"
+    );
 
     // Parse error
     let parse_error = JupiterError::parse_error("Invalid JSON".to_string());
     assert_eq!(parse_error.error_type, JupiterErrorType::ParseError);
-    assert!(!parse_error.retryable, "Parse errors should not be retryable");
+    assert!(
+        !parse_error.retryable,
+        "Parse errors should not be retryable"
+    );
 }
 
 #[test]
@@ -233,8 +262,14 @@ fn test_retry_delay_calculation() {
     assert!(delay3 > delay2, "Third retry should be longer than second");
 
     // Verify exponential growth
-    assert!(delay2.as_millis() as f64 > delay1.as_millis() as f64 * 1.5, "Should have exponential growth");
-    assert!(delay3.as_millis() as f64 > delay2.as_millis() as f64 * 1.5, "Should have exponential growth");
+    assert!(
+        delay2.as_millis() as f64 > delay1.as_millis() as f64 * 1.5,
+        "Should have exponential growth"
+    );
+    assert!(
+        delay3.as_millis() as f64 > delay2.as_millis() as f64 * 1.5,
+        "Should have exponential growth"
+    );
 }
 
 #[test]
@@ -283,7 +318,9 @@ async fn test_jupiter_retry_logic() {
         let n = attempt_count.load(std::sync::atomic::Ordering::SeqCst);
         async move {
             if n < 3 {
-                Err(chimera_operator::error::AppError::Http("Temporary failure".to_string()))
+                Err(chimera_operator::error::AppError::Http(
+                    "Temporary failure".to_string(),
+                ))
             } else {
                 Ok("success")
             }
@@ -293,7 +330,11 @@ async fn test_jupiter_retry_logic() {
     let result = retry_with_backoff(operation, &config, "test operation").await;
 
     assert!(result.is_ok(), "Should succeed after retries");
-    assert_eq!(attempt_count.load(std::sync::atomic::Ordering::SeqCst), 3, "Should have made 3 attempts");
+    assert_eq!(
+        attempt_count.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "Should have made 3 attempts"
+    );
     assert_eq!(result.unwrap(), "success", "Should return success value");
 }
 
@@ -313,11 +354,14 @@ async fn test_jupiter_retry_exhaustion() {
     let operation = || {
         attempt_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         async move {
-            Err(chimera_operator::error::AppError::Http("Persistent failure".to_string()))
+            Err(chimera_operator::error::AppError::Http(
+                "Persistent failure".to_string(),
+            ))
         }
     };
 
-    let result: chimera_operator::error::AppResult<&str> = retry_with_backoff(operation, &config, "failing operation").await;
+    let result: chimera_operator::error::AppResult<&str> =
+        retry_with_backoff(operation, &config, "failing operation").await;
 
     assert!(result.is_err(), "Should fail after all retries exhausted");
     assert_eq!(
@@ -332,13 +376,15 @@ async fn test_jupiter_retry_exhaustion() {
 async fn test_circuit_breaker_jupiter_integration() {
     // Test circuit breaker integration with Jupiter failures
 
-    use chimera_operator::config::{CircuitBreakerConfig};
+    use chimera_operator::config::CircuitBreakerConfig;
     use chimera_operator::db_abstraction::{create_database, DatabaseConfig};
 
     // Requires an external Postgres instance (TEST_DATABASE_URL)
-    let db = create_database(&DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set")))
-        .await
-        .unwrap();
+    let db = create_database(&DatabaseConfig::postgres(
+        std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"),
+    ))
+    .await
+    .unwrap();
 
     let config = CircuitBreakerConfig {
         max_jupiter_failures: 3, // Trip after 3 consecutive failures
@@ -348,24 +394,48 @@ async fn test_circuit_breaker_jupiter_integration() {
     let circuit_breaker = CircuitBreaker::new(config, db, dec!(10.0));
 
     // Record Jupiter failures
-    let tripped = circuit_breaker.record_jupiter_failure("rate_limit".to_string()).await.unwrap();
+    let tripped = circuit_breaker
+        .record_jupiter_failure("rate_limit".to_string())
+        .await
+        .unwrap();
     assert!(!tripped, "1 failure below the threshold must not trip");
-    assert_eq!(circuit_breaker.get_jupiter_failure_count(), 1, "Should have 1 failure");
+    assert_eq!(
+        circuit_breaker.get_jupiter_failure_count(),
+        1,
+        "Should have 1 failure"
+    );
 
-    let tripped = circuit_breaker.record_jupiter_failure("timeout".to_string()).await.unwrap();
+    let tripped = circuit_breaker
+        .record_jupiter_failure("timeout".to_string())
+        .await
+        .unwrap();
     assert!(!tripped, "2 failures below the threshold must not trip");
-    assert_eq!(circuit_breaker.get_jupiter_failure_count(), 2, "Should have 2 failures");
+    assert_eq!(
+        circuit_breaker.get_jupiter_failure_count(),
+        2,
+        "Should have 2 failures"
+    );
 
     // Third consecutive failure reaches the threshold: must AUTO-TRIP and
     // transition to TRIPPED (this is the auto-trip path in
     // record_jupiter_failure, not manual_trip).
-    let tripped = circuit_breaker.record_jupiter_failure("timeout".to_string()).await.unwrap();
+    let tripped = circuit_breaker
+        .record_jupiter_failure("timeout".to_string())
+        .await
+        .unwrap();
     assert!(tripped, "Third consecutive failure should trip the breaker");
-    assert_eq!(circuit_breaker.get_jupiter_failure_count(), 3, "Should have 3 failures");
+    assert_eq!(
+        circuit_breaker.get_jupiter_failure_count(),
+        3,
+        "Should have 3 failures"
+    );
 
     // Verify circuit breaker state
     let status = circuit_breaker.status();
-    assert_eq!(status.state.to_string(), "TRIPPED", "Circuit breaker should trip after 3 failures");
+    assert_eq!(
+        status.state.to_string(),
+        "TRIPPED",
+        "Circuit breaker should trip after 3 failures"
+    );
     assert!(status.trip_reason.is_some(), "Should have trip reason");
 }
-

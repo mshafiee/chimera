@@ -74,18 +74,20 @@ fn build_lifecycle_config(
         .monitoring
         .as_ref()
         .and_then(|m| m.webhook_lifecycle.as_ref());
-    Ok(crate::monitoring::webhook_lifecycle::WebhookLifecycleConfig {
-        auto_register_enabled: lifecycle.map(|wl| wl.auto_register_enabled).unwrap_or(true),
-        auto_cleanup_enabled: lifecycle.map(|wl| wl.auto_cleanup_enabled).unwrap_or(true),
-        health_check_interval_secs: lifecycle
-            .map(|wl| wl.health_check_interval_secs)
-            .unwrap_or(3600),
-        stale_threshold_days: lifecycle.map(|wl| wl.stale_threshold_days).unwrap_or(7),
-        max_registration_retries: lifecycle.map(|wl| wl.max_registration_retries).unwrap_or(3),
-        webhook_url,
-        helius_dry_run: get_helius_dry_run(state),
-        auth_header: get_auth_header(state),
-    })
+    Ok(
+        crate::monitoring::webhook_lifecycle::WebhookLifecycleConfig {
+            auto_register_enabled: lifecycle.map(|wl| wl.auto_register_enabled).unwrap_or(true),
+            auto_cleanup_enabled: lifecycle.map(|wl| wl.auto_cleanup_enabled).unwrap_or(true),
+            health_check_interval_secs: lifecycle
+                .map(|wl| wl.health_check_interval_secs)
+                .unwrap_or(3600),
+            stale_threshold_days: lifecycle.map(|wl| wl.stale_threshold_days).unwrap_or(7),
+            max_registration_retries: lifecycle.map(|wl| wl.max_registration_retries).unwrap_or(3),
+            webhook_url,
+            helius_dry_run: get_helius_dry_run(state),
+            auth_header: get_auth_header(state),
+        },
+    )
 }
 
 /// Bulk register request
@@ -427,7 +429,9 @@ pub async fn retry_webhook_registration(
             );
             Err(AppError::Internal(format!(
                 "Webhook registration retry failed: {}",
-                result.error_message.unwrap_or_else(|| "unknown error".to_string())
+                result
+                    .error_message
+                    .unwrap_or_else(|| "unknown error".to_string())
             )))
         }
         Err(e) => {
@@ -486,7 +490,10 @@ pub async fn toggle_wallet_webhook(
                 error = %e,
                 "Failed to toggle webhook"
             );
-            Err(AppError::Internal(format!("Failed to toggle webhook: {}", e)))
+            Err(AppError::Internal(format!(
+                "Failed to toggle webhook: {}",
+                e
+            )))
         }
     }
 }

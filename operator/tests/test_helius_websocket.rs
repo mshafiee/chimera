@@ -7,7 +7,7 @@
 //!
 //! Run with a real HELIUS_API_KEY: cargo test --test test_helius_websocket -- --ignored
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::time::Duration;

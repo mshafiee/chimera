@@ -22,22 +22,42 @@ fn live_enforced_go_proceeds() {
 #[test]
 fn live_enforced_no_verdict_fails_closed() {
     // The crucial fail-closed case: no verdict computed yet → block.
-    assert!(profitability_gate_blocks(true, TradeMode::Live, Action::Buy, Strategy::Shield, "").is_some());
+    assert!(
+        profitability_gate_blocks(true, TradeMode::Live, Action::Buy, Strategy::Shield, "")
+            .is_some()
+    );
 }
 
 #[test]
 fn live_enforced_inconclusive_fails_closed() {
-    assert!(profitability_gate_blocks(true, TradeMode::Live, Action::Buy, Strategy::Spear, "INCONCLUSIVE").is_some());
+    assert!(profitability_gate_blocks(
+        true,
+        TradeMode::Live,
+        Action::Buy,
+        Strategy::Spear,
+        "INCONCLUSIVE"
+    )
+    .is_some());
 }
 
 #[test]
 fn live_enforced_stop_fails_closed() {
-    assert!(profitability_gate_blocks(true, TradeMode::Live, Action::Buy, Strategy::Shield, "STOP").is_some());
+    assert!(profitability_gate_blocks(
+        true,
+        TradeMode::Live,
+        Action::Buy,
+        Strategy::Shield,
+        "STOP"
+    )
+    .is_some());
 }
 
 #[test]
 fn live_enforced_unknown_verdict_fails_closed() {
-    assert!(profitability_gate_blocks(true, TradeMode::Live, Action::Buy, Strategy::Shield, "WAT").is_some());
+    assert!(
+        profitability_gate_blocks(true, TradeMode::Live, Action::Buy, Strategy::Shield, "WAT")
+            .is_some()
+    );
 }
 
 #[test]
@@ -48,7 +68,13 @@ fn paper_mode_never_blocks_even_without_verdict() {
         None
     );
     assert_eq!(
-        profitability_gate_blocks(true, TradeMode::Paper, Action::Buy, Strategy::Shield, "STOP"),
+        profitability_gate_blocks(
+            true,
+            TradeMode::Paper,
+            Action::Buy,
+            Strategy::Shield,
+            "STOP"
+        ),
         None
     );
 }
@@ -87,11 +113,23 @@ fn live_disabled_enforcement_proceeds_like_paper() {
     // When enforcement is off, a live entry BUY is never blocked — identical to
     // paper/devnet — even with a STOP/INCONCLUSIVE/empty verdict.
     assert_eq!(
-        profitability_gate_blocks(false, TradeMode::Live, Action::Buy, Strategy::Shield, "STOP"),
+        profitability_gate_blocks(
+            false,
+            TradeMode::Live,
+            Action::Buy,
+            Strategy::Shield,
+            "STOP"
+        ),
         None
     );
     assert_eq!(
-        profitability_gate_blocks(false, TradeMode::Live, Action::Buy, Strategy::Shield, "INCONCLUSIVE"),
+        profitability_gate_blocks(
+            false,
+            TradeMode::Live,
+            Action::Buy,
+            Strategy::Shield,
+            "INCONCLUSIVE"
+        ),
         None
     );
     assert_eq!(

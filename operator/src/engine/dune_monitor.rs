@@ -214,7 +214,9 @@ impl DunePnlMonitor {
             tokio::spawn(async move {
                 let has_key = !task_self.api_key.is_empty();
                 if !has_key {
-                    warn!("Dune promote disabled — DUNE_API_KEY not set (on-chain audit still runs)");
+                    warn!(
+                        "Dune promote disabled — DUNE_API_KEY not set (on-chain audit still runs)"
+                    );
                 }
 
                 // Catch-up cycle ~30s after startup.
@@ -337,7 +339,10 @@ impl DunePnlMonitor {
     /// Poll execution status, then download CSV results.
     async fn poll_and_fetch_csv(&self, execution_id: &str) -> AppResult<String> {
         let status_url = format!("{}/execution/{}/status", self.dune_api_base, execution_id);
-        let csv_url = format!("{}/execution/{}/results/csv", self.dune_api_base, execution_id);
+        let csv_url = format!(
+            "{}/execution/{}/results/csv",
+            self.dune_api_base, execution_id
+        );
 
         for _ in 0..MAX_POLLS {
             tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
@@ -363,9 +368,7 @@ impl DunePnlMonitor {
                         .header("X-Dune-Api-Key", &self.api_key)
                         .send()
                         .await
-                        .map_err(|e| {
-                            AppError::Internal(format!("Dune CSV fetch failed: {e}"))
-                        })?;
+                        .map_err(|e| AppError::Internal(format!("Dune CSV fetch failed: {e}")))?;
 
                     let csv = csv_resp
                         .text()
@@ -379,17 +382,16 @@ impl DunePnlMonitor {
                         .error
                         .map(|e| e.message)
                         .unwrap_or_else(|| "unknown error".to_string());
-                    return Err(AppError::Internal(format!(
-                        "Dune query failed: {msg}"
-                    )));
+                    return Err(AppError::Internal(format!("Dune query failed: {msg}")));
                 }
                 _ => { /* still pending/executing */ }
             }
         }
 
         Err(AppError::Internal(format!(
-            "Dune query timed out after {} polls"
-        , MAX_POLLS)))
+            "Dune query timed out after {} polls",
+            MAX_POLLS
+        )))
     }
 
     /// Fetch JSON result rows for an already-COMPLETED execution.
@@ -591,10 +593,8 @@ impl DunePnlMonitor {
             if parsed.is_empty() {
                 // CSV endpoint flaky — fall back to JSON results.
                 if let Ok(rows) = self.fetch_completed_json_rows(&execution_id).await {
-                    parsed = Self::parse_profitable_csv(
-                        &Self::rows_to_csv(&rows),
-                        self.promote_min_roi,
-                    );
+                    parsed =
+                        Self::parse_profitable_csv(&Self::rows_to_csv(&rows), self.promote_min_roi);
                 }
             }
             info!(
@@ -617,9 +617,10 @@ impl DunePnlMonitor {
 
         // 2. Respect the ACTIVE total cap (same as scout's max_active_wallets).
         let DbPool::PostgreSQL(pool) = self.db.pool();
-        let active_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE'")
-            .fetch_one(&pool)
-            .await?;
+        let active_total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE'")
+                .fetch_one(&pool)
+                .await?;
         if active_total as u32 >= self.promote_max_active_total {
             info!(
                 active_total,
@@ -671,26 +672,23 @@ impl DunePnlMonitor {
                     let assessor =
                         crate::engine::onchain_assessment::OnchainAssessor::new(helius.clone());
                     for addr in &candidates {
-                        match assessor
-                            .assess_wallet(addr, onchain_config.tx_limit)
-                            .await
-                        {
+                        match assessor.assess_wallet(addr, onchain_config.tx_limit).await {
                             Ok(a) => {
                                 // Persist the per-wallet exit profile (reuses
                                 // the fetched txs — zero extra Helius cost).
                                 {
                                     let DbPool::PostgreSQL(pool) = self.db.pool();
                                     let stats = crate::engine::exit_profile::WalletExitStats::from_assessment(&a);
-                                    if let Err(e) = crate::engine::exit_profile::upsert_exit_profile(
-                                        &pool, addr, &stats,
-                                    )
-                                    .await
+                                    if let Err(e) =
+                                        crate::engine::exit_profile::upsert_exit_profile(
+                                            &pool, addr, &stats,
+                                        )
+                                        .await
                                     {
                                         warn!(wallet = %addr, error = %e, "Dune promotion: exit profile upsert failed");
                                     }
                                 }
-                                let pass = a.round_trips
-                                    >= onchain_config.min_round_trips
+                                let pass = a.round_trips >= onchain_config.min_round_trips
                                     && a.expectancy_pct > onchain_config.min_expectancy_pct;
                                 info!(
                                     wallet = %addr,
@@ -724,10 +722,7 @@ impl DunePnlMonitor {
 
         // 4. Promote (capped per cycle).
         let mut promoted = 0;
-        for address in verified
-            .iter()
-            .take(self.promote_max_per_cycle as usize)
-        {
+        for address in verified.iter().take(self.promote_max_per_cycle as usize) {
             let w = pnl_map.get(address.as_str());
             let (roi, net_pnl, trades) = w
                 .map(|w| (w.roi, w.net_pnl_usd, w.trade_count))
@@ -740,10 +735,7 @@ impl DunePnlMonitor {
             // Toxic baseline so the detector can track post-promotion ROI.
             if let Some(ctx) = &self.promotion_ctx {
                 if let Some(td) = &ctx.toxic_detector {
-                    if let Err(e) = td
-                        .register_wallet_promotion(address.clone(), roi)
-                        .await
-                    {
+                    if let Err(e) = td.register_wallet_promotion(address.clone(), roi).await {
                         warn!(
                             wallet = %address,
                             error = %e,
@@ -1011,15 +1003,14 @@ impl DunePnlMonitor {
                     // Use the wallet's actual 30d ROI ratio (consistent units with
                     // the detector's selection_roi); fall back to 0.0 when unknown.
                     if let Some(td) = &ctx.toxic_detector {
-                        let baseline_roi: f64 = sqlx::query_scalar(
-                            "SELECT roi_30d FROM wallets WHERE address = $1",
-                        )
-                        .bind(addr)
-                        .fetch_optional(&pool)
-                        .await
-                        .ok()
-                        .flatten()
-                        .unwrap_or(0.0);
+                        let baseline_roi: f64 =
+                            sqlx::query_scalar("SELECT roi_30d FROM wallets WHERE address = $1")
+                                .bind(addr)
+                                .fetch_optional(&pool)
+                                .await
+                                .ok()
+                                .flatten()
+                                .unwrap_or(0.0);
                         if let Err(e) = td
                             .register_wallet_promotion(addr.clone(), baseline_roi)
                             .await
@@ -1029,10 +1020,9 @@ impl DunePnlMonitor {
                     }
 
                     // Webhook registration so signals start flowing.
-                    if let (Some(limiter), Some(wl_config)) = (
-                        &ctx.webhook_rate_limiter,
-                        &ctx.webhook_lifecycle_config,
-                    ) {
+                    if let (Some(limiter), Some(wl_config)) =
+                        (&ctx.webhook_rate_limiter, &ctx.webhook_lifecycle_config)
+                    {
                         let manager = WebhookLifecycleManager::new(
                             self.db.clone(),
                             helius.clone(),
@@ -1247,9 +1237,11 @@ impl DunePnlMonitor {
                     // fetched txs — zero extra Helius cost).
                     {
                         let DbPool::PostgreSQL(pool) = self.db.pool();
-                        let stats = crate::engine::exit_profile::WalletExitStats::from_assessment(&a);
+                        let stats =
+                            crate::engine::exit_profile::WalletExitStats::from_assessment(&a);
                         if let Err(e) =
-                            crate::engine::exit_profile::upsert_exit_profile(&pool, wallet, &stats).await
+                            crate::engine::exit_profile::upsert_exit_profile(&pool, wallet, &stats)
+                                .await
                         {
                             warn!(wallet = %wallet, error = %e, "On-chain audit: exit profile upsert failed");
                         }
@@ -1353,14 +1345,20 @@ mod tests {
 
         let wallets = DunePnlMonitor::parse_csv(csv);
         assert_eq!(wallets.len(), 1); // "short" filtered out (< 32 chars)
-        assert_eq!(wallets[0].address, "7oLDfykjJVDmR8ZKcgoehW6z4zhnBnGC8mGUFLhDHxxg");
+        assert_eq!(
+            wallets[0].address,
+            "7oLDfykjJVDmR8ZKcgoehW6z4zhnBnGC8mGUFLhDHxxg"
+        );
         assert!((wallets[0].net_pnl_usd - (-500.0)).abs() < 0.01);
         assert!((wallets[0].margin_pct - (-10.0)).abs() < 0.01);
     }
 
     #[test]
     fn test_parse_csv_empty() {
-        assert!(DunePnlMonitor::parse_csv("wallet,trades_24h,net_pnl_usd,volume_usd,margin_pct\n").is_empty());
+        assert!(
+            DunePnlMonitor::parse_csv("wallet,trades_24h,net_pnl_usd,volume_usd,margin_pct\n")
+                .is_empty()
+        );
         assert!(DunePnlMonitor::parse_csv("").is_empty());
     }
 
@@ -1380,8 +1378,14 @@ mod tests {
         // short: < 32 chars -> filtered
         // A6Wch1mJ: ROI 2.0, 25 trades -> kept
         assert_eq!(wallets.len(), 2);
-        assert_eq!(wallets[0].address, "7oLDfykjJVDmR8ZKcgoehW6z4zhnBnGC8mGUFLhDHxxg");
-        assert_eq!(wallets[1].address, "A6Wch1mJJ1PyooNSAUtctcNmQTxqtkcWManMBQPmKceM");
+        assert_eq!(
+            wallets[0].address,
+            "7oLDfykjJVDmR8ZKcgoehW6z4zhnBnGC8mGUFLhDHxxg"
+        );
+        assert_eq!(
+            wallets[1].address,
+            "A6Wch1mJJ1PyooNSAUtctcNmQTxqtkcWManMBQPmKceM"
+        );
     }
 
     #[test]

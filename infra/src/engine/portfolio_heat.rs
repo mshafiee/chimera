@@ -125,7 +125,9 @@ impl PortfolioHeat {
         // attempt and from the background liquidation task).
         static REGISTRY_FALLBACK_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
         if REGISTRY_FALLBACK_WARNED.set(()).is_ok() {
-            tracing::warn!("Registry not available - using database fallback for portfolio heat (slower)");
+            tracing::warn!(
+                "Registry not available - using database fallback for portfolio heat (slower)"
+            );
         }
         // Include EXITING positions — they still hold capital until exit confirms.
         // Use entry_amount_sol only: heat measures capital at risk (deployed capital),
@@ -260,7 +262,7 @@ impl PortfolioHeat {
         };
 
         let result = new_heat_percent <= self.max_heat_percent;
-        
+
         tracing::info!(
             capital = %capital,
             max_heat_percent = %self.max_heat_percent,
@@ -311,7 +313,7 @@ impl PortfolioHeat {
                 }
             }
         }
-        
+
         for status in &["PENDING", "QUEUED", "EXECUTING", "RETRY"] {
             let trades = self
                 .db
@@ -324,7 +326,7 @@ impl PortfolioHeat {
                     // to prevent stale queue entries from blocking new trades
                     let trade_age = chrono::Utc::now() - trade.created_at;
                     let is_stale = trade_age.num_seconds() > 300; // 5 minutes
-                    
+
                     if !is_stale {
                         match trade.strategy.as_str() {
                             "SHIELD" => shield_heat += trade.amount_sol,
@@ -495,7 +497,7 @@ impl PortfolioHeat {
             chimera_core::models::Strategy::Spear => spear_heat,
             _ => Decimal::ZERO,
         };
-        
+
         // Diagnostic logging for allocation checks
         let result = current_heat + position_size_sol <= allocated_sol;
         tracing::info!(
@@ -516,7 +518,7 @@ impl PortfolioHeat {
             position_size_sol,
             allocated_sol
         );
-        
+
         Ok(result)
     }
 
@@ -961,7 +963,12 @@ mod tests {
         let mut trades = HashMap::new();
         trades.insert(
             "QUEUED".to_string(),
-            vec![buy_trade("other-trade", "SHIELD", dec!(7.5), now_ago_secs(10))],
+            vec![buy_trade(
+                "other-trade",
+                "SHIELD",
+                dec!(7.5),
+                now_ago_secs(10),
+            )],
         );
         let db = heat_db(
             vec![position(

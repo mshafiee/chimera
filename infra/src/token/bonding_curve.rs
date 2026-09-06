@@ -13,8 +13,8 @@
 //! always more profitable (virtual reserves evaporate).
 
 use anyhow::{Context, Result};
-use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
+use solana_client::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 
@@ -115,10 +115,7 @@ pub fn bonding_curve_pda(mint: &str) -> Result<Pubkey> {
 /// Fetch and parse a token's bonding curve state from the chain.
 /// Returns `Ok(None)` when the account doesn't exist (non-pump token or the
 /// curve was closed after graduation).
-pub fn fetch_bonding_curve(
-    rpc: &RpcClient,
-    mint: &str,
-) -> Result<Option<BondingCurveState>> {
+pub fn fetch_bonding_curve(rpc: &RpcClient, mint: &str) -> Result<Option<BondingCurveState>> {
     let curve_pk = bonding_curve_pda(mint)?;
     let account = rpc
         .get_account(&curve_pk)
@@ -182,8 +179,8 @@ mod tests {
         let mid = BondingCurveState::from_account_data(&sample_curve_data(60_000_000_000, false))
             .unwrap();
         assert_eq!(mid.phase(), BondingCurvePhase::Mid);
-        let grad = BondingCurveState::from_account_data(&sample_curve_data(85_000_000_000, true))
-            .unwrap();
+        let grad =
+            BondingCurveState::from_account_data(&sample_curve_data(85_000_000_000, true)).unwrap();
         assert_eq!(grad.phase(), BondingCurvePhase::Graduated);
     }
 

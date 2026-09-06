@@ -205,7 +205,9 @@ pub async fn run_reconciliation(
 
     // Compute the post-run unresolved total from the DB and push it to metrics.
     let unresolved = match db.get_reconciliation_status(100).await {
-        Ok(ReconciliationStatus { unresolved_count, .. }) => unresolved_count as u64,
+        Ok(ReconciliationStatus {
+            unresolved_count, ..
+        }) => unresolved_count as u64,
         Err(e) => {
             tracing::warn!(error = %e, "reconciliation: failed to read post-run status");
             result.unresolved
@@ -391,11 +393,7 @@ async fn reconcile_position(
             )
             .await?;
         }
-        Outcome::Discrepancy {
-            kind,
-            actual,
-            note,
-        } => {
+        Outcome::Discrepancy { kind, actual, note } => {
             db.insert_reconciliation_log(
                 &pos.trade_uuid,
                 &pos.state,
@@ -515,9 +513,7 @@ async fn auto_resolve_exit(
 /// Push the run summary to the existing Prometheus reconciliation counters.
 fn push_metrics(metrics: &MetricsState, result: &ReconciliationRunResult) {
     if result.checked_count > 0 {
-        metrics
-            .reconciliation_checked
-            .inc_by(result.checked_count);
+        metrics.reconciliation_checked.inc_by(result.checked_count);
     }
     if result.discrepancies > 0 {
         metrics
@@ -558,7 +554,10 @@ mod tests {
     fn test_rpc_checker_parses_valid_signature() {
         // A 64-byte zero signature encodes to 64 base58 '1' characters.
         let sig = "1".repeat(64);
-        assert!(sig.parse::<Signature>().is_ok(), "64-byte zero signature should parse");
+        assert!(
+            sig.parse::<Signature>().is_ok(),
+            "64-byte zero signature should parse"
+        );
         // An obviously invalid signature must be rejected (the checker maps this to Error).
         assert!("not-a-valid-signature!!!".parse::<Signature>().is_err());
     }

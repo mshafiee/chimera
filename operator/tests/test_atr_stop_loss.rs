@@ -26,7 +26,10 @@ fn test_market_regime_parsing() {
     // Test that market regimes parse correctly from strings
     assert_eq!(MarketRegime::parse_regime("BULL"), MarketRegime::Bull);
     assert_eq!(MarketRegime::parse_regime("BEAR"), MarketRegime::Bear);
-    assert_eq!(MarketRegime::parse_regime("VOLATILE"), MarketRegime::Volatile);
+    assert_eq!(
+        MarketRegime::parse_regime("VOLATILE"),
+        MarketRegime::Volatile
+    );
     assert_eq!(MarketRegime::parse_regime("NEUTRAL"), MarketRegime::Neutral);
     assert_eq!(MarketRegime::parse_regime("bull"), MarketRegime::Bull);
     assert_eq!(MarketRegime::parse_regime("bear"), MarketRegime::Bear);
@@ -51,7 +54,11 @@ fn test_market_regime_multiplier_ordering() {
     let multipliers: Vec<_> = regimes.iter().map(|r| r.atr_multiplier()).collect();
     let unique_multipliers: std::collections::HashSet<_> = multipliers.iter().collect();
 
-    assert_eq!(unique_multipliers.len(), 4, "All regimes should have unique multipliers");
+    assert_eq!(
+        unique_multipliers.len(),
+        4,
+        "All regimes should have unique multipliers"
+    );
 
     println!("✓ Market regime multipliers are unique");
 
@@ -62,8 +69,14 @@ fn test_market_regime_multiplier_ordering() {
     let volatile_mult = MarketRegime::Volatile.atr_multiplier();
 
     assert!(bear_mult < neutral_mult, "Bear should have tightest stops");
-    assert!(neutral_mult < bull_mult, "Neutral should be tighter than bull");
-    assert!(bull_mult < volatile_mult, "Bull should be tighter than volatile");
+    assert!(
+        neutral_mult < bull_mult,
+        "Neutral should be tighter than bull"
+    );
+    assert!(
+        bull_mult < volatile_mult,
+        "Bull should be tighter than volatile"
+    );
 
     println!("✓ Market regime multipliers follow expected ordering:");
     println!("  Bear: {}", bear_mult);
@@ -90,12 +103,21 @@ fn test_atr_formula_logic() {
     let stop_price = entry_price - (entry_price * atr_distance);
 
     // Verify the stop-loss price is below entry for long positions
-    assert!(stop_price < entry_price, "ATR stop-loss should be below entry price");
+    assert!(
+        stop_price < entry_price,
+        "ATR stop-loss should be below entry price"
+    );
 
     // Verify the stop-loss distance is reasonable (not too tight or wide)
     let loss_percent = ((stop_price - entry_price) / entry_price) * dec!(100.0);
-    assert!(loss_percent > dec!(-20), "ATR stop-loss should not be extremely tight");
-    assert!(loss_percent < dec!(-5), "ATR stop-loss should provide protection");
+    assert!(
+        loss_percent > dec!(-20),
+        "ATR stop-loss should not be extremely tight"
+    );
+    assert!(
+        loss_percent < dec!(-5),
+        "ATR stop-loss should provide protection"
+    );
 
     println!("✓ ATR formula logic works:");
     println!("  Entry: ${}", entry_price);
@@ -128,14 +150,39 @@ fn test_regime_adjustment_logic() {
     }
 
     // Verify regime ordering (bear tightest, volatile widest)
-    let bear_stop = stops.iter().find(|(n, _)| *n == "Bear").map(|(_, s)| s).unwrap();
-    let neutral_stop = stops.iter().find(|(n, _)| *n == "Neutral").map(|(_, s)| s).unwrap();
-    let bull_stop = stops.iter().find(|(n, _)| *n == "Bull").map(|(_, s)| s).unwrap();
-    let volatile_stop = stops.iter().find(|(n, _)| *n == "Volatile").map(|(_, s)| s).unwrap();
+    let bear_stop = stops
+        .iter()
+        .find(|(n, _)| *n == "Bear")
+        .map(|(_, s)| s)
+        .unwrap();
+    let neutral_stop = stops
+        .iter()
+        .find(|(n, _)| *n == "Neutral")
+        .map(|(_, s)| s)
+        .unwrap();
+    let bull_stop = stops
+        .iter()
+        .find(|(n, _)| *n == "Bull")
+        .map(|(_, s)| s)
+        .unwrap();
+    let volatile_stop = stops
+        .iter()
+        .find(|(n, _)| *n == "Volatile")
+        .map(|(_, s)| s)
+        .unwrap();
 
-    assert!(bear_stop > neutral_stop, "Bear should have tightest stops (highest price)");
-    assert!(neutral_stop > bull_stop, "Neutral should be tighter than bull");
-    assert!(bull_stop > volatile_stop, "Bull should be tighter than volatile");
+    assert!(
+        bear_stop > neutral_stop,
+        "Bear should have tightest stops (highest price)"
+    );
+    assert!(
+        neutral_stop > bull_stop,
+        "Neutral should be tighter than bull"
+    );
+    assert!(
+        bull_stop > volatile_stop,
+        "Bull should be tighter than volatile"
+    );
 
     println!("✓ Regime adjustment logic works correctly:");
     for (name, stop) in &stops {

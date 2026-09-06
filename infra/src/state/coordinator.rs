@@ -4,7 +4,9 @@
 //! and provides periodic synchronization.
 
 use crate::db_abstraction::Database;
-use crate::state::registry::{PositionState, PortfolioHeatState, StateRegistry, TradeState, TradeStatus, WalletState};
+use crate::state::registry::{
+    PortfolioHeatState, PositionState, StateRegistry, TradeState, TradeStatus, WalletState,
+};
 use crate::state::write_queue::AsyncWriteQueue;
 use rust_decimal::Decimal;
 use std::sync::Arc;
@@ -30,7 +32,10 @@ impl StateCoordinator {
         write_queue: Arc<AsyncWriteQueue>,
         sync_interval: Duration,
     ) -> Self {
-        info!("Creating state coordinator with sync interval: {:?}", sync_interval);
+        info!(
+            "Creating state coordinator with sync interval: {:?}",
+            sync_interval
+        );
         Self {
             registry,
             db,
@@ -70,7 +75,10 @@ impl StateCoordinator {
         let sync_interval = self.sync_interval;
         let last_sync = Arc::clone(&self.last_sync);
 
-        info!("Starting periodic sync task (interval: {:?})", sync_interval);
+        info!(
+            "Starting periodic sync task (interval: {:?})",
+            sync_interval
+        );
 
         tokio::spawn(async move {
             let mut timer = interval(sync_interval);
@@ -100,7 +108,10 @@ impl StateCoordinator {
                 *last_sync.lock().unwrap() = Instant::now();
 
                 let duration = start.elapsed();
-                debug!("State synchronization completed in {}ms", duration.as_millis());
+                debug!(
+                    "State synchronization completed in {}ms",
+                    duration.as_millis()
+                );
             }
         });
 
@@ -112,8 +123,13 @@ impl StateCoordinator {
         let statuses = ["PENDING", "QUEUED", "EXECUTING", "ACTIVE", "EXITING"];
 
         for status in &statuses {
-            let trades = self.db.get_trades_by_status(status, i32::MAX).await
-                .map_err(|e| CoordinatorError::DatabaseError(format!("Failed to load trades: {}", e)))?;
+            let trades = self
+                .db
+                .get_trades_by_status(status, i32::MAX)
+                .await
+                .map_err(|e| {
+                    CoordinatorError::DatabaseError(format!("Failed to load trades: {}", e))
+                })?;
             let trades_count = trades.len();
 
             for trade in trades {
@@ -130,8 +146,9 @@ impl StateCoordinator {
                     version: 1,
                 };
 
-                self.registry.insert_trade(trade_state)
-                    .map_err(|e| CoordinatorError::RegistryError(format!("Failed to insert trade: {}", e)))?;
+                self.registry.insert_trade(trade_state).map_err(|e| {
+                    CoordinatorError::RegistryError(format!("Failed to insert trade: {}", e))
+                })?;
             }
 
             debug!("Loaded {} trades with status {}", trades_count, status);
@@ -142,8 +159,9 @@ impl StateCoordinator {
 
     /// Load active positions from database
     async fn load_active_positions(&self) -> Result<(), CoordinatorError> {
-        let positions = self.db.get_active_positions().await
-            .map_err(|e| CoordinatorError::DatabaseError(format!("Failed to load positions: {}", e)))?;
+        let positions = self.db.get_active_positions().await.map_err(|e| {
+            CoordinatorError::DatabaseError(format!("Failed to load positions: {}", e))
+        })?;
         let positions_count = positions.len();
 
         for position in positions {
@@ -160,8 +178,9 @@ impl StateCoordinator {
                 updated_at: SystemTime::now(),
             };
 
-            self.registry.insert_position(position_state)
-                .map_err(|e| CoordinatorError::RegistryError(format!("Failed to insert position: {}", e)))?;
+            self.registry.insert_position(position_state).map_err(|e| {
+                CoordinatorError::RegistryError(format!("Failed to insert position: {}", e))
+            })?;
         }
 
         debug!("Loaded {} active positions", positions_count);
@@ -170,8 +189,9 @@ impl StateCoordinator {
 
     /// Load wallets from database
     async fn load_wallets(&self) -> Result<(), CoordinatorError> {
-        let wallet_details = self.db.get_wallets(None).await
-            .map_err(|e| CoordinatorError::DatabaseError(format!("Failed to load wallets: {}", e)))?;
+        let wallet_details = self.db.get_wallets(None).await.map_err(|e| {
+            CoordinatorError::DatabaseError(format!("Failed to load wallets: {}", e))
+        })?;
         let wallets_count = wallet_details.len();
 
         for wallet in wallet_details {
@@ -183,8 +203,9 @@ impl StateCoordinator {
                 updated_at: SystemTime::now(),
             };
 
-            self.registry.upsert_wallet(wallet_state)
-                .map_err(|e| CoordinatorError::RegistryError(format!("Failed to insert wallet: {}", e)))?;
+            self.registry.upsert_wallet(wallet_state).map_err(|e| {
+                CoordinatorError::RegistryError(format!("Failed to insert wallet: {}", e))
+            })?;
         }
 
         debug!("Loaded {} wallets", wallets_count);
@@ -215,42 +236,58 @@ impl StateCoordinator {
 
         // Add pending trades
         for trade in self.registry.get_all_trades() {
-            if matches!(trade.status, TradeStatus::Pending | TradeStatus::Queued | TradeStatus::Executing)
-                && trade.side == "BUY" {
-                    total_exposure += trade.amount_sol;
-                    // Use actual strategy for accurate allocation
-                    match trade.strategy.as_str() {
-                        "SHIELD" => shield_exposure += trade.amount_sol,
-                        "SPEAR" => spear_exposure += trade.amount_sol,
-                        _ => {
-                            // Unknown strategy - evenly distribute
-                            shield_exposure += trade.amount_sol / Decimal::from(2);
-                            spear_exposure += trade.amount_sol / Decimal::from(2);
-                        }
+            if matches!(
+                trade.status,
+                TradeStatus::Pending | TradeStatus::Queued | TradeStatus::Executing
+            ) && trade.side == "BUY"
+            {
+                total_exposure += trade.amount_sol;
+                // Use actual strategy for accurate allocation
+                match trade.strategy.as_str() {
+                    "SHIELD" => shield_exposure += trade.amount_sol,
+                    "SPEAR" => spear_exposure += trade.amount_sol,
+                    _ => {
+                        // Unknown strategy - evenly distribute
+                        shield_exposure += trade.amount_sol / Decimal::from(2);
+                        spear_exposure += trade.amount_sol / Decimal::from(2);
                     }
                 }
+            }
         }
 
-        self.registry.update_portfolio_heat(PortfolioHeatState {
-            total_exposure_sol: total_exposure,
-            shield_exposure_sol: shield_exposure,
-            spear_exposure_sol: spear_exposure,
-            pending_heat_sol: Decimal::ZERO,
-            last_updated: SystemTime::now(),
-        }).map_err(|e| CoordinatorError::RegistryError(format!("Failed to update portfolio heat: {}", e)))?;
+        self.registry
+            .update_portfolio_heat(PortfolioHeatState {
+                total_exposure_sol: total_exposure,
+                shield_exposure_sol: shield_exposure,
+                spear_exposure_sol: spear_exposure,
+                pending_heat_sol: Decimal::ZERO,
+                last_updated: SystemTime::now(),
+            })
+            .map_err(|e| {
+                CoordinatorError::RegistryError(format!("Failed to update portfolio heat: {}", e))
+            })?;
 
-        debug!("Calculated portfolio heat: {} SOL (shield: {}, spear: {})",
-               total_exposure, shield_exposure, spear_exposure);
+        debug!(
+            "Calculated portfolio heat: {} SOL (shield: {}, spear: {})",
+            total_exposure, shield_exposure, spear_exposure
+        );
         Ok(())
     }
 
     /// Sync active trades between registry and database
-    async fn sync_active_trades(registry: &Arc<StateRegistry>, db: &Arc<dyn Database>) -> Result<(), CoordinatorError> {
+    async fn sync_active_trades(
+        registry: &Arc<StateRegistry>,
+        db: &Arc<dyn Database>,
+    ) -> Result<(), CoordinatorError> {
         let statuses = ["PENDING", "QUEUED", "EXECUTING", "ACTIVE", "EXITING"];
 
         for status in &statuses {
-            let db_trades = db.get_trades_by_status(status, i32::MAX).await
-                .map_err(|e| CoordinatorError::DatabaseError(format!("Failed to fetch trades: {}", e)))?;
+            let db_trades = db
+                .get_trades_by_status(status, i32::MAX)
+                .await
+                .map_err(|e| {
+                    CoordinatorError::DatabaseError(format!("Failed to fetch trades: {}", e))
+                })?;
 
             for db_trade in db_trades {
                 let reg_trade = registry.get_trade(&db_trade.trade_uuid);
@@ -260,12 +297,22 @@ impl StateCoordinator {
                         // Check if status matches
                         let reg_status: String = reg_trade.status.clone().into();
                         if reg_status != db_trade.status {
-                            warn!("Status mismatch for trade {}: registry={:?}, db={}",
-                                  db_trade.trade_uuid, reg_trade.status, db_trade.status);
+                            warn!(
+                                "Status mismatch for trade {}: registry={:?}, db={}",
+                                db_trade.trade_uuid, reg_trade.status, db_trade.status
+                            );
                             // Update registry to match database (database is source of truth)
-                            registry.update_trade_status(&db_trade.trade_uuid,
-                                                       Self::db_status_to_trade_status(&db_trade.status))
-                                .map_err(|e| CoordinatorError::RegistryError(format!("Failed to update trade status: {}", e)))?;
+                            registry
+                                .update_trade_status(
+                                    &db_trade.trade_uuid,
+                                    Self::db_status_to_trade_status(&db_trade.status),
+                                )
+                                .map_err(|e| {
+                                    CoordinatorError::RegistryError(format!(
+                                        "Failed to update trade status: {}",
+                                        e
+                                    ))
+                                })?;
                         }
                     }
                     None => {
@@ -283,8 +330,12 @@ impl StateCoordinator {
                             updated_at: SystemTime::now(),
                             version: 1,
                         };
-                        registry.insert_trade(trade_state)
-                            .map_err(|e| CoordinatorError::RegistryError(format!("Failed to insert trade: {}", e)))?;
+                        registry.insert_trade(trade_state).map_err(|e| {
+                            CoordinatorError::RegistryError(format!(
+                                "Failed to insert trade: {}",
+                                e
+                            ))
+                        })?;
                     }
                 }
             }
@@ -294,9 +345,13 @@ impl StateCoordinator {
     }
 
     /// Sync active positions between registry and database
-    async fn sync_active_positions(registry: &Arc<StateRegistry>, db: &Arc<dyn Database>) -> Result<(), CoordinatorError> {
-        let db_positions = db.get_active_positions().await
-            .map_err(|e| CoordinatorError::DatabaseError(format!("Failed to fetch positions: {}", e)))?;
+    async fn sync_active_positions(
+        registry: &Arc<StateRegistry>,
+        db: &Arc<dyn Database>,
+    ) -> Result<(), CoordinatorError> {
+        let db_positions = db.get_active_positions().await.map_err(|e| {
+            CoordinatorError::DatabaseError(format!("Failed to fetch positions: {}", e))
+        })?;
 
         for db_position in db_positions {
             let reg_position = registry.get_position_by_trade_uuid(&db_position.trade_uuid);
@@ -305,16 +360,27 @@ impl StateCoordinator {
                 Some(reg_position) => {
                     // Check if state matches
                     if reg_position.state != db_position.state {
-                        warn!("State mismatch for position {}: registry={}, db={}",
-                              db_position.trade_uuid, reg_position.state, db_position.state);
+                        warn!(
+                            "State mismatch for position {}: registry={}, db={}",
+                            db_position.trade_uuid, reg_position.state, db_position.state
+                        );
                         // Update registry to match database
-                        registry.update_position_state(&db_position.trade_uuid, &db_position.state)
-                            .map_err(|e| CoordinatorError::RegistryError(format!("Failed to update position state: {}", e)))?;
+                        registry
+                            .update_position_state(&db_position.trade_uuid, &db_position.state)
+                            .map_err(|e| {
+                                CoordinatorError::RegistryError(format!(
+                                    "Failed to update position state: {}",
+                                    e
+                                ))
+                            })?;
                     }
                 }
                 None => {
                     // Position in DB but not in registry - add it
-                    debug!("Adding missing position to registry: {}", db_position.trade_uuid);
+                    debug!(
+                        "Adding missing position to registry: {}",
+                        db_position.trade_uuid
+                    );
                     let position_state = PositionState {
                         trade_uuid: db_position.trade_uuid.clone(),
                         wallet_address: db_position.wallet_address.clone(),
@@ -327,8 +393,9 @@ impl StateCoordinator {
                         unrealized_pnl_sol: db_position.unrealized_pnl_sol,
                         updated_at: SystemTime::now(),
                     };
-                    registry.insert_position(position_state)
-                        .map_err(|e| CoordinatorError::RegistryError(format!("Failed to insert position: {}", e)))?;
+                    registry.insert_position(position_state).map_err(|e| {
+                        CoordinatorError::RegistryError(format!("Failed to insert position: {}", e))
+                    })?;
                 }
             }
         }
@@ -337,9 +404,13 @@ impl StateCoordinator {
     }
 
     /// Sync wallets between registry and database
-    async fn sync_wallets(registry: &Arc<StateRegistry>, db: &Arc<dyn Database>) -> Result<(), CoordinatorError> {
-        let db_wallets = db.get_wallets(None).await
-            .map_err(|e| CoordinatorError::DatabaseError(format!("Failed to fetch wallets: {}", e)))?;
+    async fn sync_wallets(
+        registry: &Arc<StateRegistry>,
+        db: &Arc<dyn Database>,
+    ) -> Result<(), CoordinatorError> {
+        let db_wallets = db.get_wallets(None).await.map_err(|e| {
+            CoordinatorError::DatabaseError(format!("Failed to fetch wallets: {}", e))
+        })?;
 
         for db_wallet in db_wallets {
             let reg_wallet = registry.get_wallet(&db_wallet.address);
@@ -348,8 +419,10 @@ impl StateCoordinator {
                 Some(reg_wallet) => {
                     // Check if status matches
                     if reg_wallet.status != db_wallet.status {
-                        warn!("Status mismatch for wallet {}: registry={}, db={}",
-                              db_wallet.address, reg_wallet.status, db_wallet.status);
+                        warn!(
+                            "Status mismatch for wallet {}: registry={}, db={}",
+                            db_wallet.address, reg_wallet.status, db_wallet.status
+                        );
                         // Update registry to match database
                         let wallet_state = WalletState {
                             address: db_wallet.address.clone(),
@@ -358,8 +431,12 @@ impl StateCoordinator {
                             win_rate: db_wallet.win_rate,
                             updated_at: SystemTime::now(),
                         };
-                        registry.upsert_wallet(wallet_state)
-                            .map_err(|e| CoordinatorError::RegistryError(format!("Failed to update wallet: {}", e)))?;
+                        registry.upsert_wallet(wallet_state).map_err(|e| {
+                            CoordinatorError::RegistryError(format!(
+                                "Failed to update wallet: {}",
+                                e
+                            ))
+                        })?;
                     }
                 }
                 None => {
@@ -372,8 +449,9 @@ impl StateCoordinator {
                         win_rate: db_wallet.win_rate,
                         updated_at: SystemTime::now(),
                     };
-                    registry.upsert_wallet(wallet_state)
-                        .map_err(|e| CoordinatorError::RegistryError(format!("Failed to insert wallet: {}", e)))?;
+                    registry.upsert_wallet(wallet_state).map_err(|e| {
+                        CoordinatorError::RegistryError(format!("Failed to insert wallet: {}", e))
+                    })?;
                 }
             }
         }
@@ -502,21 +580,52 @@ mod tests {
 
     fn coordinator(db: Arc<MockDatabase>) -> StateCoordinator {
         let registry = Arc::new(StateRegistry::new());
-        let wq = Arc::new(AsyncWriteQueue::new(db.clone(), RetryConfig::default(), BatchConfig::default()));
+        let wq = Arc::new(AsyncWriteQueue::new(
+            db.clone(),
+            RetryConfig::default(),
+            BatchConfig::default(),
+        ));
         StateCoordinator::new(registry, db, wq, Duration::from_secs(60))
     }
 
     #[test]
     fn test_db_status_to_trade_status() {
-        assert_eq!(StateCoordinator::db_status_to_trade_status("PENDING"), TradeStatus::Pending);
-        assert_eq!(StateCoordinator::db_status_to_trade_status("QUEUED"), TradeStatus::Queued);
-        assert_eq!(StateCoordinator::db_status_to_trade_status("EXECUTING"), TradeStatus::Executing);
-        assert_eq!(StateCoordinator::db_status_to_trade_status("ACTIVE"), TradeStatus::Active);
-        assert_eq!(StateCoordinator::db_status_to_trade_status("EXITING"), TradeStatus::Exiting);
-        assert_eq!(StateCoordinator::db_status_to_trade_status("CLOSED"), TradeStatus::Closed);
-        assert_eq!(StateCoordinator::db_status_to_trade_status("FAILED"), TradeStatus::Failed);
-        assert_eq!(StateCoordinator::db_status_to_trade_status("DEAD_LETTER"), TradeStatus::DeadLetter);
-        assert_eq!(StateCoordinator::db_status_to_trade_status("UNKNOWN"), TradeStatus::Failed);
+        assert_eq!(
+            StateCoordinator::db_status_to_trade_status("PENDING"),
+            TradeStatus::Pending
+        );
+        assert_eq!(
+            StateCoordinator::db_status_to_trade_status("QUEUED"),
+            TradeStatus::Queued
+        );
+        assert_eq!(
+            StateCoordinator::db_status_to_trade_status("EXECUTING"),
+            TradeStatus::Executing
+        );
+        assert_eq!(
+            StateCoordinator::db_status_to_trade_status("ACTIVE"),
+            TradeStatus::Active
+        );
+        assert_eq!(
+            StateCoordinator::db_status_to_trade_status("EXITING"),
+            TradeStatus::Exiting
+        );
+        assert_eq!(
+            StateCoordinator::db_status_to_trade_status("CLOSED"),
+            TradeStatus::Closed
+        );
+        assert_eq!(
+            StateCoordinator::db_status_to_trade_status("FAILED"),
+            TradeStatus::Failed
+        );
+        assert_eq!(
+            StateCoordinator::db_status_to_trade_status("DEAD_LETTER"),
+            TradeStatus::DeadLetter
+        );
+        assert_eq!(
+            StateCoordinator::db_status_to_trade_status("UNKNOWN"),
+            TradeStatus::Failed
+        );
     }
 
     #[tokio::test]
@@ -525,12 +634,19 @@ mod tests {
         db.trades_by_status
             .write()
             .insert("PENDING".to_string(), vec![trade(1, "t1", "PENDING")]);
-        db.active_positions.write().push(position("p1", "ACTIVE", "SHIELD"));
+        db.active_positions
+            .write()
+            .push(position("p1", "ACTIVE", "SHIELD"));
         db.wallet_details.write().push(wallet_detail());
 
         let registry = Arc::new(StateRegistry::new());
-        let wq = Arc::new(AsyncWriteQueue::new(db.clone(), RetryConfig::default(), BatchConfig::default()));
-        let coordinator = StateCoordinator::new(registry.clone(), db.clone(), wq, Duration::from_secs(60));
+        let wq = Arc::new(AsyncWriteQueue::new(
+            db.clone(),
+            RetryConfig::default(),
+            BatchConfig::default(),
+        ));
+        let coordinator =
+            StateCoordinator::new(registry.clone(), db.clone(), wq, Duration::from_secs(60));
 
         coordinator.load_initial_state().await.unwrap();
 
@@ -551,7 +667,9 @@ mod tests {
         let registry = Arc::new(StateRegistry::new());
         let db_dyn: Arc<dyn Database> = db.clone();
 
-        StateCoordinator::sync_active_trades(&registry, &db_dyn).await.unwrap();
+        StateCoordinator::sync_active_trades(&registry, &db_dyn)
+            .await
+            .unwrap();
         assert!(registry.get_trade("t1").is_some());
     }
 
@@ -579,18 +697,27 @@ mod tests {
             .unwrap();
         let db_dyn: Arc<dyn Database> = db.clone();
 
-        StateCoordinator::sync_active_trades(&registry, &db_dyn).await.unwrap();
-        assert_eq!(registry.get_trade("t1").unwrap().status, TradeStatus::Exiting);
+        StateCoordinator::sync_active_trades(&registry, &db_dyn)
+            .await
+            .unwrap();
+        assert_eq!(
+            registry.get_trade("t1").unwrap().status,
+            TradeStatus::Exiting
+        );
     }
 
     #[tokio::test]
     async fn test_sync_active_positions_adds_missing() {
         let db = Arc::new(MockDatabase::default());
-        db.active_positions.write().push(position("p1", "ACTIVE", "SPEAR"));
+        db.active_positions
+            .write()
+            .push(position("p1", "ACTIVE", "SPEAR"));
         let registry = Arc::new(StateRegistry::new());
         let db_dyn: Arc<dyn Database> = db.clone();
 
-        StateCoordinator::sync_active_positions(&registry, &db_dyn).await.unwrap();
+        StateCoordinator::sync_active_positions(&registry, &db_dyn)
+            .await
+            .unwrap();
         assert!(registry.get_position_by_trade_uuid("p1").is_some());
     }
 
@@ -601,7 +728,9 @@ mod tests {
         let registry = Arc::new(StateRegistry::new());
         let db_dyn: Arc<dyn Database> = db.clone();
 
-        StateCoordinator::sync_wallets(&registry, &db_dyn).await.unwrap();
+        StateCoordinator::sync_wallets(&registry, &db_dyn)
+            .await
+            .unwrap();
         assert!(registry.get_wallet("wallet").is_some());
     }
 

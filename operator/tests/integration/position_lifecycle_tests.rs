@@ -132,10 +132,7 @@ async fn test_close_position_no_active_position_is_noop() {
         result.is_ok(),
         "Closing non-existent position should not error"
     );
-    assert!(
-        !result.unwrap(),
-        "No active position was closed"
-    );
+    assert!(!result.unwrap(), "No active position was closed");
 
     let pool = pg_pool(&db);
     let pos_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM positions")
@@ -231,7 +228,7 @@ async fn test_pnl_calculation_accuracy_with_fees() {
     .unwrap();
     db.update_trade_costs(
         exit_uuid,
-        Decimal::from_str("0.001").unwrap(), // exit Jito tip
+        Decimal::from_str("0.001").unwrap(),  // exit Jito tip
         Decimal::from_str("0.0005").unwrap(), // exit DEX fee (attribution only)
         Decimal::from_str("0.0002").unwrap(), // exit slippage (attribution only)
     )
@@ -264,12 +261,14 @@ async fn test_pnl_calculation_accuracy_with_fees() {
 
     // Expected: (110 - 100) / 100 × 1.0 = +0.1 SOL gross, exactly.
     assert_eq!(
-        realized_pnl, Decimal::from_str("0.1").unwrap(),
+        realized_pnl,
+        Decimal::from_str("0.1").unwrap(),
         "Gross PnL should be exactly +0.1 SOL"
     );
     // A1: net = gross − entry tip − exit tip = 0.1 − 0.002.
     assert_eq!(
-        realized_net_pnl, Decimal::from_str("0.098").unwrap(),
+        realized_net_pnl,
+        Decimal::from_str("0.098").unwrap(),
         "Net PnL after fees should be exactly +0.098 SOL (A1 cost model)"
     );
 
@@ -281,7 +280,8 @@ async fn test_pnl_calculation_accuracy_with_fees() {
             .await
             .unwrap();
     assert_eq!(
-        trade_net, Decimal::from_str("0.098").unwrap(),
+        trade_net,
+        Decimal::from_str("0.098").unwrap(),
         "trades.net_pnl_sol must match the position's realized net PnL"
     );
 }

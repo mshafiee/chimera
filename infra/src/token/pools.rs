@@ -168,7 +168,9 @@ mod tests {
     #[tokio::test]
     async fn test_raydium_liquidity_unimplemented_errors() {
         let enumerator = PoolEnumerator::new(
-            Arc::new(RpcClient::new("https://api.mainnet-beta.solana.com".to_string())),
+            Arc::new(RpcClient::new(
+                "https://api.mainnet-beta.solana.com".to_string(),
+            )),
             100,
             300,
         );
@@ -182,7 +184,9 @@ mod tests {
     #[tokio::test]
     async fn test_orca_liquidity_unimplemented_errors() {
         let enumerator = PoolEnumerator::new(
-            Arc::new(RpcClient::new("https://api.mainnet-beta.solana.com".to_string())),
+            Arc::new(RpcClient::new(
+                "https://api.mainnet-beta.solana.com".to_string(),
+            )),
             100,
             300,
         );
@@ -196,7 +200,9 @@ mod tests {
     #[tokio::test]
     async fn test_combined_liquidity_zero_when_both_unimplemented() {
         let enumerator = PoolEnumerator::new(
-            Arc::new(RpcClient::new("https://api.mainnet-beta.solana.com".to_string())),
+            Arc::new(RpcClient::new(
+                "https://api.mainnet-beta.solana.com".to_string(),
+            )),
             100,
             300,
         );
@@ -207,7 +213,9 @@ mod tests {
     #[tokio::test]
     async fn test_cache_fresh_entry_returned_and_expired_evicted() {
         let enumerator = PoolEnumerator::new(
-            Arc::new(RpcClient::new("https://api.mainnet-beta.solana.com".to_string())),
+            Arc::new(RpcClient::new(
+                "https://api.mainnet-beta.solana.com".to_string(),
+            )),
             100,
             300,
         );

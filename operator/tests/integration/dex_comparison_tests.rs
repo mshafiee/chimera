@@ -8,8 +8,8 @@
 
 use chimera_operator::engine::slippage;
 use chimera_operator::Strategy;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 // Mirrors of the engine's slippage constants (slippage.rs, private there) so
@@ -43,7 +43,10 @@ fn test_slippage_model_deep_pool() {
         Some(dec!(100)),
         fb,
     );
-    assert_eq!(est.expected_fraction, LIQ_IMPACT_FLOOR, "deep pool clamps to the impact floor");
+    assert_eq!(
+        est.expected_fraction, LIQ_IMPACT_FLOOR,
+        "deep pool clamps to the impact floor"
+    );
     // tolerance = expected × BUFFER_MULT + MIN_BUFFER (0.001×2 + 0.003) × 1e4 = 50 bps
     assert_eq!(est.tolerance_bps, expect_tolerance(LIQ_IMPACT_FLOOR));
 }
@@ -80,8 +83,7 @@ fn test_slippage_model_jupiter_overrides_and_shield_clamps() {
         large_fraction: dec!(0.01),
         threshold_sol: dec!(0.5),
     };
-    let est =
-        slippage::estimate(Strategy::Shield, Some(dec!(5.0)), dec!(1), None, None, fb);
+    let est = slippage::estimate(Strategy::Shield, Some(dec!(5.0)), dec!(1), None, None, fb);
     // 5% real impact, but Shield tolerance caps at 100 bps.
     assert_eq!(est.expected_fraction, dec!(0.05));
     assert_eq!(est.tolerance_bps, 100);
@@ -143,6 +145,9 @@ async fn test_route_selection_caching() {
         .expect("cached selection");
     // A cache hit must reproduce the FULL quote, not just the selected DEX —
     // comparing only the DEX could pass with two independent live calls.
-    assert_eq!(r1.quote, r2.quote, "cached selection must reproduce the full quote");
+    assert_eq!(
+        r1.quote, r2.quote,
+        "cached selection must reproduce the full quote"
+    );
     assert_eq!(r1.selected_dex, r2.selected_dex);
 }

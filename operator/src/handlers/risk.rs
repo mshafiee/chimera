@@ -49,7 +49,7 @@ pub struct PortfolioRiskResponse {
     pub concentration: ConcentrationData,
     pub exposure: ExposureData,
     pub drawdown: DrawdownData,
-    pub total_capital_sol: f64, // Configured capital cap
+    pub total_capital_sol: f64,  // Configured capital cap
     pub wallet_balance_sol: f64, // Actual available balance (capital + realized PnL - active exposure)
 }
 
@@ -441,9 +441,8 @@ async fn get_stop_loss_metrics_db(
             f64,
             String,
         ),
-    >(
-        &format!(
-            r#"
+    >(&format!(
+        r#"
         SELECT p.trade_uuid, p.token_symbol, p.closed_at,
                p.entry_price::float8, et.stop_loss_price::float8, p.exit_price::float8,
                p.entry_amount_sol::float8, p.strategy
@@ -458,42 +457,41 @@ async fn get_stop_loss_metrics_db(
         ORDER BY p.closed_at DESC
         LIMIT 10
         "#,
-            interval
-        ),
-    )
+        interval
+    ))
     .fetch_all(&pool)
     .await?;
 
     let recent_activations: Vec<StopLossActivation> = recent_rows
         .iter()
-        .map(|(uuid, symbol, closed_at, entry, stop, exit, amount, strategy)| {
-            // Same formula as the aggregate query: (stop - exit) * amount / entry,
-            // clamped at 0 so an overshoot above the stop reports no loss prevented.
-            let loss_prevented = ((stop - exit).max(0.0)) * amount / entry.max(0.000001);
-            StopLossActivation {
-                timestamp: closed_at.clone().unwrap_or_default(),
-                trade_uuid: uuid.clone(),
-                token_symbol: symbol.clone(),
-                entry_price: *entry,
-                stop_price: *stop,
-                loss_prevented_sol: loss_prevented,
-                strategy_name: strategy.clone(),
-            }
-        })
+        .map(
+            |(uuid, symbol, closed_at, entry, stop, exit, amount, strategy)| {
+                // Same formula as the aggregate query: (stop - exit) * amount / entry,
+                // clamped at 0 so an overshoot above the stop reports no loss prevented.
+                let loss_prevented = ((stop - exit).max(0.0)) * amount / entry.max(0.000001);
+                StopLossActivation {
+                    timestamp: closed_at.clone().unwrap_or_default(),
+                    trade_uuid: uuid.clone(),
+                    token_symbol: symbol.clone(),
+                    entry_price: *entry,
+                    stop_price: *stop,
+                    loss_prevented_sol: loss_prevented,
+                    strategy_name: strategy.clone(),
+                }
+            },
+        )
         .collect();
 
     // Calculate activation rate (activations per total closed positions in period)
-    let total_closed: (Option<i64>,) = sqlx::query_as(
-        &format!(
-            r#"
+    let total_closed: (Option<i64>,) = sqlx::query_as(&format!(
+        r#"
         SELECT COUNT(*)
         FROM positions
         WHERE state = 'CLOSED'
           AND closed_at >= NOW() - INTERVAL '{}'
         "#,
-            interval
-        ),
-    )
+        interval
+    ))
     .fetch_one(&pool)
     .await?;
 
@@ -554,9 +552,8 @@ async fn get_profit_target_metrics_db(
     };
 
     // Count trailing stop activations (where trailing_stop_active = true)
-    let trailing_result: (Option<i64>,) = sqlx::query_as(
-        &format!(
-            r#"
+    let trailing_result: (Option<i64>,) = sqlx::query_as(&format!(
+        r#"
         SELECT COUNT(*)
         FROM positions p
         JOIN exit_targets et ON p.trade_uuid = et.trade_uuid
@@ -564,31 +561,27 @@ async fn get_profit_target_metrics_db(
           AND et.trailing_stop_active = true
           AND p.closed_at >= NOW() - INTERVAL '{}'
         "#,
-            interval
-        ),
-    )
+        interval
+    ))
     .fetch_one(&pool)
     .await?;
 
     let trailing_stop_activations = trailing_result.0.unwrap_or(0);
 
     // Per-strategy closed-position counts (denominator for the hit rate)
-    let closed_by_strategy_rows = sqlx::query_as::<_, (String, i64)>(
-        &format!(
-            r#"
+    let closed_by_strategy_rows = sqlx::query_as::<_, (String, i64)>(&format!(
+        r#"
         SELECT strategy, COUNT(*)
         FROM positions
         WHERE state = 'CLOSED'
           AND closed_at >= NOW() - INTERVAL '{}'
         GROUP BY strategy
         "#,
-            interval
-        ),
-    )
+        interval
+    ))
     .fetch_all(&pool)
     .await?;
-    let closed_by_strategy: HashMap<String, i64> =
-        closed_by_strategy_rows.into_iter().collect();
+    let closed_by_strategy: HashMap<String, i64> = closed_by_strategy_rows.into_iter().collect();
 
     // Get by strategy
     let by_strategy_rows = sqlx::query_as::<_, (String, i64, Option<f64>, Option<i64>)>(
@@ -678,17 +671,15 @@ async fn get_profit_target_metrics_db(
         .collect();
 
     // Calculate hit rate (hits with targets / total closed)
-    let total_closed: (Option<i64>,) = sqlx::query_as(
-        &format!(
-            r#"
+    let total_closed: (Option<i64>,) = sqlx::query_as(&format!(
+        r#"
         SELECT COUNT(*)
         FROM positions
         WHERE state = 'CLOSED'
           AND closed_at >= NOW() - INTERVAL '{}'
         "#,
-            interval
-        ),
-    )
+        interval
+    ))
     .fetch_one(&pool)
     .await?;
 
@@ -824,10 +815,7 @@ pub async fn get_portfolio_risk(
     // Get drawdown: (current, historical-worst) from the same DB call.
     // The historical worst is reported as max_drawdown_percent — NOT the
     // current value — so consumers see the real peak-to-trough drawdown.
-    let (current_drawdown, max_drawdown) = state
-        .db
-        .get_max_drawdown_percent(total_capital)
-        .await?;
+    let (current_drawdown, max_drawdown) = state.db.get_max_drawdown_percent(total_capital).await?;
     let current_drawdown_f64 = current_drawdown.to_f64().unwrap_or(0.0);
     let max_drawdown_f64 = max_drawdown.to_f64().unwrap_or(0.0);
 
@@ -867,13 +855,13 @@ pub async fn get_portfolio_risk(
         - Decimal::try_from(exposure.total_exposure_sol).map_err(|e| {
             AppError::Internal(format!("Failed to convert exposure to Decimal: {}", e))
         })?)
-        .to_f64()
-        .ok_or_else(|| {
-            AppError::Internal(format!(
-                "Failed to convert wallet balance {} to f64",
-                total_capital + realized_pnl
-            ))
-        })?;
+    .to_f64()
+    .ok_or_else(|| {
+        AppError::Internal(format!(
+            "Failed to convert wallet balance {} to f64",
+            total_capital + realized_pnl
+        ))
+    })?;
 
     Ok(Json(PortfolioRiskResponse {
         portfolio_heat_percent: portfolio_heat_pct,

@@ -170,7 +170,10 @@ mod tests {
         *req.headers_mut() = headers;
 
         let key = extractor.extract(&req).unwrap();
-        assert_eq!(key, "10.0.0.1", "X-Real-IP should be preferred over X-Forwarded-For");
+        assert_eq!(
+            key, "10.0.0.1",
+            "X-Real-IP should be preferred over X-Forwarded-For"
+        );
     }
 
     #[test]
@@ -195,7 +198,10 @@ mod tests {
         *req.headers_mut() = headers;
 
         let key = extractor.extract(&req).unwrap();
-        assert_eq!(key, "10.0.0.1", "Forwarded header should be preferred over X-Forwarded-For");
+        assert_eq!(
+            key, "10.0.0.1",
+            "Forwarded header should be preferred over X-Forwarded-For"
+        );
     }
 
     #[test]
@@ -204,7 +210,10 @@ mod tests {
         // FIX: Rightmost IP should be used (closest to trusted proxy), not leftmost
         let req = create_request_with_header("X-Forwarded-For", "1.2.3.4, 5.6.7.8");
         let key = extractor.extract(&req).unwrap();
-        assert_eq!(key, "5.6.7.8", "Should use rightmost IP from X-Forwarded-For");
+        assert_eq!(
+            key, "5.6.7.8",
+            "Should use rightmost IP from X-Forwarded-For"
+        );
     }
 
     #[test]
@@ -212,7 +221,10 @@ mod tests {
         let extractor = ProxyAwareKeyExtractor;
         let req = create_request_with_header("X-Forwarded-For", "192.168.1.1");
         let key = extractor.extract(&req).unwrap();
-        assert_eq!(key, "192.168.1.1", "Single IP in X-Forwarded-For should work");
+        assert_eq!(
+            key, "192.168.1.1",
+            "Single IP in X-Forwarded-For should work"
+        );
     }
 
     #[test]
@@ -239,7 +251,10 @@ mod tests {
         let req = create_request_with_header("X-Forwarded-For", "1.2.3.4, 5.6.7.8");
         let key = extractor.extract(&req).unwrap();
         // Should use rightmost (5.6.7.8) not leftmost (1.2.3.4)
-        assert_eq!(key, "5.6.7.8", "Should prevent IP spoofing by using rightmost IP");
+        assert_eq!(
+            key, "5.6.7.8",
+            "Should prevent IP spoofing by using rightmost IP"
+        );
     }
 
     // ==========================================================================
@@ -334,11 +349,7 @@ mod tests {
     #[test]
     fn test_untrusted_peer_ignores_x_real_ip() {
         let extractor = ProxyAwareKeyExtractor;
-        let req = with_header(
-            request_from_v4([8, 8, 8, 8], 443),
-            "X-Real-IP",
-            "10.0.0.9",
-        );
+        let req = with_header(request_from_v4([8, 8, 8, 8], 443), "X-Real-IP", "10.0.0.9");
         let key = extractor.extract(&req).unwrap();
         assert_eq!(key, "8.8.8.8");
     }

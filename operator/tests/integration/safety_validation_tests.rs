@@ -33,10 +33,7 @@ use chimera_operator::engine::{
 };
 use chimera_operator::jupiter;
 use solana_sdk::{
-    hash::Hash,
-    message::VersionedMessage,
-    pubkey::Pubkey,
-    transaction::VersionedTransaction,
+    hash::Hash, message::VersionedMessage, pubkey::Pubkey, transaction::VersionedTransaction,
 };
 use std::str::FromStr;
 
@@ -55,7 +52,9 @@ fn throwaway_user() -> Pubkey {
 const TIP_ACCOUNT: &str = "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU4";
 
 fn require_key() -> Option<String> {
-    let key = std::env::var("CHIMERA_JUPITER__API_KEY").ok().filter(|v| !v.is_empty());
+    let key = std::env::var("CHIMERA_JUPITER__API_KEY")
+        .ok()
+        .filter(|v| !v.is_empty());
     if key.is_none() {
         eprintln!(
             "SKIP: set CHIMERA_JUPITER__API_KEY to run the safety validation harness (obtain from developers.jup.ag/portal)"
@@ -90,7 +89,11 @@ async fn fetch_swap_tx(use_legacy: bool) -> anyhow::Result<(VersionedTransaction
         .send()
         .await?;
     if !resp.status().is_success() {
-        anyhow::bail!("Jupiter /swap returned {}: {}", resp.status(), resp.text().await?);
+        anyhow::bail!(
+            "Jupiter /swap returned {}: {}",
+            resp.status(),
+            resp.text().await?
+        );
     }
     let val: serde_json::Value = resp.json().await?;
     let tx_b64 = val
@@ -130,7 +133,9 @@ async fn v0_refresh_preserves_real_jupiter_message() {
     let v0 = match &tx.message {
         VersionedMessage::V0(m) => m.clone(),
         VersionedMessage::Legacy(_) => {
-            eprintln!("SKIP: Jupiter returned a legacy message, not V0 (asLegacyTransaction was ignored)");
+            eprintln!(
+                "SKIP: Jupiter returned a legacy message, not V0 (asLegacyTransaction was ignored)"
+            );
             return;
         }
     };
@@ -223,14 +228,20 @@ async fn inline_tip_on_real_jupiter_legacy_tx() {
     {
         assert_eq!(a.program_id, b.program_id);
         assert_eq!(a.data, b.data);
-        assert_eq!(a.accounts, b.accounts, "original instructions must be preserved verbatim");
+        assert_eq!(
+            a.accounts, b.accounts,
+            "original instructions must be preserved verbatim"
+        );
     }
     let tip = tipped_ixs.last().unwrap();
     assert_eq!(
         tip.program_id,
         Pubkey::from_str("11111111111111111111111111111111").unwrap()
     );
-    assert!(tip.accounts.iter().any(|m| m.pubkey == tip_account && m.is_writable));
+    assert!(tip
+        .accounts
+        .iter()
+        .any(|m| m.pubkey == tip_account && m.is_writable));
     println!(
         "OK: Jito tip inlined as last instruction on a real Jupiter legacy swap tx ({} originals preserved)",
         original_ixs.len()

@@ -164,15 +164,12 @@ fn main() {
     };
 
     let raw = if input_path == "-" {
-        use std::io::{Read, stdin};
+        use std::io::{stdin, Read};
         let mut s = String::new();
-        stdin()
-            .lock()
-            .read_to_string(&mut s)
-            .unwrap_or_else(|e| {
-                eprintln!("failed to read stdin: {e}");
-                process::exit(1);
-            });
+        stdin().lock().read_to_string(&mut s).unwrap_or_else(|e| {
+            eprintln!("failed to read stdin: {e}");
+            process::exit(1);
+        });
         s
     } else {
         fs::read_to_string(&input_path).unwrap_or_else(|e| {
@@ -274,7 +271,10 @@ fn main() {
     );
 }
 
-fn pnl_pct_for(entry: rust_decimal::Decimal, price: rust_decimal::Decimal) -> rust_decimal::Decimal {
+fn pnl_pct_for(
+    entry: rust_decimal::Decimal,
+    price: rust_decimal::Decimal,
+) -> rust_decimal::Decimal {
     if entry.is_zero() {
         return rust_decimal::Decimal::ZERO;
     }

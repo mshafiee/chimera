@@ -168,12 +168,18 @@ impl TelegramNotifier {
             "disable_web_page_preview": true,
         });
 
-        let response = self.client.post(&url).json(&payload).send().await.map_err(|e| {
-            // reqwest errors embed the request URL, which contains the bot
-            // token — sanitize before the error can reach logs/metrics.
-            let sanitized = e.to_string().replace(&self.bot_token, "***");
-            anyhow::anyhow!("Telegram request failed: {}", sanitized)
-        })?;
+        let response = self
+            .client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| {
+                // reqwest errors embed the request URL, which contains the bot
+                // token — sanitize before the error can reach logs/metrics.
+                let sanitized = e.to_string().replace(&self.bot_token, "***");
+                anyhow::anyhow!("Telegram request failed: {}", sanitized)
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();

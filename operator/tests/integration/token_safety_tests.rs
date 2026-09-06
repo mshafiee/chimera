@@ -107,9 +107,7 @@ async fn test_parser_cache_usage() {
     );
     assert!(result1.safe, "whitelisted token must be safe");
     assert!(
-        cache
-            .get(&format!("{USDC_MINT}:SHIELD"))
-            .is_some(),
+        cache.get(&format!("{USDC_MINT}:SHIELD")).is_some(),
         "fast check must leave the result in the cache"
     );
 }

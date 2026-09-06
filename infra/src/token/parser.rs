@@ -340,7 +340,10 @@ impl TokenParser {
 
         // Phase 2: Holder concentration check
         if self.config.holder_concentration_check_enabled {
-            if let Err(e) = self.check_holder_concentration(token_address, &metadata.supply).await {
+            if let Err(e) = self
+                .check_holder_concentration(token_address, &metadata.supply)
+                .await
+            {
                 let result = TokenSafetyResult::unsafe_with_reason(e.to_string());
                 self.cache.insert(cache_key, result.clone());
                 return Ok(result);
@@ -361,11 +364,7 @@ impl TokenParser {
     }
 
     /// Check holder concentration - Phase 2
-    async fn check_holder_concentration(
-        &self,
-        token_address: &str,
-        supply: &u64,
-    ) -> AppResult<()> {
+    async fn check_holder_concentration(&self, token_address: &str, supply: &u64) -> AppResult<()> {
         use crate::token::pools::KNOWN_DEX_PROGRAM_IDS;
         use solana_sdk::pubkey::Pubkey;
         use std::str::FromStr;
@@ -408,9 +407,7 @@ impl TokenParser {
         // Step 2: Batch get account owners
         let account_pubkeys: Vec<Pubkey> = largest_accounts
             .iter()
-            .filter_map(|account| {
-                account.address.parse::<Pubkey>().ok()
-            })
+            .filter_map(|account| account.address.parse::<Pubkey>().ok())
             .collect();
 
         if account_pubkeys.is_empty() {
@@ -432,8 +429,10 @@ impl TokenParser {
         // Step 3: Filter out DEX-owned accounts and calculate concentration
         let mut top_10_non_dex_amount = 0u64;
         let mut non_dex_count = 0;
-        let dex_programs: std::collections::HashSet<String> =
-            KNOWN_DEX_PROGRAM_IDS.iter().map(|s| s.to_string()).collect();
+        let dex_programs: std::collections::HashSet<String> = KNOWN_DEX_PROGRAM_IDS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
 
         for (i, account_opt) in accounts.iter().take(10).enumerate() {
             if let Some(account) = account_opt {
@@ -981,16 +980,21 @@ mod tests {
         // Test typical Solana addresses (44 chars, base58)
         let valid_addresses = vec![
             "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU", // Standard 44-char address
-            "So11111111111111111111111111111111111111112",   // System program
-            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",    // Token program
-            "9WzDXwBbmg8CsZv8kGqWJRrqcVdNBHQjuUeJPgWcH3YQ",    // Another valid address
+            "So11111111111111111111111111111111111111112",  // System program
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",  // Token program
+            "9WzDXwBbmg8CsZv8kGqWJRrqcVdNBHQjuUeJPgWcH3YQ", // Another valid address
         ];
 
         for address in valid_addresses {
             // Should pass format validation
-            assert!(address.len() >= 32 && address.len() <= 44, "Valid address length check");
             assert!(
-                address.chars().all(|c| c.is_alphanumeric() || c == '1' || c == '3' || c == '5'),
+                address.len() >= 32 && address.len() <= 44,
+                "Valid address length check"
+            );
+            assert!(
+                address
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '1' || c == '3' || c == '5'),
                 "Valid address char check: {}",
                 address
             );
@@ -1002,14 +1006,14 @@ mod tests {
         // Test invalid addresses that should be rejected
         let too_long = "a".repeat(100);
         let invalid_addresses = vec![
-            "",                           // Empty
-            "short",                      // Too short
-            &too_long,                     // Too long
-            "invalid@address#",            // Invalid characters
-                            // Has special chars
-            "ABC DEF",                     // Has space
-            "12345",                      // Too short
-            "0x1234567890abcdef",          // Ethereum-style hex
+            "",                 // Empty
+            "short",            // Too short
+            &too_long,          // Too long
+            "invalid@address#", // Invalid characters
+            // Has special chars
+            "ABC DEF",            // Has space
+            "12345",              // Too short
+            "0x1234567890abcdef", // Ethereum-style hex
         ];
 
         for address in invalid_addresses {
@@ -1032,7 +1036,9 @@ mod tests {
         let invalid_base58 = vec!["0OIL", "abc123def0", "invalid0chars"];
 
         for address in invalid_base58 {
-            let has_invalid_chars = address.chars().any(|c| c == '0' || c == 'O' || c == 'I' || c == 'l');
+            let has_invalid_chars = address
+                .chars()
+                .any(|c| c == '0' || c == 'O' || c == 'I' || c == 'l');
             assert!(has_invalid_chars, "Should detect invalid base58 chars");
         }
 
@@ -1055,14 +1061,20 @@ mod tests {
         assert!(is_non_speculative(known_tokens::USDC));
         assert!(is_non_speculative(known_tokens::USDT));
         assert!(is_non_speculative(known_tokens::WSOL));
-        assert!(!is_non_speculative("7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"));
+        assert!(!is_non_speculative(
+            "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+        ));
     }
 
     #[test]
     fn test_is_pumpfun_token() {
-        assert!(is_pumpfun_token("So1111111111111111111111111111111111111pump"));
+        assert!(is_pumpfun_token(
+            "So1111111111111111111111111111111111111pump"
+        ));
         assert!(is_pumpfun_token("anything-ends-with-pump"));
-        assert!(!is_pumpfun_token("7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"));
+        assert!(!is_pumpfun_token(
+            "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+        ));
         assert!(!is_pumpfun_token("pumpnope"));
     }
 
@@ -1082,7 +1094,10 @@ mod tests {
     #[tokio::test]
     async fn test_fast_check_rejects_short_address() {
         let parser = test_parser();
-        let err = parser.fast_check("short", Strategy::Shield).await.unwrap_err();
+        let err = parser
+            .fast_check("short", Strategy::Shield)
+            .await
+            .unwrap_err();
         assert!(matches!(err, AppError::InvalidTokenAddress(_)));
     }
 
@@ -1090,7 +1105,10 @@ mod tests {
     async fn test_fast_check_rejects_long_address() {
         let parser = test_parser();
         let long = "a".repeat(100);
-        let err = parser.fast_check(&long, Strategy::Shield).await.unwrap_err();
+        let err = parser
+            .fast_check(&long, Strategy::Shield)
+            .await
+            .unwrap_err();
         assert!(matches!(err, AppError::InvalidTokenAddress(_)));
     }
 
@@ -1100,7 +1118,10 @@ mod tests {
         // 44 chars but contains a non-base58 character.
         let addr = format!("{}X-{}", "A".repeat(21), "B".repeat(21));
         assert_eq!(addr.len(), 44);
-        let err = parser.fast_check(&addr, Strategy::Shield).await.unwrap_err();
+        let err = parser
+            .fast_check(&addr, Strategy::Shield)
+            .await
+            .unwrap_err();
         assert!(matches!(err, AppError::InvalidTokenAddress(_)));
     }
 

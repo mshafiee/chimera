@@ -27,7 +27,9 @@ fn helius_rpc_url_targets_mainnet_rpc_host_not_das_api() {
         "RPC URL must NOT use the DAS API host (api.helius.xyz), got: {url}"
     );
     assert!(
-        url.query().unwrap_or_default().contains("api-key=test-key-123"),
+        url.query()
+            .unwrap_or_default()
+            .contains("api-key=test-key-123"),
         "RPC URL must include the API key, got: {url}"
     );
 }

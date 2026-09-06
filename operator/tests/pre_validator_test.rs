@@ -20,8 +20,7 @@ async fn test_validate_local_cache_miss() {
 
     // Create a token fetcher without pre-populated cache
     let token_fetcher = Arc::new(
-        TokenMetadataFetcher::new("https://api.mainnet-beta.solana.com")
-            .with_liquidity_ttl(60)
+        TokenMetadataFetcher::new("https://api.mainnet-beta.solana.com").with_liquidity_ttl(60),
     );
 
     // Create a minimal config
@@ -81,13 +80,12 @@ async fn test_pre_validator_initialization() {
         sol_mint,
         Decimal::from(150),
         chimera_operator::price_cache::PriceSource::Jupiter,
-        None
+        None,
     );
 
     // Create token fetcher
     let token_fetcher = Arc::new(
-        TokenMetadataFetcher::new("https://api.mainnet-beta.solana.com")
-            .with_liquidity_ttl(60)
+        TokenMetadataFetcher::new("https://api.mainnet-beta.solana.com").with_liquidity_ttl(60),
     );
 
     // Create minimal config
@@ -128,8 +126,7 @@ async fn test_validate_local_returns_immediately() {
 
     // Create a token fetcher
     let token_fetcher = Arc::new(
-        TokenMetadataFetcher::new("https://api.mainnet-beta.solana.com")
-            .with_liquidity_ttl(60)
+        TokenMetadataFetcher::new("https://api.mainnet-beta.solana.com").with_liquidity_ttl(60),
     );
 
     // Create minimal config
@@ -176,7 +173,10 @@ async fn test_validate_local_returns_immediately() {
     println!("Result: {:?}", result);
 
     // Should complete very quickly (< 10ms) since it's just cache lookups
-    assert!(elapsed.as_millis() < 100, "validate_local should return immediately");
+    assert!(
+        elapsed.as_millis() < 100,
+        "validate_local should return immediately"
+    );
     assert!(result.is_err(), "Should fail on cache miss");
     println!("✓ validate_local returns immediately without blocking");
 }

@@ -6,20 +6,20 @@
 
 use crate::error::{AppError, AppResult};
 use crate::metrics::RentScavengerMetrics;
+use bincode;
+use solana_account_decoder::UiAccountData;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
+    instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
     signature::{Keypair, Signer},
     transaction::Transaction,
-    instruction::{AccountMeta, Instruction},
 };
-use solana_account_decoder::UiAccountData;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
 use tokio::time::sleep;
-use tracing::{info, error, debug, warn};
-use bincode;
+use tracing::{debug, error, info, warn};
 
 /// Retry configuration for RPC calls
 const MAX_RETRIES: u32 = 3;
@@ -55,15 +55,24 @@ impl Default for RentScavengerConfig {
 impl RentScavengerConfig {
     pub fn validate(&mut self) {
         if self.interval_secs < 300 {
-            warn!(value = self.interval_secs, "RENT_SCAVENGER_INTERVAL_SECS below 300s, clamping to default");
+            warn!(
+                value = self.interval_secs,
+                "RENT_SCAVENGER_INTERVAL_SECS below 300s, clamping to default"
+            );
             self.interval_secs = 6 * 3600;
         }
         if self.max_batch_size < 1 || self.max_batch_size > 20 {
-            warn!(value = self.max_batch_size, "RENT_SCAVENGER_BATCH_SIZE out of range [1,20], clamping to default");
+            warn!(
+                value = self.max_batch_size,
+                "RENT_SCAVENGER_BATCH_SIZE out of range [1,20], clamping to default"
+            );
             self.max_batch_size = 10;
         }
         if self.max_rent_lamports < 1_000_000 {
-            warn!(value = self.max_rent_lamports, "RENT_SCAVENGER_MAX_RENT_LAMPORTS below 0.001 SOL, clamping to default");
+            warn!(
+                value = self.max_rent_lamports,
+                "RENT_SCAVENGER_MAX_RENT_LAMPORTS below 0.001 SOL, clamping to default"
+            );
             self.max_rent_lamports = 1_000_000_000;
         }
     }
@@ -79,18 +88,14 @@ pub struct RentScavenger {
 
 impl RentScavenger {
     /// Retry helper for transient RPC failures with exponential backoff
-    async fn retry_rpc<F, T, E>(
-        &self,
-        operation_name: &str,
-        operation: F,
-    ) -> Result<T, E>
+    async fn retry_rpc<F, T, E>(&self, operation_name: &str, operation: F) -> Result<T, E>
     where
         F: Fn() -> Result<T, E>,
         E: std::fmt::Display,
     {
         let mut attempt = 0;
         let mut delay = Duration::from_millis(INITIAL_RETRY_DELAY_MS);
-        
+
         loop {
             attempt += 1;
             match operation() {
@@ -106,12 +111,12 @@ impl RentScavenger {
                 }
                 Err(e) => {
                     let error_msg = e.to_string();
-                    let is_transient = error_msg.contains("timeout") 
+                    let is_transient = error_msg.contains("timeout")
                         || error_msg.contains("network")
                         || error_msg.contains("connection")
                         || error_msg.contains("503")
                         || error_msg.contains("429");
-                    
+
                     if attempt >= MAX_RETRIES || !is_transient {
                         error!(
                             operation = operation_name,
@@ -124,7 +129,7 @@ impl RentScavenger {
                         }
                         return Err(e);
                     }
-                    
+
                     warn!(
                         operation = operation_name,
                         attempt = attempt,
@@ -132,7 +137,7 @@ impl RentScavenger {
                         retry_delay_ms = delay.as_millis(),
                         "RPC operation failed transiently, retrying with exponential backoff"
                     );
-                    
+
                     sleep(delay).await;
                     delay *= 2; // Exponential backoff
                 }
@@ -171,7 +176,7 @@ impl RentScavenger {
         let scavenger = Arc::clone(&self);
         tokio::spawn(async move {
             let mut ticker = interval(Duration::from_secs(scavenger.config.interval_secs));
-            
+
             // Initial run
             if let Err(e) = scavenger.reclaim_empty_accounts().await {
                 error!(error = %e, "Initial rent scavenger run failed");
@@ -180,7 +185,7 @@ impl RentScavenger {
             loop {
                 ticker.tick().await;
                 debug!("Rent scavenger tick");
-                
+
                 if let Err(e) = scavenger.reclaim_empty_accounts().await {
                     error!(error = %e, "Rent scavenger run failed");
                 }
@@ -194,7 +199,7 @@ impl RentScavenger {
     pub async fn reclaim_empty_accounts(&self) -> AppResult<()> {
         let start_time = std::time::Instant::now();
         let owner = self.funding_keypair.pubkey();
-        
+
         // Process both legacy and Token-2022 programs
         let programs = vec![
             ("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "Token"),
@@ -205,7 +210,10 @@ impl RentScavenger {
         let mut total_rent_reclaimed = 0u64;
 
         for (program_id, program_name) in programs {
-            match self.reclaim_empty_accounts_for_program(&owner, program_id, program_name).await {
+            match self
+                .reclaim_empty_accounts_for_program(&owner, program_id, program_name)
+                .await
+            {
                 Ok((closed, rent_reclaimed)) => {
                     total_closed += closed;
                     total_rent_reclaimed += rent_reclaimed;
@@ -230,7 +238,7 @@ impl RentScavenger {
                 rent_reclaimed_sol = total_rent_reclaimed as f64 / 1_000_000_000.0,
                 "Rent scavenger completed successfully"
             );
-            
+
             if let Some(ref metrics) = self.metrics {
                 metrics.increment_accounts_closed(total_closed);
                 metrics.increment_rent_reclaimed(total_rent_reclaimed);
@@ -238,7 +246,7 @@ impl RentScavenger {
         } else {
             debug!("No empty token accounts found to close");
         }
-        
+
         if let Some(ref metrics) = self.metrics {
             metrics.record_run_duration(start_time.elapsed());
         }
@@ -262,12 +270,9 @@ impl RentScavenger {
 
         // Get all token accounts for this program
         use solana_client::rpc_request::TokenAccountsFilter;
-        
+
         let accounts = rpc_client
-            .get_token_accounts_by_owner(
-                owner,
-                TokenAccountsFilter::ProgramId(program_pubkey),
-            )
+            .get_token_accounts_by_owner(owner, TokenAccountsFilter::ProgramId(program_pubkey))
             .map_err(|e| {
                 AppError::Rpc(format!(
                     "Failed to fetch token accounts for {}: {}",
@@ -279,7 +284,8 @@ impl RentScavenger {
         let mut empty_accounts = Vec::new();
         // Rent exemption is queried once per distinct account size (Token-2022
         // extension accounts can be larger than 165 bytes).
-        let mut rent_cache: std::collections::HashMap<usize, u64> = std::collections::HashMap::new();
+        let mut rent_cache: std::collections::HashMap<usize, u64> =
+            std::collections::HashMap::new();
 
         for keyed_account in accounts {
             if let UiAccountData::Json(parsed) = keyed_account.account.data {
@@ -335,7 +341,8 @@ impl RentScavenger {
 
         // Re-verification snapshot: fetch the current empty set ONCE per program
         // instead of once per batch (O(batches × total) round-trips otherwise).
-        let current_empty = self.fetch_current_empty_accounts(&rpc_client, &program_pubkey, owner)?;
+        let current_empty =
+            self.fetch_current_empty_accounts(&rpc_client, &program_pubkey, owner)?;
 
         // Close accounts in batches
         let mut total_closed = 0u64;
@@ -348,12 +355,12 @@ impl RentScavenger {
                 .filter(|(account_pubkey, _)| current_empty.contains(account_pubkey))
                 .cloned()
                 .collect();
-            
+
             if verified_batch.is_empty() {
                 debug!("All accounts in batch failed re-verification, skipping");
                 continue;
             }
-            
+
             // Safety check: don't exceed max rent limit
             let batch_rent: u64 = verified_batch.iter().map(|(_, rent)| rent).sum();
             if total_rent_reclaimed + batch_rent > self.config.max_rent_lamports {
@@ -366,7 +373,10 @@ impl RentScavenger {
                 break;
             }
 
-            match self.close_token_accounts_batch(&verified_batch, &program_pubkey, &rpc_client).await {
+            match self
+                .close_token_accounts_batch(&verified_batch, &program_pubkey, &rpc_client)
+                .await
+            {
                 Ok(closed) => {
                     total_closed += closed;
                     total_rent_reclaimed += batch_rent;
@@ -423,11 +433,7 @@ impl RentScavenger {
         let close_authority_ok = info
             .get("closeAuthority")
             .and_then(|d| d.as_str())
-            .map(|s| {
-                s.is_empty()
-                    || s == "11111111111111111111111111111111"
-                    || s == owner_str
-            })
+            .map(|s| s.is_empty() || s == "11111111111111111111111111111111" || s == owner_str)
             .unwrap_or(true);
         close_authority_ok
     }
@@ -445,9 +451,7 @@ impl RentScavenger {
 
         let current_accounts = rpc_client
             .get_token_accounts_by_owner(owner, TokenAccountsFilter::ProgramId(*program_pubkey))
-            .map_err(|e| {
-                AppError::Rpc(format!("Failed to fetch current token accounts: {}", e))
-            })?;
+            .map_err(|e| AppError::Rpc(format!("Failed to fetch current token accounts: {}", e)))?;
 
         let mut current_empty: std::collections::HashSet<Pubkey> = std::collections::HashSet::new();
         for keyed_account in current_accounts {
@@ -479,7 +483,10 @@ impl RentScavenger {
             return Ok(0);
         }
 
-        match self.send_close_transaction(accounts, program_id, rpc_client).await {
+        match self
+            .send_close_transaction(accounts, program_id, rpc_client)
+            .await
+        {
             Ok(sig) => {
                 info!(
                     accounts_closed = accounts.len(),
@@ -497,7 +504,10 @@ impl RentScavenger {
                 let mut closed = 0u64;
                 for (account_pubkey, rent) in accounts {
                     let single = [(*account_pubkey, *rent)];
-                    match self.send_close_transaction(&single, program_id, rpc_client).await {
+                    match self
+                        .send_close_transaction(&single, program_id, rpc_client)
+                        .await
+                    {
                         Ok(sig) => {
                             debug!(account = %account_pubkey, signature = %sig, "Closed account individually");
                             closed += 1;
@@ -536,7 +546,7 @@ impl RentScavenger {
             // - 0: [WRITE] Account to close
             // - 1: [WRITE] Destination account for rent (owner)
             // - 2: [] Authority (signer)
-            
+
             let instruction = Instruction {
                 program_id: *program_id,
                 accounts: vec![
@@ -550,20 +560,17 @@ impl RentScavenger {
             instructions.push(instruction);
         }
 
-        let mut transaction = Transaction::new_with_payer(
-            &instructions,
-            Some(&owner),
-        );
-        
+        let mut transaction = Transaction::new_with_payer(&instructions, Some(&owner));
+
         // Sign the transaction
         transaction.sign(&[self.funding_keypair.as_ref()], recent_blockhash);
 
         // Validate transaction size before submission (max 1232 bytes)
         let tx_bytes = bincode::serde::encode_to_vec(&transaction, bincode::config::legacy())
             .map_err(|e| AppError::Internal(format!("Failed to serialize transaction: {}", e)))?;
-        
+
         let tx_size = tx_bytes.len();
-        
+
         if tx_size > 1232 {
             return Err(AppError::Internal(format!(
                 "Transaction too large: {} bytes (max 1232), consider reducing batch size",
@@ -578,13 +585,15 @@ impl RentScavenger {
         );
 
         // Send transaction with retry logic for transient failures
-        let signature = self.retry_rpc("send_close_account_transaction", || {
-            rpc_client
-                .send_and_confirm_transaction(&transaction)
-                .map_err(|e| {
-                    AppError::Rpc(format!("Failed to send close account transaction: {}", e))
-                })
-        }).await?;
+        let signature = self
+            .retry_rpc("send_close_account_transaction", || {
+                rpc_client
+                    .send_and_confirm_transaction(&transaction)
+                    .map_err(|e| {
+                        AppError::Rpc(format!("Failed to send close account transaction: {}", e))
+                    })
+            })
+            .await?;
 
         Ok(signature)
     }
@@ -611,7 +620,7 @@ mod tests {
         let mut config = RentScavengerConfig {
             enabled: true,
             interval_secs: 3600,
-            max_batch_size: 0,   // below minimum
+            max_batch_size: 0, // below minimum
             max_rent_lamports: 1_000_000_000,
         };
         config.validate();
@@ -672,7 +681,10 @@ mod tests {
             serde_json::Value::String(amount.to_string()),
         );
         let mut info = serde_json::Map::new();
-        info.insert("tokenAmount".to_string(), serde_json::Value::Object(amount_obj));
+        info.insert(
+            "tokenAmount".to_string(),
+            serde_json::Value::Object(amount_obj),
+        );
         serde_json::Value::Object(info)
     }
 
@@ -769,10 +781,7 @@ mod tests {
         let owner = owner();
         let info = full_info(
             "0",
-            &[
-                ("delegate", ""),
-                ("closeAuthority", "SomeOtherAuthority"),
-            ],
+            &[("delegate", ""), ("closeAuthority", "SomeOtherAuthority")],
         );
         assert!(!RentScavenger::is_closable_empty_account(&info, &owner));
     }

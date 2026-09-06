@@ -344,7 +344,10 @@ pub async fn run_startup_webhook_check(
     // 0. Verify existing webhook IDs against Helius — clear stale ones so they get re-registered.
     // This fixes the case where the DB has a webhook_id but the webhook was deleted from Helius
     // (e.g., manually or by a previous cleanup), leaving monitoring silently broken.
-    let wallets_with_ids = db.get_active_wallets_with_webhook_ids().await.unwrap_or_default();
+    let wallets_with_ids = db
+        .get_active_wallets_with_webhook_ids()
+        .await
+        .unwrap_or_default();
     if !wallets_with_ids.is_empty() {
         match manager.get_helius_webhook_ids().await {
             Ok(helius_webhook_ids) => {
@@ -369,7 +372,10 @@ pub async fn run_startup_webhook_check(
                     }
                 }
                 if stale_count > 0 {
-                    info!(count = stale_count, "Cleared stale webhook IDs from database");
+                    info!(
+                        count = stale_count,
+                        "Cleared stale webhook IDs from database"
+                    );
                 }
             }
             Err(e) => {
@@ -559,13 +565,17 @@ mod tests {
         assert!(is_quota_classified(
             "Webhook registration failed: {\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32429,\"message\":\"max usage reached\"}}"
         ));
-        assert!(is_quota_classified("Webhook registration failed: error code: 1015"));
+        assert!(is_quota_classified(
+            "Webhook registration failed: error code: 1015"
+        ));
         assert!(is_quota_classified("HTTP 429 Too Many Requests"));
         assert!(is_quota_classified("rate limit exceeded"));
 
         // Non-quota errors must NOT pause registration.
         assert!(!is_quota_classified("Invalid Solana address format"));
-        assert!(!is_quota_classified("Webhook ID no longer exists in Helius — clearing"));
+        assert!(!is_quota_classified(
+            "Webhook ID no longer exists in Helius — clearing"
+        ));
         assert!(!is_quota_classified("connection reset by peer"));
         assert!(!is_quota_classified(""));
     }

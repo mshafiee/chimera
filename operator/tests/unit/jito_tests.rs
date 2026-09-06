@@ -33,7 +33,10 @@ fn test_jito_error_classification() {
     }
 
     // Debug formatting is stable for diagnostics
-    assert_eq!(format!("{:?}", retryable), "Retryable(\"insufficient tip\")");
+    assert_eq!(
+        format!("{:?}", retryable),
+        "Retryable(\"insufficient tip\")"
+    );
 }
 
 /// Test JitoHealth structure creation
@@ -70,9 +73,15 @@ fn test_jito_health_clone() {
     let health2 = health1.clone();
     assert_eq!(health2.healthy, health1.healthy);
     assert_eq!(health2.latency_ms, health1.latency_ms);
-    assert_eq!(health2.resolution_success_rate, health1.resolution_success_rate);
+    assert_eq!(
+        health2.resolution_success_rate,
+        health1.resolution_success_rate
+    );
     assert_eq!(health2.total_submissions, health1.total_submissions);
-    assert_eq!(health2.successful_resolutions, health1.successful_resolutions);
+    assert_eq!(
+        health2.successful_resolutions,
+        health1.successful_resolutions
+    );
 }
 
 /// Test JitoHealth edge cases (zero data, degraded state)
@@ -109,7 +118,10 @@ fn test_jito_config_defaults() {
 
     assert!(config.enabled, "Jito should be enabled by default");
     assert_eq!(config.min_failures_before_fallback, 10);
-    assert!(!config.disable_fallback, "Fallback should be enabled by default");
+    assert!(
+        !config.disable_fallback,
+        "Fallback should be enabled by default"
+    );
     assert_eq!(config.max_retries, 5);
     assert_eq!(config.tip_floor_sol, dec!(0.0005));
     assert_eq!(config.tip_ceiling_sol, dec!(0.005));
@@ -136,7 +148,10 @@ fn test_jito_tip_scales_by_trade_size() {
     // Small trade (0.02 SOL): tip = 0.02 * 0.02 = 0.0004, floored at 0.0005.
     let small_trade_size = dec!(0.02);
     let small_trade_tip = (small_trade_size * config.tip_percent_max).max(config.tip_floor_sol);
-    assert_eq!(small_trade_tip, config.tip_floor_sol, "small tip must hit the floor");
+    assert_eq!(
+        small_trade_tip, config.tip_floor_sol,
+        "small tip must hit the floor"
+    );
 
     // Medium trade (0.1 SOL): tip = 0.1 * 0.02 = 0.002, under the 0.005 ceiling.
     let medium_trade_size = dec!(0.1);
@@ -147,7 +162,10 @@ fn test_jito_tip_scales_by_trade_size() {
     // Large trade (1.0 SOL): 1.0 * 0.02 = 0.02, capped at ceiling 0.005.
     let large_trade_size = dec!(1.0);
     let large_trade_tip = (large_trade_size * config.tip_percent_max).min(config.tip_ceiling_sol);
-    assert_eq!(large_trade_tip, config.tip_ceiling_sol, "large tip must cap at ceiling");
+    assert_eq!(
+        large_trade_tip, config.tip_ceiling_sol,
+        "large tip must cap at ceiling"
+    );
 
     // Tiny trade (0.005 SOL): 0.005 * 0.02 = 0.0001, floored at 0.0005.
     let tiny_trade_size = dec!(0.005);
@@ -156,7 +174,15 @@ fn test_jito_tip_scales_by_trade_size() {
 
     // Verify tip-to-position ratios are reasonable (not 50% as in bug)
     let small_ratio = (small_trade_tip / small_trade_size).to_f64().unwrap_or(0.0);
-    assert!(small_ratio <= 0.15, "small trade tip ratio ({small_ratio}) must be reasonable");
-    let medium_ratio = (medium_trade_tip / medium_trade_size).to_f64().unwrap_or(0.0);
-    assert!(medium_ratio <= 0.15, "medium trade tip ratio ({medium_ratio}) must be reasonable");
+    assert!(
+        small_ratio <= 0.15,
+        "small trade tip ratio ({small_ratio}) must be reasonable"
+    );
+    let medium_ratio = (medium_trade_tip / medium_trade_size)
+        .to_f64()
+        .unwrap_or(0.0);
+    assert!(
+        medium_ratio <= 0.15,
+        "medium trade tip ratio ({medium_ratio}) must be reasonable"
+    );
 }

@@ -4,8 +4,8 @@
 
 use crate::monitoring::rate_limiter::RateLimiter;
 use crate::monitoring::rate_limiter::RequestPriority;
-use chimera_core::retry::{extract_status, retry_with_backoff, HttpStatusError};
 use anyhow::{anyhow, Context, Result};
+use chimera_core::retry::{extract_status, retry_with_backoff, HttpStatusError};
 use parking_lot::RwLock;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -242,8 +242,8 @@ impl HeliusClient {
         let _cache_size = self.metadata_cache.read().len() as u64;
 
         HeliusMetrics {
-            cache_hits, // Actual cache hits since start
-            cache_misses, // Actual cache misses since start
+            cache_hits,             // Actual cache hits since start
+            cache_misses,           // Actual cache misses since start
             successful_requests: 0, // Not actively tracked without additional state
             retried_requests: 0,    // Not actively tracked without additional state
             failed_requests: 0,     // Not actively tracked without additional state
@@ -282,10 +282,7 @@ impl HeliusClient {
             .context("Failed to parse getTransaction response")?;
 
         // If `result` is null, the transaction was not found on-chain
-        let found = json
-            .get("result")
-            .map(|r| !r.is_null())
-            .unwrap_or(false);
+        let found = json.get("result").map(|r| !r.is_null()).unwrap_or(false);
 
         Ok(found)
     }
@@ -298,7 +295,7 @@ impl HeliusClient {
         (cache_hits, cache_misses, cache_size)
     }
 
-        /// Fetch a wallet's recent SWAP transactions (enhanced format).
+    /// Fetch a wallet's recent SWAP transactions (enhanced format).
     ///
     /// Returns the raw enhanced transaction JSON objects. The enhanced
     /// `tokenTransfers[].tokenAmount` is decimal-adjusted (human units);
@@ -373,7 +370,8 @@ impl HeliusClient {
     ///
     /// Uses shared metadata cache for unified storage of token metadata and age information.
     /// Age is calculated once and stored in the cache for 24 hours.
-    pub async fn get_token_age_hours(&self, mint_address: &str) -> Result<Option<f64>> {        // Check shared metadata cache first
+    pub async fn get_token_age_hours(&self, mint_address: &str) -> Result<Option<f64>> {
+        // Check shared metadata cache first
         {
             let cache = self.metadata_cache.read();
             if let Some(metadata) = cache.get(mint_address) {
@@ -386,8 +384,13 @@ impl HeliusClient {
                         .context("Failed to get current timestamp")?
                         .as_secs() as i64;
                     let age_hours = (now - creation_ts) as f64 / 3600.0;
-                    self.cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    tracing::debug!(token = mint_address, age = age_hours, "Cache hit for token age");
+                    self.cache_hits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::debug!(
+                        token = mint_address,
+                        age = age_hours,
+                        "Cache hit for token age"
+                    );
                     return Ok(Some(age_hours));
                 }
                 // Fall through if creation_timestamp is not cached
@@ -395,8 +398,12 @@ impl HeliusClient {
         }
 
         // Cache miss - fetch from Helius API
-        self.cache_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        tracing::debug!(token = mint_address, "Cache miss for token age, fetching from Helius API");
+        self.cache_misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::debug!(
+            token = mint_address,
+            "Cache miss for token age, fetching from Helius API"
+        );
         let creation_timestamp = self.get_token_creation_time(mint_address).await?;
 
         if let Some(timestamp) = creation_timestamp {
@@ -413,35 +420,43 @@ impl HeliusClient {
                 let mut cache = self.metadata_cache.write();
                 // We need to get the existing metadata (if any) and update it with age info
                 // If no metadata exists yet, we create a minimal entry that will be enhanced by TokenMetadataFetcher later
-                let updated_metadata = if let Some(mut existing_metadata) = cache.get(mint_address).cloned() {
-                    // Update existing metadata with age information
-                    existing_metadata.creation_timestamp = Some(timestamp);
-                    existing_metadata.age_hours = Some(age_hours);
-                    existing_metadata
-                } else {
-                    // Create minimal metadata entry with age information
-                    // TokenMetadataFetcher will enrich this with full metadata later
-                    crate::token::TokenMetadata {
-                        mint: mint_address.to_string(),
-                        freeze_authority: None,
-                        mint_authority: None,
-                        decimals: 0, // Will be updated by TokenMetadataFetcher
-                        supply: 0,   // Will be updated by TokenMetadataFetcher
-                        is_token_2022: false,
-                        has_transfer_hook: false,
-                        has_permanent_delegate: false,
-                        creation_timestamp: Some(timestamp),
-                        age_hours: Some(age_hours),
-                    }
-                };
+                let updated_metadata =
+                    if let Some(mut existing_metadata) = cache.get(mint_address).cloned() {
+                        // Update existing metadata with age information
+                        existing_metadata.creation_timestamp = Some(timestamp);
+                        existing_metadata.age_hours = Some(age_hours);
+                        existing_metadata
+                    } else {
+                        // Create minimal metadata entry with age information
+                        // TokenMetadataFetcher will enrich this with full metadata later
+                        crate::token::TokenMetadata {
+                            mint: mint_address.to_string(),
+                            freeze_authority: None,
+                            mint_authority: None,
+                            decimals: 0, // Will be updated by TokenMetadataFetcher
+                            supply: 0,   // Will be updated by TokenMetadataFetcher
+                            is_token_2022: false,
+                            has_transfer_hook: false,
+                            has_permanent_delegate: false,
+                            creation_timestamp: Some(timestamp),
+                            age_hours: Some(age_hours),
+                        }
+                    };
 
                 cache.insert(mint_address.to_string(), updated_metadata);
-                tracing::debug!(token = mint_address, age = age_hours, "Cached token age in shared metadata cache");
+                tracing::debug!(
+                    token = mint_address,
+                    age = age_hours,
+                    "Cached token age in shared metadata cache"
+                );
             }
 
             Ok(Some(age_hours))
         } else {
-            tracing::debug!(token = mint_address, "No token age found (API returned None)");
+            tracing::debug!(
+                token = mint_address,
+                "No token age found (API returned None)"
+            );
             Ok(None)
         }
     }
@@ -486,11 +501,9 @@ impl HeliusClient {
                         // retryable. An opaque anyhow error has no status and would
                         // silently bypass both the retry AND the non-retryable
                         // short-circuit below.
-                        return Err(anyhow::Error::new(HttpStatusError::new(status))
-                            .context(format!(
-                                "Failed to fetch token creation time: {}",
-                                error_text
-                            )));
+                        return Err(anyhow::Error::new(HttpStatusError::new(status)).context(
+                            format!("Failed to fetch token creation time: {}", error_text),
+                        ));
                     }
 
                     let transactions: Vec<serde_json::Value> = response
@@ -1214,7 +1227,11 @@ mod tests {
         assert_eq!(swap.token_inputs.len(), 1);
         assert_eq!(swap.token_outputs[0].user_account, "u2");
         assert_eq!(
-            swap.token_outputs[0].raw_token_amount.as_ref().unwrap().token_amount,
+            swap.token_outputs[0]
+                .raw_token_amount
+                .as_ref()
+                .unwrap()
+                .token_amount,
             "2"
         );
 
@@ -1263,7 +1280,10 @@ mod tests {
     #[test]
     fn test_webhook_toggle_serialization() {
         let toggle = WebhookToggle { is_active: true };
-        assert_eq!(serde_json::to_string(&toggle).unwrap(), "{\"isActive\":true}");
+        assert_eq!(
+            serde_json::to_string(&toggle).unwrap(),
+            "{\"isActive\":true}"
+        );
     }
 
     #[test]
@@ -1307,7 +1327,10 @@ mod tests {
             ..reg
         };
         let json = serde_json::to_string(&reg).unwrap();
-        assert!(!json.contains("authHeader"), "None auth_header must be skipped");
+        assert!(
+            !json.contains("authHeader"),
+            "None auth_header must be skipped"
+        );
     }
 
     #[test]
@@ -1349,7 +1372,8 @@ mod tests {
         mock.with_env("HELIUS_RPC_BASE_URL", || async {
             let client = test_client();
             assert!(client.verify_signature_exists("abc123").await.unwrap());
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1360,7 +1384,8 @@ mod tests {
         mock.with_env("HELIUS_RPC_BASE_URL", || async {
             let client = test_client();
             assert!(!client.verify_signature_exists("abc123").await.unwrap());
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1369,7 +1394,8 @@ mod tests {
         mock.with_env("HELIUS_RPC_BASE_URL", || async {
             let client = test_client();
             assert!(client.verify_signature_exists("abc123").await.is_err());
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1378,7 +1404,8 @@ mod tests {
         mock.with_env("HELIUS_RPC_BASE_URL", || async {
             let client = test_client();
             assert!(client.verify_signature_exists("abc123").await.is_err());
-        }).await;
+        })
+        .await;
     }
 
     // =============================================================================
@@ -1403,7 +1430,8 @@ mod tests {
             // target 2: one page of 2 items satisfies the target
             let txs = client.fetch_wallet_swaps("wallet-1", 2).await.unwrap();
             assert_eq!(txs.len(), 2);
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1424,8 +1452,12 @@ mod tests {
             let txs = client.fetch_wallet_swaps("wallet-1", 150).await.unwrap();
             assert_eq!(txs.len(), 150);
             assert!(calls.load(Ordering::Relaxed) >= 2, "must paginate");
-            assert!(calls.load(Ordering::Relaxed) <= 3, "loop must stop once target reached");
-        }).await;
+            assert!(
+                calls.load(Ordering::Relaxed) <= 3,
+                "loop must stop once target reached"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1435,7 +1467,8 @@ mod tests {
             let client = test_client();
             let txs = client.fetch_wallet_swaps("wallet-1", 500).await.unwrap();
             assert!(txs.is_empty());
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1444,7 +1477,8 @@ mod tests {
         mock.with_env("HELIUS_API_BASE_URL", || async {
             let client = test_client();
             assert!(client.fetch_wallet_swaps("wallet-1", 10).await.is_err());
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1453,7 +1487,8 @@ mod tests {
         mock.with_env("HELIUS_API_BASE_URL", || async {
             let client = test_client();
             assert!(client.fetch_wallet_swaps("wallet-1", 10).await.is_err());
-        }).await;
+        })
+        .await;
     }
 
     // =============================================================================
@@ -1527,7 +1562,8 @@ mod tests {
             assert!(meta.age_hours.is_some());
             assert!(meta.creation_timestamp.is_some());
             assert_eq!(client.get_metrics().cache_misses, 1);
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1555,7 +1591,8 @@ mod tests {
             assert!(age > 2.9 && age < 3.1, "oldest tx wins (3h), got {age}");
             let metrics = client.get_metrics();
             assert_eq!(metrics.cache_misses, 1);
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1564,7 +1601,8 @@ mod tests {
         mock.with_env("HELIUS_API_BASE_URL", || async {
             let client = test_client();
             assert!(client.get_token_age_hours("mint1").await.unwrap().is_none());
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1573,7 +1611,8 @@ mod tests {
         mock.with_env("HELIUS_API_BASE_URL", || async {
             let client = test_client();
             assert!(client.get_token_age_hours("mint1").await.unwrap().is_none());
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1587,7 +1626,8 @@ mod tests {
         mock.with_env("HELIUS_API_BASE_URL", || async {
             let client = test_client();
             assert!(client.get_token_age_hours("mint1").await.unwrap().is_none());
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1598,7 +1638,8 @@ mod tests {
         mock.with_env("HELIUS_API_BASE_URL", || async {
             let client = test_client();
             assert!(client.get_token_age_hours("mint1").await.is_err());
-        }).await;
+        })
+        .await;
     }
 
     // =============================================================================
@@ -1615,11 +1656,16 @@ mod tests {
         mock.with_env("HELIUS_API_BASE_URL", || async {
             let client = test_client();
             let id = client
-                .register_webhook(&["w1".to_string(), "w2".to_string()], "https://x/webhook", Some("auth"))
+                .register_webhook(
+                    &["w1".to_string(), "w2".to_string()],
+                    "https://x/webhook",
+                    Some("auth"),
+                )
                 .await
                 .unwrap();
             assert_eq!(id, "wh-new-1");
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1632,7 +1678,8 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(err.to_string().contains("Webhook registration failed"));
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1644,7 +1691,8 @@ mod tests {
                 .register_webhook(&["w1".to_string()], "https://x/webhook", None)
                 .await
                 .is_err());
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1655,7 +1703,13 @@ mod tests {
             assert_eq!(method, "POST");
             assert_eq!(path, "/webhooks");
             calls.fetch_add(1, Ordering::Relaxed);
-            (200, format!(r#"{{"webhookID":"wh-batch-{}"}}"#, calls.load(Ordering::Relaxed)))
+            (
+                200,
+                format!(
+                    r#"{{"webhookID":"wh-batch-{}"}}"#,
+                    calls.load(Ordering::Relaxed)
+                ),
+            )
         });
         mock.with_env("HELIUS_API_BASE_URL", || async {
             let client = test_client();
@@ -1672,9 +1726,14 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(results.len(), 3);
-            assert_eq!(register_calls.load(Ordering::Relaxed), 2, "3 wallets / batch 2 = 2 calls");
+            assert_eq!(
+                register_calls.load(Ordering::Relaxed),
+                2,
+                "3 wallets / batch 2 = 2 calls"
+            );
             assert_eq!(results[0].1, results[1].1, "same webhook within batch");
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1694,7 +1753,8 @@ mod tests {
                 )
                 .await
                 .is_err());
-        }).await;
+        })
+        .await;
     }
 
     // =============================================================================
@@ -1711,13 +1771,15 @@ mod tests {
         mock.with_env("HELIUS_API_BASE_URL", || async {
             let client = test_client();
             client.delete_webhook("wh-1").await.unwrap();
-        }).await;
+        })
+        .await;
 
         let mock = MockServer::spawn(|_, _| (404, "gone".to_string()));
         mock.with_env("HELIUS_API_BASE_URL", || async {
             let client = test_client();
             client.delete_webhook("wh-1").await.unwrap(); // 404 treated as success
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1726,7 +1788,8 @@ mod tests {
         mock.with_env("HELIUS_API_BASE_URL", || async {
             let client = test_client();
             assert!(client.delete_webhook("wh-1").await.is_err());
-        }).await;
+        })
+        .await;
     }
 
     // =============================================================================
@@ -1748,7 +1811,8 @@ mod tests {
             let webhooks = client.list_webhooks().await.unwrap();
             assert_eq!(webhooks.len(), 2);
             assert_eq!(webhooks[0]["webhookID"], "wh-1");
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1757,7 +1821,8 @@ mod tests {
         mock.with_env("HELIUS_API_BASE_URL", || async {
             let client = test_client();
             assert!(client.list_webhooks().await.is_err());
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1766,14 +1831,16 @@ mod tests {
             assert_eq!(path, "/webhooks/wh-1");
             (
                 200,
-                serde_json::json!({"webhookID": "wh-1", "active": true, "webhookURL": "https://x"}).to_string(),
+                serde_json::json!({"webhookID": "wh-1", "active": true, "webhookURL": "https://x"})
+                    .to_string(),
             )
         });
         mock.with_env("HELIUS_API_BASE_URL", || async {
             let client = test_client();
             let wh = client.get_webhook("wh-1").await.unwrap();
             assert_eq!(wh["active"], true);
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1796,7 +1863,8 @@ mod tests {
             let wh = client.get_webhook_typed("wh-1").await.unwrap();
             assert_eq!(wh.webhook_id, "wh-1");
             assert_eq!(wh.wallet_addresses.len(), 2);
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1818,7 +1886,8 @@ mod tests {
             let webhooks = client.list_webhooks_typed().await.unwrap();
             assert_eq!(webhooks.len(), 1);
             assert_eq!(webhooks[0].webhook_id, "wh-1");
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1827,7 +1896,8 @@ mod tests {
         mock.with_env("HELIUS_API_BASE_URL", || async {
             let client = test_client();
             assert!(client.list_webhooks_typed().await.is_err());
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1836,7 +1906,8 @@ mod tests {
         mock.with_env("HELIUS_API_BASE_URL", || async {
             let client = test_client();
             assert!(client.get_webhook_typed("wh-x").await.is_err());
-        }).await;
+        })
+        .await;
     }
 
     // =============================================================================
@@ -1865,7 +1936,8 @@ mod tests {
                 )
                 .await
                 .unwrap();
-        }).await;
+        })
+        .await;
 
         let mock = MockServer::spawn(|_, _| (400, "bad".to_string()));
         mock.with_env("HELIUS_API_BASE_URL", || async {
@@ -1884,7 +1956,8 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(err.to_string().contains("Webhook update failed"));
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1897,13 +1970,15 @@ mod tests {
         mock.with_env("HELIUS_API_BASE_URL", || async {
             let client = test_client();
             client.toggle_webhook("wh-1", true).await.unwrap();
-        }).await;
+        })
+        .await;
 
         let mock = MockServer::spawn(|_, _| (400, "bad".to_string()));
         mock.with_env("HELIUS_API_BASE_URL", || async {
             let client = test_client();
             assert!(client.toggle_webhook("wh-1", false).await.is_err());
-        }).await;
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1928,7 +2003,8 @@ mod tests {
             assert_eq!(results.len(), 2);
             assert!(results[0].1.is_ok());
             assert!(results[1].1.is_ok());
-        }).await;
+        })
+        .await;
     }
 
     // =============================================================================

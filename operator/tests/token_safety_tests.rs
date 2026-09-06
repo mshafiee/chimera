@@ -41,7 +41,9 @@ fn test_unlisted_heuristic_rejected_in_strict_mode() {
         "allow_unlisted_heuristic must be false in production config for safety"
     );
 
-    println!("✓ Config validation: allow_unlisted_heuristic is correctly set to false (strict mode)");
+    println!(
+        "✓ Config validation: allow_unlisted_heuristic is correctly set to false (strict mode)"
+    );
 }
 
 #[test]
@@ -77,8 +79,7 @@ fn test_minimum_liquidity_thresholds() {
 
     println!(
         "✓ Liquidity thresholds: Shield ${:.0}, Spear ${:.0}",
-        config.token_safety.min_liquidity_shield_usd,
-        config.token_safety.min_liquidity_spear_usd
+        config.token_safety.min_liquidity_shield_usd, config.token_safety.min_liquidity_spear_usd
     );
 }
 
@@ -90,10 +91,7 @@ mod config_validation_tests {
     fn test_config_file_exists() {
         // Anchor at the crate root: cargo test runs with the package directory
         // as CWD, but this must stay deterministic regardless of invocation.
-        let config_path = std::path::Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/config.yaml"
-        ));
+        let config_path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/config.yaml"));
         assert!(
             config_path.exists(),
             "operator/config.yaml must exist for token safety tests"

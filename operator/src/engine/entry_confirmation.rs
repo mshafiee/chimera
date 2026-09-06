@@ -221,10 +221,7 @@ impl EntryConfirmationManager {
 
         // Price held → re-run the full pipeline with the consensus-OR-proven
         // gate bypassed (the price-hold is the admission criterion here).
-        let decision = self
-            .selection
-            .decide_with_options(&entry.req, true)
-            .await;
+        let decision = self.selection.decide_with_options(&entry.req, true).await;
         if !decision.admitted {
             tracing::info!(
                 token = %token,

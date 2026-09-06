@@ -18,14 +18,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
 use tokio::sync::RwLock;
 
 use crate::config::{ExitProfileConfig, ProfitManagementConfig};
 use crate::db_abstraction::Database;
-use crate::error::AppResult;
 use crate::engine::onchain_assessment::OnchainWalletAssessment;
+use crate::error::AppResult;
 
 /// Raw per-wallet exit statistics derived from on-chain round trips.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -92,11 +92,7 @@ impl EffectiveExitParams {
             // winners past the winning rail and gave back gains. The
             // trailing stop locks in peaks regardless.
             high_profit_hours: 24,
-            medium_profit_hours: if is_spear {
-                12
-            } else {
-                cfg.time_exit_hours
-            },
+            medium_profit_hours: if is_spear { 12 } else { cfg.time_exit_hours },
             trailing_activation_pct: cfg.trailing_stop_activation,
             trailing_distance_pct: cfg.trailing_stop_distance,
         }
@@ -149,9 +145,7 @@ pub fn effective_params(
 
     let is_spear = strategy == "SPEAR";
     let m = hold_multiplier(cfg, stats);
-    let mult = |base: f64| -> u64 {
-        ((base * m).round() as i64).clamp(1, 168) as u64
-    };
+    let mult = |base: f64| -> u64 { ((base * m).round() as i64).clamp(1, 168) as u64 };
 
     let base_high = if is_spear { 24.0 } else { 48.0 };
     let base_medium = if is_spear {
@@ -164,11 +158,9 @@ pub fn effective_params(
     // clamped to [min, max]. This is the per-wallet volatility adaptation —
     // wide swings get wide trails so normal retraces don't shake out.
     let w = weight(stats.samples, cfg.shrinkage_k);
-    let raw_dist = stats
-        .median_win_pct
-        .max(stats.median_loss_pct.abs());
-    let wallet_dist = (raw_dist * 0.3)
-        .clamp(cfg.trailing_min_distance_pct, cfg.trailing_max_distance_pct);
+    let raw_dist = stats.median_win_pct.max(stats.median_loss_pct.abs());
+    let wallet_dist =
+        (raw_dist * 0.3).clamp(cfg.trailing_min_distance_pct, cfg.trailing_max_distance_pct);
     let distance = blend(
         global.trailing_stop_distance.to_f64().unwrap_or(10.0),
         wallet_dist,
@@ -187,10 +179,12 @@ pub fn effective_params(
         .to_f64()
         .unwrap_or(5.0)
         .max(cfg.trailing_min_activation_pct);
-    let wallet_act = (stats.median_win_pct * 0.35)
-        .clamp(cfg.trailing_min_activation_pct, act_global);
-    let activation = blend(act_global, wallet_act, w)
-        .clamp(cfg.trailing_min_activation_pct, cfg.trailing_max_activation_pct);
+    let wallet_act =
+        (stats.median_win_pct * 0.35).clamp(cfg.trailing_min_activation_pct, act_global);
+    let activation = blend(act_global, wallet_act, w).clamp(
+        cfg.trailing_min_activation_pct,
+        cfg.trailing_max_activation_pct,
+    );
 
     EffectiveExitParams {
         high_profit_hours: mult(base_high),
@@ -349,7 +343,12 @@ mod tests {
         ProfitManagementConfig::default()
     }
 
-    fn stats(samples: usize, median_hold_secs: Option<i64>, win_pct: f64, loss_pct: f64) -> WalletExitStats {
+    fn stats(
+        samples: usize,
+        median_hold_secs: Option<i64>,
+        win_pct: f64,
+        loss_pct: f64,
+    ) -> WalletExitStats {
         WalletExitStats {
             samples,
             median_hold_secs,
@@ -437,11 +436,17 @@ mod tests {
         // Tiny winners -> distance at min; huge winners -> distance at max.
         let s_small = stats(200, Some(3600), 1.0, -1.0);
         let e_small = effective_params(&cfg, &global, Some(&s_small), "SHIELD");
-        assert!(e_small.trailing_distance_pct >= Decimal::from_f64_retain(cfg.trailing_min_distance_pct).unwrap());
+        assert!(
+            e_small.trailing_distance_pct
+                >= Decimal::from_f64_retain(cfg.trailing_min_distance_pct).unwrap()
+        );
 
         let s_big = stats(200, Some(3600), 500.0, -40.0);
         let e_big = effective_params(&cfg, &global, Some(&s_big), "SHIELD");
-        assert!(e_big.trailing_distance_pct <= Decimal::from_f64_retain(cfg.trailing_max_distance_pct).unwrap());
+        assert!(
+            e_big.trailing_distance_pct
+                <= Decimal::from_f64_retain(cfg.trailing_max_distance_pct).unwrap()
+        );
     }
 
     #[test]

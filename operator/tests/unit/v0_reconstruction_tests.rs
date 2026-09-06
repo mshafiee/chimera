@@ -7,9 +7,7 @@
 use chimera_operator::engine::v0_reconstruction::refresh_v0_blockhash;
 use solana_sdk::{
     hash::hash,
-    message::{
-        v0::Message as V0Message, AddressLookupTableAccount, VersionedMessage,
-    },
+    message::{v0::Message as V0Message, AddressLookupTableAccount, VersionedMessage},
     pubkey::Pubkey,
     transaction::VersionedTransaction,
 };

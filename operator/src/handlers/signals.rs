@@ -329,10 +329,7 @@ pub async fn get_wallet_clustering(
     let pool = pg_pool(&state.db)?;
     let clusters = fetch_clusters(&pool, 24).await?;
 
-    let total_wallets: usize = clusters
-        .iter()
-        .map(|c| c.wallets.len())
-        .sum();
+    let total_wallets: usize = clusters.iter().map(|c| c.wallets.len()).sum();
 
     // Calculate clustering metrics
     let avg_cluster_size = if !clusters.is_empty() {
@@ -747,7 +744,10 @@ async fn fetch_clusters(
         };
 
         clusters.push(Cluster {
-            id: format!("token_{}", token_address.chars().take(8).collect::<String>()),
+            id: format!(
+                "token_{}",
+                token_address.chars().take(8).collect::<String>()
+            ),
             wallets,
             signal_count: signal_count as usize,
             avg_wqs: avg_wqs.unwrap_or(0.0),
@@ -773,8 +773,10 @@ async fn calculate_divergence_alerts(
     let recent_signals = aggregator.get_all_recent_signals().await;
 
     // Group signals by token to identify divergences
-    let mut token_signals: std::collections::HashMap<String, Vec<&crate::monitoring::signal_aggregator::TokenSignal>> =
-        std::collections::HashMap::new();
+    let mut token_signals: std::collections::HashMap<
+        String,
+        Vec<&crate::monitoring::signal_aggregator::TokenSignal>,
+    > = std::collections::HashMap::new();
 
     for signal in &recent_signals {
         token_signals
@@ -798,35 +800,35 @@ async fn calculate_divergence_alerts(
             .cloned()
             .collect();
 
-            // Check for divergence: some wallets selling while others buying/holding
-            if !sellers.is_empty() && !buyers.is_empty() {
-                // This is a divergence pattern - wallets disagree on direction.
-                // divergence_type follows the documented contract:
-                // "directional" | "timing" | "amount".
-                let divergence_type = if buyers.len() != sellers.len() {
-                    "directional".to_string()
-                } else {
-                    "timing".to_string() // Equal split - timing divergence
-                };
+        // Check for divergence: some wallets selling while others buying/holding
+        if !sellers.is_empty() && !buyers.is_empty() {
+            // This is a divergence pattern - wallets disagree on direction.
+            // divergence_type follows the documented contract:
+            // "directional" | "timing" | "amount".
+            let divergence_type = if buyers.len() != sellers.len() {
+                "directional".to_string()
+            } else {
+                "timing".to_string() // Equal split - timing divergence
+            };
 
-                // Create wallet clusters for divergent wallets
-                let wallets_clustered = vec![WalletCluster {
-                    cluster_id: format!(
-                        "holders_{}",
-                        token_address.chars().take(8).collect::<String>()
-                    ),
-                    wallet_addresses: buyers.iter().map(|b| b.wallet_address.clone()).collect(),
-                    signal: "BUY".to_string(),
-                }];
+            // Create wallet clusters for divergent wallets
+            let wallets_clustered = vec![WalletCluster {
+                cluster_id: format!(
+                    "holders_{}",
+                    token_address.chars().take(8).collect::<String>()
+                ),
+                wallet_addresses: buyers.iter().map(|b| b.wallet_address.clone()).collect(),
+                signal: "BUY".to_string(),
+            }];
 
-                let wallets_divergent = vec![WalletCluster {
-                    cluster_id: format!(
-                        "sellers_{}",
-                        token_address.chars().take(8).collect::<String>()
-                    ),
-                    wallet_addresses: sellers.iter().map(|s| s.wallet_address.clone()).collect(),
-                    signal: "SELL".to_string(),
-                }];
+            let wallets_divergent = vec![WalletCluster {
+                cluster_id: format!(
+                    "sellers_{}",
+                    token_address.chars().take(8).collect::<String>()
+                ),
+                wallet_addresses: sellers.iter().map(|s| s.wallet_address.clone()).collect(),
+                signal: "SELL".to_string(),
+            }];
 
             let alert = DivergenceAlert {
                 alert_id: format!("div_{}", uuid::Uuid::new_v4()),

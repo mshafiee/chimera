@@ -20,8 +20,8 @@ pub fn shadow_proven_edge(stats: &ShadowKellyStats, min_samples: i64) -> bool {
     if stats.samples < min_samples {
         return false;
     }
-    let expectancy =
-        stats.win_rate * stats.avg_win - (rust_decimal::Decimal::ONE - stats.win_rate) * stats.avg_loss;
+    let expectancy = stats.win_rate * stats.avg_win
+        - (rust_decimal::Decimal::ONE - stats.win_rate) * stats.avg_loss;
     expectancy > rust_decimal::Decimal::ZERO
 }
 

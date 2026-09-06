@@ -151,7 +151,6 @@ pub struct HealthMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
     use std::time::Duration;
 
     #[tokio::test]

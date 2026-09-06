@@ -128,13 +128,15 @@ mod tests {
         // (liquidity 60000 → 0.20 is included in every expected value)
         let at_6h = SignalQuality::calculate(0.0, None, Decimal::from(60000u32), Some(6.0));
         assert_score_approx(&at_6h, 0.2 + 0.3 * 0.1);
-        let just_over_6h = SignalQuality::calculate(0.0, None, Decimal::from(60000u32), Some(6.0001));
+        let just_over_6h =
+            SignalQuality::calculate(0.0, None, Decimal::from(60000u32), Some(6.0001));
         assert_score_approx(&just_over_6h, 0.2 + 0.5 * 0.1);
         let at_24h = SignalQuality::calculate(0.0, None, Decimal::from(60000u32), Some(24.0));
         assert_score_approx(&at_24h, 0.2 + 0.5 * 0.1);
         let at_168h = SignalQuality::calculate(0.0, None, Decimal::from(60000u32), Some(168.0));
         assert_score_approx(&at_168h, 0.2 + 0.7 * 0.1);
-        let just_over_168h = SignalQuality::calculate(0.0, None, Decimal::from(60000u32), Some(168.0001));
+        let just_over_168h =
+            SignalQuality::calculate(0.0, None, Decimal::from(60000u32), Some(168.0001));
         assert_score_approx(&just_over_168h, 0.2 + 1.0 * 0.1);
 
         // Unknown age → neutral 0.5.

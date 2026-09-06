@@ -62,7 +62,6 @@ mod shadow_fill_tests;
 #[path = "unit/shadow_trader_tests.rs"]
 mod shadow_trader_tests;
 
-
 #[path = "unit/db_integrity_tests.rs"]
 mod db_integrity_tests;
 

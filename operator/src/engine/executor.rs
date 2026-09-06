@@ -3,17 +3,17 @@
 //! Handles the actual submission of trades to the Solana network.
 //! Includes RPC failover with automatic recovery to primary.
 
-use crate::config::AppConfig;
 use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerState as CBState};
+use crate::config::AppConfig;
 use crate::db_abstraction::Database;
 use crate::engine::kelly_sizer::KellySizer;
 use crate::engine::tips::TipManager;
 use crate::engine::transaction_builder::{load_wallet_keypair, TransactionBuilder};
 use crate::engine::{slippage, slippage::SlippageEstimate};
-use crate::utils;
 use crate::models::{Action, Signal, Strategy};
 use crate::notifications::{CompositeNotifier, NotificationEvent};
 use crate::price_cache::PriceCache;
+use crate::utils;
 use crate::vault::load_secrets_with_fallback;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::{DateTime, Utc};
@@ -345,7 +345,7 @@ impl Executor {
     pub fn with_circuit_breaker(
         config: Arc<AppConfig>,
         db: Arc<dyn Database>,
-        circuit_breaker: Option<Arc<CircuitBreaker>>
+        circuit_breaker: Option<Arc<CircuitBreaker>>,
     ) -> Self {
         let rpc_mode = if config.jito.enabled {
             RpcMode::Jito
@@ -469,11 +469,11 @@ impl Executor {
     /// Detect if an error message indicates RPC rate limiting
     pub fn is_rate_limit_error(error: &str) -> bool {
         let error_lower = error.to_lowercase();
-        error_lower.contains("rate limit") ||
-        error_lower.contains("429") ||
-        error_lower.contains("too many requests") ||
-        error_lower.contains("ratelimit") ||
-        error_lower.contains("rate-limit")
+        error_lower.contains("rate limit")
+            || error_lower.contains("429")
+            || error_lower.contains("too many requests")
+            || error_lower.contains("ratelimit")
+            || error_lower.contains("rate-limit")
     }
 
     /// Send notification if notifier is configured and rules allow it
@@ -962,10 +962,7 @@ impl Executor {
 
     /// Check market conditions before executing trades
     /// Returns Ok(()) if conditions are favorable, Err with reason otherwise
-    pub async fn check_market_conditions(
-        &self,
-        signal: &Signal,
-    ) -> Result<(), String> {
+    pub async fn check_market_conditions(&self, signal: &Signal) -> Result<(), String> {
         // Measured values captured for diagnostic logging (logging-only — the
         // gating logic and thresholds below are unchanged).
         let mut sol_price_now: Option<Decimal> = None;
@@ -1395,7 +1392,10 @@ impl Executor {
     pub async fn check_jito_health(&self) -> Result<JitoHealth, ExecutorError> {
         let start = std::time::Instant::now();
 
-        let jito_client = self.jito_searcher.as_ref().ok_or(ExecutorError::JitoDisabled)?;
+        let jito_client = self
+            .jito_searcher
+            .as_ref()
+            .ok_or(ExecutorError::JitoDisabled)?;
 
         // Use getTipAccounts endpoint instead of /health (which doesn't exist)
         // This checks connectivity with a JSON-RPC POST request the same way
@@ -1424,9 +1424,15 @@ impl Executor {
         let previous_health;
         {
             let state = self.mutable.lock();
-            total_submissions = state.jito_submissions.load(std::sync::atomic::Ordering::Relaxed);
-            successful_resolutions = state.jito_resolutions_success.load(std::sync::atomic::Ordering::Relaxed);
-            let _failed_resolutions = state.jito_resolutions_failed.load(std::sync::atomic::Ordering::Relaxed);
+            total_submissions = state
+                .jito_submissions
+                .load(std::sync::atomic::Ordering::Relaxed);
+            successful_resolutions = state
+                .jito_resolutions_success
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let _failed_resolutions = state
+                .jito_resolutions_failed
+                .load(std::sync::atomic::Ordering::Relaxed);
             previous_health = state.jito_health.clone();
         }
 
@@ -1512,18 +1518,27 @@ impl Executor {
 
     /// Record a Jito bundle submission (for health tracking)
     pub fn record_jito_submission(&self) {
-        self.mutable.lock().jito_submissions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.mutable
+            .lock()
+            .jito_submissions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Record a successful Jito bundle resolution
     pub fn record_jito_resolution_success(&self) {
-        self.mutable.lock().jito_resolutions_success.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.mutable
+            .lock()
+            .jito_resolutions_success
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.record_jito_resolution_metrics("success");
     }
 
     /// Record a failed Jito bundle resolution
     pub fn record_jito_resolution_failure(&self) {
-        self.mutable.lock().jito_resolutions_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.mutable
+            .lock()
+            .jito_resolutions_failed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.record_jito_resolution_metrics("failed");
     }
 
@@ -1531,29 +1546,29 @@ impl Executor {
     pub fn get_jito_stats(&self) -> (u64, u64, u64) {
         let state = self.mutable.lock();
         (
-            state.jito_submissions.load(std::sync::atomic::Ordering::Relaxed),
-            state.jito_resolutions_success.load(std::sync::atomic::Ordering::Relaxed),
-            state.jito_resolutions_failed.load(std::sync::atomic::Ordering::Relaxed),
+            state
+                .jito_submissions
+                .load(std::sync::atomic::Ordering::Relaxed),
+            state
+                .jito_resolutions_success
+                .load(std::sync::atomic::Ordering::Relaxed),
+            state
+                .jito_resolutions_failed
+                .load(std::sync::atomic::Ordering::Relaxed),
         )
     }
 
     /// Record Jito bundle submission to Prometheus metrics
     pub fn record_jito_submission_metrics(&self, mode: &str) {
         if let Some(ref metrics) = self.metrics {
-            metrics
-                .jito_submissions
-                .with_label_values(&[mode])
-                .inc();
+            metrics.jito_submissions.with_label_values(&[mode]).inc();
         }
     }
 
     /// Record Jito bundle resolution to Prometheus metrics
     pub fn record_jito_resolution_metrics(&self, status: &str) {
         if let Some(ref metrics) = self.metrics {
-            metrics
-                .jito_resolutions
-                .with_label_values(&[status])
-                .inc();
+            metrics.jito_resolutions.with_label_values(&[status]).inc();
         }
     }
 
@@ -1570,9 +1585,7 @@ impl Executor {
     /// Update Jito health gauge from health check
     pub fn update_jito_health_metrics(&self, health: &JitoHealth) {
         if let Some(ref metrics) = self.metrics {
-            metrics
-                .jito_health
-                .set(if health.healthy { 1 } else { 0 });
+            metrics.jito_health.set(if health.healthy { 1 } else { 0 });
         }
     }
 
@@ -1653,7 +1666,8 @@ impl Executor {
             built_tx.price_impact_pct(),
             tip,
             built_tx.route_fee_sol(),
-        ).await?;
+        )
+        .await?;
 
         tracing::debug!(
             tip_sol = tip.to_f64().unwrap_or(0.0),
@@ -1674,9 +1688,12 @@ impl Executor {
                     "Jito tip capped at 1 SOL to prevent u64 overflow"
                 );
             }
-                        let tip_lamports = utils::sol_to_lamports(capped_tip).map_err(|e| {
-                            ExecutorError::TransactionFailed(format!("Failed to convert tip to lamports: {}", e))
-                        })?;
+            let tip_lamports = utils::sol_to_lamports(capped_tip).map_err(|e| {
+                ExecutorError::TransactionFailed(format!(
+                    "Failed to convert tip to lamports: {}",
+                    e
+                ))
+            })?;
 
             // D3: legacy transactions inline the tip as the last instruction and
             // ship as a single-tx bundle (one signature, atomic at tx level). V0
@@ -1706,16 +1723,19 @@ impl Executor {
                             error = %e,
                             "Could not inline Jito tip into legacy tx; falling back to separate-tip bundle"
                         );
-                        let bytes = bincode::serde::encode_to_vec(transaction, bincode::config::legacy())
-                            .map_err(|e| {
+                        let bytes =
+                            bincode::serde::encode_to_vec(transaction, bincode::config::legacy())
+                                .map_err(|e| {
                                 ExecutorError::TransactionFailed(format!(
                                     "Serialization error: {}",
                                     e
                                 ))
                             })?;
-                        jito_searcher.submit_bundle(&bytes, tip_lamports, &wallet_keypair).await
+                        jito_searcher
+                            .submit_bundle(&bytes, tip_lamports, &wallet_keypair)
+                            .await
                     }
-                }
+                },
                 crate::engine::transaction_builder::BuiltTransaction::Versioned {
                     transaction_bytes,
                     ..
@@ -1809,9 +1829,12 @@ impl Executor {
                         // D3: inline the tip into the legacy swap tx and ship a
                         // single-tx bundle via Helius (one signature, atomic).
                         let capped_tip = tip.min(Decimal::ONE);
-            let tip_lamports = utils::sol_to_lamports(capped_tip).map_err(|e| {
-                ExecutorError::TransactionFailed(format!("Failed to convert tip to lamports: {}", e))
-            })?;
+                        let tip_lamports = utils::sol_to_lamports(capped_tip).map_err(|e| {
+                            ExecutorError::TransactionFailed(format!(
+                                "Failed to convert tip to lamports: {}",
+                                e
+                            ))
+                        })?;
                         match self.inline_and_serialize_tip(
                             transaction,
                             &wallet_keypair,
@@ -2042,7 +2065,9 @@ impl Executor {
             .get("result")
             .and_then(|v| v.as_str())
             .or_else(|| result.get("bundleId").and_then(|v| v.as_str()))
-            .ok_or_else(|| ExecutorError::Rpc("No result/bundleId in Helius response".to_string()))?;
+            .ok_or_else(|| {
+                ExecutorError::Rpc("No result/bundleId in Helius response".to_string())
+            })?;
 
         Ok(format!("bundle:{}", bundle_id))
     }
@@ -2058,7 +2083,8 @@ impl Executor {
         // getBundleStatuses is served at the Solana RPC host (per Helius docs),
         // NOT at api.helius.xyz/v0/bundles.
         let url = crate::utils::helius_rpc_url(api_key);
-        crate::engine::jito_searcher::resolve_bundle_status(&self.http_client, &url, bundle_id).await
+        crate::engine::jito_searcher::resolve_bundle_status(&self.http_client, &url, bundle_id)
+            .await
     }
 
     /// Execute via Helius RPC with Staked Connections (high landing rate for exits)
@@ -2112,7 +2138,8 @@ impl Executor {
             built_tx.price_impact_pct(),
             tip,
             built_tx.route_fee_sol(),
-        ).await?;
+        )
+        .await?;
 
         tracing::debug!(
             tip_sol = tip.to_f64().unwrap_or(0.0),
@@ -2123,8 +2150,7 @@ impl Executor {
         // Submit via Helius RPC with staked connection prioritization
         let (signature, confirmed) = match &built_tx {
             crate::engine::transaction_builder::BuiltTransaction::Legacy {
-                transaction,
-                ..
+                transaction, ..
             } => {
                 let sig = self
                     .submit_transaction_helius_staked(transaction, &wallet_keypair)
@@ -2320,8 +2346,8 @@ impl Executor {
         };
 
         // Serialize the signed transaction
-        let signed_bytes =
-            bincode::serde::encode_to_vec(&signed_tx, bincode::config::legacy()).map_err(|e| {
+        let signed_bytes = bincode::serde::encode_to_vec(&signed_tx, bincode::config::legacy())
+            .map_err(|e| {
                 ExecutorError::TransactionFailed(format!(
                     "Failed to serialize versioned transaction: {}",
                     e
@@ -2383,7 +2409,10 @@ impl Executor {
     }
 
     /// Execute via standard TPU
-    pub async fn execute_standard(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
+    pub async fn execute_standard(
+        &self,
+        signal: &Signal,
+    ) -> Result<ExecutionOutcome, ExecutorError> {
         tracing::info!(
             trade_uuid = %signal.trade_uuid,
             "Executing trade via standard TPU"
@@ -2436,7 +2465,8 @@ impl Executor {
             built_tx.price_impact_pct(),
             Decimal::ZERO,
             built_tx.route_fee_sol(),
-        ).await?;
+        )
+        .await?;
 
         // Submit transaction via RPC
         let (signature, confirmed) = match &built_tx {
@@ -2597,14 +2627,9 @@ impl Executor {
                 // blockhash is a direct public-field swap on a clone (F10) — no
                 // per-ALT RPC fetch or message recompilation.
                 if self.config.jupiter.reconstruct_v0_on_blockhash_expiry {
-                    tracing::debug!(
-                        "V0 transaction detected: refreshing message blockhash field"
-                    );
+                    tracing::debug!("V0 transaction detected: refreshing message blockhash field");
 
-                    match v0_reconstruction::refresh_v0_blockhash(
-                        &versioned_tx,
-                        recent_blockhash,
-                    ) {
+                    match v0_reconstruction::refresh_v0_blockhash(&versioned_tx, recent_blockhash) {
                         Ok(refreshed) => {
                             tracing::debug!("Refreshed V0 message blockhash");
                             refreshed
@@ -2670,8 +2695,8 @@ impl Executor {
 
         // Serialize the signed transaction with the unified bincode 2.x serde
         // API using the legacy config (identical wire format to bincode 1.3).
-        let signed_bytes =
-            bincode::serde::encode_to_vec(&signed_tx, bincode::config::legacy()).map_err(|e| {
+        let signed_bytes = bincode::serde::encode_to_vec(&signed_tx, bincode::config::legacy())
+            .map_err(|e| {
                 ExecutorError::TransactionFailed(format!(
                     "Failed to serialize versioned transaction: {}",
                     e
@@ -2858,11 +2883,13 @@ impl Executor {
             let failure_rate = tip_manager.get_recent_failure_rate().await.unwrap_or(0.0);
 
             // Use dynamic tip scaling with failure rate data
-            tip_manager.calculate_dynamic_tip_with_load(
-                signal.payload.strategy,
-                signal.payload.amount_sol,
-                failure_rate,
-            ).await
+            tip_manager
+                .calculate_dynamic_tip_with_load(
+                    signal.payload.strategy,
+                    signal.payload.amount_sol,
+                    failure_rate,
+                )
+                .await
         } else {
             // Fallback to simple strategy-based tip calculation
             // Scale tip by trade size (tip_percent_max default 10%), with strategy-specific floors
@@ -2880,7 +2907,6 @@ impl Executor {
             let percentage_based_tip = signal.payload.amount_sol * self.config.jito.tip_percent_max;
 
             // Apply floor, percentage cap, and ceiling
-            
 
             percentage_based_tip
                 .max(strategy_floor)
@@ -2900,14 +2926,10 @@ impl Executor {
             | ExecutorError::JitoDisabled
             | ExecutorError::CircuitBreakerTripped(_)
             | ExecutorError::MarketConditionsUnfavorable(_)
-            | ExecutorError::ExecutionCostTooHigh { .. } => {
-                JitoError::Fatal(error.to_string())
-            }
+            | ExecutorError::ExecutionCostTooHigh { .. } => JitoError::Fatal(error.to_string()),
 
             // Network errors - may warrant fallback consideration
-            ExecutorError::Timeout => {
-                JitoError::Network(error.to_string())
-            }
+            ExecutorError::Timeout => JitoError::Network(error.to_string()),
 
             // RPC and transaction errors - check if retryable
             ExecutorError::Rpc(msg) | ExecutorError::TransactionFailed(msg) => {
@@ -2946,19 +2968,13 @@ impl Executor {
             }
 
             // Blockhash expired - always retryable
-            ExecutorError::BlockhashExpired => {
-                JitoError::Retryable(error.to_string())
-            }
+            ExecutorError::BlockhashExpired => JitoError::Retryable(error.to_string()),
 
             // V0 reconstruction errors - retryable (might be transient)
-            ExecutorError::V0ReconstructionFailed(_) => {
-                JitoError::Retryable(error.to_string())
-            }
+            ExecutorError::V0ReconstructionFailed(_) => JitoError::Retryable(error.to_string()),
 
             // ALT errors - fatal (not recoverable without different parameters)
-            ExecutorError::AddressLookupTableUnavailable(_) => {
-                JitoError::Fatal(error.to_string())
-            }
+            ExecutorError::AddressLookupTableUnavailable(_) => JitoError::Fatal(error.to_string()),
         }
     }
 
@@ -2973,9 +2989,9 @@ impl Executor {
             // that can't land at the ceiling should fail rather than pay
             // 2-3x the ceiling on retries. The ceiling is the hard cap.
             let multiplier = 1.0 + (0.2 * (attempt - 1) as f64);
-            let raw_increased = base_tip_sol * rust_decimal::Decimal::from_str(
-                &format!("{}", multiplier)
-            ).unwrap_or(rust_decimal::Decimal::from(2));
+            let raw_increased = base_tip_sol
+                * rust_decimal::Decimal::from_str(&format!("{}", multiplier))
+                    .unwrap_or(rust_decimal::Decimal::from(2));
             let increased_tip = raw_increased.min(self.config.jito.tip_ceiling_sol);
 
             // Convert to lamports (1 SOL = 1,000,000,000 lamports)
@@ -3013,7 +3029,10 @@ impl Executor {
     /// - Retryable errors (insufficient tip, timeout): retry with increased tip
     /// - Fatal errors (insufficient balance, invalid tx): fail immediately
     /// - Network errors: may trigger fallback consideration
-    pub async fn execute_jito_with_retry(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
+    pub async fn execute_jito_with_retry(
+        &self,
+        signal: &Signal,
+    ) -> Result<ExecutionOutcome, ExecutorError> {
         let mut attempts = 0;
         let max_attempts = self.config.jito.max_retries;
 
@@ -3045,7 +3064,7 @@ impl Executor {
                         );
                     }
                     return Ok(result);
-                },
+                }
                 Err(e) => {
                     let jito_error = self.classify_jito_error(&e);
 
@@ -3067,7 +3086,7 @@ impl Executor {
                             // Sleep before retry
                             tokio::time::sleep(backoff).await;
                             continue;
-                        },
+                        }
                         JitoError::Retryable(reason) => {
                             tracing::error!(
                                 trade_uuid = %signal.trade_uuid,
@@ -3076,7 +3095,7 @@ impl Executor {
                                 "Jito execution failed after maximum retry attempts"
                             );
                             return Err(e);
-                        },
+                        }
                         JitoError::Fatal(reason) => {
                             tracing::error!(
                                 trade_uuid = %signal.trade_uuid,
@@ -3084,7 +3103,7 @@ impl Executor {
                                 "Jito execution failed with fatal error - not retryable"
                             );
                             return Err(e);
-                        },
+                        }
                         JitoError::Network(reason) => {
                             tracing::warn!(
                                 trade_uuid = %signal.trade_uuid,
@@ -3093,7 +3112,7 @@ impl Executor {
                             );
                             // Network errors are returned to caller for fallback consideration
                             return Err(e);
-                        },
+                        }
                     }
                 }
             }
@@ -3121,15 +3140,17 @@ impl Executor {
             return Err(ExecutorError::ExecutionCostTooHigh {
                 cost: tip,
                 cost_pct: (tip / signal.payload.amount_sol).to_f64().unwrap_or(0.0) * 100.0,
-                limit_pct: (min_live_position / signal.payload.amount_sol).to_f64().unwrap_or(100.0) * 100.0,
+                limit_pct: (min_live_position / signal.payload.amount_sol)
+                    .to_f64()
+                    .unwrap_or(100.0)
+                    * 100.0,
                 strategy: signal.payload.strategy,
             });
         }
 
         // P2-17/F22: real per-route fee when available, else flat config rate.
-        let dex_fee = route_fee_sol.unwrap_or_else(|| {
-            signal.payload.amount_sol * self.config.strategy.dex_fee_rate
-        });
+        let dex_fee = route_fee_sol
+            .unwrap_or_else(|| signal.payload.amount_sol * self.config.strategy.dex_fee_rate);
         // F5/F6: use the SAME unified slippage estimate as the post-trade
         // recorded cost, so the gate and the recorded cost never disagree.
         // When Jupiter's priceImpactPct is absent this falls back to the
@@ -3165,11 +3186,14 @@ impl Executor {
         let mut expected_profit_sol = None;
         if self.config.strategy.friction_gating_enabled {
             // Calculate Kelly metrics for this wallet
-            let kelly_result = self.kelly_sizer.calculate_kelly(
-                &signal.payload.wallet_address,
-                signal.payload.strategy,
-                14, // 14-day lookback for recent performance
-            ).await;
+            let kelly_result = self
+                .kelly_sizer
+                .calculate_kelly(
+                    &signal.payload.wallet_address,
+                    signal.payload.strategy,
+                    14, // 14-day lookback for recent performance
+                )
+                .await;
 
             if let Ok(kelly) = kelly_result {
                 // Expected profit = position_size * expected_return_pct
@@ -3349,8 +3373,7 @@ impl Executor {
                 let state = self.mutable.lock();
                 let reason = format!(
                     "Consecutive Jito failures ({}) exceeded threshold ({})",
-                    state.failure_count,
-                    self.config.jito.min_failures_before_fallback
+                    state.failure_count, self.config.jito.min_failures_before_fallback
                 );
                 let previous_mode = state.rpc_mode;
                 (reason, previous_mode)
@@ -3459,7 +3482,16 @@ impl Executor {
     pub async fn get_paper_prices(
         &self,
         signal: &Signal,
-    ) -> Result<(Option<Decimal>, Option<Decimal>, Option<u64>, Option<Decimal>, Option<Decimal>), ExecutorError> {
+    ) -> Result<
+        (
+            Option<Decimal>,
+            Option<Decimal>,
+            Option<u64>,
+            Option<Decimal>,
+            Option<Decimal>,
+        ),
+        ExecutorError,
+    > {
         let active_client = self.active_rpc_client();
         let tx_builder = TransactionBuilder::new(active_client.clone(), self.config.clone())
             .map_err(|e| ExecutorError::TransactionFailed(format!("TransactionBuilder: {}", e)))?;
@@ -3468,11 +3500,19 @@ impl Executor {
 
         match signal.payload.action {
             Action::Buy => {
-                let amount_lamports = crate::utils::sol_to_lamports(signal.payload.amount_sol).map_err(|e| {
-                    ExecutorError::TransactionFailed(format!("Failed to convert SOL amount to lamports: {}", e))
-                })?;
+                let amount_lamports = crate::utils::sol_to_lamports(signal.payload.amount_sol)
+                    .map_err(|e| {
+                        ExecutorError::TransactionFailed(format!(
+                            "Failed to convert SOL amount to lamports: {}",
+                            e
+                        ))
+                    })?;
                 let result = tx_builder
-                    .get_quote_prices(sol_mint, signal.token_address().unwrap_or(""), amount_lamports)
+                    .get_quote_prices(
+                        sol_mint,
+                        signal.token_address().unwrap_or(""),
+                        amount_lamports,
+                    )
                     .await
                     .map_err(|e| {
                         ExecutorError::TransactionFailed(format!("Jupiter quote: {}", e))
@@ -3677,17 +3717,14 @@ impl Executor {
         let mut tx = Transaction::new_with_payer(&[noop_ix], Some(&wallet_keypair.pubkey()));
         tx.sign(&[&wallet_keypair], blockhash);
 
-        let signature_str = crate::metrics::timed_rpc(
-            "primary",
-            "sendTransaction",
-            active.send_transaction(&tx),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Devnet submission failed");
-            ExecutorError::TransactionFailed(format!("Devnet submission: {}", e))
-        })?
-        .to_string();
+        let signature_str =
+            crate::metrics::timed_rpc("primary", "sendTransaction", active.send_transaction(&tx))
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "Devnet submission failed");
+                    ExecutorError::TransactionFailed(format!("Devnet submission: {}", e))
+                })?
+                .to_string();
 
         let confirmed = self
             .poll_signature_confirmation(&signature_str, &signal.trade_uuid)
@@ -3942,8 +3979,14 @@ mod tests {
         use rust_decimal_macros::dec;
         // Missing fill price / decimals -> None (cannot derive safely).
         assert_eq!(derive_token_amount(dec!(0.25), None, Some(9)), None);
-        assert_eq!(derive_token_amount(dec!(0.25), Some(dec!(0.001)), None), None);
+        assert_eq!(
+            derive_token_amount(dec!(0.25), Some(dec!(0.001)), None),
+            None
+        );
         // Zero fill price -> None (would divide by zero).
-        assert_eq!(derive_token_amount(dec!(0.25), Some(dec!(0)), Some(9)), None);
+        assert_eq!(
+            derive_token_amount(dec!(0.25), Some(dec!(0)), Some(9)),
+            None
+        );
     }
 }

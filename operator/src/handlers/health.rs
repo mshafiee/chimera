@@ -190,7 +190,11 @@ pub async fn health_check(
     };
 
     // Get fallback duration (time spent in fallback mode)
-    let fallback_duration_secs = state.engine.fallback_duration().await.map(|d| d.num_seconds());
+    let fallback_duration_secs = state
+        .engine
+        .fallback_duration()
+        .await
+        .map(|d| d.num_seconds());
 
     let rpc_health = ComponentHealth {
         status: rpc_health_status,
@@ -289,7 +293,8 @@ async fn check_database(db: &dyn Database, last_db_ok: &AtomicU64) -> ComponentH
         Err(e) => {
             tracing::error!(error = %e, "Database health check failed");
             let now_epoch = Utc::now().timestamp() as u64;
-            let (status, message) = determine_db_grace_status(last_db_ok.load(Ordering::Relaxed), now_epoch);
+            let (status, message) =
+                determine_db_grace_status(last_db_ok.load(Ordering::Relaxed), now_epoch);
             ComponentHealth {
                 status,
                 message: message.or(Some(e.to_string())),

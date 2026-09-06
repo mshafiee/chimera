@@ -81,7 +81,7 @@ impl DecisionRecorder {
         // dropped. Any drift = silently lost records — the 2026-08-30 trial
         // incident's signature. INFO so it survives the lossy-log bursts.
         let attempted_now = self.attempted.load(Ordering::Relaxed);
-        if attempted_now % 1000 == 0 {
+        if attempted_now.is_multiple_of(1000) {
             tracing::info!(
                 attempted = attempted_now,
                 persisted = self.persisted.load(Ordering::Relaxed),
@@ -112,7 +112,12 @@ impl DecisionRecorder {
             //   counted in `dropped` for reconciliation.
             let is_admitted = decision_row_admitted;
             let permit = if is_admitted {
-                Some(write_semaphore.acquire_owned().await.expect("semaphore closed"))
+                Some(
+                    write_semaphore
+                        .acquire_owned()
+                        .await
+                        .expect("semaphore closed"),
+                )
             } else {
                 match write_semaphore.try_acquire_owned() {
                     Ok(p) => Some(p),
@@ -628,9 +633,9 @@ mod tests {
         assert_eq!(rec.attempted.load(Ordering::Relaxed), 0);
         assert_eq!(rec.persisted.load(Ordering::Relaxed), 0);
         assert!(rec.run_context().run_id.contains("-"));
-}
+    }
 
-// ── Persistence policy tests (2026-08-31, silent-loss fix) ──────────────────
+    // ── Persistence policy tests (2026-08-31, silent-loss fix) ──────────────────
 
     fn sample_decision_admitted(req: &SelectionRequest) -> BuyDecision {
         let mut d = sample_decision(req);
@@ -679,7 +684,11 @@ mod tests {
         // verified in the DB-backed suites). The invariant under test:
         // admitted records are NEVER dropped, they queue.
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-        assert_eq!(rec.dropped.load(Ordering::Relaxed), 0, "admitted must never drop, even saturated");
+        assert_eq!(
+            rec.dropped.load(Ordering::Relaxed),
+            0,
+            "admitted must never drop, even saturated"
+        );
     }
 
     /// REJECTED decisions are droppable analytics: under saturation they are
@@ -696,7 +705,11 @@ mod tests {
 
         // Give the spawned task a moment; it must have dropped immediately.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert_eq!(rec.dropped.load(Ordering::Relaxed), 1, "rejected drop counted");
+        assert_eq!(
+            rec.dropped.load(Ordering::Relaxed),
+            1,
+            "rejected drop counted"
+        );
         assert_eq!(rec.persisted.load(Ordering::Relaxed), 0);
 
         // After release, nothing further happens for the dropped record.

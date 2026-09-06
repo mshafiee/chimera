@@ -200,7 +200,10 @@ pub async fn wallet_auth(
 }
 
 /// Check if wallet is registered as admin
-async fn check_wallet_role(db: &Arc<dyn Database>, wallet_address: &str) -> Result<String, AppError> {
+async fn check_wallet_role(
+    db: &Arc<dyn Database>,
+    wallet_address: &str,
+) -> Result<String, AppError> {
     // Check admin_wallets table
     let result = db.get_admin_wallet_role(wallet_address).await?;
 

@@ -14,8 +14,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
 
 use crate::monitoring::helius::HeliusClient;
 use crate::token::is_pumpfun_token;
@@ -24,7 +24,7 @@ use crate::token::is_pumpfun_token;
 const QUOTE_MINTS: [&str; 3] = [
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
     "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
-    "So11111111111111111111111111111111111111112",   // WSOL
+    "So11111111111111111111111111111111111111112",  // WSOL
 ];
 
 /// Assessment of a wallet's on-chain round-trip trading.
@@ -105,7 +105,8 @@ impl OnchainAssessor {
         let mut total_sell = Decimal::ZERO;
         for ledger in ledgers.values() {
             if ledger.buy_quote > Decimal::ZERO && ledger.sell_quote > Decimal::ZERO {
-                let pnl = (ledger.sell_quote - ledger.buy_quote) / ledger.buy_quote * Decimal::from(100);
+                let pnl =
+                    (ledger.sell_quote - ledger.buy_quote) / ledger.buy_quote * Decimal::from(100);
                 pnls.push(pnl);
                 total_buy += ledger.buy_quote;
                 total_sell += ledger.sell_quote;
@@ -126,13 +127,21 @@ impl OnchainAssessor {
             0.0
         };
         let avg_win = if wins > 0 {
-            pnls.iter().filter(|p| **p > Decimal::ZERO).map(|p| p.to_f64().unwrap_or(0.0)).sum::<f64>() / wins as f64
+            pnls.iter()
+                .filter(|p| **p > Decimal::ZERO)
+                .map(|p| p.to_f64().unwrap_or(0.0))
+                .sum::<f64>()
+                / wins as f64
         } else {
             0.0
         };
         let losses = n - wins;
         let avg_loss = if losses > 0 {
-            pnls.iter().filter(|p| **p <= Decimal::ZERO).map(|p| p.to_f64().unwrap_or(0.0)).sum::<f64>() / losses as f64
+            pnls.iter()
+                .filter(|p| **p <= Decimal::ZERO)
+                .map(|p| p.to_f64().unwrap_or(0.0))
+                .sum::<f64>()
+                / losses as f64
         } else {
             0.0
         };
@@ -141,8 +150,16 @@ impl OnchainAssessor {
         } else {
             0.0
         };
-        let gross_win: f64 = pnls.iter().filter(|p| **p > Decimal::ZERO).map(|p| p.to_f64().unwrap_or(0.0)).sum();
-        let gross_loss: f64 = pnls.iter().filter(|p| **p <= Decimal::ZERO).map(|p| p.to_f64().unwrap_or(0.0).abs()).sum();
+        let gross_win: f64 = pnls
+            .iter()
+            .filter(|p| **p > Decimal::ZERO)
+            .map(|p| p.to_f64().unwrap_or(0.0))
+            .sum();
+        let gross_loss: f64 = pnls
+            .iter()
+            .filter(|p| **p <= Decimal::ZERO)
+            .map(|p| p.to_f64().unwrap_or(0.0).abs())
+            .sum();
         let profit_factor = if gross_loss > 0.0 {
             gross_win / gross_loss
         } else if gross_win > 0.0 {
@@ -168,9 +185,25 @@ impl OnchainAssessor {
             } else {
                 Some((holds.iter().sum::<i64>() / holds.len() as i64).max(0))
             },
-            median_win_pct: round2(median_f64(&pnls.iter().filter(|p| **p > Decimal::ZERO).map(|p| p.to_f64().unwrap_or(0.0)).collect::<Vec<_>>())),
-            median_loss_pct: round2(median_f64(&pnls.iter().filter(|p| **p <= Decimal::ZERO).map(|p| p.to_f64().unwrap_or(0.0)).collect::<Vec<_>>())),
-            profit_factor: if profit_factor.is_finite() { round2(profit_factor) } else { profit_factor },
+            median_win_pct: round2(median_f64(
+                &pnls
+                    .iter()
+                    .filter(|p| **p > Decimal::ZERO)
+                    .map(|p| p.to_f64().unwrap_or(0.0))
+                    .collect::<Vec<_>>(),
+            )),
+            median_loss_pct: round2(median_f64(
+                &pnls
+                    .iter()
+                    .filter(|p| **p <= Decimal::ZERO)
+                    .map(|p| p.to_f64().unwrap_or(0.0))
+                    .collect::<Vec<_>>(),
+            )),
+            profit_factor: if profit_factor.is_finite() {
+                round2(profit_factor)
+            } else {
+                profit_factor
+            },
         })
     }
 
@@ -201,8 +234,14 @@ impl OnchainAssessor {
                         }
                     })
                     .unwrap_or(Decimal::ZERO);
-                let from = leg.get("fromUserAccount").and_then(|v| v.as_str()).unwrap_or("");
-                let to = leg.get("toUserAccount").and_then(|v| v.as_str()).unwrap_or("");
+                let from = leg
+                    .get("fromUserAccount")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let to = leg
+                    .get("toUserAccount")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if from == wallet {
                     wallet_legs.push((mint.to_string(), amount, true));
                 } else if to == wallet {
@@ -213,8 +252,14 @@ impl OnchainAssessor {
         // Native SOL leg (raw lamports / 1e9).
         if let Some(transfers) = tx.get("nativeTransfers").and_then(|t| t.as_array()) {
             for leg in transfers {
-                let from = leg.get("fromUserAccount").and_then(|v| v.as_str()).unwrap_or("");
-                let to = leg.get("toUserAccount").and_then(|v| v.as_str()).unwrap_or("");
+                let from = leg
+                    .get("fromUserAccount")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let to = leg
+                    .get("toUserAccount")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let lamports = leg.get("amount").and_then(|a| a.as_u64()).unwrap_or(0);
                 if (from == wallet || to == wallet) && lamports > 0 {
                     let sol = Decimal::from(lamports) / Decimal::from(1_000_000_000u64);
@@ -414,7 +459,8 @@ mod tests {
     }
 
     #[test]
-    fn test_sol_quoted_buy() {        let wallet = "Wallet111111111111111111111111111111111111";
+    fn test_sol_quoted_buy() {
+        let wallet = "Wallet111111111111111111111111111111111111";
         let token = "TokA111111111111111111111111111111111111111";
         let wsol = "So11111111111111111111111111111111111111112";
 

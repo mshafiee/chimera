@@ -353,7 +353,8 @@ async fn test_position_size_floor_at_minimum() {
     // (zero) instead of being clamped up to trade at the minimum with the
     // worst cost ratio.
     assert_eq!(
-        size, Decimal::ZERO,
+        size,
+        Decimal::ZERO,
         "Sub-minimum computed size must return zero under skip-below-min semantics"
     );
 
@@ -806,7 +807,11 @@ async fn test_capital_relative_sizes_scale_with_capital() {
 
     // base = capital * 0.15 * 1.0 * 1.0.
     assert_eq!(s10, Decimal::from_str("1.5").unwrap(), "10 SOL → 15% = 1.5");
-    assert_eq!(s100, Decimal::from_str("15.0").unwrap(), "100 SOL → 15% = 15");
+    assert_eq!(
+        s100,
+        Decimal::from_str("15.0").unwrap(),
+        "100 SOL → 15% = 15"
+    );
     // 1000 * 0.15 = 150, but the absolute safety ceiling (max_size_sol = 50) binds.
     assert_eq!(
         s1000,
@@ -845,8 +850,16 @@ async fn test_proven_wallet_scales_with_capital() {
     // proven = capital * proven_size_pct (0.15); Shield strategy max = 0.30 capital > proven.
     let p10 = proven_size(&sizer, Decimal::from_str("10.0").unwrap()).await;
     let p100 = proven_size(&sizer, Decimal::from_str("100.0").unwrap()).await;
-    assert_eq!(p10, Decimal::from_str("1.5").unwrap(), "proven at 10 SOL = 1.5");
-    assert_eq!(p100, Decimal::from_str("15.0").unwrap(), "proven at 100 SOL = 15");
+    assert_eq!(
+        p10,
+        Decimal::from_str("1.5").unwrap(),
+        "proven at 10 SOL = 1.5"
+    );
+    assert_eq!(
+        p100,
+        Decimal::from_str("15.0").unwrap(),
+        "proven at 100 SOL = 15"
+    );
 }
 
 /// Capital-relative sizing still honours skip-below-min: a small capital that

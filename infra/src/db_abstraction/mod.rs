@@ -603,8 +603,11 @@ pub trait Database: Send + Sync {
 
     /// Distinct tracked wallets with BUY rows for the token in the trailing
     /// window (hours). Returns 0 on empty.
-    async fn get_token_wallet_count(&self, token_address: &str, window_hours: i64)
-        -> AppResult<i64>;
+    async fn get_token_wallet_count(
+        &self,
+        token_address: &str,
+        window_hours: i64,
+    ) -> AppResult<i64>;
 
     /// Update last speculative signal timestamp for a wallet
     async fn update_last_speculative_signal(

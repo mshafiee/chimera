@@ -213,7 +213,11 @@ impl ExitDetector {
                         .entry((wallet_address.to_string(), token_address.to_string()))
                         .or_insert(Decimal::ZERO) += amount_in;
 
-                    return if is_full { ExitType::Full } else { ExitType::Partial };
+                    return if is_full {
+                        ExitType::Full
+                    } else {
+                        ExitType::Partial
+                    };
                 }
                 // Unparseable position data — cannot classify reliably.
                 tracing::debug!(
@@ -331,12 +335,16 @@ mod tests {
         assert!(!detector.take_ready_exit(&sig).await);
 
         // Missing wallet/token
-        assert!(!detector
-            .take_ready_exit(&signal("nobody", "token-1", 0))
-            .await);
-        assert!(!detector
-            .take_ready_exit(&signal("wallet-1", "nothing", 0))
-            .await);
+        assert!(
+            !detector
+                .take_ready_exit(&signal("nobody", "token-1", 0))
+                .await
+        );
+        assert!(
+            !detector
+                .take_ready_exit(&signal("wallet-1", "nothing", 0))
+                .await
+        );
     }
 
     #[tokio::test]
@@ -385,7 +393,10 @@ mod tests {
         detector.detect_exit("wallet-2", &swap, 0).await;
 
         let pending = detector.pending_exits.read().await;
-        assert!(!pending.contains_key("wallet-1"), "stale entries must be swept");
+        assert!(
+            !pending.contains_key("wallet-1"),
+            "stale entries must be swept"
+        );
         assert!(pending.contains_key("wallet-2"));
     }
 
@@ -407,18 +418,20 @@ mod tests {
             .mark_exit_processed(&signal("wallet-1", "token-1", 0))
             .await;
         let pending = detector.pending_exits.read().await;
-        assert!(!pending.contains_key("wallet-1"), "wallet entry fully removed");
+        assert!(
+            !pending.contains_key("wallet-1"),
+            "wallet entry fully removed"
+        );
         assert!(pending.contains_key("wallet-2"), "other wallets untouched");
     }
 
     #[tokio::test]
     async fn mark_exit_processed_full_exit_clears_cumulative() {
         let detector = ExitDetector::new();
-        detector
-            .cumulative_sold
-            .write()
-            .await
-            .insert(("wallet-1".to_string(), "token-1".to_string()), Decimal::new(9, 0));
+        detector.cumulative_sold.write().await.insert(
+            ("wallet-1".to_string(), "token-1".to_string()),
+            Decimal::new(9, 0),
+        );
 
         let mut full = signal("wallet-1", "token-1", 0);
         full.exit_type = ExitType::Full;
@@ -432,11 +445,10 @@ mod tests {
 
         // Partial exit keeps cumulative
         let detector2 = ExitDetector::new();
-        detector2
-            .cumulative_sold
-            .write()
-            .await
-            .insert(("wallet-1".to_string(), "token-1".to_string()), Decimal::new(9, 0));
+        detector2.cumulative_sold.write().await.insert(
+            ("wallet-1".to_string(), "token-1".to_string()),
+            Decimal::new(9, 0),
+        );
         detector2
             .mark_exit_processed(&signal("wallet-1", "token-1", 0))
             .await;

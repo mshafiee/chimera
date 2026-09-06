@@ -12,8 +12,8 @@ use tokio::time::{sleep, Duration};
 #[tokio::test]
 async fn test_liquidity_cache_hit() {
     // Create a token metadata fetcher
-    let fetcher = TokenMetadataFetcher::new("https://api.mainnet-beta.solana.com")
-        .with_liquidity_ttl(60); // 60 second TTL
+    let fetcher =
+        TokenMetadataFetcher::new("https://api.mainnet-beta.solana.com").with_liquidity_ttl(60); // 60 second TTL
 
     let fetcher = Arc::new(fetcher);
 
@@ -40,8 +40,8 @@ async fn test_liquidity_cache_hit() {
 #[tokio::test]
 async fn test_liquidity_cache_fast_path() {
     // Create a token metadata fetcher with short TTL
-    let fetcher = TokenMetadataFetcher::new("https://api.mainnet-beta.solana.com")
-        .with_liquidity_ttl(10); // 10 second TTL
+    let fetcher =
+        TokenMetadataFetcher::new("https://api.mainnet-beta.solana.com").with_liquidity_ttl(10); // 10 second TTL
 
     let fetcher = Arc::new(fetcher);
 
@@ -56,15 +56,18 @@ async fn test_liquidity_cache_fast_path() {
     let cached = fetcher.get_cached_liquidity(token);
     println!("Cached liquidity: {:?}", cached);
 
-    assert!(cached.is_some(), "Cache should return a value after first fetch");
+    assert!(
+        cached.is_some(),
+        "Cache should return a value after first fetch"
+    );
     println!("✓ Fast path test passed - cache returned: ${:?}", cached);
 }
 
 #[tokio::test]
 async fn test_liquidity_cache_expiration() {
     // Create a token metadata fetcher with very short TTL
-    let fetcher = TokenMetadataFetcher::new("https://api.mainnet-beta.solana.com")
-        .with_liquidity_ttl(2); // 2 second TTL for testing
+    let fetcher =
+        TokenMetadataFetcher::new("https://api.mainnet-beta.solana.com").with_liquidity_ttl(2); // 2 second TTL for testing
 
     let fetcher = Arc::new(fetcher);
 
@@ -76,7 +79,10 @@ async fn test_liquidity_cache_expiration() {
 
     // Immediately check cache (should be present)
     let cached_immediate = fetcher.get_cached_liquidity(token);
-    assert!(cached_immediate.is_some(), "Cache should be present immediately");
+    assert!(
+        cached_immediate.is_some(),
+        "Cache should be present immediately"
+    );
     println!("✓ Cache present immediately: ${:?}", cached_immediate);
 
     // Wait for cache to expire
@@ -85,15 +91,17 @@ async fn test_liquidity_cache_expiration() {
 
     // Check cache after expiration (should be None)
     let cached_expired = fetcher.get_cached_liquidity(token);
-    assert!(cached_expired.is_none(), "Cache should be expired after TTL");
+    assert!(
+        cached_expired.is_none(),
+        "Cache should be expired after TTL"
+    );
     println!("✓ Cache correctly expired after TTL");
 }
 
 #[tokio::test]
 async fn test_fdv_cache_functionality() {
     // Create a token metadata fetcher
-    let fetcher = TokenMetadataFetcher::new("https://api.mainnet-beta.solana.com")
-        .with_fdv_ttl(60); // 60 second TTL
+    let fetcher = TokenMetadataFetcher::new("https://api.mainnet-beta.solana.com").with_fdv_ttl(60); // 60 second TTL
 
     let fetcher = Arc::new(fetcher);
 
@@ -105,7 +113,9 @@ async fn test_fdv_cache_functionality() {
 
     // If API call fails, we can still test the cache mechanism
     if result1.is_err() {
-        println!("⚠ API call failed (expected in test environment), testing cache mechanism only...");
+        println!(
+            "⚠ API call failed (expected in test environment), testing cache mechanism only..."
+        );
         // The cache mechanism still works, we just can't populate it without valid API data
         println!("✓ FDV cache test passed (cache mechanism verified)");
         return;
@@ -123,8 +133,7 @@ async fn test_fdv_cache_functionality() {
 async fn test_background_updater_starts() {
     // Create a token metadata fetcher
     let fetcher = Arc::new(
-        TokenMetadataFetcher::new("https://api.mainnet-beta.solana.com")
-            .with_liquidity_ttl(60)
+        TokenMetadataFetcher::new("https://api.mainnet-beta.solana.com").with_liquidity_ttl(60),
     );
 
     let token = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"; // USDC

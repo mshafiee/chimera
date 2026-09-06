@@ -251,7 +251,9 @@ mod tests {
         assert!(store.is_empty());
         assert_eq!(store.len(), 0);
 
-        store.insert("mint1".to_string(), sample_metadata("mint1"), 60).await;
+        store
+            .insert("mint1".to_string(), sample_metadata("mint1"), 60)
+            .await;
         assert!(!store.is_empty());
         assert_eq!(store.len(), 1);
 
@@ -268,11 +270,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_store_from_arc() {
-        let arc = std::sync::Arc::new(parking_lot::RwLock::new(
-            std::collections::HashMap::new(),
-        ));
+        let arc = std::sync::Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
         let store = MetadataCacheStore::from_arc(Arc::clone(&arc));
-        store.insert("a".to_string(), sample_metadata("a"), 60).await;
+        store
+            .insert("a".to_string(), sample_metadata("a"), 60)
+            .await;
         // The shared backing map reflects the insert.
         assert!(arc.read().contains_key("a"));
 
@@ -286,7 +288,11 @@ mod tests {
 #[derive(Clone)]
 pub enum MetadataCacheStore {
     /// In-memory cache using Arc<RwLock<HashMap>>
-    Memory(std::sync::Arc<parking_lot::RwLock<std::collections::HashMap<String, super::metadata::TokenMetadata>>>),
+    Memory(
+        std::sync::Arc<
+            parking_lot::RwLock<std::collections::HashMap<String, super::metadata::TokenMetadata>>,
+        >,
+    ),
     /// Redis cache for multi-instance deployments
     #[cfg(feature = "redis-cache")]
     Redis(std::sync::Arc<tokio::sync::Mutex<redis::aio::ConnectionManager>>),
@@ -295,16 +301,26 @@ pub enum MetadataCacheStore {
 impl MetadataCacheStore {
     /// Create a new memory-based cache store
     pub fn new_memory() -> Self {
-        Self::Memory(std::sync::Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())))
+        Self::Memory(std::sync::Arc::new(parking_lot::RwLock::new(
+            std::collections::HashMap::new(),
+        )))
     }
 
     /// Create a memory store from an existing Arc<RwLock<HashMap>>
-    pub fn from_arc(cache: std::sync::Arc<parking_lot::RwLock<std::collections::HashMap<String, super::metadata::TokenMetadata>>>) -> Self {
+    pub fn from_arc(
+        cache: std::sync::Arc<
+            parking_lot::RwLock<std::collections::HashMap<String, super::metadata::TokenMetadata>>,
+        >,
+    ) -> Self {
         Self::Memory(cache)
     }
 
     /// Create a memory store from an existing Arc<RwLock<HashMap>>
-    pub fn from_memory_cache(cache: std::sync::Arc<parking_lot::RwLock<std::collections::HashMap<String, super::metadata::TokenMetadata>>>) -> Self {
+    pub fn from_memory_cache(
+        cache: std::sync::Arc<
+            parking_lot::RwLock<std::collections::HashMap<String, super::metadata::TokenMetadata>>,
+        >,
+    ) -> Self {
         Self::Memory(cache)
     }
 
@@ -319,7 +335,9 @@ impl MetadataCacheStore {
             .await
             .map_err(|e| format!("Failed to create Redis connection manager: {}", e))?;
 
-        Ok(Self::Redis(std::sync::Arc::new(tokio::sync::Mutex::new(conn_manager))))
+        Ok(Self::Redis(std::sync::Arc::new(tokio::sync::Mutex::new(
+            conn_manager,
+        ))))
     }
 
     /// Get token metadata from cache
@@ -351,7 +369,9 @@ impl MetadataCacheStore {
             #[cfg(feature = "redis-cache")]
             Self::Redis(conn) => {
                 let mut conn = conn.lock().await;
-                let _ = self.insert_to_redis(&mut conn, &key, &value, ttl_secs).await;
+                let _ = self
+                    .insert_to_redis(&mut conn, &key, &value, ttl_secs)
+                    .await;
             }
         }
     }
@@ -457,14 +477,13 @@ impl MetadataCacheStore {
             .map_err(|e| format!("Redis KEYS error: {}", e))?;
 
         let keys = match keys_data {
-            redis::Value::Bulk(values) => {
-                values.into_iter()
-                    .filter_map(|v| match v {
-                        redis::Value::Data(bytes) => String::from_utf8(bytes).ok(),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-            }
+            redis::Value::Bulk(values) => values
+                .into_iter()
+                .filter_map(|v| match v {
+                    redis::Value::Data(bytes) => String::from_utf8(bytes).ok(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
             _ => vec![],
         };
 

@@ -14,11 +14,7 @@ fn test_jupiter_error_rate_limit_classification() {
 
     assert_eq!(error.error_type, JupiterErrorType::RateLimit);
     assert!(error.retryable, "Rate limit errors should be retryable");
-    assert_eq!(
-        error.status_code,
-        Some(429),
-        "Should preserve status code"
-    );
+    assert_eq!(error.status_code, Some(429), "Should preserve status code");
     assert_eq!(
         error.retry_delay,
         Some(Duration::from_secs(5)),
@@ -32,7 +28,10 @@ fn test_jupiter_error_authentication_classification() {
 
     assert_eq!(error.error_type, JupiterErrorType::Authentication);
     assert!(!error.retryable, "Auth errors should not be retryable");
-    assert!(error.retry_delay.is_none(), "Auth errors should not have retry delay");
+    assert!(
+        error.retry_delay.is_none(),
+        "Auth errors should not have retry delay"
+    );
 }
 
 #[test]
@@ -40,7 +39,10 @@ fn test_jupiter_error_bad_request_classification() {
     let error = JupiterError::from_http_error(400, "Invalid parameters".to_string());
 
     assert_eq!(error.error_type, JupiterErrorType::BadRequest);
-    assert!(!error.retryable, "Bad request errors should not be retryable");
+    assert!(
+        !error.retryable,
+        "Bad request errors should not be retryable"
+    );
 }
 
 #[test]
@@ -70,8 +72,14 @@ fn test_jupiter_network_error_creation() {
 
     assert_eq!(error.error_type, JupiterErrorType::NetworkError);
     assert!(error.retryable, "Network errors should be retryable");
-    assert!(error.retry_delay.is_some(), "Network errors should have retry delay");
-    assert!(error.status_code.is_none(), "Network errors have no status code");
+    assert!(
+        error.retry_delay.is_some(),
+        "Network errors should have retry delay"
+    );
+    assert!(
+        error.status_code.is_none(),
+        "Network errors have no status code"
+    );
 }
 
 #[test]
@@ -88,7 +96,10 @@ fn test_jupiter_parse_error_creation() {
 
     assert_eq!(error.error_type, JupiterErrorType::ParseError);
     assert!(!error.retryable, "Parse errors should not be retryable");
-    assert!(error.retry_delay.is_none(), "Parse errors should not have retry delay");
+    assert!(
+        error.retry_delay.is_none(),
+        "Parse errors should not have retry delay"
+    );
 }
 
 #[test]
@@ -254,23 +265,19 @@ fn test_retry_config_defaults() {
 
     assert_eq!(config.max_retries, 3, "Default max retries should be 3");
     assert_eq!(
-        config.initial_delay_ms,
-        100,
+        config.initial_delay_ms, 100,
         "Default initial delay should be 100ms"
     );
     assert_eq!(
-        config.max_delay_ms,
-        10000,
+        config.max_delay_ms, 10000,
         "Default max delay should be 10s"
     );
     assert_eq!(
-        config.backoff_multiplier,
-        2.0,
+        config.backoff_multiplier, 2.0,
         "Default backoff multiplier should be 2.0"
     );
     assert_eq!(
-        config.jitter_factor,
-        0.1,
+        config.jitter_factor, 0.1,
         "Default jitter factor should be 0.1"
     );
 }
@@ -285,7 +292,10 @@ fn test_jupiter_error_to_app_error_conversion() {
             // Expected - rate limit should convert to service unavailable
         }
         other => {
-            panic!("Rate limit error should convert to ServiceUnavailable, got: {:?}", other);
+            panic!(
+                "Rate limit error should convert to ServiceUnavailable, got: {:?}",
+                other
+            );
         }
     }
 
@@ -325,7 +335,10 @@ fn test_jupiter_error_to_app_error_conversion() {
             // Expected - server errors should convert to HTTP errors
         }
         other => {
-            panic!("Server error should convert to Http error, got: {:?}", other);
+            panic!(
+                "Server error should convert to Http error, got: {:?}",
+                other
+            );
         }
     }
 
@@ -337,7 +350,10 @@ fn test_jupiter_error_to_app_error_conversion() {
             // Expected - parse errors should convert to parse errors
         }
         other => {
-            panic!("Parse error should convert to Parse error, got: {:?}", other);
+            panic!(
+                "Parse error should convert to Parse error, got: {:?}",
+                other
+            );
         }
     }
 }
@@ -376,12 +392,24 @@ fn test_retry_delay_boundary_conditions() {
     let delay3 = calculate_retry_delay(3, &config);
     let delay4 = calculate_retry_delay(4, &config);
 
-    assert_eq!(delay1.as_millis(), 50, "First delay should be initial_delay_ms");
+    assert_eq!(
+        delay1.as_millis(),
+        50,
+        "First delay should be initial_delay_ms"
+    );
     assert_eq!(delay2.as_millis(), 100, "Second delay should be 2x initial");
     assert_eq!(delay3.as_millis(), 200, "Third delay should be 4x initial");
-    assert_eq!(delay4.as_millis(), 200, "Fourth delay should be capped at max");
+    assert_eq!(
+        delay4.as_millis(),
+        200,
+        "Fourth delay should be capped at max"
+    );
 
     // Verify cap is maintained for higher attempts
     let delay10 = calculate_retry_delay(10, &config);
-    assert_eq!(delay10.as_millis(), 200, "High attempts should stay at max delay");
+    assert_eq!(
+        delay10.as_millis(),
+        200,
+        "High attempts should stay at max delay"
+    );
 }

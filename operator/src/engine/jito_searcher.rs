@@ -79,7 +79,11 @@ pub async fn resolve_bundle_status(
         )
         .await;
         let Ok(Ok(resp)) = send else {
-            tracing::debug!(attempt, bundle_id, "Bundle status request timed out; retrying");
+            tracing::debug!(
+                attempt,
+                bundle_id,
+                "Bundle status request timed out; retrying"
+            );
             continue;
         };
         if let Ok(val) = resp.json::<serde_json::Value>().await {
@@ -105,7 +109,9 @@ pub fn extract_swap_signature_from_bundle(value: &serde_json::Value) -> Option<S
         .and_then(|v| v.as_array())
         .and_then(|a| a.first())
         .filter(|entry| {
-            entry.get("err").is_none_or(|e| e.is_null() || e.get("Ok").is_some())
+            entry
+                .get("err")
+                .is_none_or(|e| e.is_null() || e.get("Ok").is_some())
         })
         .and_then(|entry| entry.get("transactions"))
         .and_then(|t| t.as_array())
@@ -113,7 +119,6 @@ pub fn extract_swap_signature_from_bundle(value: &serde_json::Value) -> Option<S
         .and_then(|s| s.as_str())
         .map(|s| s.to_string())
 }
-
 
 /// Jito Searcher client for direct bundle submission
 pub struct JitoSearcherClient {
@@ -277,9 +282,7 @@ impl JitoSearcherClient {
             self.rpc_client.get_latest_blockhash(),
         )
         .await
-        .map_err(|e| {
-            ExecutorError::Rpc(format!("Failed to get recent blockhash: {}", e))
-        })?;
+        .map_err(|e| ExecutorError::Rpc(format!("Failed to get recent blockhash: {}", e)))?;
 
         // Create tip instruction
         let tip_instruction =
@@ -380,7 +383,10 @@ mod tests {
     /// Bundle not landed / wrong shape → None (caller marks unconfirmed).
     #[test]
     fn extract_swap_signature_none_when_not_landed() {
-        assert_eq!(extract_swap_signature_from_bundle(&serde_json::json!({ "result": null })), None);
+        assert_eq!(
+            extract_swap_signature_from_bundle(&serde_json::json!({ "result": null })),
+            None
+        );
         assert_eq!(
             extract_swap_signature_from_bundle(&serde_json::json!({ "result": { "value": [] } })),
             None

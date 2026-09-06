@@ -473,7 +473,10 @@ fn wallet_auth_handler(body: String) -> (StatusCode, axum::Json<Value>) {
     let payload: Result<Value, _> = serde_json::from_str(&body);
     match payload {
         Ok(p) => {
-            let wallet = p.get("wallet_address").and_then(|w| w.as_str()).unwrap_or("");
+            let wallet = p
+                .get("wallet_address")
+                .and_then(|w| w.as_str())
+                .unwrap_or("");
             let message = p.get("message").and_then(|m| m.as_str()).unwrap_or("");
             let signature = p.get("signature").and_then(|s| s.as_str()).unwrap_or("");
 
@@ -1065,7 +1068,11 @@ fn test_solana_pubkey_format() {
     let valid_address = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
     assert_eq!(valid_address.len(), 44);
     let decoded = Pubkey::from_str(valid_address).expect("valid address must decode");
-    assert_eq!(decoded.as_ref().len(), 32, "decoded pubkey must be 32 bytes");
+    assert_eq!(
+        decoded.as_ref().len(),
+        32,
+        "decoded pubkey must be 32 bytes"
+    );
 
     // Invalid: contains non-base58 characters (0, O, I, l are not base58), or
     // decodes to more than 32 bytes (leading 'z' on a 44-char string).

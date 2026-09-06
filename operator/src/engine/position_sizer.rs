@@ -257,8 +257,7 @@ impl PositionSizer {
                     // Do NOT clamp to min_size_sol here — the fallback cap already
                     // constrains unproven wallets. Clamping up would inflate a
                     // negative-EV or unproven signal past the conservative cap.
-                    (capital * self.config.base_size_pct * wqs_factor * confidence)
-                        .min(pct_cap_sol)
+                    (capital * self.config.base_size_pct * wqs_factor * confidence).min(pct_cap_sol)
                 }
             }
         } else {

@@ -722,14 +722,22 @@ mod tests {
     fn test_database_config_postgres_helper() {
         let config = DatabaseConfig::postgres("postgres://localhost:5432/chimera".to_string());
         assert_eq!(config.backend, DatabaseBackend::PostgreSQL);
-        assert_eq!(config.url.as_deref(), Some("postgres://localhost:5432/chimera"));
+        assert_eq!(
+            config.url.as_deref(),
+            Some("postgres://localhost:5432/chimera")
+        );
     }
 
     #[test]
     fn test_database_config_debug_redacts_url_credentials() {
-        let config = DatabaseConfig::postgres("postgres://user:supersecret@db.example:5432/chimera".to_string());
+        let config = DatabaseConfig::postgres(
+            "postgres://user:supersecret@db.example:5432/chimera".to_string(),
+        );
         let dbg = format!("{:?}", config);
-        assert!(dbg.contains("user:***@db.example"), "credentials must be redacted");
+        assert!(
+            dbg.contains("user:***@db.example"),
+            "credentials must be redacted"
+        );
         assert!(!dbg.contains("supersecret"), "password must not appear");
     }
 

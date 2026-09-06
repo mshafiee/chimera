@@ -287,7 +287,8 @@ struct ActiveWorkerGuard {
 
 impl Drop for ActiveWorkerGuard {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        self.counter
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

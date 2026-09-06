@@ -89,8 +89,7 @@ impl SubscriptionManager {
         let active_wallets = self.get_active_wallets().await?;
 
         // Get current subscriptions
-        let current_subscriptions: HashSet<String> =
-            self.subscribed_wallets.read().await.clone();
+        let current_subscriptions: HashSet<String> = self.subscribed_wallets.read().await.clone();
 
         // Subscribe to new wallets
         for wallet in &active_wallets {

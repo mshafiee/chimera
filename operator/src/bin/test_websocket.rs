@@ -11,13 +11,9 @@ async fn main() -> Result<()> {
     // Load environment variables
     dotenvy::dotenv().ok();
 
-    let api_key = std::env::var("HELIUS_API_KEY")
-        .expect("HELIUS_API_KEY must be set in .env file");
+    let api_key = std::env::var("HELIUS_API_KEY").expect("HELIUS_API_KEY must be set in .env file");
 
-    let websocket_url = format!(
-        "wss://mainnet.helius-rpc.com/?api-key={}",
-        api_key
-    );
+    let websocket_url = format!("wss://mainnet.helius-rpc.com/?api-key={}", api_key);
 
     println!("🔌 Connecting to Helius WebSocket...");
     let redacted_url = websocket_url.replace(&api_key, "***");
@@ -31,7 +27,9 @@ async fn main() -> Result<()> {
 
     // Test 1: Ping/Pong
     println!("\n📡 Test 1: Ping/Pong");
-    ws_sender.send(tokio_tungstenite::tungstenite::Message::Ping(vec![1, 2, 3])).await?;
+    ws_sender
+        .send(tokio_tungstenite::tungstenite::Message::Ping(vec![1, 2, 3]))
+        .await?;
     println!("   Sent ping");
 
     let pong_received = timeout(Duration::from_secs(5), async {
@@ -49,7 +47,8 @@ async fn main() -> Result<()> {
                 }
             }
         }
-    }).await;
+    })
+    .await;
 
     if pong_received.is_ok() {
         println!("   ✅ Received pong - ping/pong working!");
@@ -76,7 +75,9 @@ async fn main() -> Result<()> {
         ]
     });
 
-    ws_sender.send(standard_subscription.to_string().into()).await?;
+    ws_sender
+        .send(standard_subscription.to_string().into())
+        .await?;
     println!("   ✅ Standard accountSubscribe request sent");
 
     // Test 3: Try Helius accountSubscribe with filters
@@ -95,7 +96,9 @@ async fn main() -> Result<()> {
         ]
     });
 
-    ws_sender.send(helius_subscription.to_string().into()).await?;
+    ws_sender
+        .send(helius_subscription.to_string().into())
+        .await?;
     println!("   ✅ Helius accountSubscribe request sent");
 
     // Test 4: Wait for messages
@@ -111,12 +114,18 @@ async fn main() -> Result<()> {
                 match message {
                     tokio_tungstenite::tungstenite::Message::Text(text) => {
                         message_count += 1;
-                        println!("   📨 Message #{}: {}", message_count, &text[..text.len().min(100)]);
+                        println!(
+                            "   📨 Message #{}: {}",
+                            message_count,
+                            &text[..text.len().min(100)]
+                        );
 
                         // Try to parse as JSON
                         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
                             // Check if it's a subscription notification
-                            if value.get("method").and_then(|m| m.as_str()) == Some("subscriptionNotification") {
+                            if value.get("method").and_then(|m| m.as_str())
+                                == Some("subscriptionNotification")
+                            {
                                 subscription_notifications += 1;
                                 println!("      ✅ Subscription notification detected!");
 
@@ -125,7 +134,15 @@ async fn main() -> Result<()> {
                                     if let Some(result) = params.get("result") {
                                         if let Some(transaction) = result.get("transaction") {
                                             if let Some(signature) = transaction.get("signature") {
-                                                println!("      📝 Transaction: {}", signature.as_str().unwrap_or("unknown").chars().take(16).collect::<String>());
+                                                println!(
+                                                    "      📝 Transaction: {}",
+                                                    signature
+                                                        .as_str()
+                                                        .unwrap_or("unknown")
+                                                        .chars()
+                                                        .take(16)
+                                                        .collect::<String>()
+                                                );
                                             }
                                         }
                                     }
@@ -135,7 +152,10 @@ async fn main() -> Result<()> {
                     }
                     tokio_tungstenite::tungstenite::Message::Ping(data) => {
                         println!("   📡 Received ping, sending pong");
-                        ws_sender.send(tokio_tungstenite::tungstenite::Message::Pong(data)).await.ok();
+                        ws_sender
+                            .send(tokio_tungstenite::tungstenite::Message::Pong(data))
+                            .await
+                            .ok();
                     }
                     tokio_tungstenite::tungstenite::Message::Pong(_) => {
                         println!("   📡 Received pong");
@@ -150,7 +170,8 @@ async fn main() -> Result<()> {
         }
 
         Ok::<(usize, usize), anyhow::Error>((message_count, subscription_notifications))
-    }).await;
+    })
+    .await;
 
     match message_timeout {
         Ok(Ok((total_msgs, sub_notifications))) => {
@@ -175,7 +196,9 @@ async fn main() -> Result<()> {
 
     // Close connection
     println!("\n🔌 Closing connection...");
-    ws_sender.send(tokio_tungstenite::tungstenite::Message::Close(None)).await?;
+    ws_sender
+        .send(tokio_tungstenite::tungstenite::Message::Close(None))
+        .await?;
     println!("✅ Connection closed gracefully");
 
     Ok(())

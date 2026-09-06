@@ -5,9 +5,9 @@
 //! - Liquidity estimation
 //! - Honeypot detection via sell simulation
 
-use chimera_core::error::{AppError, AppResult};
 use crate::monitoring::rate_limiter::RateLimiter;
 use crate::token::pools::PoolEnumerator;
+use chimera_core::error::{AppError, AppResult};
 use parking_lot::RwLock;
 use reqwest;
 use rust_decimal::Decimal;
@@ -129,7 +129,11 @@ pub struct TokenMetadataFetcher {
 impl TokenMetadataFetcher {
     /// Create a new metadata fetcher
     pub fn new(rpc_url: &str) -> Self {
-        Self::new_with_rate_limiter_and_jupiter(rpc_url, None, "https://api.jup.ag/swap/v2".to_string())
+        Self::new_with_rate_limiter_and_jupiter(
+            rpc_url,
+            None,
+            "https://api.jup.ag/swap/v2".to_string(),
+        )
     }
 
     /// Get a shared reference to the metadata cache for use with other components
@@ -143,13 +147,20 @@ impl TokenMetadataFetcher {
     }
 
     /// Set the price cache for decimals lookup
-    pub fn with_price_cache(mut self, price_cache: Arc<chimera_core::price_cache::PriceCache>) -> Self {
+    pub fn with_price_cache(
+        mut self,
+        price_cache: Arc<chimera_core::price_cache::PriceCache>,
+    ) -> Self {
         self.price_cache = Some(price_cache);
         self
     }
 
     /// Create a new metadata fetcher with optional rate limiter and Jupiter API URL
-    pub fn new_with_rate_limiter_and_jupiter(rpc_url: &str, rate_limiter: Option<Arc<RateLimiter>>, jupiter_api_url: String) -> Self {
+    pub fn new_with_rate_limiter_and_jupiter(
+        rpc_url: &str,
+        rate_limiter: Option<Arc<RateLimiter>>,
+        jupiter_api_url: String,
+    ) -> Self {
         let rpc_client = RpcClient::new_with_timeout(rpc_url.to_string(), Duration::from_secs(10));
         let rpc_client_arc = Arc::new(rpc_client);
 
@@ -189,11 +200,18 @@ impl TokenMetadataFetcher {
 
     /// Create from an existing RPC client
     pub fn with_client(rpc_client: Arc<RpcClient>) -> Self {
-        Self::with_client_rate_limiter_and_jupiter(rpc_client, None, "https://api.jup.ag/swap/v2".to_string())
+        Self::with_client_rate_limiter_and_jupiter(
+            rpc_client,
+            None,
+            "https://api.jup.ag/swap/v2".to_string(),
+        )
     }
 
     /// Set the price cache for decimals lookup (builder pattern for with_client)
-    pub fn with_price_cache_builder(mut self, price_cache: Arc<chimera_core::price_cache::PriceCache>) -> Self {
+    pub fn with_price_cache_builder(
+        mut self,
+        price_cache: Arc<chimera_core::price_cache::PriceCache>,
+    ) -> Self {
         self.price_cache = Some(price_cache);
         self
     }
@@ -257,13 +275,19 @@ impl TokenMetadataFetcher {
 
     /// Enable distributed cache (Redis) for multi-instance deployments
     #[cfg(feature = "redis-cache")]
-    pub fn with_distributed_cache(mut self, cache_store: crate::token::cache::MetadataCacheStore) -> Self {
+    pub fn with_distributed_cache(
+        mut self,
+        cache_store: crate::token::cache::MetadataCacheStore,
+    ) -> Self {
         self.distributed_cache = Some(cache_store);
         self
     }
 
     /// Set Helius client for active age fetching in background cache updater
-    pub fn with_helius_client(mut self, helius_client: std::sync::Arc<crate::monitoring::helius::HeliusClient>) -> Self {
+    pub fn with_helius_client(
+        mut self,
+        helius_client: std::sync::Arc<crate::monitoring::helius::HeliusClient>,
+    ) -> Self {
         self.helius_client = Some(helius_client);
         self
     }
@@ -408,7 +432,11 @@ impl TokenMetadataFetcher {
     /// When HeliusClient is available, it fetches missing age information to prevent on-demand delays.
     async fn update_metadata_ages(&self) -> AppResult<()> {
         // Get list of tokens in metadata cache
-        let (tokens_with_age, tokens_without_age, total_cache_size): (Vec<String>, Vec<String>, usize) = {
+        let (tokens_with_age, tokens_without_age, total_cache_size): (
+            Vec<String>,
+            Vec<String>,
+            usize,
+        ) = {
             let cache = self.metadata_cache.read();
             let mut with_age = Vec::new();
             let mut without_age = Vec::new();
@@ -456,11 +484,14 @@ impl TokenMetadataFetcher {
         if let Some(helius_client) = &self.helius_client {
             if !tokens_without_age.is_empty() {
                 // Track cache warming cycle
-                self.cache_warming_cycles.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.cache_warming_cycles
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 tracing::info!(
                     count = tokens_without_age.len(),
-                    cycle = self.cache_warming_cycles.load(std::sync::atomic::Ordering::Relaxed),
+                    cycle = self
+                        .cache_warming_cycles
+                        .load(std::sync::atomic::Ordering::Relaxed),
                     "Intelligent cache warming: prioritizing tokens for age fetching"
                 );
 
@@ -498,7 +529,8 @@ impl TokenMetadataFetcher {
                         Ok(Some(age)) => {
                             fetched_count += 1;
                             priority_fetched += 1;
-                            self.cache_warming_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            self.cache_warming_successes
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             tracing::debug!(
                                 token = %token_addr,
                                 age_hours = age,
@@ -515,7 +547,8 @@ impl TokenMetadataFetcher {
                         }
                         Err(e) => {
                             failed_count += 1;
-                            self.cache_warming_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            self.cache_warming_failures
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             tracing::warn!(
                                 token = %token_addr,
                                 error = %e,
@@ -533,7 +566,8 @@ impl TokenMetadataFetcher {
                         Ok(Some(age)) => {
                             fetched_count += 1;
                             standard_fetched += 1;
-                            self.cache_warming_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            self.cache_warming_successes
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             tracing::debug!(
                                 token = %token_addr,
                                 age_hours = age,
@@ -550,7 +584,8 @@ impl TokenMetadataFetcher {
                         }
                         Err(e) => {
                             failed_count += 1;
-                            self.cache_warming_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            self.cache_warming_failures
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             tracing::warn!(
                                 token = %token_addr,
                                 error = %e,
@@ -568,8 +603,12 @@ impl TokenMetadataFetcher {
                     failed = failed_count,
                     remaining_priority = priority_tokens.len().saturating_sub(priority_fetched),
                     remaining_standard = standard_tokens.len().saturating_sub(standard_fetched),
-                    total_successes = self.cache_warming_successes.load(std::sync::atomic::Ordering::Relaxed),
-                    total_failures = self.cache_warming_failures.load(std::sync::atomic::Ordering::Relaxed),
+                    total_successes = self
+                        .cache_warming_successes
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    total_failures = self
+                        .cache_warming_failures
+                        .load(std::sync::atomic::Ordering::Relaxed),
                     "Intelligent cache warming cycle completed"
                 );
 
@@ -732,7 +771,7 @@ impl TokenMetadataFetcher {
                 has_transfer_hook,
                 has_permanent_delegate,
                 creation_timestamp: None, // Not available from RPC, set by Helius API
-                age_hours: None, // Calculated from creation_timestamp
+                age_hours: None,          // Calculated from creation_timestamp
             })
         })
         .await
@@ -816,11 +855,12 @@ impl TokenMetadataFetcher {
         // v3 shape: {<token_address>: {"usdPrice": <f64>, "liquidity": ..., "decimals": ...}}
         // (v2 wrapped under data.<token>.price; v1 used priceUsd — kept as fallbacks.)
         let price_usd_f64 = {
-            let token_data = data.get(token_address).or_else(|| {
-                data.get("data").and_then(|d| d.get(token_address))
-            }).ok_or_else(|| {
-                AppError::Parse("Token not found in Jupiter response".to_string())
-            })?;
+            let token_data = data
+                .get(token_address)
+                .or_else(|| data.get("data").and_then(|d| d.get(token_address)))
+                .ok_or_else(|| {
+                    AppError::Parse("Token not found in Jupiter response".to_string())
+                })?;
             token_data
                 .get("usdPrice")
                 .and_then(|p| p.as_f64())
@@ -891,7 +931,8 @@ impl TokenMetadataFetcher {
         };
 
         // Update cache
-        self.update_liquidity_cache(token_address, dex_liquidity).await;
+        self.update_liquidity_cache(token_address, dex_liquidity)
+            .await;
 
         if dex_liquidity > Decimal::ZERO {
             tracing::debug!(
@@ -1239,9 +1280,15 @@ impl TokenMetadataFetcher {
     /// Get cache warming performance statistics
     /// Returns tuple of (cycles, successes, failures, success_rate)
     pub fn cache_warming_stats(&self) -> (u64, u64, u64, f64) {
-        let cycles = self.cache_warming_cycles.load(std::sync::atomic::Ordering::Relaxed);
-        let successes = self.cache_warming_successes.load(std::sync::atomic::Ordering::Relaxed);
-        let failures = self.cache_warming_failures.load(std::sync::atomic::Ordering::Relaxed);
+        let cycles = self
+            .cache_warming_cycles
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let successes = self
+            .cache_warming_successes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let failures = self
+            .cache_warming_failures
+            .load(std::sync::atomic::Ordering::Relaxed);
 
         let success_rate = if successes + failures > 0 {
             (successes as f64) / ((successes + failures) as f64)
@@ -1447,7 +1494,10 @@ mod tests {
 
     #[test]
     fn test_setters() {
-        let fetcher = test_fetcher().with_unlisted_heuristic(true).with_liquidity_ttl(30).with_fdv_ttl(90);
+        let fetcher = test_fetcher()
+            .with_unlisted_heuristic(true)
+            .with_liquidity_ttl(30)
+            .with_fdv_ttl(90);
         assert!(fetcher.allow_unlisted_heuristic);
         assert_eq!(fetcher.liquidity_ttl_secs, 30);
         assert_eq!(fetcher.fdv_ttl_secs, 90);
@@ -1498,8 +1548,13 @@ mod tests {
         assert!(fetcher.get_cached_liquidity("mint1").is_none());
 
         // Update then hit.
-        fetcher.update_liquidity_cache("mint1", Decimal::from(50_000)).await;
-        assert_eq!(fetcher.get_cached_liquidity("mint1"), Some(Decimal::from(50_000)));
+        fetcher
+            .update_liquidity_cache("mint1", Decimal::from(50_000))
+            .await;
+        assert_eq!(
+            fetcher.get_cached_liquidity("mint1"),
+            Some(Decimal::from(50_000))
+        );
 
         // Stale entry -> None.
         {
@@ -1520,7 +1575,9 @@ mod tests {
         let fetcher = test_fetcher();
         assert!(fetcher.get_cached_fdv("mint1").is_none());
 
-        fetcher.update_fdv_cache("mint1", Decimal::from(1_000), Decimal::from(2_000)).await;
+        fetcher
+            .update_fdv_cache("mint1", Decimal::from(1_000), Decimal::from(2_000))
+            .await;
         assert_eq!(fetcher.get_cached_fdv("mint1"), Some(Decimal::from(2_000)));
 
         {
@@ -1541,18 +1598,21 @@ mod tests {
         let fetcher = test_fetcher();
         // Insert metadata then clear via the sync public path.
         let cache = fetcher.get_metadata_cache();
-        cache.write().insert("mint1".to_string(), TokenMetadata {
-            mint: "mint1".to_string(),
-            freeze_authority: None,
-            mint_authority: None,
-            decimals: 9,
-            supply: 1,
-            is_token_2022: false,
-            has_transfer_hook: false,
-            has_permanent_delegate: false,
-            creation_timestamp: None,
-            age_hours: None,
-        });
+        cache.write().insert(
+            "mint1".to_string(),
+            TokenMetadata {
+                mint: "mint1".to_string(),
+                freeze_authority: None,
+                mint_authority: None,
+                decimals: 9,
+                supply: 1,
+                is_token_2022: false,
+                has_transfer_hook: false,
+                has_permanent_delegate: false,
+                creation_timestamp: None,
+                age_hours: None,
+            },
+        );
         assert_eq!(fetcher.cache_size(), 1);
         fetcher.clear_cache();
         assert_eq!(fetcher.cache_size(), 0);
@@ -1580,8 +1640,14 @@ mod tests {
             creation_timestamp: None,
             age_hours: Some(12.0),
         };
-        fetcher.metadata_cache.write().insert("mint1".to_string(), meta.clone());
-        fetcher.last_fetched.write().insert("mint1".to_string(), Instant::now());
+        fetcher
+            .metadata_cache
+            .write()
+            .insert("mint1".to_string(), meta.clone());
+        fetcher
+            .last_fetched
+            .write()
+            .insert("mint1".to_string(), Instant::now());
 
         // Fresh cache entry returns immediately (no RPC call).
         let got = fetcher.get_metadata("mint1").await.unwrap();

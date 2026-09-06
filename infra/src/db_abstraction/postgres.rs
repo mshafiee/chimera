@@ -4293,7 +4293,8 @@ impl Database for PostgresBackend {
     async fn get_wallet_copy_performance(
         &self,
         wallet_address: &str,
-    ) -> AppResult<Option<WalletCopyPerformance>> {        let row = sqlx::query(
+    ) -> AppResult<Option<WalletCopyPerformance>> {
+        let row = sqlx::query(
             r#"
             SELECT
                 wallet_address,

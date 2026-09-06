@@ -130,12 +130,18 @@ mod tests {
         // Fractional WQS rounds to nearest integer BEFORE the comparison:
         // 79.5 → 80 → high (30).
         assert_eq!(
-            monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from_str("79.5").unwrap()), "ACTIVE"),
+            monitoring_config.get_polling_interval_for_wallet(
+                Some(Decimal::from_str("79.5").unwrap()),
+                "ACTIVE"
+            ),
             30
         );
         // 79.49 → 79 → regular (60).
         assert_eq!(
-            monitoring_config.get_polling_interval_for_wallet(Some(Decimal::from_str("79.49").unwrap()), "ACTIVE"),
+            monitoring_config.get_polling_interval_for_wallet(
+                Some(Decimal::from_str("79.49").unwrap()),
+                "ACTIVE"
+            ),
             60
         );
     }

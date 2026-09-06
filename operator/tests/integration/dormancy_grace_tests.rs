@@ -22,7 +22,12 @@ fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
 }
 
 /// Seed an ACTIVE wallet with explicit promotion/trade timestamps.
-async fn seed_active_wallet(db: &Arc<dyn Database>, address: &str, promoted_sql: &str, traded_sql: &str) {
+async fn seed_active_wallet(
+    db: &Arc<dyn Database>,
+    address: &str,
+    promoted_sql: &str,
+    traded_sql: &str,
+) {
     let query = format!(
         "INSERT INTO wallets (address, status, wqs_score, wqs_confidence, last_trade_at, promoted_at) \
          VALUES ('{address}', 'ACTIVE', 80.0, 0.9, {traded_sql}, {promoted_sql})"
@@ -50,11 +55,16 @@ async fn test_recently_promoted_wallet_with_stale_trades_survives_dormancy_sweep
     .await;
 
     let demoted = db.demote_dormant_active_wallets(7).await.unwrap();
-    let status: String = sqlx::query_scalar("SELECT status FROM wallets WHERE address = 'grace-wallet-1111111111111111111111111111'")
-        .fetch_one(&pg_pool(&db))
-        .await
-        .unwrap();
-    assert_eq!(status, "ACTIVE", "promotion grace must shield a 1-day-old promotion");
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM wallets WHERE address = 'grace-wallet-1111111111111111111111111111'",
+    )
+    .fetch_one(&pg_pool(&db))
+    .await
+    .unwrap();
+    assert_eq!(
+        status, "ACTIVE",
+        "promotion grace must shield a 1-day-old promotion"
+    );
     assert_eq!(demoted, 0);
 }
 
@@ -73,11 +83,16 @@ async fn test_stale_promotion_and_stale_trades_are_demoted() {
     .await;
 
     db.demote_dormant_active_wallets(7).await.unwrap();
-    let status: String = sqlx::query_scalar("SELECT status FROM wallets WHERE address = 'stale-wallet-111111111111111111111111111111'")
-        .fetch_one(&pg_pool(&db))
-        .await
-        .unwrap();
-    assert_eq!(status, "CANDIDATE", "dormant on both anchors must be reclaimed");
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM wallets WHERE address = 'stale-wallet-111111111111111111111111111111'",
+    )
+    .fetch_one(&pg_pool(&db))
+    .await
+    .unwrap();
+    assert_eq!(
+        status, "CANDIDATE",
+        "dormant on both anchors must be reclaimed"
+    );
 }
 
 /// A wallet that traded RECENTLY but was promoted long ago is kept: the
@@ -95,11 +110,16 @@ async fn test_recent_trade_keeps_old_promotion_alive() {
     .await;
 
     db.demote_dormant_active_wallets(7).await.unwrap();
-    let status: String = sqlx::query_scalar("SELECT status FROM wallets WHERE address = 'recent-trade-1111111111111111111111111111'")
-        .fetch_one(&pg_pool(&db))
-        .await
-        .unwrap();
-    assert_eq!(status, "ACTIVE", "recent on-chain trade must anchor dormancy");
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM wallets WHERE address = 'recent-trade-1111111111111111111111111111'",
+    )
+    .fetch_one(&pg_pool(&db))
+    .await
+    .unwrap();
+    assert_eq!(
+        status, "ACTIVE",
+        "recent on-chain trade must anchor dormancy"
+    );
 }
 
 /// Legacy skip preserved: a wallet with BOTH timestamps NULL is left to the
@@ -117,11 +137,16 @@ async fn test_null_timestamps_are_skipped() {
     .unwrap();
 
     db.demote_dormant_active_wallets(7).await.unwrap();
-    let status: String = sqlx::query_scalar("SELECT status FROM wallets WHERE address = 'null-ts-wallet-11111111111111111111111'")
-        .fetch_one(&pg_pool(&db))
-        .await
-        .unwrap();
-    assert_eq!(status, "ACTIVE", "NULL timestamps must be skipped (legacy behavior)");
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM wallets WHERE address = 'null-ts-wallet-11111111111111111111111'",
+    )
+    .fetch_one(&pg_pool(&db))
+    .await
+    .unwrap();
+    assert_eq!(
+        status, "ACTIVE",
+        "NULL timestamps must be skipped (legacy behavior)"
+    );
 }
 
 /// Regression (2026-08-29, first deployment of the GREATEST anchor): an
@@ -143,9 +168,14 @@ async fn test_promoted_at_only_wallet_with_null_last_trade_is_never_demoted() {
     .unwrap();
 
     db.demote_dormant_active_wallets(7).await.unwrap();
-    let status: String = sqlx::query_scalar("SELECT status FROM wallets WHERE address = 'null-lt-promoted-1111111111111111111'")
-        .fetch_one(&pg_pool(&db))
-        .await
-        .unwrap();
-    assert_eq!(status, "ACTIVE", "last_trade_at-NULL wallets must never be demoted here (legacy skip)");
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM wallets WHERE address = 'null-lt-promoted-1111111111111111111'",
+    )
+    .fetch_one(&pg_pool(&db))
+    .await
+    .unwrap();
+    assert_eq!(
+        status, "ACTIVE",
+        "last_trade_at-NULL wallets must never be demoted here (legacy skip)"
+    );
 }

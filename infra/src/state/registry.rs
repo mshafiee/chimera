@@ -184,7 +184,11 @@ impl StateRegistry {
     }
 
     /// Update trade status
-    pub fn update_trade_status(&self, trade_uuid: &str, status: TradeStatus) -> Result<(), RegistryError> {
+    pub fn update_trade_status(
+        &self,
+        trade_uuid: &str,
+        status: TradeStatus,
+    ) -> Result<(), RegistryError> {
         trace!(trade_uuid = %trade_uuid, new_status = ?status, "Updating trade status in registry");
 
         if let Some(mut trade) = self.trades.get_mut(trade_uuid) {
@@ -234,7 +238,8 @@ impl StateRegistry {
                "Inserting position into registry");
 
         // Update token position count for duplicate checks
-        let mut count = self.token_position_counts
+        let mut count = self
+            .token_position_counts
             .entry(position.token_address.clone())
             .or_insert(0);
         *count += 1;
@@ -246,13 +251,18 @@ impl StateRegistry {
     }
 
     /// Update position state
-    pub fn update_position_state(&self, trade_uuid: &str, state: &str) -> Result<(), RegistryError> {
+    pub fn update_position_state(
+        &self,
+        trade_uuid: &str,
+        state: &str,
+    ) -> Result<(), RegistryError> {
         trace!(trade_uuid = %trade_uuid, new_state = %state, "Updating position state in registry");
 
         if let Some(mut position) = self.positions.get_mut(trade_uuid) {
             // Decrement old state count if leaving ACTIVE
             if position.state == "ACTIVE" && state != "ACTIVE" {
-                if let Some(mut count) = self.token_position_counts.get_mut(&position.token_address) {
+                if let Some(mut count) = self.token_position_counts.get_mut(&position.token_address)
+                {
                     *count = count.saturating_sub(1);
                 }
             }
@@ -270,13 +280,16 @@ impl StateRegistry {
     /// Get all active positions
     pub fn get_active_positions(&self) -> Vec<PositionState> {
         self.metrics.reads_total.fetch_add(1, Ordering::Relaxed);
-        let positions: Vec<PositionState> = self.positions
+        let positions: Vec<PositionState> = self
+            .positions
             .iter()
             .filter(|p| p.state == "ACTIVE")
             .map(|p| p.clone())
             .collect();
 
-        self.metrics.hits_total.fetch_add(positions.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .hits_total
+            .fetch_add(positions.len() as u64, Ordering::Relaxed);
         positions
     }
 
@@ -297,20 +310,24 @@ impl StateRegistry {
     /// Get positions by token address
     pub fn get_positions_by_token(&self, token_address: &str) -> Vec<PositionState> {
         self.metrics.reads_total.fetch_add(1, Ordering::Relaxed);
-        let positions: Vec<PositionState> = self.positions
+        let positions: Vec<PositionState> = self
+            .positions
             .iter()
             .filter(|p| p.token_address == token_address && p.state == "ACTIVE")
             .map(|p| p.clone())
             .collect();
 
-        self.metrics.hits_total.fetch_add(positions.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .hits_total
+            .fetch_add(positions.len() as u64, Ordering::Relaxed);
         positions
     }
 
     /// Check if there's an active position for a token (duplicate position check)
     pub fn has_active_position_for_token(&self, token_address: &str) -> bool {
         self.metrics.reads_total.fetch_add(1, Ordering::Relaxed);
-        let has_active = self.token_position_counts
+        let has_active = self
+            .token_position_counts
             .get(token_address)
             .map(|c| *c > 0)
             .unwrap_or(false);
@@ -404,12 +421,18 @@ impl StateRegistry {
 
     /// Get all trades as a vector (for coordinator sync)
     pub fn get_all_trades(&self) -> Vec<TradeState> {
-        self.trades.iter().map(|entry| entry.value().clone()).collect()
+        self.trades
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
     }
 
     /// Get all positions as a vector (for coordinator sync)
     pub fn get_all_positions(&self) -> Vec<PositionState> {
-        self.positions.iter().map(|entry| entry.value().clone()).collect()
+        self.positions
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
     }
 
     /// Calculate portfolio heat purely from in-memory maps.
@@ -461,19 +484,22 @@ impl StateRegistry {
         // Add exposure from pending, queued, or executing trades in memory
         for entry in self.trades.iter() {
             let trade = entry.value();
-            if matches!(trade.status, TradeStatus::Pending | TradeStatus::Queued | TradeStatus::Executing)
-                && trade.side == "BUY" {
-                    total_exposure += trade.amount_sol;
-                    match trade.strategy.as_str() {
-                        "SHIELD" => shield_exposure += trade.amount_sol,
-                        "SPEAR" => spear_exposure += trade.amount_sol,
-                        _ => {
-                            // Unknown strategy - evenly distribute
-                            shield_exposure += trade.amount_sol / Decimal::from(2);
-                            spear_exposure += trade.amount_sol / Decimal::from(2);
-                        }
+            if matches!(
+                trade.status,
+                TradeStatus::Pending | TradeStatus::Queued | TradeStatus::Executing
+            ) && trade.side == "BUY"
+            {
+                total_exposure += trade.amount_sol;
+                match trade.strategy.as_str() {
+                    "SHIELD" => shield_exposure += trade.amount_sol,
+                    "SPEAR" => spear_exposure += trade.amount_sol,
+                    _ => {
+                        // Unknown strategy - evenly distribute
+                        shield_exposure += trade.amount_sol / Decimal::from(2);
+                        spear_exposure += trade.amount_sol / Decimal::from(2);
                     }
                 }
+            }
         }
 
         PortfolioHeatState {
@@ -513,258 +539,284 @@ mod tests {
     use super::*;
 
     fn test_trade(trade_uuid: &str, side: &str, status: TradeStatus, strategy: &str) -> TradeState {
-    TradeState {
-        trade_uuid: trade_uuid.to_string(),
-        status,
-        wallet_address: "wallet-1".to_string(),
-        token_address: "token-1".to_string(),
-        token_symbol: Some("TKN".to_string()),
-        strategy: strategy.to_string(),
-        side: side.to_string(),
-        amount_sol: Decimal::new(2, 0),
-        updated_at: SystemTime::now(),
-        version: 1,
+        TradeState {
+            trade_uuid: trade_uuid.to_string(),
+            status,
+            wallet_address: "wallet-1".to_string(),
+            token_address: "token-1".to_string(),
+            token_symbol: Some("TKN".to_string()),
+            strategy: strategy.to_string(),
+            side: side.to_string(),
+            amount_sol: Decimal::new(2, 0),
+            updated_at: SystemTime::now(),
+            version: 1,
+        }
     }
-}
 
-fn test_position(trade_uuid: &str, strategy: &str, state: &str) -> PositionState {
-    PositionState {
-        trade_uuid: trade_uuid.to_string(),
-        wallet_address: "wallet-1".to_string(),
-        token_address: "token-1".to_string(),
-        token_symbol: Some("TKN".to_string()),
-        state: state.to_string(),
-        strategy: strategy.to_string(),
-        entry_amount_sol: Decimal::new(5, 0),
-        current_price: Some(Decimal::new(1, 1)),
-        unrealized_pnl_sol: Some(Decimal::new(1, 1)),
-        updated_at: SystemTime::now(),
+    fn test_position(trade_uuid: &str, strategy: &str, state: &str) -> PositionState {
+        PositionState {
+            trade_uuid: trade_uuid.to_string(),
+            wallet_address: "wallet-1".to_string(),
+            token_address: "token-1".to_string(),
+            token_symbol: Some("TKN".to_string()),
+            state: state.to_string(),
+            strategy: strategy.to_string(),
+            entry_amount_sol: Decimal::new(5, 0),
+            current_price: Some(Decimal::new(1, 1)),
+            unrealized_pnl_sol: Some(Decimal::new(1, 1)),
+            updated_at: SystemTime::now(),
+        }
     }
-}
 
-fn test_wallet(address: &str, status: &str) -> WalletState {
-    WalletState {
-        address: address.to_string(),
-        status: status.to_string(),
-        wqs_score: Some(Decimal::new(75, 0)),
-        win_rate: Some(Decimal::new(50, 0)),
-        updated_at: SystemTime::now(),
+    fn test_wallet(address: &str, status: &str) -> WalletState {
+        WalletState {
+            address: address.to_string(),
+            status: status.to_string(),
+            wqs_score: Some(Decimal::new(75, 0)),
+            win_rate: Some(Decimal::new(50, 0)),
+            updated_at: SystemTime::now(),
+        }
     }
-}
 
-#[test]
-fn test_trade_status_from_str_all_variants() {
-    assert_eq!(TradeStatus::from("PENDING"), TradeStatus::Pending);
-    assert_eq!(TradeStatus::from("QUEUED"), TradeStatus::Queued);
-    assert_eq!(TradeStatus::from("EXECUTING"), TradeStatus::Executing);
-    assert_eq!(TradeStatus::from("ACTIVE"), TradeStatus::Active);
-    assert_eq!(TradeStatus::from("EXITING"), TradeStatus::Exiting);
-    assert_eq!(TradeStatus::from("CLOSED"), TradeStatus::Closed);
-    assert_eq!(TradeStatus::from("FAILED"), TradeStatus::Failed);
-    assert_eq!(TradeStatus::from("DEAD_LETTER"), TradeStatus::DeadLetter);
-    assert_eq!(TradeStatus::from("UNKNOWN"), TradeStatus::Failed);
-}
-
-#[test]
-fn test_trade_status_into_string_all_variants() {
-    let cases = [
-        (TradeStatus::Pending, "PENDING"),
-        (TradeStatus::Queued, "QUEUED"),
-        (TradeStatus::Executing, "EXECUTING"),
-        (TradeStatus::Active, "ACTIVE"),
-        (TradeStatus::Exiting, "EXITING"),
-        (TradeStatus::Closed, "CLOSED"),
-        (TradeStatus::Failed, "FAILED"),
-        (TradeStatus::DeadLetter, "DEAD_LETTER"),
-    ];
-    for (status, expected) in cases {
-        let s: String = status.into();
-        assert_eq!(s, expected);
+    #[test]
+    fn test_trade_status_from_str_all_variants() {
+        assert_eq!(TradeStatus::from("PENDING"), TradeStatus::Pending);
+        assert_eq!(TradeStatus::from("QUEUED"), TradeStatus::Queued);
+        assert_eq!(TradeStatus::from("EXECUTING"), TradeStatus::Executing);
+        assert_eq!(TradeStatus::from("ACTIVE"), TradeStatus::Active);
+        assert_eq!(TradeStatus::from("EXITING"), TradeStatus::Exiting);
+        assert_eq!(TradeStatus::from("CLOSED"), TradeStatus::Closed);
+        assert_eq!(TradeStatus::from("FAILED"), TradeStatus::Failed);
+        assert_eq!(TradeStatus::from("DEAD_LETTER"), TradeStatus::DeadLetter);
+        assert_eq!(TradeStatus::from("UNKNOWN"), TradeStatus::Failed);
     }
-}
 
-#[test]
-fn test_registry_default() {
-    let registry = StateRegistry::default();
-    assert_eq!(registry.trade_count(), 0);
-    assert_eq!(registry.position_count(), 0);
-    assert_eq!(registry.wallet_count(), 0);
-}
+    #[test]
+    fn test_trade_status_into_string_all_variants() {
+        let cases = [
+            (TradeStatus::Pending, "PENDING"),
+            (TradeStatus::Queued, "QUEUED"),
+            (TradeStatus::Executing, "EXECUTING"),
+            (TradeStatus::Active, "ACTIVE"),
+            (TradeStatus::Exiting, "EXITING"),
+            (TradeStatus::Closed, "CLOSED"),
+            (TradeStatus::Failed, "FAILED"),
+            (TradeStatus::DeadLetter, "DEAD_LETTER"),
+        ];
+        for (status, expected) in cases {
+            let s: String = status.into();
+            assert_eq!(s, expected);
+        }
+    }
 
-#[test]
-fn test_insert_and_get_trade() {
-    let registry = StateRegistry::new();
-    let trade = test_trade("t-1", "BUY", TradeStatus::Pending, "SHIELD");
-    registry.insert_trade(trade.clone()).unwrap();
+    #[test]
+    fn test_registry_default() {
+        let registry = StateRegistry::default();
+        assert_eq!(registry.trade_count(), 0);
+        assert_eq!(registry.position_count(), 0);
+        assert_eq!(registry.wallet_count(), 0);
+    }
 
-    let got = registry.get_trade("t-1").unwrap();
-    assert_eq!(got.trade_uuid, "t-1");
-    assert_eq!(got.status, TradeStatus::Pending);
-    assert_eq!(got.amount_sol, Decimal::new(2, 0));
-    assert!(registry.get_trade("missing").is_none());
-    assert_eq!(registry.trade_count(), 1);
-    assert_eq!(registry.get_all_trades().len(), 1);
-}
+    #[test]
+    fn test_insert_and_get_trade() {
+        let registry = StateRegistry::new();
+        let trade = test_trade("t-1", "BUY", TradeStatus::Pending, "SHIELD");
+        registry.insert_trade(trade.clone()).unwrap();
 
-#[test]
-fn test_update_trade_status() {
-    let registry = StateRegistry::new();
-    let trade = test_trade("t-1", "BUY", TradeStatus::Pending, "SHIELD");
-    registry.insert_trade(trade).unwrap();
+        let got = registry.get_trade("t-1").unwrap();
+        assert_eq!(got.trade_uuid, "t-1");
+        assert_eq!(got.status, TradeStatus::Pending);
+        assert_eq!(got.amount_sol, Decimal::new(2, 0));
+        assert!(registry.get_trade("missing").is_none());
+        assert_eq!(registry.trade_count(), 1);
+        assert_eq!(registry.get_all_trades().len(), 1);
+    }
 
-    registry
-        .update_trade_status("t-1", TradeStatus::Executing)
-        .unwrap();
-    let got = registry.get_trade("t-1").unwrap();
-    assert_eq!(got.status, TradeStatus::Executing);
-    assert_eq!(got.version, 2);
+    #[test]
+    fn test_update_trade_status() {
+        let registry = StateRegistry::new();
+        let trade = test_trade("t-1", "BUY", TradeStatus::Pending, "SHIELD");
+        registry.insert_trade(trade).unwrap();
 
-    let err = registry.update_trade_status("missing", TradeStatus::Closed);
-    assert!(matches!(err, Err(RegistryError::TradeNotFound(_))));
-}
+        registry
+            .update_trade_status("t-1", TradeStatus::Executing)
+            .unwrap();
+        let got = registry.get_trade("t-1").unwrap();
+        assert_eq!(got.status, TradeStatus::Executing);
+        assert_eq!(got.version, 2);
 
-#[test]
-fn test_insert_and_update_position() {
-    let registry = StateRegistry::new();
-    let position = test_position("p-1", "SHIELD", "ACTIVE");
-    registry.insert_position(position).unwrap();
-    assert!(registry.has_active_position_for_token("token-1"));
-    assert_eq!(registry.position_count(), 1);
+        let err = registry.update_trade_status("missing", TradeStatus::Closed);
+        assert!(matches!(err, Err(RegistryError::TradeNotFound(_))));
+    }
 
-    // Transition ACTIVE -> EXITING decrements the token count
-    registry
-        .update_position_state("p-1", "EXITING")
-        .unwrap();
-    assert!(!registry.has_active_position_for_token("token-1"));
-    let got = registry.get_position_by_trade_uuid("p-1").unwrap();
-    assert_eq!(got.state, "EXITING");
+    #[test]
+    fn test_insert_and_update_position() {
+        let registry = StateRegistry::new();
+        let position = test_position("p-1", "SHIELD", "ACTIVE");
+        registry.insert_position(position).unwrap();
+        assert!(registry.has_active_position_for_token("token-1"));
+        assert_eq!(registry.position_count(), 1);
 
-    // Transition non-ACTIVE -> ACTIVE does not re-increment (count is only
-    // bumped on insert_position; leaving ACTIVE is the only decrement).
-    registry.update_position_state("p-1", "ACTIVE").unwrap();
-    assert!(!registry.has_active_position_for_token("token-1"));
+        // Transition ACTIVE -> EXITING decrements the token count
+        registry.update_position_state("p-1", "EXITING").unwrap();
+        assert!(!registry.has_active_position_for_token("token-1"));
+        let got = registry.get_position_by_trade_uuid("p-1").unwrap();
+        assert_eq!(got.state, "EXITING");
 
-    // Not found
-    let err = registry.update_position_state("missing", "CLOSED");
-    assert!(matches!(err, Err(RegistryError::PositionNotFound(_))));
+        // Transition non-ACTIVE -> ACTIVE does not re-increment (count is only
+        // bumped on insert_position; leaving ACTIVE is the only decrement).
+        registry.update_position_state("p-1", "ACTIVE").unwrap();
+        assert!(!registry.has_active_position_for_token("token-1"));
 
-    assert_eq!(registry.get_all_positions().len(), 1);
-}
+        // Not found
+        let err = registry.update_position_state("missing", "CLOSED");
+        assert!(matches!(err, Err(RegistryError::PositionNotFound(_))));
 
-#[test]
-fn test_position_queries() {
-    let registry = StateRegistry::new();
-    registry.insert_position(test_position("p-1", "SHIELD", "ACTIVE")).unwrap();
-    registry.insert_position(test_position("p-2", "SPEAR", "EXITING")).unwrap();
+        assert_eq!(registry.get_all_positions().len(), 1);
+    }
 
-    let active = registry.get_active_positions();
-    assert_eq!(active.len(), 1);
-    assert_eq!(active[0].trade_uuid, "p-1");
+    #[test]
+    fn test_position_queries() {
+        let registry = StateRegistry::new();
+        registry
+            .insert_position(test_position("p-1", "SHIELD", "ACTIVE"))
+            .unwrap();
+        registry
+            .insert_position(test_position("p-2", "SPEAR", "EXITING"))
+            .unwrap();
 
-    let by_token = registry.get_positions_by_token("token-1");
-    assert_eq!(by_token.len(), 1);
-    assert_eq!(by_token[0].trade_uuid, "p-1");
+        let active = registry.get_active_positions();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].trade_uuid, "p-1");
 
-    assert!(registry.get_position_by_trade_uuid("p-1").is_some());
-    assert!(registry.get_position_by_trade_uuid("nope").is_none());
-    assert!(!registry.has_active_position_for_token("other-token"));
-}
+        let by_token = registry.get_positions_by_token("token-1");
+        assert_eq!(by_token.len(), 1);
+        assert_eq!(by_token[0].trade_uuid, "p-1");
 
-#[test]
-fn test_wallet_ops() {
-    let registry = StateRegistry::new();
-    assert!(registry.get_wallet("wallet-1").is_none());
+        assert!(registry.get_position_by_trade_uuid("p-1").is_some());
+        assert!(registry.get_position_by_trade_uuid("nope").is_none());
+        assert!(!registry.has_active_position_for_token("other-token"));
+    }
 
-    registry.upsert_wallet(test_wallet("wallet-1", "ACTIVE")).unwrap();
-    let wallet = registry.get_wallet("wallet-1").unwrap();
-    assert_eq!(wallet.status, "ACTIVE");
-    assert_eq!(wallet.wqs_score, Some(Decimal::new(75, 0)));
-    assert_eq!(registry.wallet_count(), 1);
+    #[test]
+    fn test_wallet_ops() {
+        let registry = StateRegistry::new();
+        assert!(registry.get_wallet("wallet-1").is_none());
 
-    // Upsert overwrites
-    registry.upsert_wallet(test_wallet("wallet-1", "CANDIDATE")).unwrap();
-    assert_eq!(registry.get_wallet("wallet-1").unwrap().status, "CANDIDATE");
-}
+        registry
+            .upsert_wallet(test_wallet("wallet-1", "ACTIVE"))
+            .unwrap();
+        let wallet = registry.get_wallet("wallet-1").unwrap();
+        assert_eq!(wallet.status, "ACTIVE");
+        assert_eq!(wallet.wqs_score, Some(Decimal::new(75, 0)));
+        assert_eq!(registry.wallet_count(), 1);
 
-#[test]
-fn test_portfolio_heat_ops() {
-    let registry = StateRegistry::new();
-    let heat = registry.get_portfolio_heat();
-    assert_eq!(heat.total_exposure_sol, Decimal::ZERO);
+        // Upsert overwrites
+        registry
+            .upsert_wallet(test_wallet("wallet-1", "CANDIDATE"))
+            .unwrap();
+        assert_eq!(registry.get_wallet("wallet-1").unwrap().status, "CANDIDATE");
+    }
 
-    let new_heat = PortfolioHeatState {
-        total_exposure_sol: Decimal::new(10, 0),
-        shield_exposure_sol: Decimal::new(6, 0),
-        spear_exposure_sol: Decimal::new(4, 0),
-        pending_heat_sol: Decimal::new(1, 0),
-        last_updated: SystemTime::now(),
-    };
-    registry.update_portfolio_heat(new_heat.clone()).unwrap();
-    let got = registry.get_portfolio_heat();
-    assert_eq!(got.total_exposure_sol, new_heat.total_exposure_sol);
-    assert_eq!(got.shield_exposure_sol, Decimal::new(6, 0));
-    assert_eq!(got.spear_exposure_sol, Decimal::new(4, 0));
-    assert_eq!(got.pending_heat_sol, Decimal::new(1, 0));
-}
+    #[test]
+    fn test_portfolio_heat_ops() {
+        let registry = StateRegistry::new();
+        let heat = registry.get_portfolio_heat();
+        assert_eq!(heat.total_exposure_sol, Decimal::ZERO);
 
-#[test]
-fn test_metrics_hit_rate() {
-    let registry = StateRegistry::new();
-    assert_eq!(registry.get_metrics().reads_total, 0);
+        let new_heat = PortfolioHeatState {
+            total_exposure_sol: Decimal::new(10, 0),
+            shield_exposure_sol: Decimal::new(6, 0),
+            spear_exposure_sol: Decimal::new(4, 0),
+            pending_heat_sol: Decimal::new(1, 0),
+            last_updated: SystemTime::now(),
+        };
+        registry.update_portfolio_heat(new_heat.clone()).unwrap();
+        let got = registry.get_portfolio_heat();
+        assert_eq!(got.total_exposure_sol, new_heat.total_exposure_sol);
+        assert_eq!(got.shield_exposure_sol, Decimal::new(6, 0));
+        assert_eq!(got.spear_exposure_sol, Decimal::new(4, 0));
+        assert_eq!(got.pending_heat_sol, Decimal::new(1, 0));
+    }
 
-    registry.insert_trade(test_trade("t-1", "BUY", TradeStatus::Pending, "SHIELD")).unwrap();
-    registry.get_trade("t-1"); // hit
-    registry.get_trade("missing"); // miss
+    #[test]
+    fn test_metrics_hit_rate() {
+        let registry = StateRegistry::new();
+        assert_eq!(registry.get_metrics().reads_total, 0);
 
-    let metrics = registry.get_metrics();
-    assert_eq!(metrics.reads_total, 2);
-    assert_eq!(metrics.writes_total, 1);
-    assert_eq!(metrics.hits_total, 1);
-    assert_eq!(metrics.misses_total, 1);
-    assert_eq!(metrics.trade_count, 1);
-    assert!((metrics.hit_rate - 0.5).abs() < 1e-9);
-}
+        registry
+            .insert_trade(test_trade("t-1", "BUY", TradeStatus::Pending, "SHIELD"))
+            .unwrap();
+        registry.get_trade("t-1"); // hit
+        registry.get_trade("missing"); // miss
 
-#[test]
-fn test_calculate_portfolio_heat_fast() {
-    let registry = StateRegistry::new();
+        let metrics = registry.get_metrics();
+        assert_eq!(metrics.reads_total, 2);
+        assert_eq!(metrics.writes_total, 1);
+        assert_eq!(metrics.hits_total, 1);
+        assert_eq!(metrics.misses_total, 1);
+        assert_eq!(metrics.trade_count, 1);
+        assert!((metrics.hit_rate - 0.5).abs() < 1e-9);
+    }
 
-    // ACTIVE SHIELD position: 5 SOL
-    registry.insert_position(test_position("p-1", "SHIELD", "ACTIVE")).unwrap();
-    // Fresh EXITING position (included): 5 SOL, SPEAR
-    registry.insert_position(test_position("p-2", "SPEAR", "EXITING")).unwrap();
-    // Stale EXITING position (excluded, >1800s old)
-    let mut stale = test_position("p-3", "SPEAR", "EXITING");
-    stale.updated_at = SystemTime::now() - std::time::Duration::from_secs(3600);
-    registry.insert_position(stale).unwrap();
-    // Unknown strategy position: 5 SOL split evenly
-    registry.insert_position(test_position("p-4", "UNKNOWN", "ACTIVE")).unwrap();
-    // Closed position: excluded
-    registry.insert_position(test_position("p-5", "SHIELD", "CLOSED")).unwrap();
+    #[test]
+    fn test_calculate_portfolio_heat_fast() {
+        let registry = StateRegistry::new();
 
-    // Pending BUY trade (SHIELD): +2 SOL
-    registry.insert_trade(test_trade("t-1", "BUY", TradeStatus::Pending, "SHIELD")).unwrap();
-    // Queued BUY trade (SPEAR): +2 SOL
-    registry.insert_trade(test_trade("t-2", "BUY", TradeStatus::Queued, "SPEAR")).unwrap();
-    // Executing BUY trade (UNKNOWN): +2 SOL split
-    registry.insert_trade(test_trade("t-3", "BUY", TradeStatus::Executing, "UNKNOWN")).unwrap();
-    // SELL trade: excluded
-    registry.insert_trade(test_trade("t-4", "SELL", TradeStatus::Pending, "SHIELD")).unwrap();
-    // ACTIVE trade: excluded
-    registry.insert_trade(test_trade("t-5", "BUY", TradeStatus::Active, "SHIELD")).unwrap();
+        // ACTIVE SHIELD position: 5 SOL
+        registry
+            .insert_position(test_position("p-1", "SHIELD", "ACTIVE"))
+            .unwrap();
+        // Fresh EXITING position (included): 5 SOL, SPEAR
+        registry
+            .insert_position(test_position("p-2", "SPEAR", "EXITING"))
+            .unwrap();
+        // Stale EXITING position (excluded, >1800s old)
+        let mut stale = test_position("p-3", "SPEAR", "EXITING");
+        stale.updated_at = SystemTime::now() - std::time::Duration::from_secs(3600);
+        registry.insert_position(stale).unwrap();
+        // Unknown strategy position: 5 SOL split evenly
+        registry
+            .insert_position(test_position("p-4", "UNKNOWN", "ACTIVE"))
+            .unwrap();
+        // Closed position: excluded
+        registry
+            .insert_position(test_position("p-5", "SHIELD", "CLOSED"))
+            .unwrap();
 
-    let heat = registry.calculate_portfolio_heat_fast();
-    // total: 5 (p1) + 5 (p2) + 5 (p4) + 2 + 2 + 2 = 21
-    assert_eq!(heat.total_exposure_sol, Decimal::new(21, 0));
-    // shield: p1(5) + t1(2) + p4(2.5) + t3(1) = 10.5
-    assert_eq!(heat.shield_exposure_sol, Decimal::new(105, 1));
-    // spear: p2(5) + t2(2) + p4(2.5) + t3(1) = 10.5
-    assert_eq!(heat.spear_exposure_sol, Decimal::new(105, 1));
-    assert_eq!(heat.pending_heat_sol, Decimal::ZERO);
-}
+        // Pending BUY trade (SHIELD): +2 SOL
+        registry
+            .insert_trade(test_trade("t-1", "BUY", TradeStatus::Pending, "SHIELD"))
+            .unwrap();
+        // Queued BUY trade (SPEAR): +2 SOL
+        registry
+            .insert_trade(test_trade("t-2", "BUY", TradeStatus::Queued, "SPEAR"))
+            .unwrap();
+        // Executing BUY trade (UNKNOWN): +2 SOL split
+        registry
+            .insert_trade(test_trade("t-3", "BUY", TradeStatus::Executing, "UNKNOWN"))
+            .unwrap();
+        // SELL trade: excluded
+        registry
+            .insert_trade(test_trade("t-4", "SELL", TradeStatus::Pending, "SHIELD"))
+            .unwrap();
+        // ACTIVE trade: excluded
+        registry
+            .insert_trade(test_trade("t-5", "BUY", TradeStatus::Active, "SHIELD"))
+            .unwrap();
 
-#[test]
-fn test_trade_uuid_exists() {
+        let heat = registry.calculate_portfolio_heat_fast();
+        // total: 5 (p1) + 5 (p2) + 5 (p4) + 2 + 2 + 2 = 21
+        assert_eq!(heat.total_exposure_sol, Decimal::new(21, 0));
+        // shield: p1(5) + t1(2) + p4(2.5) + t3(1) = 10.5
+        assert_eq!(heat.shield_exposure_sol, Decimal::new(105, 1));
+        // spear: p2(5) + t2(2) + p4(2.5) + t3(1) = 10.5
+        assert_eq!(heat.spear_exposure_sol, Decimal::new(105, 1));
+        assert_eq!(heat.pending_heat_sol, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_trade_uuid_exists() {
         let registry = StateRegistry::new();
 
         // Test non-existent trade

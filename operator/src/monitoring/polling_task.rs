@@ -626,7 +626,7 @@ async fn process_transaction(
             amount_out: amount_sol, // Simplified - would need actual conversion
             dex: "unknown".to_string(), // Not available from polling data
             slippage: None,
-            token_decimals: None,         // Not available from polling data
+            token_decimals: None, // Not available from polling data
         };
 
         // Detect exit with configurable delay

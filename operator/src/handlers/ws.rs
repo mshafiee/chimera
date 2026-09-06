@@ -551,7 +551,6 @@ mod tests {
         url: &str,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
-        use futures_util::StreamExt;
         let (ws, _resp) = tokio_tungstenite::connect_async(url)
             .await
             .expect("websocket handshake");
@@ -564,7 +563,6 @@ mod tests {
         >,
     ) -> String {
         use futures_util::StreamExt;
-        use tokio_tungstenite::tungstenite::Message;
         tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
             .await
             .expect("message within timeout")
@@ -694,9 +692,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_ws_send_failure_ends_send_task() {
-        use futures_util::SinkExt;
-        use tokio_tungstenite::tungstenite::Message;
-
         let state = test_state(false);
         let url = spawn_ws_server(state.clone());
         let ws = ws_connect(&format!("{url}/ws?token=api-key-1")).await;

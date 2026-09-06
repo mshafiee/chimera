@@ -694,10 +694,7 @@ impl Database for MockDb {
     }
 
     async fn record_smart_money_signal(&self, signal: &SmartMoneySignal) -> AppResult<()> {
-        self.recorded_signals
-            .lock()
-            .unwrap()
-            .push(signal.clone());
+        self.recorded_signals.lock().unwrap().push(signal.clone());
         Ok(())
     }
 

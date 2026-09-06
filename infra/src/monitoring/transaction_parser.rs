@@ -149,7 +149,7 @@ fn parse_jupiter_swap(tx_json: &Value, wallet_address: &str) -> Result<ParsedSwa
         direction,
         dex: "Jupiter".to_string(),
         slippage: None,
-            token_decimals: None,
+        token_decimals: None,
     })
 }
 
@@ -219,7 +219,7 @@ fn parse_raydium_swap(tx_json: &Value, wallet_address: &str) -> Result<ParsedSwa
         direction,
         dex: "Raydium".to_string(),
         slippage: None,
-            token_decimals: None,
+        token_decimals: None,
     })
 }
 
@@ -251,7 +251,7 @@ fn parse_orca_swap(tx_json: &Value, wallet_address: &str) -> Result<ParsedSwap> 
         direction,
         dex: "Orca".to_string(),
         slippage: None,
-            token_decimals: None,
+        token_decimals: None,
     })
 }
 
@@ -283,7 +283,7 @@ fn parse_pumpfun_swap(tx_json: &Value, wallet_address: &str) -> Result<ParsedSwa
         direction,
         dex: "Pump.fun".to_string(),
         slippage: None,
-            token_decimals: None,
+        token_decimals: None,
     })
 }
 
@@ -504,7 +504,7 @@ pub fn parse_laserstream_message(
         direction,
         dex,
         slippage: None,
-            token_decimals: None, // Could be calculated from price data if available
+        token_decimals: None, // Could be calculated from price data if available
     }))
 }
 
@@ -513,10 +513,7 @@ fn detect_dex_from_laserstream(payload: &Value) -> Result<String> {
     // Check for DEX program IDs in transaction logs
     if let Some(logs) = payload.get("logs").and_then(|l| l.as_array()) {
         // Convert JsonValue array to string array before joining
-        let log_strings: Vec<&str> = logs
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
+        let log_strings: Vec<&str> = logs.iter().filter_map(|v| v.as_str()).collect();
         let log_str = log_strings.join(" ");
 
         if log_str.contains("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4") {
@@ -545,7 +542,6 @@ fn parse_from_swap_event(
     sol_mint: &str,
     stablecoin_mints: &[&str; 2],
 ) -> Result<Option<ParsedSwap>> {
-
     // Collect all token legs from inputs (given) and outputs (received).
     // Each leg is (mint, amount, is_output).
     let mut legs: Vec<(String, Decimal, bool)> = Vec::new();
@@ -612,7 +608,11 @@ fn parse_from_swap_event(
         let mut best_quote: Option<(String, Decimal)> = None;
         for (mint, amount, _) in &legs {
             if stablecoin_mints.contains(&mint.as_str())
-                && best_quote.as_ref().map(|(_, a)| a.abs()).unwrap_or(Decimal::ZERO) < amount.abs()
+                && best_quote
+                    .as_ref()
+                    .map(|(_, a)| a.abs())
+                    .unwrap_or(Decimal::ZERO)
+                    < amount.abs()
             {
                 best_quote = Some((mint.clone(), *amount));
             }
@@ -648,7 +648,7 @@ fn parse_from_swap_event(
         direction,
         dex: dex.to_string(),
         slippage: None,
-            token_decimals: None,
+        token_decimals: None,
     }))
 }
 
@@ -707,7 +707,9 @@ pub fn parse_helius_webhook(
 
                 let amount = Decimal::from_str(&change.raw_token_amount.token_amount)
                     .unwrap_or(Decimal::ZERO);
-                *token_deltas.entry(change.mint.clone()).or_insert(Decimal::ZERO) += amount;
+                *token_deltas
+                    .entry(change.mint.clone())
+                    .or_insert(Decimal::ZERO) += amount;
             }
         }
     }
@@ -795,7 +797,8 @@ pub fn parse_helius_webhook(
             token_mint
         } else {
             quote_mint
-        },        amount_in: if direction == SwapDirection::Buy {
+        },
+        amount_in: if direction == SwapDirection::Buy {
             quote_amount
         } else {
             token_delta.abs()
@@ -808,7 +811,7 @@ pub fn parse_helius_webhook(
         direction,
         dex,
         slippage: None,
-            token_decimals: None,
+        token_decimals: None,
     }))
 }
 
@@ -885,7 +888,9 @@ mod tests {
             vec![],
         );
 
-        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("should parse");
+        let swap = parse_helius_webhook(&payload, Some(wallet))
+            .unwrap()
+            .expect("should parse");
         assert_eq!(swap.direction, SwapDirection::Buy);
         assert_eq!(swap.token_out, token);
         assert_eq!(swap.token_in, SOL_MINT);
@@ -906,7 +911,9 @@ mod tests {
             vec![],
         );
 
-        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("should parse");
+        let swap = parse_helius_webhook(&payload, Some(wallet))
+            .unwrap()
+            .expect("should parse");
         assert_eq!(swap.direction, SwapDirection::Sell);
         assert_eq!(swap.token_in, token);
         assert_eq!(swap.token_out, SOL_MINT);
@@ -924,17 +931,22 @@ mod tests {
                 account: wallet.to_string(),
                 native_balance_change: Some(-1_000_000_000),
                 token_balance_changes: Some(vec![
-                    token_change(usdc, "2000", wallet),  // receive USDC
-                    token_change(usdc, "-2000", wallet), // spend USDC (nets to 0)
+                    token_change(usdc, "2000", wallet),   // receive USDC
+                    token_change(usdc, "-2000", wallet),  // spend USDC (nets to 0)
                     token_change(target, "5000", wallet), // receive target
                 ]),
             }],
             vec![],
         );
 
-        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("should parse");
+        let swap = parse_helius_webhook(&payload, Some(wallet))
+            .unwrap()
+            .expect("should parse");
         assert_eq!(swap.direction, SwapDirection::Buy);
-        assert_eq!(swap.token_out, target, "must pick target, not intermediate USDC");
+        assert_eq!(
+            swap.token_out, target,
+            "must pick target, not intermediate USDC"
+        );
     }
 
     #[test]
@@ -955,7 +967,9 @@ mod tests {
             }],
         );
 
-        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("should parse");
+        let swap = parse_helius_webhook(&payload, Some(wallet))
+            .unwrap()
+            .expect("should parse");
         // Should use native_transfers (2 SOL), not native_balance_change (0.05 SOL)
         assert!(
             swap.amount_in >= rust_decimal::Decimal::new(2, 0),
@@ -991,7 +1005,9 @@ mod tests {
             }],
             vec![],
         );
-        assert!(parse_helius_webhook(&payload, Some(wallet)).unwrap().is_none());
+        assert!(parse_helius_webhook(&payload, Some(wallet))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1008,7 +1024,11 @@ mod tests {
                 AccountData {
                     account: wallet.to_string(),
                     native_balance_change: Some(500_000_000), // +0.5 SOL received
-                    token_balance_changes: Some(vec![token_change(token, &format!("-{}", amount), wallet)]),
+                    token_balance_changes: Some(vec![token_change(
+                        token,
+                        &format!("-{}", amount),
+                        wallet,
+                    )]),
                 },
                 AccountData {
                     account: dex.to_string(),
@@ -1037,7 +1057,11 @@ mod tests {
                 AccountData {
                     account: wallet.to_string(),
                     native_balance_change: Some(500_000_000), // +0.5 SOL received
-                    token_balance_changes: Some(vec![token_change(token, &format!("-{}", amount), wallet)]),
+                    token_balance_changes: Some(vec![token_change(
+                        token,
+                        &format!("-{}", amount),
+                        wallet,
+                    )]),
                 },
                 AccountData {
                     account: dex.to_string(),
@@ -1048,7 +1072,9 @@ mod tests {
             vec![],
         );
 
-        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("should parse with wallet filter");
+        let swap = parse_helius_webhook(&payload, Some(wallet))
+            .unwrap()
+            .expect("should parse with wallet filter");
         assert_eq!(swap.direction, SwapDirection::Sell);
         assert_eq!(swap.token_in, token);
         assert_eq!(swap.token_out, SOL_MINT);
@@ -1073,13 +1099,19 @@ mod tests {
                 AccountData {
                     account: dex.to_string(),
                     native_balance_change: Some(500_000_000), // +0.5 SOL received
-                    token_balance_changes: Some(vec![token_change(token, &format!("-{}", amount), dex)]),
+                    token_balance_changes: Some(vec![token_change(
+                        token,
+                        &format!("-{}", amount),
+                        dex,
+                    )]),
                 },
             ],
             vec![],
         );
 
-        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("should parse with wallet filter");
+        let swap = parse_helius_webhook(&payload, Some(wallet))
+            .unwrap()
+            .expect("should parse with wallet filter");
         assert_eq!(swap.direction, SwapDirection::Buy);
         assert_eq!(swap.token_in, SOL_MINT);
         assert_eq!(swap.token_out, token);
@@ -1101,14 +1133,16 @@ mod tests {
                 account: wallet.to_string(),
                 native_balance_change: None,
                 token_balance_changes: Some(vec![
-                    token_change(usdc, "-1000000", wallet),  // -1 USDC (6 decimals)
+                    token_change(usdc, "-1000000", wallet), // -1 USDC (6 decimals)
                     token_change(token, "1000000000000", wallet), // +1M tokens
                 ]),
             }],
             vec![],
         );
 
-        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("should parse");
+        let swap = parse_helius_webhook(&payload, Some(wallet))
+            .unwrap()
+            .expect("should parse");
         assert_eq!(swap.direction, SwapDirection::Buy);
         assert_eq!(swap.token_in, usdc);
         assert_eq!(swap.token_out, token);
@@ -1125,14 +1159,16 @@ mod tests {
                 account: wallet.to_string(),
                 native_balance_change: None,
                 token_balance_changes: Some(vec![
-                    token_change(usdc, "2000000", wallet),        // +2 USDC
+                    token_change(usdc, "2000000", wallet),         // +2 USDC
                     token_change(token, "-1000000000000", wallet), // -1M tokens
                 ]),
             }],
             vec![],
         );
 
-        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("should parse");
+        let swap = parse_helius_webhook(&payload, Some(wallet))
+            .unwrap()
+            .expect("should parse");
         assert_eq!(swap.direction, SwapDirection::Sell);
         assert_eq!(swap.token_in, token);
         assert_eq!(swap.token_out, usdc);
@@ -1153,7 +1189,9 @@ mod tests {
             vec![],
         );
 
-        assert!(parse_helius_webhook(&payload, Some(wallet)).unwrap().is_none());
+        assert!(parse_helius_webhook(&payload, Some(wallet))
+            .unwrap()
+            .is_none());
     }
 
     // ==========================================================================
@@ -1209,11 +1247,7 @@ mod tests {
 
     #[test]
     fn test_parse_transaction_raydium_orca_pumpfun() {
-        for (program, dex) in [
-            (RAYDIUM, "Raydium"),
-            (ORCA, "Orca"),
-            (PUMPFUN, "Pump.fun"),
-        ] {
+        for (program, dex) in [(RAYDIUM, "Raydium"), (ORCA, "Orca"), (PUMPFUN, "Pump.fun")] {
             let tx = tx_with_program(program);
             let info = parse_transaction(&tx, "wallet").unwrap();
             let swap = info.parsed_swap.expect(dex);
@@ -1356,7 +1390,8 @@ mod tests {
             balance(0, SOL_MINT, 10.0),
         ];
         let post = vec![balance(0, SOL_MINT, 9.0)];
-        let (token_in, _, _, _, _) = parse_balance_changes(Some(&pre), Some(&post), "wallet").unwrap();
+        let (token_in, _, _, _, _) =
+            parse_balance_changes(Some(&pre), Some(&post), "wallet").unwrap();
         assert_eq!(token_in, SOL_MINT);
     }
 
@@ -1364,7 +1399,12 @@ mod tests {
     // parse_laserstream_message
     // ==========================================================================
 
-    fn laser_transfer(from: Option<&str>, to: Option<&str>, mint: &str, amount: &str) -> serde_json::Value {
+    fn laser_transfer(
+        from: Option<&str>,
+        to: Option<&str>,
+        mint: &str,
+        amount: &str,
+    ) -> serde_json::Value {
         serde_json::json!({
             "fromUserAccount": from,
             "toUserAccount": to,
@@ -1382,7 +1422,9 @@ mod tests {
                 laser_transfer(Some("dex"), Some(wallet), TOK, "100.0")
             ]
         });
-        let swap = parse_laserstream_message(&payload, wallet).unwrap().expect("swap");
+        let swap = parse_laserstream_message(&payload, wallet)
+            .unwrap()
+            .expect("swap");
         assert_eq!(swap.direction, SwapDirection::Buy);
         assert_eq!(swap.token_in, SOL_MINT);
         assert_eq!(swap.token_out, TOK);
@@ -1399,7 +1441,9 @@ mod tests {
                 laser_transfer(Some("dex"), Some(wallet), SOL_MINT, "0.5")
             ]
         });
-        let swap = parse_laserstream_message(&payload, wallet).unwrap().expect("swap");
+        let swap = parse_laserstream_message(&payload, wallet)
+            .unwrap()
+            .expect("swap");
         assert_eq!(swap.direction, SwapDirection::Sell);
         assert_eq!(swap.token_in, TOK);
         assert_eq!(swap.token_out, SOL_MINT);
@@ -1411,7 +1455,9 @@ mod tests {
         let payload = serde_json::json!({
             "tokenTransfers": [laser_transfer(Some(wallet), Some("dex"), TOK, "50.0")]
         });
-        assert!(parse_laserstream_message(&payload, wallet).unwrap().is_none());
+        assert!(parse_laserstream_message(&payload, wallet)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1440,7 +1486,9 @@ mod tests {
                 laser_transfer(Some("dex"), Some(wallet), SOL_MINT, "0.5")
             ]
         });
-        assert!(parse_laserstream_message(&payload, wallet).unwrap().is_none());
+        assert!(parse_laserstream_message(&payload, wallet)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1459,7 +1507,9 @@ mod tests {
                     laser_transfer(Some("dex"), Some(wallet), SOL_MINT, "0.5")
                 ]
             });
-            let swap = parse_laserstream_message(&payload, wallet).unwrap().expect("swap");
+            let swap = parse_laserstream_message(&payload, wallet)
+                .unwrap()
+                .expect("swap");
             assert_eq!(swap.dex, expected);
         }
 
@@ -1471,7 +1521,9 @@ mod tests {
                 laser_transfer(Some("dex"), Some(wallet), SOL_MINT, "0.5")
             ]
         });
-        let swap = parse_laserstream_message(&payload, wallet).unwrap().expect("swap");
+        let swap = parse_laserstream_message(&payload, wallet)
+            .unwrap()
+            .expect("swap");
         assert_eq!(swap.dex, "Unknown");
 
         // No logs at all
@@ -1481,7 +1533,9 @@ mod tests {
                 laser_transfer(Some("dex"), Some(wallet), SOL_MINT, "0.5")
             ]
         });
-        let swap = parse_laserstream_message(&payload, wallet).unwrap().expect("swap");
+        let swap = parse_laserstream_message(&payload, wallet)
+            .unwrap()
+            .expect("swap");
         assert_eq!(swap.dex, "Unknown");
     }
 
@@ -1529,7 +1583,9 @@ mod tests {
             token_outputs: vec![token_leg(TOK, "1000000000000")],
         };
         let payload = swap_event_payload(Some(event), vec![]);
-        let swap = parse_helius_webhook(&payload, Some("wallet-1")).unwrap().expect("swap");
+        let swap = parse_helius_webhook(&payload, Some("wallet-1"))
+            .unwrap()
+            .expect("swap");
         assert_eq!(swap.direction, SwapDirection::Buy);
         assert_eq!(swap.token_in, SOL_MINT);
         assert_eq!(swap.token_out, TOK);
@@ -1550,7 +1606,9 @@ mod tests {
             token_outputs: vec![],
         };
         let payload = swap_event_payload(Some(event), vec![]);
-        let swap = parse_helius_webhook(&payload, Some("wallet-1")).unwrap().expect("swap");
+        let swap = parse_helius_webhook(&payload, Some("wallet-1"))
+            .unwrap()
+            .expect("swap");
         assert_eq!(swap.direction, SwapDirection::Sell);
         assert_eq!(swap.token_in, TOK);
         assert_eq!(swap.token_out, SOL_MINT);
@@ -1567,7 +1625,9 @@ mod tests {
             token_outputs: vec![token_leg(TOK, "5000000000000")],
         };
         let payload = swap_event_payload(Some(event), vec![]);
-        let swap = parse_helius_webhook(&payload, Some("wallet-1")).unwrap().expect("swap");
+        let swap = parse_helius_webhook(&payload, Some("wallet-1"))
+            .unwrap()
+            .expect("swap");
         assert_eq!(swap.direction, SwapDirection::Buy);
         assert_eq!(swap.token_in, usdc);
         assert_eq!(swap.token_out, TOK);
@@ -1584,7 +1644,9 @@ mod tests {
             token_outputs: vec![token_leg(usdt, "2000000")],
         };
         let payload = swap_event_payload(Some(event), vec![]);
-        let swap = parse_helius_webhook(&payload, Some("wallet-1")).unwrap().expect("swap");
+        let swap = parse_helius_webhook(&payload, Some("wallet-1"))
+            .unwrap()
+            .expect("swap");
         assert_eq!(swap.direction, SwapDirection::Sell);
         assert_eq!(swap.token_in, TOK);
         assert_eq!(swap.token_out, usdt);
@@ -1606,7 +1668,9 @@ mod tests {
         };
         let payload = swap_event_payload(Some(event), vec![]);
         // Falls through to balance-change fallback (no account data -> None)
-        assert!(parse_helius_webhook(&payload, Some("wallet-1")).unwrap().is_none());
+        assert!(parse_helius_webhook(&payload, Some("wallet-1"))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1625,7 +1689,9 @@ mod tests {
             ],
         };
         let payload = swap_event_payload(Some(event), vec![]);
-        let swap = parse_helius_webhook(&payload, Some("wallet-1")).unwrap().expect("swap");
+        let swap = parse_helius_webhook(&payload, Some("wallet-1"))
+            .unwrap()
+            .expect("swap");
         assert_eq!(swap.token_out, TOK);
     }
 
@@ -1647,7 +1713,9 @@ mod tests {
         };
         let payload = swap_event_payload(Some(event), vec![]);
         // No usable legs -> falls to balance fallback -> None
-        assert!(parse_helius_webhook(&payload, Some("wallet-1")).unwrap().is_none());
+        assert!(parse_helius_webhook(&payload, Some("wallet-1"))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1667,7 +1735,9 @@ mod tests {
             token_outputs: vec![],
         };
         let payload = swap_event_payload(Some(event), vec![]);
-        assert!(parse_helius_webhook(&payload, Some("wallet-1")).unwrap().is_none());
+        assert!(parse_helius_webhook(&payload, Some("wallet-1"))
+            .unwrap()
+            .is_none());
     }
 
     // ==========================================================================
@@ -1689,11 +1759,31 @@ mod tests {
                 ]),
             }],
             vec![
-                NativeTransfer { amount: 1, from_user_account: "a".into(), to_user_account: "b".into() },
-                NativeTransfer { amount: 1, from_user_account: "a".into(), to_user_account: "b".into() },
-                NativeTransfer { amount: 1, from_user_account: "a".into(), to_user_account: "b".into() },
-                NativeTransfer { amount: 1, from_user_account: "a".into(), to_user_account: "b".into() },
-                NativeTransfer { amount: 1, from_user_account: "a".into(), to_user_account: "b".into() },
+                NativeTransfer {
+                    amount: 1,
+                    from_user_account: "a".into(),
+                    to_user_account: "b".into(),
+                },
+                NativeTransfer {
+                    amount: 1,
+                    from_user_account: "a".into(),
+                    to_user_account: "b".into(),
+                },
+                NativeTransfer {
+                    amount: 1,
+                    from_user_account: "a".into(),
+                    to_user_account: "b".into(),
+                },
+                NativeTransfer {
+                    amount: 1,
+                    from_user_account: "a".into(),
+                    to_user_account: "b".into(),
+                },
+                NativeTransfer {
+                    amount: 1,
+                    from_user_account: "a".into(),
+                    to_user_account: "b".into(),
+                },
             ],
         );
         assert_eq!(detect_dex_from_payload(&payload), "Jupiter");
@@ -1716,7 +1806,9 @@ mod tests {
             }],
             vec![],
         );
-        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("swap");
+        let swap = parse_helius_webhook(&payload, Some(wallet))
+            .unwrap()
+            .expect("swap");
         assert_eq!(swap.direction, SwapDirection::Sell);
         assert_eq!(swap.amount_in, Decimal::new(1000, 0));
         assert_eq!(swap.amount_out, Decimal::new(1000, 0));
@@ -1739,12 +1831,18 @@ mod tests {
             }],
             vec![],
         );
-        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("swap");
+        let swap = parse_helius_webhook(&payload, Some(wallet))
+            .unwrap()
+            .expect("swap");
         assert_eq!(swap.direction, SwapDirection::Sell);
         assert_eq!(swap.token_in, TOK);
         assert_eq!(swap.token_out, usdc);
         // Raw token amounts (USDC has 6 decimals): 2000000 base units
-        assert_eq!(swap.amount_out, Decimal::new(2000000, 0), "USDC delta is the quote");
+        assert_eq!(
+            swap.amount_out,
+            Decimal::new(2000000, 0),
+            "USDC delta is the quote"
+        );
         assert_eq!(swap.amount_in, Decimal::new(1000000000000, 0));
     }
 }

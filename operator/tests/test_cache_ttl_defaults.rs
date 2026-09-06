@@ -5,7 +5,10 @@ use chimera_operator::config::{default_token_cache_ttl, TokenSafetyConfig};
 #[test]
 fn test_default_cache_ttl_is_24_hours() {
     let ttl = default_token_cache_ttl();
-    assert_eq!(ttl, 86400, "Default cache TTL should be 24 hours (86400 seconds)");
+    assert_eq!(
+        ttl, 86400,
+        "Default cache TTL should be 24 hours (86400 seconds)"
+    );
 }
 
 #[test]

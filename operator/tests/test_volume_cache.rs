@@ -58,7 +58,11 @@ fn test_volume_drop_detection() {
     let average = cache.get_24h_average_volume("declining_token");
 
     assert!(current.is_some() && average.is_some());
-    println!("✓ Current volume: {}, Average: {}", current.unwrap(), average.unwrap());
+    println!(
+        "✓ Current volume: {}, Average: {}",
+        current.unwrap(),
+        average.unwrap()
+    );
 
     // NOTE: drop detection is NOT asserted to fire here. `has_volume_drop`
     // requires >= 30 minutes of recorded history (or 12+ baseline samples)
@@ -108,10 +112,16 @@ fn test_volume_cache_empty_handling() {
 
     // Try to get volume for non-existent token
     let no_volume = cache.get_current_volume("nonexistent_token");
-    assert!(no_volume.is_none(), "Should return None for non-existent token");
+    assert!(
+        no_volume.is_none(),
+        "Should return None for non-existent token"
+    );
 
     let no_average = cache.get_24h_average_volume("nonexistent_token");
-    assert!(no_average.is_none(), "Should return None for non-existent token");
+    assert!(
+        no_average.is_none(),
+        "Should return None for non-existent token"
+    );
 
     // Volume drop detection should return false for non-existent token
     let no_drop = cache.has_volume_drop("nonexistent_token", dec!(50));
@@ -151,7 +161,10 @@ fn test_volume_stale_data_handling() {
 
     // Volume drop should not be detected (most recent is high)
     let has_dropped = cache.has_volume_drop("stale_token", dec!(50));
-    assert!(!has_dropped, "Should not detect drop with recent high volume");
+    assert!(
+        !has_dropped,
+        "Should not detect drop with recent high volume"
+    );
 
     println!("✓ Stale data handling works correctly");
 }
@@ -185,7 +198,11 @@ fn test_volume_cache_concurrent_access() {
         let token = format!("concurrent_token_{}", i);
         let volume = cache.get_current_volume(&token);
         assert!(volume.is_some(), "Should have volume for token {}", token);
-        assert_eq!(volume.unwrap(), dec!(1000.0), "Final volume should be 1000.0");
+        assert_eq!(
+            volume.unwrap(),
+            dec!(1000.0),
+            "Final volume should be 1000.0"
+        );
     }
 
     println!("✓ Concurrent access handled safely");

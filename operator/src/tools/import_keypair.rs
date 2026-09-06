@@ -800,7 +800,11 @@ mod tests {
     fn cli_with_keypair_file(dir: &tempfile::TempDir, extra: &[&str]) -> Cli {
         let path = dir.path().join("kp.json");
         let kp = Keypair::new();
-        std::fs::write(&path, serde_json::to_string(&kp.to_bytes().to_vec()).unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_string(&kp.to_bytes().to_vec()).unwrap(),
+        )
+        .unwrap();
         let mut args = vec!["import_keypair", "--keypair-file", path.to_str().unwrap()];
         args.extend_from_slice(extra);
         Cli::parse_from(args)
@@ -829,9 +833,10 @@ mod tests {
         std::env::remove_var("CHIMERA_SECURITY__WEBHOOK_SECRET");
         let dir = tempfile::tempdir().unwrap();
         let err = run(cli_with_keypair_file(&dir, &[])).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("CHIMERA_SECURITY__WEBHOOK_SECRET"), "{err}");
+        assert!(
+            err.to_string().contains("CHIMERA_SECURITY__WEBHOOK_SECRET"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -839,7 +844,10 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         clear_env();
         std::env::set_var("CHIMERA_VAULT_KEY", env_key());
-        std::env::set_var("CHIMERA_SECURITY__WEBHOOK_SECRET", "0123456789abcdef0123456789abcdef");
+        std::env::set_var(
+            "CHIMERA_SECURITY__WEBHOOK_SECRET",
+            "0123456789abcdef0123456789abcdef",
+        );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.json");
         std::fs::write(&path, "not a keypair").unwrap();
@@ -849,7 +857,10 @@ mod tests {
             path.to_str().unwrap(),
         ]))
         .unwrap_err();
-        assert!(err.to_string().contains("Keypair validation failed"), "{err}");
+        assert!(
+            err.to_string().contains("Keypair validation failed"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -857,7 +868,10 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         clear_env();
         std::env::set_var("CHIMERA_VAULT_KEY", env_key());
-        std::env::set_var("CHIMERA_SECURITY__WEBHOOK_SECRET", "0123456789abcdef0123456789abcdef");
+        std::env::set_var(
+            "CHIMERA_SECURITY__WEBHOOK_SECRET",
+            "0123456789abcdef0123456789abcdef",
+        );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad64.json");
         // 64 bytes of garbage: valid length, invalid ed25519.
@@ -868,7 +882,10 @@ mod tests {
             path.to_str().unwrap(),
         ]))
         .unwrap_err();
-        assert!(err.to_string().contains("not a valid Ed25519 keypair"), "{err}");
+        assert!(
+            err.to_string().contains("not a valid Ed25519 keypair"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -876,7 +893,10 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         clear_env();
         std::env::set_var("CHIMERA_VAULT_KEY", env_key());
-        std::env::set_var("CHIMERA_SECURITY__WEBHOOK_SECRET", "0123456789abcdef0123456789abcdef");
+        std::env::set_var(
+            "CHIMERA_SECURITY__WEBHOOK_SECRET",
+            "0123456789abcdef0123456789abcdef",
+        );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mismatch.json");
         // 32 valid secret bytes + 32 unrelated pubkey bytes.
@@ -906,7 +926,10 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         clear_env();
         std::env::set_var("CHIMERA_VAULT_KEY", env_key());
-        std::env::set_var("CHIMERA_SECURITY__WEBHOOK_SECRET", "0123456789abcdef0123456789abcdef");
+        std::env::set_var(
+            "CHIMERA_SECURITY__WEBHOOK_SECRET",
+            "0123456789abcdef0123456789abcdef",
+        );
         let dir = tempfile::tempdir().unwrap();
         let vault_path = dir.path().join("secrets.enc");
         run(cli_with_keypair_file(
@@ -923,14 +946,21 @@ mod tests {
         clear_env();
         let key = env_key();
         std::env::set_var("CHIMERA_VAULT_KEY", &key);
-        std::env::set_var("CHIMERA_SECURITY__WEBHOOK_SECRET", "0123456789abcdef0123456789abcdef");
+        std::env::set_var(
+            "CHIMERA_SECURITY__WEBHOOK_SECRET",
+            "0123456789abcdef0123456789abcdef",
+        );
         std::env::set_var("HELIUS_API_KEY", "helius-key-123");
         std::env::set_var("CHIMERA_RPC__FALLBACK_API_KEY", "fb-key-456");
         let dir = tempfile::tempdir().unwrap();
         let vault_path = dir.path().join("secrets.enc");
         let kp_path = dir.path().join("kp.json");
         let kp = Keypair::new();
-        std::fs::write(&kp_path, serde_json::to_string(&kp.to_bytes().to_vec()).unwrap()).unwrap();
+        std::fs::write(
+            &kp_path,
+            serde_json::to_string(&kp.to_bytes().to_vec()).unwrap(),
+        )
+        .unwrap();
         let expected_pubkey = bs58::encode(kp.pubkey().as_ref()).into_string();
         run(Cli::parse_from([
             "import_keypair",
@@ -952,7 +982,10 @@ mod tests {
         assert_eq!(secrets.rpc_api_key.as_deref(), Some("helius-key-123"));
         assert_eq!(secrets.fallback_rpc_api_key.as_deref(), Some("fb-key-456"));
         let kp = load_wallet_keypair(&secrets).unwrap();
-        assert_eq!(bs58::encode(kp.pubkey().as_ref()).into_string(), expected_pubkey);
+        assert_eq!(
+            bs58::encode(kp.pubkey().as_ref()).into_string(),
+            expected_pubkey
+        );
     }
 
     #[test]
@@ -961,7 +994,10 @@ mod tests {
         clear_env();
         let key = env_key();
         std::env::set_var("CHIMERA_VAULT_KEY", &key);
-        std::env::set_var("CHIMERA_SECURITY__WEBHOOK_SECRET", "new-secret-0123456789abcdef0123");
+        std::env::set_var(
+            "CHIMERA_SECURITY__WEBHOOK_SECRET",
+            "new-secret-0123456789abcdef0123",
+        );
         let dir = tempfile::tempdir().unwrap();
         let vault_path = dir.path().join("secrets.enc");
 
@@ -994,7 +1030,10 @@ mod tests {
             secrets.webhook_secret_previous.as_deref(),
             Some("old-secret-0123456789abcdef0123456789")
         );
-        assert!(!dir.path().join("secrets.enc.bak").exists(), "backup must be removed on success");
+        assert!(
+            !dir.path().join("secrets.enc.bak").exists(),
+            "backup must be removed on success"
+        );
     }
 
     #[test]
@@ -1002,8 +1041,14 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         clear_env();
         std::env::set_var("CHIMERA_VAULT_KEY", env_key());
-        std::env::set_var("CHIMERA_SECURITY__WEBHOOK_SECRET", "same-secret-0123456789abcdef0123");
-        std::env::set_var("CHIMERA_SECURITY__WEBHOOK_SECRET_PREVIOUS", "prev-secret-from-env");
+        std::env::set_var(
+            "CHIMERA_SECURITY__WEBHOOK_SECRET",
+            "same-secret-0123456789abcdef0123",
+        );
+        std::env::set_var(
+            "CHIMERA_SECURITY__WEBHOOK_SECRET_PREVIOUS",
+            "prev-secret-from-env",
+        );
         let dir = tempfile::tempdir().unwrap();
         let vault_path = dir.path().join("secrets.enc");
         run(cli_with_keypair_file(
@@ -1024,7 +1069,10 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         clear_env();
         std::env::set_var("CHIMERA_VAULT_KEY", env_key());
-        std::env::set_var("CHIMERA_SECURITY__WEBHOOK_SECRET", "0123456789abcdef0123456789abcdef");
+        std::env::set_var(
+            "CHIMERA_SECURITY__WEBHOOK_SECRET",
+            "0123456789abcdef0123456789abcdef",
+        );
         let dir = tempfile::tempdir().unwrap();
         let vault_path = dir.path().join("secrets.enc");
         std::env::set_var("CHIMERA_VAULT_PATH", vault_path.to_str().unwrap());
@@ -1062,7 +1110,10 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         clear_env();
         std::env::set_var("CHIMERA_VAULT_KEY", env_key());
-        std::env::set_var("CHIMERA_SECURITY__WEBHOOK_SECRET", "0123456789abcdef0123456789abcdef");
+        std::env::set_var(
+            "CHIMERA_SECURITY__WEBHOOK_SECRET",
+            "0123456789abcdef0123456789abcdef",
+        );
         let dir = tempfile::tempdir().unwrap();
         // Read-only parent: exists() is false for the target file (fresh
         // vault), but save_secrets' O_EXCL tmp create fails with EACCES.

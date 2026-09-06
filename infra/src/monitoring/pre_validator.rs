@@ -6,11 +6,11 @@
 //! - Slippage estimation
 //! - Token age check
 
-use chimera_core::config::AppConfig;
 use crate::monitoring::HeliusClient;
-use chimera_core::price_cache::PriceCache;
 use crate::token::TokenMetadataFetcher;
 use anyhow::Result;
+use chimera_core::config::AppConfig;
+use chimera_core::price_cache::PriceCache;
 use rust_decimal::prelude::*;
 use std::sync::Arc;
 
@@ -234,7 +234,8 @@ impl PreValidator {
         }
 
         // 4. Estimate slippage locally using the cached pool liquidity
-        let estimated_slippage = self.estimate_slippage_local(amount_sol, liquidity_usd, price_cache);
+        let estimated_slippage =
+            self.estimate_slippage_local(amount_sol, liquidity_usd, price_cache);
 
         Ok(estimated_slippage)
     }
@@ -266,7 +267,8 @@ impl PreValidator {
         // Fallback: size-only heuristic (0.5% base + 0.1% per 0.1 SOL)
         let base = Decimal::from_str("0.5").unwrap_or(Decimal::ZERO);
         let size_unit = Decimal::from_str("0.1").unwrap_or(Decimal::ONE);
-        let size_part = (amount_sol / size_unit) * Decimal::from_str("0.1").unwrap_or(Decimal::ZERO);
+        let size_part =
+            (amount_sol / size_unit) * Decimal::from_str("0.1").unwrap_or(Decimal::ZERO);
         (base + size_part).min(max_slippage)
     }
 

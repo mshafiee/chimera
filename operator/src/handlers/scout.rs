@@ -337,7 +337,9 @@ pub async fn get_cache_stats(
     let total_entries = very_high + high + medium + low + inactive;
 
     // Simulated cache metrics (in production, get from Scout's cache manager)
-    let total_hits = very_high.saturating_mul(10).saturating_add(high.saturating_mul(5));
+    let total_hits = very_high
+        .saturating_mul(10)
+        .saturating_add(high.saturating_mul(5));
     let total_misses = medium.saturating_add(low);
     let max_size = 10000;
 
@@ -415,11 +417,12 @@ async fn get_wallet_statistics(db: &Arc<dyn Database>) -> Result<WalletStatistic
     .map_err(AppError::Database)?;
 
     // Get last update time from the most recently updated wallet
-    let last_time: Option<String> =
-        sqlx::query_scalar("SELECT MAX(updated_at)::TEXT FROM wallets WHERE updated_at IS NOT NULL")
-            .fetch_one(&pool)
-            .await
-            .map_err(AppError::Database)?;
+    let last_time: Option<String> = sqlx::query_scalar(
+        "SELECT MAX(updated_at)::TEXT FROM wallets WHERE updated_at IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?;
 
     Ok(WalletStatistics {
         total_wallets,
@@ -459,8 +462,7 @@ async fn calculate_wqs_distribution(db: &Arc<dyn Database>) -> Result<Vec<WQSBuc
             .await
             .map_err(AppError::Database)?;
 
-    let mut counts: std::collections::HashMap<String, i64> =
-        rows.into_iter().collect();
+    let mut counts: std::collections::HashMap<String, i64> = rows.into_iter().collect();
     let distribution = vec!["0-20", "20-40", "40-60", "60-80", "80-100"]
         .into_iter()
         .map(|range_name| {
@@ -576,12 +578,11 @@ async fn calculate_scout_metrics(db: &Arc<dyn Database>) -> Result<ScoutMetricsR
     .await
     .map_err(AppError::Database)?;
 
-    let backtest_total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE notes LIKE '%Backtest:%'",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
+    let backtest_total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM wallets WHERE notes LIKE '%Backtest:%'")
+            .fetch_one(&pool)
+            .await
+            .map_err(AppError::Database)?;
 
     let backtest_success_rate = if backtest_total > 0 {
         (backtest_passed as f64 / backtest_total as f64) * 100.0
@@ -597,12 +598,11 @@ async fn calculate_scout_metrics(db: &Arc<dyn Database>) -> Result<ScoutMetricsR
             .await
             .map_err(AppError::Database)?;
 
-    let validation_total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE status IN ('ACTIVE', 'CANDIDATE')",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
+    let validation_total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM wallets WHERE status IN ('ACTIVE', 'CANDIDATE')")
+            .fetch_one(&pool)
+            .await
+            .map_err(AppError::Database)?;
 
     let validation_pass_rate = if validation_total > 0 {
         (validation_passed as f64 / validation_total as f64) * 100.0

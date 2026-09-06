@@ -366,7 +366,11 @@ impl RecoveryManager {
     /// The balance is queried for the position's OWNING wallet (`wallet_address`),
     /// never the default wallet — in a multi-wallet setup the default keypair
     /// may hold no tokens for this position and would produce a false zero.
-    async fn check_is_balance_zero(&self, token_address: &str, wallet_address: &str) -> AppResult<bool> {
+    async fn check_is_balance_zero(
+        &self,
+        token_address: &str,
+        wallet_address: &str,
+    ) -> AppResult<bool> {
         let wallet_pubkey = wallet_address
             .parse::<Pubkey>()
             .map_err(|e| AppError::Internal(format!("Invalid wallet address: {}", e)))?;

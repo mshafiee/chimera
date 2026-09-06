@@ -249,7 +249,11 @@ impl WebhookLifecycleManager {
                 _ => break,
             };
 
-            let webhook = match self.helius_client.get_webhook_typed(&batch_webhook_id).await {
+            let webhook = match self
+                .helius_client
+                .get_webhook_typed(&batch_webhook_id)
+                .await
+            {
                 Ok(w) => w,
                 Err(e) => {
                     // Only treat as stale on a definitive 404 (2026-08-17):
@@ -476,7 +480,10 @@ impl WebhookLifecycleManager {
                     "delete",
                     "success",
                     Some(&webhook_id),
-                    Some(&format!("Would delete webhook for wallet {} (dry-run)", wallet)),
+                    Some(&format!(
+                        "Would delete webhook for wallet {} (dry-run)",
+                        wallet
+                    )),
                     None,
                     Some(start.elapsed().as_millis() as i32),
                 )
@@ -489,10 +496,7 @@ impl WebhookLifecycleManager {
             Ok(()) => {
                 let _ = self.db.clear_webhook_id(wallet).await;
 
-                let _ = self
-                    .db
-                    .upsert_wallet_monitoring(wallet, None, false)
-                    .await;
+                let _ = self.db.upsert_wallet_monitoring(wallet, None, false).await;
 
                 let _ = self
                     .db
@@ -898,80 +902,80 @@ impl WebhookLifecycleManager {
                         failed += 1;
                         warn!(webhook_id = %webhook_id, error = %e, "Failed to cleanup orphaned webhook");
                     }
+                }
             }
         }
-    }
 
-    // Recover unhealthy/paused webhooks: delete stale Helius entry,
-    // clear DB ID, then register fresh below.
-    let recovery_wallets: Vec<String> = db_webhooks
-        .iter()
-        .filter(|dw| {
-            dw.monitoring_enabled
-                && dw.helius_webhook_id.is_some()
-                && (dw.webhook_health_status.as_deref() == Some("unhealthy")
-                    || dw.webhook_status.as_deref() == Some("paused")
-                    || dw.webhook_health_status.as_deref() == Some("error"))
-        })
-        .map(|dw| dw.wallet_address.clone())
-        .collect();
-
-    for wallet in &recovery_wallets {
-        let webhook_id = db_webhooks
+        // Recover unhealthy/paused webhooks: delete stale Helius entry,
+        // clear DB ID, then register fresh below.
+        let recovery_wallets: Vec<String> = db_webhooks
             .iter()
-            .find(|dw| dw.wallet_address == *wallet)
-            .and_then(|dw| dw.helius_webhook_id.clone());
+            .filter(|dw| {
+                dw.monitoring_enabled
+                    && dw.helius_webhook_id.is_some()
+                    && (dw.webhook_health_status.as_deref() == Some("unhealthy")
+                        || dw.webhook_status.as_deref() == Some("paused")
+                        || dw.webhook_health_status.as_deref() == Some("error"))
+            })
+            .map(|dw| dw.wallet_address.clone())
+            .collect();
 
-        if let Some(ref id) = webhook_id {
-            // Verify-then-delete (2026-08-17): the persisted "error"/"unhealthy"
-            // flag is often a stale artifact of a transient failure. Deleting
-            // the webhook without re-checking destroyed live webhooks —
-            // including a freshly consolidated 50-wallet shared webhook. Only
-            // delete on a definitive 404; if the webhook still exists, clear
-            // the stale flag and keep it.
-            match self.helius_client.get_webhook_typed(id).await {
-                Ok(_) => {
-                    info!(
-                        wallet = %wallet,
-                        webhook_id = %id,
-                        "Recovery skipped: webhook still exists in Helius (stale health flag cleared)"
-                    );
-                    let _ = self
-                        .db
-                        .update_webhook_health_status(wallet, "healthy", None)
-                        .await;
-                    continue;
-                }
-                Err(e) => {
-                    let err = e.to_string();
-                    if !(err.contains("404") || err.contains("Not Found")) {
-                        // Transient error (429/network): do NOT delete and do
-                        // NOT strip the DB reference — retry next cycle.
-                        warn!(
+        for wallet in &recovery_wallets {
+            let webhook_id = db_webhooks
+                .iter()
+                .find(|dw| dw.wallet_address == *wallet)
+                .and_then(|dw| dw.helius_webhook_id.clone());
+
+            if let Some(ref id) = webhook_id {
+                // Verify-then-delete (2026-08-17): the persisted "error"/"unhealthy"
+                // flag is often a stale artifact of a transient failure. Deleting
+                // the webhook without re-checking destroyed live webhooks —
+                // including a freshly consolidated 50-wallet shared webhook. Only
+                // delete on a definitive 404; if the webhook still exists, clear
+                // the stale flag and keep it.
+                match self.helius_client.get_webhook_typed(id).await {
+                    Ok(_) => {
+                        info!(
                             wallet = %wallet,
                             webhook_id = %id,
-                            error = %err,
-                            "Recovery deferred: webhook verification failed transiently"
+                            "Recovery skipped: webhook still exists in Helius (stale health flag cleared)"
                         );
+                        let _ = self
+                            .db
+                            .update_webhook_health_status(wallet, "healthy", None)
+                            .await;
                         continue;
                     }
-                    info!(
-                        wallet = %wallet,
-                        webhook_id = %id,
-                        "Webhook confirmed gone (404) — deleting reference for re-registration"
-                    );
+                    Err(e) => {
+                        let err = e.to_string();
+                        if !(err.contains("404") || err.contains("Not Found")) {
+                            // Transient error (429/network): do NOT delete and do
+                            // NOT strip the DB reference — retry next cycle.
+                            warn!(
+                                wallet = %wallet,
+                                webhook_id = %id,
+                                error = %err,
+                                "Recovery deferred: webhook verification failed transiently"
+                            );
+                            continue;
+                        }
+                        info!(
+                            wallet = %wallet,
+                            webhook_id = %id,
+                            "Webhook confirmed gone (404) — deleting reference for re-registration"
+                        );
+                    }
                 }
             }
+
+            if let Err(e) = self.db.clear_webhook_id(wallet).await {
+                warn!(wallet = %wallet, error = %e, "Failed to clear webhook_id for recovery");
+            }
+
+            missing_wallets.push(wallet.clone());
         }
 
-        if let Err(e) = self.db.clear_webhook_id(wallet).await {
-            warn!(wallet = %wallet, error = %e, "Failed to clear webhook_id for recovery");
-        }
-
-        missing_wallets.push(wallet.clone());
-    }
-
-    // Register missing webhooks
+        // Register missing webhooks
         for wallet in missing_wallets {
             match self.register_wallet_webhook(&wallet).await {
                 Ok(result) if result.success => {

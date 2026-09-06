@@ -34,7 +34,10 @@ pub struct ExecutionLock {
 
 impl ExecutionLock {
     /// Create a new execution lock with the given configuration
-    pub fn new(config: ExecutionLockConfig, metrics: Option<Arc<crate::metrics::ExecutionLockMetrics>>) -> Self {
+    pub fn new(
+        config: ExecutionLockConfig,
+        metrics: Option<Arc<crate::metrics::ExecutionLockMetrics>>,
+    ) -> Self {
         info!(
             enabled = config.enabled,
             timeout_seconds = config.lock_timeout_seconds,
@@ -441,13 +444,19 @@ mod tests {
         let lock = ExecutionLock::new(config, None);
 
         let guard = lock.try_acquire("trade-123", "worker-1");
-        assert!(lock.is_locked("trade-123"), "Should be locked while guard is active");
+        assert!(
+            lock.is_locked("trade-123"),
+            "Should be locked while guard is active"
+        );
 
         // Explicitly drop the guard
         drop(guard);
 
         // Lock should be released after guard is dropped
-        assert!(!lock.is_locked("trade-123"), "Lock should be released after guard drop");
+        assert!(
+            !lock.is_locked("trade-123"),
+            "Lock should be released after guard drop"
+        );
     }
 
     #[test]
@@ -483,7 +492,10 @@ mod tests {
 
         // Both should succeed when disabled
         assert!(guard1.is_some(), "First acquisition should succeed");
-        assert!(guard2.is_some(), "Second acquisition should succeed when disabled");
+        assert!(
+            guard2.is_some(),
+            "Second acquisition should succeed when disabled"
+        );
     }
 
     #[test]
@@ -495,7 +507,10 @@ mod tests {
         assert!(lock.is_locked("trade-123"), "Should be locked");
 
         lock.force_release("trade-123");
-        assert!(!lock.is_locked("trade-123"), "Lock should be force-released");
+        assert!(
+            !lock.is_locked("trade-123"),
+            "Lock should be force-released"
+        );
     }
 
     #[test]

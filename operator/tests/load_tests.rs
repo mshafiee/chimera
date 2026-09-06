@@ -16,8 +16,8 @@ use chimera_operator::metrics::MetricsState;
 use chimera_operator::notifications::{NotificationEvent, NotificationService};
 use rust_decimal::Decimal;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Mock notification service for load testing
@@ -58,7 +58,8 @@ impl NotificationService for LoadNotifier {
 
         let elapsed = start.elapsed();
         self.events_sent.fetch_add(1, Ordering::Relaxed);
-        self.processing_time_ns.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+        self.processing_time_ns
+            .fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
 
         Ok(())
     }
@@ -135,7 +136,11 @@ async fn test_atomic_counter_performance() {
     assert_eq!(counter.load(Ordering::Relaxed), expected);
 
     // Performance assertion: 1 million increments in under a second
-    assert!(duration.as_millis() < 1000, "Atomic operations too slow: {:?}", duration);
+    assert!(
+        duration.as_millis() < 1000,
+        "Atomic operations too slow: {:?}",
+        duration
+    );
 }
 
 #[tokio::test]
@@ -149,10 +154,7 @@ async fn test_metrics_recording_overhead() {
 
     for i in 0..iterations {
         // Simulate metrics recording
-        metrics
-            .jito_submissions
-            .with_label_values(&["jito"])
-            .inc();
+        metrics.jito_submissions.with_label_values(&["jito"]).inc();
         metrics
             .jito_resolutions
             .with_label_values(&["success"])
@@ -180,7 +182,10 @@ async fn test_metrics_recording_overhead() {
         10_000
     );
     assert_eq!(
-        metrics.jito_resolutions.with_label_values(&["success"]).get(),
+        metrics
+            .jito_resolutions
+            .with_label_values(&["success"])
+            .get(),
         10_000
     );
 }
@@ -220,10 +225,31 @@ async fn test_concurrent_metric_updates() {
 
     // Data integrity: 25 tasks × 1000 submissions per mode; per task 900
     // successes + 100 failures. No update may be lost or mislabeled.
-    assert_eq!(metrics.jito_submissions.with_label_values(&["jito"]).get(), 25_000);
-    assert_eq!(metrics.jito_submissions.with_label_values(&["helius"]).get(), 25_000);
-    assert_eq!(metrics.jito_resolutions.with_label_values(&["success"]).get(), 45_000);
-    assert_eq!(metrics.jito_resolutions.with_label_values(&["failed"]).get(), 5_000);
+    assert_eq!(
+        metrics.jito_submissions.with_label_values(&["jito"]).get(),
+        25_000
+    );
+    assert_eq!(
+        metrics
+            .jito_submissions
+            .with_label_values(&["helius"])
+            .get(),
+        25_000
+    );
+    assert_eq!(
+        metrics
+            .jito_resolutions
+            .with_label_values(&["success"])
+            .get(),
+        45_000
+    );
+    assert_eq!(
+        metrics
+            .jito_resolutions
+            .with_label_values(&["failed"])
+            .get(),
+        5_000
+    );
 
     // Performance assertion: 50k concurrent updates should be fast
     assert!(
@@ -324,7 +350,9 @@ async fn test_health_check_latency() {
         std::hint::black_box(health.successful_resolutions);
 
         // Simulate calculation
-        std::hint::black_box(health.successful_resolutions as f64 / health.total_submissions as f64);
+        std::hint::black_box(
+            health.successful_resolutions as f64 / health.total_submissions as f64,
+        );
     }
 
     let duration = start.elapsed();

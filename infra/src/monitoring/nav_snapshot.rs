@@ -18,8 +18,8 @@ use std::sync::Arc;
 use rust_decimal::Decimal;
 use tokio_util::sync::CancellationToken;
 
-use chimera_core::config::AppConfig;
 use crate::db_abstraction::Database;
+use chimera_core::config::AppConfig;
 use chimera_core::error::AppResult;
 use chimera_core::price_cache::PriceCache;
 
@@ -41,9 +41,8 @@ pub fn spawn_nav_snapshot_task(
     cancel_token: CancellationToken,
 ) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-            SNAPSHOT_INTERVAL_SECS,
-        ));
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(SNAPSHOT_INTERVAL_SECS));
         let mut tick: u64 = 0;
 
         tracing::info!(

@@ -213,9 +213,10 @@ impl TransactionBuilder {
                 })?;
 
                 // Convert SOL amount to lamports
-                let amount_lamports = crate::utils::sol_to_lamports(signal.payload.amount_sol).map_err(|e| {
-                    crate::error::AppError::Validation(format!("Invalid SOL amount: {}", e))
-                })?;
+                let amount_lamports = crate::utils::sol_to_lamports(signal.payload.amount_sol)
+                    .map_err(|e| {
+                        crate::error::AppError::Validation(format!("Invalid SOL amount: {}", e))
+                    })?;
                 (sol_mint, token_mint, amount_lamports)
             }
             Action::Sell => {
@@ -293,16 +294,19 @@ impl TransactionBuilder {
         };
 
         let swap_response = execute_with_jupiter_error_handling(
-            || self.get_jupiter_swap(
-                input_mint,
-                output_mint,
-                amount,
-                wallet_keypair.pubkey(),
-                slippage_bps,
-            ),
+            || {
+                self.get_jupiter_swap(
+                    input_mint,
+                    output_mint,
+                    amount,
+                    wallet_keypair.pubkey(),
+                    slippage_bps,
+                )
+            },
             &retry_config,
-            "Jupiter swap API call"
-        ).await;
+            "Jupiter swap API call",
+        )
+        .await;
 
         // Track Jupiter API failures/success with circuit breaker
         match &swap_response {
@@ -319,7 +323,7 @@ impl TransactionBuilder {
                     if cb.record_jupiter_failure(error_type).await.unwrap_or(false) {
                         // Circuit breaker was tripped, return with circuit breaker error
                         return Err(AppError::CircuitBreaker(
-                            "Jupiter API failures exceeded threshold - trading halted".to_string()
+                            "Jupiter API failures exceeded threshold - trading halted".to_string(),
                         ));
                     }
                 }
@@ -362,9 +366,7 @@ impl TransactionBuilder {
             self.rpc_client.get_latest_blockhash(),
         )
         .await
-        .map_err(|e| {
-            crate::error::AppError::Rpc(format!("Failed to get blockhash: {}", e))
-        })?;
+        .map_err(|e| crate::error::AppError::Rpc(format!("Failed to get blockhash: {}", e)))?;
 
         // Jupiter v1 API returns VersionedTransaction (starts with version byte 0x01)
         // Check the first byte to determine transaction type
@@ -447,10 +449,13 @@ impl TransactionBuilder {
             }
 
             // Re-serialize signed transaction via the unified bincode 2.x API.
-            let signed_bytes =
-                bincode::serde::encode_to_vec(&versioned_tx, bincode::config::legacy()).map_err(
-                    |e| crate::error::AppError::Parse(format!("Failed to re-serialize V0 tx: {}", e)),
-                )?;
+            let signed_bytes = bincode::serde::encode_to_vec(
+                &versioned_tx,
+                bincode::config::legacy(),
+            )
+            .map_err(|e| {
+                crate::error::AppError::Parse(format!("Failed to re-serialize V0 tx: {}", e))
+            })?;
 
             Ok(BuiltTransaction::Versioned {
                 transaction_bytes: signed_bytes,
@@ -507,9 +512,7 @@ impl TransactionBuilder {
             self.rpc_client.get_latest_blockhash(),
         )
         .await
-        .map_err(|e| {
-            crate::error::AppError::Rpc(format!("Failed to get blockhash: {}", e))
-        })?;
+        .map_err(|e| crate::error::AppError::Rpc(format!("Failed to get blockhash: {}", e)))?;
 
         let empty_tx = Transaction::new_with_payer(&[], Some(&wallet_keypair.pubkey()));
 
@@ -541,10 +544,8 @@ impl TransactionBuilder {
         let accounts = crate::metrics::timed_rpc(
             "primary",
             "getTokenAccountsByOwner",
-            self.rpc_client.get_token_accounts_by_owner(
-                wallet_pubkey,
-                TokenAccountsFilter::Mint(*token_mint),
-            ),
+            self.rpc_client
+                .get_token_accounts_by_owner(wallet_pubkey, TokenAccountsFilter::Mint(*token_mint)),
         )
         .await
         .ok()?;
@@ -587,10 +588,24 @@ impl TransactionBuilder {
     ) -> AppResult<JupiterSwapResponse> {
         if self.config.jupiter.use_swap_v2 {
             // v2 Meta-Aggregator: single `/order` call with all routers competing
-            self.get_jupiter_v2_order(input_mint, output_mint, amount, user_public_key, slippage_bps).await
+            self.get_jupiter_v2_order(
+                input_mint,
+                output_mint,
+                amount,
+                user_public_key,
+                slippage_bps,
+            )
+            .await
         } else {
             // v1 fallback: multi-DEX comparison + swap
-            self.get_jupiter_v1_swap(input_mint, output_mint, amount, user_public_key, slippage_bps).await
+            self.get_jupiter_v1_swap(
+                input_mint,
+                output_mint,
+                amount,
+                user_public_key,
+                slippage_bps,
+            )
+            .await
         }
     }
 
@@ -610,13 +625,16 @@ impl TransactionBuilder {
         // Determine if we should use RTSE (Real-Time Slippage Estimation)
         // RTSE automatically prioritizes slippage-protected routes
         let slippage_param = if self.config.jupiter.enable_rtse {
-            "rtse"  // Let Jupiter determine optimal slippage based on market conditions
+            "rtse" // Let Jupiter determine optimal slippage based on market conditions
         } else {
             &slippage_bps.to_string()
         };
 
         // Build v2 /order request
-        let url = format!("{}/order", self.config.jupiter.api_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/order",
+            self.config.jupiter.api_url.trim_end_matches('/')
+        );
 
         let mut request_params = vec![
             ("inputMint", input_mint.to_string()),
@@ -653,22 +671,24 @@ impl TransactionBuilder {
             format!("{}/?{}", url, params.join("&"))
         };
 
-        let response = crate::jupiter::with_api_key(
-            self.http_client.get(&url_with_params),
-        )
-        .send()
-        .await
-        .map_err(|e| {
-            crate::error::AppError::Http(format!("Jupiter v2 /order request failed: {}", e))
-        })?;
+        let response = crate::jupiter::with_api_key(self.http_client.get(&url_with_params))
+            .send()
+            .await
+            .map_err(|e| {
+                crate::error::AppError::Http(format!("Jupiter v2 /order request failed: {}", e))
+            })?;
 
         let status = response.status();
         let raw: serde_json::Value = response.json().await.map_err(|e| {
-            crate::error::AppError::Parse(format!("Failed to parse Jupiter v2 /order response: {}", e))
+            crate::error::AppError::Parse(format!(
+                "Failed to parse Jupiter v2 /order response: {}",
+                e
+            ))
         })?;
 
         if !status.is_success() {
-            let error_msg = raw.get("error")
+            let error_msg = raw
+                .get("error")
                 .and_then(|v| v.as_str())
                 .or_else(|| raw.get("errorMessage").and_then(|v| v.as_str()))
                 .unwrap_or("Unknown Jupiter API error");
@@ -681,13 +701,15 @@ impl TransactionBuilder {
             );
 
             return Err(crate::error::AppError::Http(format!(
-                "Jupiter v2 /order failed: {} - {}", status, error_msg
+                "Jupiter v2 /order failed: {} - {}",
+                status, error_msg
             )));
         }
 
         // Parse v2 /order response
         // v2 returns `transaction` (base64) or `quote` fields directly
-        let swap_transaction = raw.get("transaction")
+        let swap_transaction = raw
+            .get("transaction")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
                 crate::error::AppError::Parse(format!(
@@ -706,11 +728,13 @@ impl TransactionBuilder {
             .and_then(|p| Decimal::from_f64((p * 100.0).abs()));
 
         // Extract route information for logging
-        let router = raw.get("router")
+        let router = raw
+            .get("router")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
 
-        let mode = raw.get("mode")
+        let mode = raw
+            .get("mode")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
 
@@ -725,11 +749,13 @@ impl TransactionBuilder {
         // Direction-aware (mirrors get_quote_prices): for a SELL (token→SOL)
         // the raw inAmount/outAmount ratio would be token-units-per-lamport —
         // the inverse of the documented 'lamports per base unit' semantics.
-        let in_amount = raw.get("inAmount")
+        let in_amount = raw
+            .get("inAmount")
             .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()))
             .or_else(|| raw.get("inAmount").and_then(|v| v.as_u64()));
 
-        let out_amount = raw.get("outAmount")
+        let out_amount = raw
+            .get("outAmount")
             .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()))
             .or_else(|| raw.get("outAmount").and_then(|v| v.as_u64()));
 
@@ -747,14 +773,17 @@ impl TransactionBuilder {
         };
 
         // Extract fee information from routePlan
-        let route_fee_sol: Option<Decimal> = raw.get("routePlan")
+        let route_fee_sol: Option<Decimal> = raw
+            .get("routePlan")
             .and_then(|plan| plan.as_array())
             .and_then(|steps| {
                 let mut total_fee = Decimal::ZERO;
                 for step in steps.iter().filter_map(|s| s.as_object()) {
                     if let Some(swap_info) = step.get("swapInfo").and_then(|si| si.as_object()) {
-                        if let Some(fee_amount) = swap_info.get("feeAmount")
-                            .and_then(|f| f.as_str().and_then(|s| Decimal::from_str(s).ok())) {
+                        if let Some(fee_amount) = swap_info
+                            .get("feeAmount")
+                            .and_then(|f| f.as_str().and_then(|s| Decimal::from_str(s).ok()))
+                        {
                             total_fee += fee_amount;
                         }
                     }
@@ -825,17 +854,18 @@ impl TransactionBuilder {
             "Requesting Jupiter v1 swap (fallback)"
         );
 
-        let response = crate::jupiter::with_api_key(
-            self.http_client.post(url).json(&payload),
-        )
-        .send()
-        .await
-        .map_err(|e| {
-            crate::error::AppError::Http(format!("Jupiter v1 swap request failed: {}", e))
-        })?;
+        let response = crate::jupiter::with_api_key(self.http_client.post(url).json(&payload))
+            .send()
+            .await
+            .map_err(|e| {
+                crate::error::AppError::Http(format!("Jupiter v1 swap request failed: {}", e))
+            })?;
 
         let raw: serde_json::Value = response.json().await.map_err(|e| {
-            crate::error::AppError::Parse(format!("Failed to parse Jupiter v1 swap response: {}", e))
+            crate::error::AppError::Parse(format!(
+                "Failed to parse Jupiter v1 swap response: {}",
+                e
+            ))
         })?;
 
         // v1 returns `swapTransaction`
@@ -920,7 +950,8 @@ impl TransactionBuilder {
 
             match res {
                 Ok(response) => {
-                    if (response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS || response.status().is_server_error())
+                    if (response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        || response.status().is_server_error())
                         && retries > 0
                     {
                         retries -= 1;
@@ -938,7 +969,10 @@ impl TransactionBuilder {
                     }
 
                     let quote: JupiterQuote = response.json().await.map_err(|e| {
-                        crate::error::AppError::Parse(format!("Failed to parse Jupiter quote: {}", e))
+                        crate::error::AppError::Parse(format!(
+                            "Failed to parse Jupiter quote: {}",
+                            e
+                        ))
                     })?;
 
                     return Ok(quote);
