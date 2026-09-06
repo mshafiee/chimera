@@ -658,6 +658,24 @@ pub struct PortfolioSnapshot {
     pub trade_mode: Option<String>,
 }
 
+/// One parsed swap of a tracked wallet, recorded pre-admission (Gate 0).
+/// Bilateral: side is BUY or SELL. Idempotent per (tx_signature, token_address, side).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SmartMoneySignal {
+    pub wallet_address: String,
+    pub token_address: String,
+    pub token_symbol: Option<String>,
+    pub side: String,
+    pub amount_sol: rust_decimal::Decimal,
+    pub amount_tokens: rust_decimal::Decimal,
+    pub token_decimals: Option<i32>,
+    pub price_usd: Option<rust_decimal::Decimal>,
+    pub price_sol: Option<rust_decimal::Decimal>,
+    pub tx_signature: String,
+    pub slot: i64,
+    pub block_time: chrono::DateTime<chrono::Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7,9 +7,9 @@ use super::{
     ConfigAuditItem, Database, DbPool, DeadLetterItem, DiscrepancyRow, DiscrepancyTypeStats,
     ExitTargetData, InsertPosition, InsertTrade, KillSwitchState, LatencyBucket, Position,
     PositionDetail, PositionRecord, ReconciliationRun, ReconciliationStats, ReconciliationStatus,
-    RetryableDlqItem, ShadowKellyStats, Trade, TradeDetail, TradeLatencyStats, TradeStatistics,
-    UpdateDlqItemParams, UpdatePosition, UpdateTradeStatus, Wallet, WalletCopyPerformance,
-    WalletDetail, WalletMonitoring, WalletPerformance, WebhookAuditLog,
+    RetryableDlqItem, ShadowKellyStats, SmartMoneySignal, Trade, TradeDetail, TradeLatencyStats,
+    TradeStatistics, UpdateDlqItemParams, UpdatePosition, UpdateTradeStatus, Wallet,
+    WalletCopyPerformance, WalletDetail, WalletMonitoring, WalletPerformance, WebhookAuditLog,
 };
 use chimera_core::error::{AppError, AppResult};
 use rust_decimal::prelude::*;
@@ -2994,6 +2994,55 @@ impl Database for PostgresBackend {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn record_smart_money_signal(&self, signal: &SmartMoneySignal) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO smart_money_signals (
+                wallet_address, token_address, token_symbol, side,
+                amount_sol, amount_tokens, token_decimals,
+                price_usd, price_sol, tx_signature, slot, block_time
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (tx_signature, token_address, side) DO NOTHING
+            "#,
+        )
+        .bind(&signal.wallet_address)
+        .bind(&signal.token_address)
+        .bind(&signal.token_symbol)
+        .bind(&signal.side)
+        .bind(signal.amount_sol)
+        .bind(signal.amount_tokens)
+        .bind(signal.token_decimals)
+        .bind(signal.price_usd)
+        .bind(signal.price_sol)
+        .bind(&signal.tx_signature)
+        .bind(signal.slot)
+        .bind(signal.block_time)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_token_wallet_count(
+        &self,
+        token_address: &str,
+        window_hours: i64,
+    ) -> AppResult<i64> {
+        let row: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(DISTINCT wallet_address)::BIGINT
+            FROM smart_money_signals
+            WHERE token_address = $1
+              AND side = 'BUY'
+              AND block_time > NOW() - make_interval(hours => $2)
+            "#,
+        )
+        .bind(token_address)
+        .bind(window_hours)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
     }
 
     async fn update_last_speculative_signal(

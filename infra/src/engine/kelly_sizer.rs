@@ -1005,6 +1005,21 @@ pub(crate) mod tests {
             Ok(())
         }
 
+        async fn record_smart_money_signal(
+            &self,
+            _signal: &crate::db_abstraction::SmartMoneySignal,
+        ) -> AppResult<()> {
+            Ok(())
+        }
+
+        async fn get_token_wallet_count(
+            &self,
+            _token_address: &str,
+            _window_hours: i64,
+        ) -> AppResult<i64> {
+            Ok(0)
+        }
+
         async fn update_last_speculative_signal(
             &self,
             _wallet_address: &str,

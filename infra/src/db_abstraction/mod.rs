@@ -13,9 +13,10 @@ pub use types::{
     ActivePositionEntry, ActivePositionSummary, ConfigAuditItem, DatabaseBackend, DatabaseConfig,
     DbPool, DeadLetterItem, DiscrepancyRow, DiscrepancyTypeStats, ExitTargetData, InsertPosition,
     InsertTrade, LatencyBucket, PoolStats, PositionDetail, PositionRecord, ReconciliationRun,
-    ReconciliationStats, ReconciliationStatus, RetryableDlqItem, TradeDetail, TradeLatencyStats,
-    UpdateDlqItemParams, UpdatePosition, UpdateTradeStatus, WalletCopyPerformance, WalletDetail,
-    WalletMonitoring, WalletMonitoringExtended, WebhookAuditLog, WebhookEligibility, WebhookStats,
+    ReconciliationStats, ReconciliationStatus, RetryableDlqItem, SmartMoneySignal, TradeDetail,
+    TradeLatencyStats, UpdateDlqItemParams, UpdatePosition, UpdateTradeStatus,
+    WalletCopyPerformance, WalletDetail, WalletMonitoring, WalletMonitoringExtended,
+    WebhookAuditLog, WebhookEligibility, WebhookStats,
 };
 
 use chimera_core::error::{AppError, AppResult};
@@ -595,6 +596,15 @@ pub trait Database: Send + Sync {
         wallet_address: &str,
         webhook_status: &str,
     ) -> AppResult<()>;
+
+    /// Record a parsed tracked-wallet swap pre-admission (Gate 0).
+    /// Idempotent via UNIQUE (tx_signature, token_address, side).
+    async fn record_smart_money_signal(&self, signal: &SmartMoneySignal) -> AppResult<()>;
+
+    /// Distinct tracked wallets with BUY rows for the token in the trailing
+    /// window (hours). Returns 0 on empty.
+    async fn get_token_wallet_count(&self, token_address: &str, window_hours: i64)
+        -> AppResult<i64>;
 
     /// Update last speculative signal timestamp for a wallet
     async fn update_last_speculative_signal(

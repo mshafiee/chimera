@@ -59,6 +59,10 @@ pub struct MockDb {
     pub exit_target_error: Arc<AtomicBool>,
     pub exit_target_delete_error: Arc<AtomicBool>,
     pub active_positions_error: Arc<AtomicBool>,
+    /// Gate 0: smart-money signals recorded via record_smart_money_signal.
+    pub recorded_signals: Arc<Mutex<Vec<SmartMoneySignal>>>,
+    /// Gate 0: canned distinct-wallet count returned by get_token_wallet_count.
+    pub token_wallet_count: Arc<Mutex<Option<i64>>>,
 }
 
 impl MockDb {
@@ -689,6 +693,22 @@ impl Database for MockDb {
         unimplemented!("MockDb::update_webhook_status not implemented")
     }
 
+    async fn record_smart_money_signal(&self, signal: &SmartMoneySignal) -> AppResult<()> {
+        self.recorded_signals
+            .lock()
+            .unwrap()
+            .push(signal.clone());
+        Ok(())
+    }
+
+    async fn get_token_wallet_count(
+        &self,
+        _token_address: &str,
+        _window_hours: i64,
+    ) -> AppResult<i64> {
+        Ok(self.token_wallet_count.lock().unwrap().map_or(0, |c| c))
+    }
+
     async fn update_last_speculative_signal(
         &self,
         wallet_address: &str,
@@ -1141,5 +1161,46 @@ impl Database for MockDb {
             .lock()
             .unwrap()
             .unwrap_or((rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)))
+    }
+}
+
+#[cfg(test)]
+mod smart_money_signal_tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[tokio::test]
+    async fn test_mock_records_smart_money_signal() {
+        let db = MockDb::new();
+        let signal = SmartMoneySignal {
+            wallet_address: "w".to_string(),
+            token_address: "tok".to_string(),
+            token_symbol: Some("TOK".to_string()),
+            side: "BUY".to_string(),
+            amount_sol: rust_decimal::Decimal::from(1),
+            amount_tokens: rust_decimal::Decimal::from(1000),
+            token_decimals: Some(6),
+            price_usd: None,
+            price_sol: None,
+            tx_signature: "sig1".to_string(),
+            slot: 123,
+            block_time: Utc::now(),
+        };
+        db.record_smart_money_signal(&signal)
+            .await
+            .expect("mock record must succeed");
+        assert_eq!(
+            db.recorded_signals.lock().unwrap().len(),
+            1,
+            "signal captured in mock sink"
+        );
+        assert_eq!(
+            db.get_token_wallet_count("tok", 12).await.expect("count"),
+            0,
+            "mock returns 0 (no real data)"
+        );
+        // Canned count override path (used by selection attribution tests).
+        *db.token_wallet_count.lock().unwrap() = Some(3);
+        assert_eq!(db.get_token_wallet_count("tok", 12).await.unwrap(), 3);
     }
 }
