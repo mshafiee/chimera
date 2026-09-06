@@ -199,11 +199,17 @@ services:
        - CHIMERA_SELECTION__TOKEN_AGE_TRIAL_ENABLED=true
        - CHIMERA_SELECTION__TOKEN_AGE_TRIAL_MAX_SIZE_SOL=0.25
        # Recency-weighted proven overlay (2026-08-24): after any proven path
-       # passes, the wallet's last 10 closed copy-trades must not be net-
+       # passes, the wallet's last N closed copy-trades must not be net-
        # negative. ArcebCcX kept solo-admitting on a positive all-time ledger
        # while its trailing week ran -0.24 SOL — long-window aggregates go
        # stale silently. Set to 0 to restore aggregate-only checks.
-       - CHIMERA_SELECTION__PROVEN_RECENCY_TRADES=10
+       # 10 -> 5 (2026-09-06): the only two actively-trading roster wallets
+       # (3nMNd89 WQS 64, 2qG8 WQS 72) have thin recent closed counts, so the
+       # 10-trade recency gate kept them unproven — the proven sizing boost
+       # (built exactly for the WQS-crush) never fired and every BUY died at
+       # POSITION_SIZE_ZERO (1,074 rejections in 5d, admissions 0 for 2 days).
+       # The shadow escape hatch still laps the exemption on negative form.
+       - CHIMERA_SELECTION__PROVEN_RECENCY_TRADES=5
        # Position cap for low-WQS wallets (WQS < 40 → max 0.25 SOL = min_size_sol)
        - CHIMERA_SELECTION__SPEAR_LITE_MAX_SIZE_SOL=0.25
        - CHIMERA_SELECTION__SPEAR_LITE_WQS_THRESHOLD=40.0
@@ -305,6 +311,16 @@ services:
        # fail-closes any non-GO verdict; Paper mode always proceeds so shadow
        # evidence keeps accumulating. See docs/profitability-gates.md.
        - CHIMERA_PROFITABILITY_GATE__ENABLED=true
+       # Sizing drought fix (2026-09-06): the WQS x confidence x hybrid x
+       # regime chain computed 0.108-0.131 SOL against the 0.25 floor ->
+       # POSITION_SIZE_ZERO on 100% of BUY flow (1,074 rejections in 5d,
+       # admissions 0 for 2 days). Floor 0.25 -> 0.10 restores flow: 12h
+       # shadow twins for the rejected cohort win 51.6% at +1.82%/trade
+       # (mirror_main) vs the admitted cohort's -0.26%. Cost ratio at 0.10
+       # SOL is ~3% round-trip — visible in the paper data as a real hurdle
+       # the evidence loop can now measure. REVERT if net PnL of sub-0.25
+       # entries is negative over ~50 signals.
+       - CHIMERA_POSITION_SIZING__MIN_SIZE_SOL=0.10
        # Execution cost gate (2026-09-02): 0.25 SOL micro-size blocked by 0.3% friction (cost 0.42% -> DEAD_LETTER, 3/3 last 6h).
        # Raised Shield 0.3%->1.2% and disabled Kelly friction so tail micro-trades can fill; Spear 2.5% covers 1.5 SOL tail.
        - CHIMERA_STRATEGY__SHIELD_MAX_TOTAL_COST_PERCENT=0.012
