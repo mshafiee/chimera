@@ -2,6 +2,70 @@
 
 **Scope:** Why paper trading is not profitable. All live numbers collected 2026-09-05 15:50–16:40 UTC from `chimera-01.moez.tech` (read-only SQL + operator logs + verdict API + `scripts/profitability_loop.sh`). Plan: `.kilo/plans/1788623416466-paper-profitability-investigation.md`.
 
+**UPDATE 2026-09-06T04:24Z** (post-deploy re-investigation, ~12h after the flow-stabilization deploy `955fc4c`): a NEW dominant loss driver has taken over the funnel — **POSITION_SIZE_ZERO sizing drought** (see §10). The deploy fixed what it targeted (CB thrash gone, roster repaired) but admission is now 0/day for two straight days because the sizer computes 0.10–0.13 SOL against a 0.25 SOL floor. Everything below §10 is the Sep-5 baseline.
+
+## 10. Post-deploy re-investigation (2026-09-06 04:24–04:45 UTC)
+
+### What the Sep-5 deploy fixed (verified live)
+
+| Target | Pre-deploy (Sep 5) | Post-deploy (Sep 6 04:24) |
+|---|---|---|
+| Circuit-breaker livelock | 5 trips/24h, perpetual COOLDOWN, 27 signals dropped/window | **0 trips in 12h**; breaker ACTIVE continuously; trading_allowed=true since 19:03Z Sep 5 |
+| Roster quality | 27/29 ACTIVE never traded | 29→7 ACTIVE (only real traders + 5 grace-protected), PROVING 33→55; sweep demoted 22 in one pass |
+| Dead letters | 22/7d, 7.4% NULL reasons | 0 trades created at all (see below) — DEAD_LETTER class moot |
+| Unit-test debt | 1 failing test + 2 broken test builds | Fixed in `7c9a42f`; 447/447 pass; 4 crates clippy-clean |
+
+### NEW dominant driver: sizing drought (0 admissions for 2 days)
+
+**0/2002 BUY decisions admitted since Sep 5 00:00Z.** The funnel didn't starve at the gates — it starved at the sizer:
+
+- Rejection timeline: Sep 2: 102 size-zero → Sep 3: 370 → Sep 4: 384 → Sep 5: 70 → Sep 6 (partial): 148. Concurrently admissions fell 8 → 17 → 7 → **0 → 0**.
+- The sizer path (operator logs, 492 hits/12h): `Sizer output below min_size_sol — returning zero (skip-below-min semantics)` with **computed_size 0.1075 SOL** (122×), **0.1312 SOL** (39×), 0.1210 (2×) — all below `min_size_sol: 0.25` → `POSITION_SIZE_ZERO`.
+- Affected wallets: WQS 64 (`3nMNd89…` SCALPER, 177 rejections) and WQS 72 (`2qG8…` SWING, 41) — both with long active-trade histories in the roster.
+
+**Why the math lands at 0.10–0.13:** `calculate_size` (position_sizer.rs:132) computes `capital(10 SOL) × base_size_pct(0.075) × wqs_factor(0.64/0.72) × confidence` = 0.48/0.54 SOL, then the hybrid multiplier chain: boost_avg ≈ 1.0, penalty_avg ≈ (0.5 + 1.0 + 1.0 + 0.8 + 0.7)/5 = 0.8, regime 0.8 → 0.48 × 0.8 × 0.8 ≈ 0.31 → quality_mult 0.7 (sub-0.7 quality) compounds via the penalty average again ≈ **0.10–0.13 SOL < 0.25 floor → skip**. The `regime_multiplier: 0.8` (logged on every rejection) is a structural drag active in the current market regime.
+
+**The WQS-crush regression is BACK, one layer up.** The Aug-18 proven-sizing boost exists precisely because "the WQS × confidence chain crushes proven wallets to ~0.025 SOL" — but the boost requires `factors.is_proven`, and the proven oracle (`wallet_is_proven`) now demands `proven_recency_trades: 10` (raised Sep 2 from 5) recent non-negative closed copy-trades. Wallets 3nMNd89/2qG8 have copy trades but thin recent closed counts → not proven → WQS chain → crushed → skip. The Sep-3/4 admissions were the last signals from wallets still qualifying before the recency window fully expired.
+
+### Shadow evidence on the size-zero cohort (12h twins, mirror_main)
+
+| Rejected by | n | Win% | Avg pnl% | Read |
+|---|---|---|---|---|
+| POSITION_SIZE_ZERO | 62 | 51.6 | **+1.82** | positive — the sizer is dropping a ~neutral-positive cohort |
+| TOKEN_TOO_NEW | 67 | 56.7 | +5.58 | still the top value class (16-trial window pending) |
+| LIQUIDITY_BELOW_MINIMUM | 78 | 41.0 | +1.02 | mild positive |
+| WALLET_NOT_ACTIVE | 73 | 43.8 | −0.29 | protective — correctly dropped |
+| **ADMITTED twins** | 1 | 0 | −5.24 | the lone admission Sep 5 18:23 lost (realized trade closed −0.134 SOL at 48h) |
+
+The admitted cohort (30d twins, n=118): 44.9% win, **−0.26%/trade** — still the worst cohort in the book (§3 unchanged).
+
+### Exit-strategy divergence is now extreme (7d rejected book)
+
+mirror_main +20.2%/trade (+950 SOL nominal, n=4698) vs wallet_sell −2.9% and fixed_24h −8.7%. The live book exits through the wallet_sell rail (`copy_wallet_sells=false` → profit-management targets) — the live rail's nearest shadow analogue is among the WORST strategies, while the one strategy the selection was calibrated on (mirror_main) is unreachable live. The `profit_target_5` exit reason (n=1522, +77.5% avg on winners in the shadow) shows how much upside the mirror path banks that the live path never captures; `recovery_gate` (n=1396, −7.2% avg) dominates the live-shaped losers.
+
+### Infra/ops (12h)
+
+- 8,700 Jupiter 0-price tombstones (rate ~2× Sep-5 level; token variety up — 184 cache entries) but zero ERROR lines; webhook 751 rate-limit skips (Helius 429 backoff), 14 Dune promote-query failures (both 7d/24h queries failing every 30-min tick — promotion pipeline effectively offline).
+- On-chain audit overruled shadow book for 132Tkgf: 183 shadow samples vs 2 on-chain round trips — the wallet's real trading is nearly nonexistent; shadow keeps it ACTIVE, reality says it produces no copyable flow.
+- `NO_ACTIVE_POSITION` (10.9k/7d) remains the top raw rejection — that is SELL/monitoring traffic for wallets with no open position (shadow hygiene, not loss driver).
+
+### Loss-driver ranking (post-deploy)
+
+1. **Sizing drought (NEW #1)** — computed sizes 0.10–0.13 vs 0.25 floor; 100% of BUY flow dies at the sizer; admissions 0 for 2 days. Until this is fixed, every other number in this report is frozen.
+2. **Admitted cohort negative EV** (unchanged) — 30d twins −0.26%/trade; the one post-deploy admission lost −0.134 SOL.
+3. **Live exit rail ≠ shadow calibration rail** (sharpened) — mirror_main +20.2% vs wallet_sell −2.9% on identical 7d signals; selection tuning targets the wrong exit.
+4. **Roster → promotion pipeline offline** — Dune promote queries failing every tick; PROVING wallets (55) cannot graduate via the Dune path; only 2 of 12h signal-producers are genuinely active.
+5. **Regime multiplier 0.8** — structural de-sizing during the current regime; combined with the quality penalty it is the difference between a tradeable 0.31 SOL and a rejected 0.13.
+
+### Recommended immediate actions (config-level, no code)
+
+1. Lower `position_sizing.min_size_sol` 0.25 → 0.10 **or** raise `base_size_pct` 0.075 → 0.10 for the paper phase — restores flow with sizes whose cost ratio (0.30% entry cost on 0.10 SOL ≈ 3%) is still visible as a real hurdle in the paper data.
+2. Widen `proven_recency_trades` 10 → 5 (the Sep-2 tightening) so wallets with thin-but-positive recent books re-enter the proven sizing boost; the shadow escape hatch already guards negative form.
+3. Fix/restart the Dune promote queries (14 consecutive failures) — the PROVING→ACTIVE pipeline is dead without them.
+
+---
+
+
 ## Headline
 
 The system loses money on every window and on every dimension measured, for **compounding reasons**: the admitted cohort itself is net-negative (selection), realized fills are systematically worse than the marks the exits react to (execution), costs are a large fraction of the thin average edge (cost drag), and the winning cohort that *does* exist (post-Sep-2 admission) is repeatedly halted by the circuit breaker. The Sep 2 gate relaxation (`597d6c5`) restored *flow* but not *profitability*.
