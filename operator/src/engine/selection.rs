@@ -1405,6 +1405,13 @@ impl SelectionService {
         // the decision is admitted (step 12) — signals rejected on quality,
         // sizing, or heat must not inflate consensus_wallet_count or fabricate
         // consensus for subsequent signals.
+        //
+        // Gate 0 attribution fix: the in-memory peek covers only the 5-minute
+        // admitted-signal window, which produced 178K NULL consensus counts in
+        // decision_records (unobservable cluster behaviour). The durable 12h
+        // distinct-BUY-wallet count from smart_money_signals (pre-admission
+        // recording) is merged in as attribution only — the is_consensus GATE
+        // still requires the 5-minute aggregator signal.
         let mut consensus_wallet_count: Option<usize> = None;
         let is_consensus = if let Some(ref aggregator) = self.signal_aggregator {
             let count = aggregator
@@ -1415,6 +1422,25 @@ impl SelectionService {
         } else {
             false
         };
+
+        // Durable attribution: max(aggregator count, 12h DB count). Fails open
+        // to the aggregator value on DB error — attribution must never block
+        // or fail a decision.
+        match self.db.get_token_wallet_count(&req.token_address, 12).await {
+            Ok(db_count) if db_count > 0 => {
+                let db_count = db_count as usize;
+                consensus_wallet_count =
+                    Some(consensus_wallet_count.unwrap_or(1).max(db_count));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    token = %req.token_address,
+                    error = %e,
+                    "consensus_db_count_failed (attribution falls back to aggregator)"
+                );
+            }
+        }
 
         // Smart-money cluster: distinct statistically-profitable wallets with
         // BUY signals on this token within the (12h) cluster window.
