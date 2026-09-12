@@ -61,6 +61,7 @@ async fn seed_position(db: &Arc<dyn Database>, uuid: &str, entry_sig: &str) {
         side: "BUY".to_string(),
         amount_sol: Decimal::ONE,
         status: "ACTIVE".to_string(),
+        price_at_signal: None,
     })
     .await
     .unwrap();

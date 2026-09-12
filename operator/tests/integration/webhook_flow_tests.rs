@@ -557,6 +557,7 @@ async fn test_duplicate_trade_uuid_rejection() {
         side: "BUY".to_string(),
         amount_sol: Decimal::from_str("0.5").unwrap(),
         status: "ACTIVE".to_string(),
+        price_at_signal: None,
     })
     .await
     .expect("Failed to insert test trade");

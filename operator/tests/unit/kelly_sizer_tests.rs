@@ -43,6 +43,7 @@ async fn insert_closed_trade(
         side: "BUY".to_string(),
         amount_sol: Decimal::from_str(amount_sol).unwrap(),
         status: "CLOSED".to_string(),
+        price_at_signal: None,
     })
     .await
     .unwrap();

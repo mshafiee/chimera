@@ -75,6 +75,7 @@ async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
         side: "BUY".to_string(),
         amount_sol: Decimal::from_str("1.0").unwrap(),
         status: "ACTIVE".to_string(),
+        price_at_signal: None,
     })
     .await
     .unwrap();
@@ -190,6 +191,7 @@ async fn test_profit_capture_positive_pnl_recorded() {
         side: "BUY".to_string(),
         amount_sol: Decimal::from_str("1.5").unwrap(),
         status: "ACTIVE".to_string(),
+        price_at_signal: None,
     })
     .await
     .unwrap();

@@ -319,6 +319,10 @@ pub(crate) async fn queue_monitoring_signal(
         }
     }
 
+    // Signal-time mark for `price_at_signal` (2026-09-12): best-effort cache
+    // read via selection so the paper-vs-shadow entry-drift gap is measurable
+    // in SQL. Fails open as NULL — insertion never blocks on availability.
+    let price_at_signal = selection.cached_token_price_usd(signal.token_address().unwrap_or(""));
     match db
         .insert_trade(&InsertTrade {
             trade_uuid: signal.trade_uuid.clone(),
@@ -329,6 +333,7 @@ pub(crate) async fn queue_monitoring_signal(
             side: signal.payload.action.to_string(),
             amount_sol: signal.payload.amount_sol,
             status: "PENDING".to_string(),
+            price_at_signal,
         })
         .await
     {

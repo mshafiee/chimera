@@ -159,6 +159,10 @@ pub struct InsertTrade {
     pub side: String,
     pub amount_sol: rust_decimal::Decimal,
     pub status: String,
+    /// Signal-time token price in USD (best-effort, fails open as NULL).
+    /// Populated from the price cache at insert so the paper-vs-shadow
+    /// entry-drift gap is measurable in SQL (2026-09-12).
+    pub price_at_signal: Option<rust_decimal::Decimal>,
 }
 
 /// Trade status update data

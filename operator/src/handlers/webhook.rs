@@ -298,6 +298,12 @@ pub async fn webhook_handler(
         "Signal admitted by selection service"
     );
 
+    // Signal-time mark for `price_at_signal` (2026-09-12): best-effort cache
+    // read so the paper-vs-shadow entry-drift gap is measurable in SQL.
+    // Fails open as NULL — insertion never blocks on price availability.
+    let price_at_signal = state
+        .selection
+        .cached_token_price_usd(signal.token_address().unwrap_or(""));
     // Insert into database as PENDING. The pre-check above is not atomic with
     // this insert — two concurrent identical webhooks can both pass it, so a
     // unique-violation here is the winner's duplicate path (PDD-shaped
@@ -313,6 +319,7 @@ pub async fn webhook_handler(
             side: signal.payload.action.to_string(),
             amount_sol: trade_amount_sol,
             status: "PENDING".to_string(),
+            price_at_signal,
         })
         .await
     {

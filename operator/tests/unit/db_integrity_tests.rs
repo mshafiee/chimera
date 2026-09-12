@@ -44,6 +44,7 @@ async fn setup_trade(db: &Arc<dyn Database>, uuid: &str) {
         side: "BUY".to_string(),
         amount_sol: Decimal::from_str("1.0").unwrap(),
         status: "PENDING".to_string(),
+        price_at_signal: None,
     })
     .await
     .unwrap();
@@ -141,6 +142,7 @@ async fn test_close_position_closes_only_specified_position() {
             side: "BUY".to_string(),
             amount_sol: Decimal::from_str("2.0").unwrap(),
             status: "ACTIVE".to_string(),
+            price_at_signal: None,
         })
         .await
         .unwrap();
@@ -247,6 +249,7 @@ async fn test_close_position_zero_exit_price_is_rejected() {
         side: "BUY".to_string(),
         amount_sol: Decimal::from_str("1.0").unwrap(),
         status: "ACTIVE".to_string(),
+        price_at_signal: None,
     })
     .await
     .unwrap();
@@ -317,6 +320,7 @@ async fn test_open_position_zero_entry_price_is_rejected() {
         side: "BUY".to_string(),
         amount_sol: Decimal::from_str("1.0").unwrap(),
         status: "PENDING".to_string(),
+        price_at_signal: None,
     })
     .await
     .unwrap();
@@ -425,6 +429,7 @@ async fn test_position_deleted_with_trade_via_cascade() {
         side: "BUY".to_string(),
         amount_sol: Decimal::from_str("1.0").unwrap(),
         status: "ACTIVE".to_string(),
+        price_at_signal: None,
     })
     .await
     .unwrap();
@@ -482,6 +487,7 @@ async fn test_pnl_precision_f64_roundtrip() {
         side: "BUY".to_string(),
         amount_sol: Decimal::from_str("1.0").unwrap(),
         status: "PENDING".to_string(),
+        price_at_signal: None,
     })
     .await
     .unwrap();
@@ -569,6 +575,7 @@ async fn test_close_position_unconfirmed_sets_exiting_state() {
         side: "BUY".to_string(),
         amount_sol: Decimal::from_str("1.0").unwrap(),
         status: "ACTIVE".to_string(),
+        price_at_signal: None,
     })
     .await
     .unwrap();
@@ -633,6 +640,7 @@ async fn test_revert_position_exit_restores_state_and_amount() {
         side: "BUY".to_string(),
         amount_sol: Decimal::from_str("1.5").unwrap(),
         status: "ACTIVE".to_string(),
+        price_at_signal: None,
     })
     .await
     .unwrap();
@@ -661,6 +669,7 @@ async fn test_revert_position_exit_restores_state_and_amount() {
         side: "SELL".to_string(),
         amount_sol: Decimal::from_str("0.5").unwrap(),
         status: "EXITING".to_string(),
+        price_at_signal: None,
     })
     .await
     .unwrap();

@@ -400,6 +400,9 @@ impl AsyncWriteQueue {
                         side: trade.side.clone(),
                         amount_sol: trade.amount_sol,
                         status: (trade.status.clone()).into(),
+                        // Queue replay path: the signal-time mark was taken at
+                        // the original insert; async replay carries no price.
+                        price_at_signal: None,
                     })
                     .await
                     .map(|_| ()),

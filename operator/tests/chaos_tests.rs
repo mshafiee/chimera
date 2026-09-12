@@ -310,6 +310,7 @@ async fn test_database_advisory_lock_serializes_opens() {
             side: "BUY".to_string(),
             amount_sol: Decimal::from_str("1.0").unwrap(),
             status: "PENDING".to_string(),
+            price_at_signal: None,
         })
         .await
         .unwrap();
@@ -455,6 +456,7 @@ async fn test_stuck_position_recovery() {
             side: "BUY".to_string(),
             amount_sol: Decimal::ONE,
             status: "EXITING".to_string(),
+            price_at_signal: None,
         })
         .await
         .unwrap();

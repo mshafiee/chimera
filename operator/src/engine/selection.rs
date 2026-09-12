@@ -615,6 +615,18 @@ impl SelectionService {
         self.decision_recorder.as_ref()
     }
 
+    /// Best-effort signal-time token price in USD for `trades.price_at_signal`.
+    /// Pure non-blocking cache read — returns `None` when the cache is not
+    /// wired or the token is uncached. Callers fail open (store NULL) so trade
+    /// insertion never blocks on price availability. Recorded 2026-09-12:
+    /// `price_at_signal` was never populated, leaving the paper-vs-shadow
+    /// entry-drift gap unmeasurable in SQL.
+    pub fn cached_token_price_usd(&self, token_address: &str) -> Option<Decimal> {
+        self.price_cache
+            .as_ref()
+            .and_then(|c| c.get_price_usd(token_address))
+    }
+
     /// Evaluate a signal through the unified decision pipeline.
     ///
     /// When a [`DecisionRecorder`] is attached, every decision (admitted or
