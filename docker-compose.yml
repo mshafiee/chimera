@@ -218,15 +218,15 @@ services:
        # (lowered from 10 on 2026-08-22 and 5 on 2026-09-02: proven-positive wallets like ArcebC
        # at 8 closed trades were stuck in the consensus wait — the 33-310s
        # entry lag behind the measured execution gap).
-        # Single-wallet signals from unproven wallets were the negative-EV class.
-        # Re-enabled 2026-09-12 (paper-profitability investigation): with the
-        # gate off, paper admitted a -0.44% shadow-edge cohort (median -2.3%,
-        # 43% win) and realized -1.82 SOL net over 265 closed trades. Paper
-        # proceeds regardless of the profitability verdict, so the gate costs
-        # no evidence — it only stops spending fills on negative-EV flow.
-        # The admitted+rejected twin book is preserved via the shadow trader,
-        # which records every signal (admitted or not) independently.
-        - CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN=${CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN:-true}
+       # Single-wallet signals from unproven wallets were the negative-EV class.
+       # Re-enabled 2026-09-12 (paper-profitability investigation): with the
+       # gate off, paper admitted a -0.44% shadow-edge cohort (median -2.3%,
+       # 43% win) and realized -1.82 SOL net over 265 closed trades. Paper
+       # proceeds regardless of the profitability verdict, so the gate costs
+       # no evidence -- it only stops spending fills on negative-EV flow.
+       # The admitted+rejected twin book is preserved via the shadow trader,
+       # which records every signal (admitted or not) independently.
+       - CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN=${CHIMERA_SELECTION__REQUIRE_CONSENSUS_OR_PROVEN:-true}
        - CHIMERA_SELECTION__MIN_PROVEN_TRADES=3
        - CHIMERA_SELECTION__REQUIRE_PROVEN_POSITIVE_PNL=true
        # Entry confirmation (2026-08-06): single-wallet unproven BUYs are
@@ -247,15 +247,15 @@ services:
        # Recalibrated 2026-08-20 on DEDUPED shadow data (fix 8f3a728 removed the
        # duplicate-exit inflation that had made min_samples=10 unreachable):
        # at 10 samples only 8 tokens in the pool were evaluable -> the gate
-        # locked out ~333 tokens/day as SHADOW_MIRROR_INSUFFICIENT. Lowered to
-        # min_samples=3 with a 72h window (34 tokens qualify, 4.25x) while
-        # MIN_AVG_PCT stays at 1.5 (>= post-cost breakeven; qualifying averages
-        # cluster well above it, so no safe token is lost).
-        # Re-enabled 2026-09-12 (paper-profitability investigation): the single
-        # strongest admitted-vs-rejected separator in shadow data. Tokens that
-        # cannot clear post-cost breakeven on their own whale round-trips must
-        # not be bought live, regardless of wallet-level gates.
-        - CHIMERA_SELECTION__MIRROR_GATE_ENABLED=true
+       # locked out ~333 tokens/day as SHADOW_MIRROR_INSUFFICIENT. Lowered to
+       # min_samples=3 with a 72h window (34 tokens qualify, 4.25x) while
+       # MIN_AVG_PCT stays at 1.5 (>= post-cost breakeven; qualifying averages
+       # cluster well above it, so no safe token is lost).
+       # Re-enabled 2026-09-12 (paper-profitability investigation): the single
+       # strongest admitted-vs-rejected separator in shadow data. Tokens that
+       # cannot clear post-cost breakeven on their own whale round-trips must
+       # not be bought live, regardless of wallet-level gates.
+       - CHIMERA_SELECTION__MIRROR_GATE_ENABLED=true
        - CHIMERA_SELECTION__MIRROR_GATE_MIN_AVG_PCT=1.5
        - CHIMERA_SELECTION__MIRROR_GATE_MIN_SAMPLES=3
        - CHIMERA_SELECTION__MIRROR_GATE_WINDOW_HOURS=72
@@ -296,20 +296,20 @@ services:
        - CHIMERA_SELECTION__SL_COOLDOWN_ENABLED=true
        - CHIMERA_SELECTION__SL_COOLDOWN_HOURS=24
        - CHIMERA_SELECTION__SL_COOLDOWN_LOSS_PCT=0.5
-        # Entry drift guard (2026-08-22, profit fix Phase 3): reject BUYs when
-        # the current price drifted >3% (EITHER direction) from the whale's
-        # signal-time entry — re-admitted signals filled ~2-3% net worse than
-        # the shadow mark by copying into matured pumps. Fails open when the
-        # price/decimals are unknown (same fail-open as the pump-since-whale
-        # guard it shares the unit-verified conversion with).
-        # Tightened 2026-09-12 (paper-profitability investigation): twin-signal
-        # forensics show paper realizes -3.0% where its own shadow twin marks
-        # -0.4% (-2.6pp execution gap, ~0.9pp costs + ~1.7pp entry/exit slip).
-        # A 3% allowance spans the entire gap; 1% keeps only fills that track
-        # the whale. REVERT to 3.0 if admission flow stalls (ENTRY_DRIFT_EXCEEDED
-        # dominating rejections with no PnL improvement over ~50 signals).
-        - CHIMERA_SELECTION__ENTRY_DRIFT_GUARD_ENABLED=true
-        - CHIMERA_SELECTION__MAX_ENTRY_DRIFT_PCT=1.0
+       # Entry drift guard (2026-08-22, profit fix Phase 3): reject BUYs when
+       # the current price drifted >3% (EITHER direction) from the whale's
+       # signal-time entry — re-admitted signals filled ~2-3% net worse than
+       # the shadow mark by copying into matured pumps. Fails open when the
+       # price/decimals are unknown (same fail-open as the pump-since-whale
+       # guard it shares the unit-verified conversion with).
+       # Tightened 2026-09-12 (paper-profitability investigation): twin-signal
+       # forensics show paper realizes -3.0% where its own shadow twin marks
+       # -0.4% (-2.6pp execution gap, ~0.9pp costs + ~1.7pp entry/exit slip).
+       # A 3% allowance spans the entire gap; 1% keeps only fills that track
+       # the whale. REVERT to 3.0 if admission flow stalls (ENTRY_DRIFT_EXCEEDED
+       # dominating rejections with no PnL improvement over ~50 signals).
+       - CHIMERA_SELECTION__ENTRY_DRIFT_GUARD_ENABLED=true
+       - CHIMERA_SELECTION__MAX_ENTRY_DRIFT_PCT=1.0
        # Paper trading mode (simulated execution, no real SOL)
        - CHIMERA_TRADE_MODE=paper
        # Circuit breaker (2026-09-05): 5-loss streak tripped 5x/24h at the
