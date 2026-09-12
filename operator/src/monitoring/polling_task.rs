@@ -60,6 +60,19 @@ async fn poll_wallets_by_tier(
 ) {
     tracing::info!(tier = ?tier, "poll_wallets_by_tier invoked");
 
+    // Helius quota tripwire (2026-09-12): while the key is exhausted every
+    // poll burns into 429s and achieves nothing (observed 2026-09-11: 46h
+    // of quota exhaustion with polling still firing every ~30s/tier).
+    // Skip the cycle; the wire half-opens automatically so the first probe
+    // after expiry restores coverage without a restart.
+    if chimera_core::helius_quota::is_tripped() {
+        tracing::debug!(
+            tier = ?tier,
+            "Skipping poll cycle — Helius quota tripwire active"
+        );
+        return;
+    }
+
     let interval = match tier {
         crate::config::ConvictionTier::High => polling_cfg
             .high_conviction_interval_secs

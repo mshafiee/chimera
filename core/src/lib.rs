@@ -13,6 +13,7 @@ pub mod constants;
 pub mod engine;
 pub mod error;
 pub mod experiment;
+pub mod helius_quota;
 pub mod jupiter;
 pub mod models;
 pub mod price_cache;

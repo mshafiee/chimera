@@ -367,7 +367,7 @@ pub async fn poll_wallets_batch(
 ) -> Result<Vec<WalletTransaction>> {
     let mut all_transactions = Vec::new();
 
-    for chunk in wallets.chunks(batch_size) {
+    'batch: for chunk in wallets.chunks(batch_size) {
         let mut chunk_transactions = Vec::new();
 
         for wallet in chunk {
@@ -389,7 +389,7 @@ pub async fn poll_wallets_batch(
             let last_signature = last_sig_opt.as_deref();
 
             // Poll wallet
-            if let Ok(txs) = poll_wallet_transactions(
+            match poll_wallet_transactions(
                 rpc_client,
                 wallet,
                 last_signature,
@@ -398,15 +398,40 @@ pub async fn poll_wallets_batch(
             )
             .await
             {
-                // Filter out already-seen transactions
-                for tx in txs {
-                    if !polling_state.has_seen(&tx.signature).await {
-                        polling_state.mark_seen(tx.signature.clone()).await;
-                        chunk_transactions.push(tx);
+                Ok(txs) => {
+                    // Filter out already-seen transactions
+                    for tx in txs {
+                        if !polling_state.has_seen(&tx.signature).await {
+                            polling_state.mark_seen(tx.signature.clone()).await;
+                            chunk_transactions.push(tx);
+                        }
+                    }
+
+                    polling_state.update_last_poll(wallet).await;
+                }
+                Err(e) => {
+                    // Helius quota failures are global to the key, not the
+                    // wallet: trip the shared wire and stop this batch early
+                    // instead of firing the same doomed call per wallet
+                    // (observed 2026-09-11: polling kept hammering 429s
+                    // through 46h of quota exhaustion).
+                    if let Some(class) =
+                        chimera_core::helius_quota::classify_quota_error(&e.to_string())
+                    {
+                        chimera_core::helius_quota::trip(class);
+                        tracing::warn!(
+                            wallet = %wallet,
+                            class = ?class,
+                            error = %e,
+                            "Helius quota tripwire tripped — aborting poll batch"
+                        );
+                        // Keep this chunk's already-fetched transactions —
+                        // they were collected before the trip.
+                        all_transactions
+                            .extend(std::mem::replace(&mut chunk_transactions, Vec::new()));
+                        break 'batch;
                     }
                 }
-
-                polling_state.update_last_poll(wallet).await;
             }
 
             // Small delay between wallets in batch

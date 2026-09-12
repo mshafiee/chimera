@@ -56,20 +56,31 @@ async fn count_missing_shadow_rows(db: &Arc<dyn Database>) -> anyhow::Result<i64
     Ok(missing)
 }
 
-/// PROVING pool size and how many provers produced at least one decision in
-/// the trailing 24h. Zero decisions from a populated pool is the 2026-08-28
-/// cache-starve signature (12h of provers trading with zero evidence).
-async fn count_proving_decisions_24h(db: &Arc<dyn Database>) -> anyhow::Result<(i64, i64)> {
+/// PROVING pool size, how many provers produced at least one decision in
+/// the trailing 24h, how many ACTIVE wallets exist, and how many DISTINCT
+/// wallets of any status produced a decision in the trailing 24h. Zero
+/// decisions from a populated pool is the 2026-08-28 cache-starve signature
+/// (12h of provers trading with zero evidence) — but when the global count
+/// is also zero the suspect is ingress (Helius quota / webhook delivery),
+/// not the proving lane (observed 2026-09-11: 46h of global silence
+/// misreported as proving-lane starvation).
+async fn count_proving_decisions_24h(
+    db: &Arc<dyn Database>,
+) -> anyhow::Result<(i64, i64, i64, i64)> {
     use crate::db_abstraction::DbPool;
     let DbPool::PostgreSQL(pool) = db.pool();
-    let row: (i64, i64) = sqlx::query_as(
+    let row: (i64, i64, i64, i64) = sqlx::query_as(
         r#"SELECT
              (SELECT COUNT(*) FROM wallets WHERE status = 'PROVING'),
              (SELECT COUNT(DISTINCT dr.wallet_address)
               FROM decision_records dr
               JOIN wallets w ON w.address = dr.wallet_address
               WHERE w.status = 'PROVING'
-                AND dr.received_at > NOW() - INTERVAL '24 hours')"#,
+                AND dr.received_at > NOW() - INTERVAL '24 hours'),
+             (SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE'),
+             (SELECT COUNT(DISTINCT dr.wallet_address)
+              FROM decision_records dr
+              WHERE dr.received_at > NOW() - INTERVAL '24 hours')"#,
     )
     .fetch_one(&pool)
     .await?;
@@ -102,6 +113,12 @@ pub async fn start_shadow_gap_alarm(
     // decisions resume.
     let mut consecutive_positive_starved: u32 = 0;
     let mut last_alert_starved: Option<tokio::time::Instant> = None;
+    // Global signal-drought state: same two-check + hourly machinery, but
+    // for zero decisions from ANY wallet (ingress outage signature). While
+    // a drought is active the proving-lane alert is suppressed — it would
+    // otherwise misreport the outage as a proving-lane problem every hour.
+    let mut consecutive_positive_drought: u32 = 0;
+    let mut last_alert_drought: Option<tokio::time::Instant> = None;
 
     loop {
         tokio::select! {
@@ -142,8 +159,44 @@ pub async fn start_shadow_gap_alarm(
                         }
 
                         match count_proving_decisions_24h(&db).await {
-                            Ok((provers, with_decisions)) => {
-                                let starved = provers >= 5 && with_decisions == 0;
+                            Ok((provers, with_decisions, active, global_with_decisions)) => {
+                                // Global drought check first: zero decisions
+                                // from any wallet means ingress is down — emit
+                                // the drought alert and suppress the
+                                // proving-lane one for this tick.
+                                let drought = global_with_decisions == 0
+                                    && (active + provers) > 0;
+                                if drought {
+                                    consecutive_positive_drought =
+                                        consecutive_positive_drought.saturating_add(1);
+                                    let sustained = consecutive_positive_drought >= 2;
+                                    let due = last_alert_drought
+                                        .map(|t| t.elapsed() >= realert_after)
+                                        .unwrap_or(true);
+                                    if sustained && due {
+                                        error!(
+                                            active,
+                                            provers,
+                                            "Signal drought: zero decisions from any wallet in 24h"
+                                        );
+                                        notifier
+                                            .notify(NotificationEvent::SignalDrought {
+                                                active_wallets: active,
+                                                proving_wallets: provers,
+                                            })
+                                            .await;
+                                        last_alert_drought =
+                                            Some(tokio::time::Instant::now());
+                                    }
+                                } else {
+                                    if consecutive_positive_drought > 0 {
+                                        info!("Signal drought cleared");
+                                    }
+                                    consecutive_positive_drought = 0;
+                                    last_alert_drought = None;
+                                }
+                                let starved =
+                                    provers >= 5 && with_decisions == 0 && !drought;
                                 if starved {
                                     consecutive_positive_starved =
                                         consecutive_positive_starved.saturating_add(1);

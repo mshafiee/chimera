@@ -93,6 +93,16 @@ pub enum NotificationEvent {
     /// prover signals are being dropped upstream (the 2026-08-28 cache
     /// starve class). Data only; no action possible from the DB alone.
     ProvingLaneStarved { provers: i64, with_decisions: i64 },
+    /// Zero decisions from ANY wallet (ACTIVE included) over a full day.
+    /// This is an ingress/outage signature (Helius quota, webhook delivery),
+    /// NOT a proving-lane problem — the alarm emits this instead of
+    /// `ProvingLaneStarved` so the message names the right suspect.
+    /// Observed 2026-09-11: 46h of global silence misreported as
+    /// proving-lane starvation while the Helius key was quota-exhausted.
+    SignalDrought {
+        active_wallets: i64,
+        proving_wallets: i64,
+    },
 }
 
 impl NotificationEvent {
@@ -118,6 +128,7 @@ impl NotificationEvent {
             }
             NotificationEvent::ShadowRecordingGap { .. } => AlertLevel::Important,
             NotificationEvent::ProvingLaneStarved { .. } => AlertLevel::Important,
+            NotificationEvent::SignalDrought { .. } => AlertLevel::Important,
         }
     }
 
@@ -244,6 +255,14 @@ impl NotificationEvent {
             } => {
                 format!(
                     "{prefix}🕳️ Proving lane starved: {with_decisions}/{provers} PROVING wallets produced a decision in 24h — prover signals are being dropped or every prover went quiet. Check Helius activity for PROVING addresses."
+                )
+            }
+            NotificationEvent::SignalDrought {
+                active_wallets,
+                proving_wallets,
+            } => {
+                format!(
+                    "{prefix}🚨 Signal drought: zero decisions from ANY wallet in 24h ({active_wallets} ACTIVE + {proving_wallets} PROVING silent) — ingress outage suspected (Helius quota / webhook delivery), not the proving lane."
                 )
             }
         }

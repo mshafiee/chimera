@@ -501,6 +501,8 @@ impl Executor {
                 NotificationEvent::ShadowRecordingGap { .. } => rules.rpc_fallback,
                 // Proving-lane starvation alarm (same infra-health family)
                 NotificationEvent::ProvingLaneStarved { .. } => rules.rpc_fallback,
+                // Global signal-drought alarm (same infra-health family)
+                NotificationEvent::SignalDrought { .. } => rules.rpc_fallback,
             };
 
             if should_send {
