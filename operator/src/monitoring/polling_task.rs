@@ -66,7 +66,10 @@ async fn poll_wallets_by_tier(
     // Skip the cycle; the wire half-opens automatically so the first probe
     // after expiry restores coverage without a restart.
     if chimera_core::helius_quota::is_tripped() {
-        tracing::debug!(
+        // INFO (not debug): while tripped this is the only observable proof
+        // the wire is holding — one line per tier per cycle is cheap next to
+        // the per-wallet 429 spam it replaces.
+        tracing::info!(
             tier = ?tier,
             "Skipping poll cycle — Helius quota tripwire active"
         );
@@ -1300,6 +1303,12 @@ mod tests {
 
     #[tokio::test]
     async fn tier_polling_handles_query_errors_and_empty() {
+        // Serialize against quota-wire tripping tests (see helius_quota),
+        // and start from a clear wire: earlier tests may have tripped the
+        // throughput backoff, which would otherwise suppress this test's
+        // polls for up to two minutes.
+        let _serial = chimera_core::helius_quota::test_serial_lock();
+        chimera_core::helius_quota::clear();
         let db = mock_db();
         let cfg = polling_config();
         let cb = Arc::new(crate::circuit_breaker::CircuitBreaker::new(
@@ -1372,6 +1381,12 @@ mod tests {
 
     #[tokio::test]
     async fn tier_polling_full_cycle_with_mock_rpc() {
+        // Serialize against quota-wire tripping tests (see helius_quota),
+        // and start from a clear wire: earlier tests may have tripped the
+        // throughput backoff, which would otherwise suppress this test's
+        // polls for up to two minutes.
+        let _serial = chimera_core::helius_quota::test_serial_lock();
+        chimera_core::helius_quota::clear();
         let db = mock_db();
         db.add_wallet(wallet(WALLET_A, "ACTIVE", Some(90.0)));
         db.add_wallet_monitoring(monitoring(WALLET_A, true));
@@ -1493,6 +1508,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn start_polling_tiered_shuts_down_on_cancel() {
+        // Serialize against quota-wire tripping tests (see helius_quota),
+        // and start from a clear wire: earlier tests may have tripped the
+        // throughput backoff, which would otherwise suppress this test's
+        // polls for up to two minutes.
+        let _serial = chimera_core::helius_quota::test_serial_lock();
+        chimera_core::helius_quota::clear();
         let db = mock_db();
         db.add_wallet(wallet(WALLET_A, "ACTIVE", Some(90.0)));
         db.add_wallet_monitoring(monitoring(WALLET_A, true));
@@ -1536,6 +1557,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn tier_polling_batch_error_and_no_transactions() {
         // RPC poll failure → warn and return (no panic).
+        // Serialize against quota-wire tripping tests (see helius_quota),
+        // and start from a clear wire: earlier tests may have tripped the
+        // throughput backoff, which would otherwise suppress this test's
+        // polls for up to two minutes.
+        let _serial = chimera_core::helius_quota::test_serial_lock();
+        chimera_core::helius_quota::clear();
         let db = mock_db();
         db.add_wallet(wallet(WALLET_A, "ACTIVE", Some(90.0)));
         db.add_wallet_monitoring(monitoring(WALLET_A, true));
@@ -1649,6 +1676,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn start_polling_legacy_full_cycle_with_rpc() {
+        // Serialize against quota-wire tripping tests (see helius_quota),
+        // and start from a clear wire: earlier tests may have tripped the
+        // throughput backoff, which would otherwise suppress this test's
+        // polls for up to two minutes.
+        let _serial = chimera_core::helius_quota::test_serial_lock();
+        chimera_core::helius_quota::clear();
         let db = mock_db();
         db.add_wallet(wallet(WALLET_A, "ACTIVE", Some(80.0)));
         db.add_wallet_monitoring(monitoring(WALLET_A, true));
@@ -1695,6 +1728,12 @@ mod tests {
         // batch fails → warn + continue. Runs 12 ticks to also cover the
         // every-10-cycles debug branch (wallets become empty after the query
         // error is cleared).
+        // Serialize against quota-wire tripping tests (see helius_quota),
+        // and start from a clear wire: earlier tests may have tripped the
+        // throughput backoff, which would otherwise suppress this test's
+        // polls for up to two minutes.
+        let _serial = chimera_core::helius_quota::test_serial_lock();
+        chimera_core::helius_quota::clear();
         let db = mock_db();
         let cb = Arc::new(crate::circuit_breaker::CircuitBreaker::new(
             cb_config(),
@@ -1734,6 +1773,12 @@ mod tests {
         // The RPC delivers a valid BUY, but the wallet lookup fails → the
         // process_transaction error is logged (Ok(Err) branch) and the loop
         // continues.
+        // Serialize against quota-wire tripping tests (see helius_quota),
+        // and start from a clear wire: earlier tests may have tripped the
+        // throughput backoff, which would otherwise suppress this test's
+        // polls for up to two minutes.
+        let _serial = chimera_core::helius_quota::test_serial_lock();
+        chimera_core::helius_quota::clear();
         let db = mock_db();
         db.add_wallet(wallet(WALLET_A, "ACTIVE", Some(90.0)));
         db.add_wallet_monitoring(monitoring(WALLET_A, true));
@@ -1775,6 +1820,12 @@ mod tests {
         // Tiered polling with a SELL transaction: process_transaction enqueues
         // a delayed exit into the task's own pending buffer; the 5s processor
         // dispatches it to the engine as an EXIT signal.
+        // Serialize against quota-wire tripping tests (see helius_quota),
+        // and start from a clear wire: earlier tests may have tripped the
+        // throughput backoff, which would otherwise suppress this test's
+        // polls for up to two minutes.
+        let _serial = chimera_core::helius_quota::test_serial_lock();
+        chimera_core::helius_quota::clear();
         let db = mock_db();
         db.add_wallet(wallet(WALLET_A, "ACTIVE", Some(90.0)));
         db.add_wallet_monitoring(monitoring(WALLET_A, true));
@@ -1826,6 +1877,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exit_signal_processor_dispatches_delayed_exit() {
+        // Serialize against quota-wire tripping tests (see helius_quota),
+        // and start from a clear wire: earlier tests may have tripped the
+        // throughput backoff, which would otherwise suppress this test's
+        // polls for up to two minutes.
+        let _serial = chimera_core::helius_quota::test_serial_lock();
+        chimera_core::helius_quota::clear();
         let db = mock_db();
         db.add_wallet(wallet(WALLET_A, "ACTIVE", Some(80.0)));
         db.add_wallet_monitoring(monitoring(WALLET_A, true));

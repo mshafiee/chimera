@@ -366,6 +366,15 @@ pub async fn poll_wallets_batch(
     db: Option<&dyn Database>,
 ) -> Result<Vec<WalletTransaction>> {
     let mut all_transactions = Vec::new();
+    // Consecutive-failure breaker (2026-09-12): Helius under quota pressure
+    // does not always fast-429 — calls can hang until client timeout and
+    // fail with non-quota text, grinding every tier cycle to ~3x its
+    // cadence while finding nothing. If every attempted wallet in the
+    // batch fails (any error), treat the provider as down and take the
+    // short (throughput-class) backoff; a monthly-cap trip already active
+    // is never shortened by this.
+    let mut attempted: u32 = 0;
+    let mut failed: u32 = 0;
 
     'batch: for chunk in wallets.chunks(batch_size) {
         let mut chunk_transactions = Vec::new();
@@ -375,6 +384,7 @@ pub async fn poll_wallets_batch(
             if !polling_state.should_poll(wallet, interval_secs).await {
                 continue;
             }
+            attempted += 1;
 
             // Get last signature from database if available
             // Store in a variable to extend lifetime
@@ -410,6 +420,7 @@ pub async fn poll_wallets_batch(
                     polling_state.update_last_poll(wallet).await;
                 }
                 Err(e) => {
+                    failed += 1;
                     // Helius quota failures are global to the key, not the
                     // wallet: trip the shared wire and stop this batch early
                     // instead of firing the same doomed call per wallet
@@ -444,6 +455,18 @@ pub async fn poll_wallets_batch(
         if wallets.len() > batch_size {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+    }
+
+    // Total batch failure (any error class) means the provider is down for
+    // this cycle, not the wallets: take the short throughput backoff so the
+    // next cycles fail fast instead of grinding through timeouts. Never
+    // shortens an active monthly-cap trip (see `helius_quota::trip`).
+    if attempted > 0 && failed >= attempted {
+        chimera_core::helius_quota::trip(chimera_core::helius_quota::QuotaClass::Throughput);
+        tracing::warn!(
+            attempted,
+            "Poll batch failed for every attempted wallet — throughput backoff taken"
+        );
     }
 
     Ok(all_transactions)
@@ -870,6 +893,62 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(txs.len(), 1, "warnings are non-fatal");
+    }
+
+    /// RAII guard for the process-global Helius quota wire: tests that trip
+    /// it must not leak tripped state into parallel tests (e.g. tier-poll
+    /// tests that assert live polling). Clears on construction and on drop
+    /// (including panic unwind).
+    struct QuotaWireGuard;
+    impl QuotaWireGuard {
+        fn armed() -> Self {
+            chimera_core::helius_quota::clear();
+            QuotaWireGuard
+        }
+    }
+    impl Drop for QuotaWireGuard {
+        fn drop(&mut self) {
+            chimera_core::helius_quota::clear();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_poll_wallets_batch_trips_quota_wire_on_max_usage() {
+        // Serialize against tier-poll tests asserting live polling.
+        let _serial = chimera_core::helius_quota::test_serial_lock();
+        let _guard = QuotaWireGuard::armed();
+        // Every getSignaturesForAddress fails with the exact monthly-cap
+        // payload observed in production (Helius code -32429).
+        let url = mock_rpc(|body| {
+            if body.contains("getSignaturesForAddress") {
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": -32429, "message": "max usage reached"}
+                })
+                .to_string()
+            } else {
+                error_body(-32601)
+            }
+        })
+        .await;
+        let client = RpcClient::new_with_timeout(url, Duration::from_secs(5));
+        let txs = poll_wallets_batch(
+            &client,
+            &[WALLET.to_string()],
+            0,
+            10,
+            rate_limiter(),
+            Arc::new(RpcPollingState::new()),
+            None,
+        )
+        .await
+        .expect("batch surfaces quota as Ok(empty), never Err");
+        assert!(txs.is_empty());
+        assert!(
+            chimera_core::helius_quota::is_tripped(),
+            "monthly-cap failure must trip the shared wire"
+        );
     }
 
     #[tokio::test]

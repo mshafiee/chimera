@@ -108,6 +108,18 @@ fn trip_expired(now: u64) -> bool {
     at == 0 || now.saturating_sub(at) >= trip_duration_secs()
 }
 
+/// Test-only serialization lock for the process-global wire. Unit tests
+/// that trip the wire and tests that assert live polling must hold this
+/// across the whole test body — otherwise a trip in one thread makes
+/// `poll_wallets_by_tier` early-return in another and flakes the suite.
+///
+/// Unconditional (not `#[cfg(test)]`) because downstream crates' test code
+/// links core built without `cfg(test)`; the footprint is one static mutex.
+pub fn test_serial_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Whether Helius calls should currently be suppressed. An expired trip
 /// half-opens: returns false once so exactly one probe cycle goes through,
 /// re-tripping on failure via [`trip`].
@@ -122,10 +134,7 @@ pub fn is_tripped() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // The tripwire is process-global: serialize tests that touch it.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    use crate::helius_quota::test_serial_lock;
 
     #[test]
     fn classify_recognizes_production_strings() {
@@ -153,7 +162,7 @@ mod tests {
 
     #[test]
     fn trip_and_clear_roundtrip() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = test_serial_lock();
         clear();
         assert!(!is_tripped());
         trip(QuotaClass::Throughput);
@@ -164,7 +173,7 @@ mod tests {
 
     #[test]
     fn throughput_trip_does_not_shorten_monthly_trip() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = test_serial_lock();
         clear();
         trip(QuotaClass::MonthlyCap);
         assert!(is_tripped());
