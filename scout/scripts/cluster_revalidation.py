@@ -259,10 +259,10 @@ JOIN shadow_exits e USING (shadow_id)
 WHERE e.exit_strategy = 'mirror_main'
   AND e.exited_at > NOW() - make_interval(days => %s)
   AND (
-        s.shadow_id LIKE 'dune\\_%'
+        s.shadow_id LIKE 'dune\\_%%'
         OR s.wallet_address IN (
             SELECT DISTINCT wallet_address FROM shadow_positions
-            WHERE shadow_id LIKE 'dune\\_%')
+            WHERE shadow_id LIKE 'dune\\_%%')
       )
 """
 
