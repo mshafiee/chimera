@@ -115,3 +115,52 @@ def test_summarize_mirror_uses_frozen_cohort_definition(monkeypatch):
     assert out["n"] == 2, "non-cohort rows must be excluded"
     assert out["win_rate"] == 0.5
     assert out["avg_pnl"] == 4.5
+
+
+# ── Mirror robustness gate (frozen 2026-09-19) ──────────────────────────
+
+
+def test_robustness_excludes_no_price_and_caps_moonshots(monkeypatch):
+    from scout.scripts import cluster_revalidation as cr
+
+    rows = [
+        ("dune_1", "wA", 5000.0, "profit_target_5"),  # capped to +100
+        ("dune_2", "wA", -50.0, "stop_loss"),
+        ("dune_3", "wA", 0.0, "no_price"),  # excluded from the priced sample
+        ("uuid_1", "wB", 30.0, "profit_target_5"),
+    ]
+    monkeypatch.setattr(cr, "load_cohort_exits", lambda days, s: rows)
+    monkeypatch.setattr(cr, "load_dune_cohort_wallets", lambda: {"wA", "wB"})
+    m = cr.summarize_rail_robust(days=14, exit_strategy="mirror_main")
+    assert m["n_total"] == 4
+    assert m["n_priced"] == 3, "no_price rows must not count toward n"
+    assert abs(m["mean_winsorized"] - (100.0 - 50.0 + 30.0) / 3) < 1e-9
+    assert m["median"] == 30.0
+    assert abs(m["win_rate"] - 2 / 3) < 1e-9
+
+
+def test_robustness_requires_live_rail(monkeypatch):
+    from scout.scripts import cluster_revalidation as cr
+
+    def fake(days, exit_strategy):
+        if exit_strategy == "mirror_main":
+            return [("dune_1", "wA", 10.0, "profit_target_5")] * 400
+        return [("uuid_1", "wB", -1.0, "stop_loss")] * 400
+
+    monkeypatch.setattr(cr, "load_cohort_exits", fake)
+    monkeypatch.setattr(cr, "load_dune_cohort_wallets", lambda: {"wA", "wB"})
+    out = cr.run_robustness_validation(days=14)
+    assert out["rails"]["mirror_main"]["n_priced"] == 400
+    assert out["rails"]["wallet_sell"]["median"] == -1.0
+    assert out["meets_robustness_bar"] is False, "live rail fails G4"
+
+
+def test_robustness_passes_when_both_rails_clean(monkeypatch):
+    from scout.scripts import cluster_revalidation as cr
+
+    monkeypatch.setattr(
+        cr, "load_cohort_exits", lambda days, s: [("dune_1", "wA", 5.0, "profit_target_5")] * 400
+    )
+    monkeypatch.setattr(cr, "load_dune_cohort_wallets", lambda: {"wA", "wB"})
+    out = cr.run_robustness_validation(days=14)
+    assert out["meets_robustness_bar"] is True

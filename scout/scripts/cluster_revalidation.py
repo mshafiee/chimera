@@ -31,6 +31,7 @@ import argparse
 import itertools
 import json
 import random
+import statistics
 import sys
 from collections import defaultdict
 
@@ -216,7 +217,14 @@ def main(argv=None) -> int:
     ap.add_argument("--json", action="store_true", help="emit JSON instead of markdown")
     ap.add_argument("--mirror-validation", type=int, metavar="DAYS",
                     help="run the Pivot-A mirror shadow-validation verdict")
+    ap.add_argument("--robustness-validation", type=int, metavar="DAYS",
+                    help="run the mirror robustness-gate verdict (frozen 2026-09-19)")
     args = ap.parse_args(argv)
+
+    if args.robustness_validation:
+        result = run_robustness_validation(args.robustness_validation)
+        print(json.dumps(result, indent=2, default=str))
+        return 0 if result["meets_robustness_bar"] else 1
 
     if args.mirror_validation:
         result = run_mirror_validation(args.mirror_validation)
@@ -325,6 +333,104 @@ def run_mirror_validation(days: int) -> dict:
     metrics = summarize_mirror(days)
     metrics["meets_go_bar"] = evaluate_go_bar(metrics)
     return metrics
+
+
+# ── Mirror robustness gate (frozen 2026-09-19) ──────────────────────────
+# Closes the gap where the legacy bar is met by a dead-row-padded,
+# moonshot-driven distribution. Gates (all must pass): G1 priced n>=300,
+# G2 winsorized mean>0, G3 winsorized CI-lo>0, G4 median>0, G5 winsorized
+# mean minus 2.0% round-trip>0, G6 G1-G4 also on the live-reachable rail.
+# Protocol: docs/runbooks/2026-09-19-mirror-robustness-protocol.md
+
+WINSOR_CAP = 100.0
+ROUND_TRIP_COST_PCT = 2.0
+MIN_PRICED_N = 300
+ROBUST_RAILS = ("mirror_main", "wallet_sell")
+
+COHORT_EXITS_DETAIL_SQL = """
+SELECT s.shadow_id,
+       s.wallet_address,
+       e.pnl_pct::float8,
+       COALESCE(e.exit_reason, '')
+FROM shadow_positions s
+JOIN shadow_exits e USING (shadow_id)
+WHERE e.exit_strategy = %s
+  AND e.exited_at > NOW() - make_interval(days => %s)
+  AND (
+        s.shadow_id LIKE 'dune\\_%%'
+        OR s.wallet_address IN (
+            SELECT DISTINCT wallet_address FROM shadow_positions
+            WHERE shadow_id LIKE 'dune\\_%%')
+      )
+"""
+
+
+def load_cohort_exits(days: int, exit_strategy: str):
+    """[(shadow_id, wallet_address, pnl_pct, exit_reason)] for the frozen
+    dune cohort on the given exit rail."""
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(COHORT_EXITS_DETAIL_SQL, (exit_strategy, days))
+        return cur.fetchall()
+
+
+def summarize_rail_robust(days: int, exit_strategy: str) -> dict:
+    cohort_wallets = load_dune_cohort_wallets()
+    rows = [
+        (sid, wallet, p, reason)
+        for sid, wallet, p, reason in load_cohort_exits(days, exit_strategy)
+        if sid.startswith("dune_") or wallet in cohort_wallets
+    ]
+    # Dead/unpriceable exits must not count toward n or the body statistics.
+    priced = [p for _, _, p, reason in rows if reason != "no_price"]
+    n = len(priced)
+    if n == 0:
+        return {
+            "exit_strategy": exit_strategy,
+            "n_total": len(rows),
+            "n_priced": 0,
+            "mean_winsorized": 0.0,
+            "ci_lo": 0.0,
+            "ci_hi": 0.0,
+            "median": 0.0,
+            "mean_cost_adjusted": -ROUND_TRIP_COST_PCT,
+            "win_rate": 0.0,
+        }
+    wins = [max(-WINSOR_CAP, min(WINSOR_CAP, p)) for p in priced]
+    mean_w = sum(wins) / n
+    ci_lo, ci_hi = bootstrap_ci(wins, 2000, 20260920)
+    return {
+        "exit_strategy": exit_strategy,
+        "n_total": len(rows),
+        "n_priced": n,
+        "mean_winsorized": mean_w,
+        "ci_lo": ci_lo,
+        "ci_hi": ci_hi,
+        "median": statistics.median(priced),
+        "mean_cost_adjusted": mean_w - ROUND_TRIP_COST_PCT,
+        "win_rate": sum(1 for p in priced if p > 0) / n,
+    }
+
+
+def _rail_passes(m: dict) -> bool:
+    """G1-G4 on a single rail."""
+    return (
+        m["n_priced"] >= MIN_PRICED_N
+        and m["mean_winsorized"] > 0.0
+        and m["ci_lo"] > 0.0
+        and m["median"] > 0.0
+    )
+
+
+def run_robustness_validation(days: int) -> dict:
+    rails = {s: summarize_rail_robust(days, s) for s in ROBUST_RAILS}
+    mirror = rails["mirror_main"]
+    live = rails["wallet_sell"]
+    meets = (
+        _rail_passes(mirror)
+        and mirror["mean_cost_adjusted"] > 0.0  # G5
+        and _rail_passes(live)  # G6
+    )
+    return {"days": days, "rails": rails, "meets_robustness_bar": meets}
 
 
 if __name__ == "__main__":
