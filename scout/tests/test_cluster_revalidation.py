@@ -10,6 +10,7 @@ from hypothesis import strategies as st
 from scout.scripts.cluster_revalidation import (
     bootstrap_ci,
     bucket_for_count,
+    evaluate_go_bar,
     passes_dispersion,
 )
 
@@ -83,10 +84,6 @@ def test_bootstrap_ci_empty():
 
 
 # ── Pivot-A: mirror shadow-validation on the dune cohort ────────────────
-from scout.scripts.cluster_revalidation import (
-    evaluate_go_bar,
-    summarize_mirror,
-)
 
 
 def test_evaluate_go_bar_frozen_thresholds():
@@ -101,12 +98,20 @@ def test_evaluate_go_bar_frozen_thresholds():
     assert evaluate_go_bar({"n": 400, "avg_pnl": 2.0, "ci_lo": 0.3}) is True
 
 
-def test_summarize_mirror_counts_cohort_only(monkeypatch):
+def test_summarize_mirror_uses_frozen_cohort_definition(monkeypatch):
+    # Frozen cohort (2026-09-07) = `dune_%` positions OR positions belonging to
+    # a bootstrap-set wallet. Regression guard: a prefix-only filter dropped the
+    # wallet-membership half and collapsed the live sample to n=0 (2026-09-19).
     from scout.scripts import cluster_revalidation as cr
 
-    rows = [("dune_1", 12.0), ("dune_2", -3.0), ("live_1", 100.0)]
+    rows = [
+        ("dune_1", "wA", 12.0),   # dune-keyed position -> cohort
+        ("uuid_1", "wB", -3.0),   # bootstrap-set wallet, live key -> cohort
+        ("uuid_2", "wZ", 100.0),  # non-cohort wallet -> excluded
+    ]
     monkeypatch.setattr(cr, "load_mirror_exits", lambda days: rows)
+    monkeypatch.setattr(cr, "load_dune_cohort_wallets", lambda: {"wA", "wB"})
     out = cr.summarize_mirror(days=14)
-    assert out["n"] == 2, "live-path rows must be excluded"
+    assert out["n"] == 2, "non-cohort rows must be excluded"
     assert out["win_rate"] == 0.5
     assert out["avg_pnl"] == 4.5

@@ -253,6 +253,7 @@ MIN_MIRROR_N = 300
 
 MIRROR_EXITS_SQL = """
 SELECT s.shadow_id,
+       s.wallet_address,
        e.pnl_pct::float8
 FROM shadow_positions s
 JOIN shadow_exits e USING (shadow_id)
@@ -266,19 +267,41 @@ WHERE e.exit_strategy = 'mirror_main'
       )
 """
 
+DUNE_COHORT_WALLETS_SQL = """
+SELECT DISTINCT wallet_address
+FROM shadow_positions
+WHERE shadow_id LIKE 'dune\\_%%'
+"""
+
 
 def load_mirror_exits(days: int):
-    """[(shadow_id, pnl_pct)] for mirror_main exits on the dune cohort."""
+    """[(shadow_id, wallet_address, pnl_pct)] for mirror_main exits on the
+    dune cohort (dune-keyed positions plus bootstrap-set wallets' positions)."""
     with connect() as conn, conn.cursor() as cur:
         cur.execute(MIRROR_EXITS_SQL, (days,))
         return cur.fetchall()
 
 
+def load_dune_cohort_wallets() -> set:
+    """Wallet addresses present in the dune bootstrap set (`dune_%` rows)."""
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(DUNE_COHORT_WALLETS_SQL)
+        return {row[0] for row in cur.fetchall()}
+
+
 def summarize_mirror(days: int) -> dict:
-    # Cohort filter is defense-in-depth: the SQL already scopes to the dune
-    # cohort, but a mock/stub (or future SQL drift) must not silently admit
-    # live-path rows into the validation sample.
-    pnls = [p for sid, p in load_mirror_exits(days) if sid.startswith("dune_")]
+    # Frozen cohort definition (2026-09-07): `dune_%`-keyed positions PLUS any
+    # position belonging to a wallet present in the dune bootstrap set. The
+    # SQL already scopes to this cohort; the predicate below is defense-in-depth
+    # against SQL drift. A prefix-only filter is WRONG: the bootstrap rows age
+    # out of the window while the cohort wallets keep producing live-path
+    # (UUID-keyed) exits, so prefix-only collapses the sample to n=0.
+    cohort_wallets = load_dune_cohort_wallets()
+    pnls = [
+        p
+        for sid, wallet, p in load_mirror_exits(days)
+        if sid.startswith("dune_") or wallet in cohort_wallets
+    ]
     n = len(pnls)
     ci_lo, ci_hi = bootstrap_ci(pnls, 2000, 20260907)
     return {
