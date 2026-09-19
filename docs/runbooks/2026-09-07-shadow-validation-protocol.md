@@ -38,6 +38,40 @@ historical `dune_%` rows only feed t-stat gates, not the validation sample;
 |---|---|---|---|---|---|---|
 | 2026-09-06 | 30 | 1297 | +99.5 | (pre-instrument) | — | context only: stale cohort, from pivot-analysis forensics |
 | 2026-09-06 | — | — | — | — | — | protocol amendment: window opens on existing cohort (Dune 402 blocker); forward window 2026-09-06 → 2026-09-20 |
+| 2026-09-19 | 13 | 1971 | +9.03 | +1.47 | yes (peek) | **MECHANICAL GO ONLY — not economically real.** Instrument repaired (4 bugs, below); cohort restored to frozen def. 79% of rows are `no_price` zeros that pad n; the mean is driven by 192 `profit_target_5` winners (avg +135%, max +7960%); trimmed to ≤100% the mean is **−1.23%**; median 0.00. `mirror_main` is unreachable live and shadow marks are fill-optimistic. |
+
+### Instrument repair (2026-09-19, pre-verdict)
+
+The pre-registered instrument could not run as deployed. Four defects fixed
+(all before any verdict data existed; the n=0 peek was a filter artifact):
+
+1. `import scout.analysis.db` — the scout image flattens `scout/` to `/app`
+   (no `scout` package) → `ModuleNotFoundError`. Fixed with a layout fallback.
+2. `if __name__ == "__main__"` sat **above** the Pivot-A function defs →
+   `NameError: run_mirror_validation`; the script could never execute.
+3. `LIKE 'dune\_%'` — psycopg parses `%` as a placeholder →
+   `ProgrammingError`; escaped to `%%`.
+4. **Cohort definition contradiction** — `summarize_mirror` re-filtered to
+   `shadow_id LIKE 'dune_%'` only, discarding the frozen cohort's
+   bootstrap-set-wallet half. The stale `dune_` rows have aged out of the
+   window while the cohort wallets keep producing live-path (UUID-keyed)
+   exits, so the prefix-only filter collapsed the sample to **n=0** (an
+   automatic PIVOT on a bug). Restored to the frozen definition
+   (`dune_%` **or** bootstrap-set wallet), with the predicate applied
+   defense-in-depth in Python. Fix: commit `4f2f5c0`.
+
+### Robustness gap in the frozen GO bar (flag, do not amend post-hoc)
+
+The bar (n≥300 ∧ mean>0 ∧ CI-lo>0) is passed by a distribution the bar was
+never designed to guard: 1,557 of 1,971 exits (79%) are `no_price` zeros that
+inflate `n` while contributing nothing; 192 `profit_target_5` moonshots
+(one at +7,960%) carry the entire mean; 149 `stop_loss` (−47.9% avg) and 73
+`recovery_gate` (−13.5% avg) are the real losses. Excluding >100% exits the
+mean is negative. **A GO on this shape must not proceed to live-sizing
+without a moonshot-robustness check** — but adding one now would be a
+post-hoc threshold change and is therefore logged here as a governance
+flag, not applied.
+
 
 ## Verdict
 
