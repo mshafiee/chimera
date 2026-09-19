@@ -35,7 +35,10 @@ import random
 import sys
 from collections import defaultdict
 
-from scout.analysis.db import connect
+try:  # container layout: /app is the package root (analysis.*, scripts.*)
+    from analysis.db import connect
+except ImportError:  # repo layout: run from repo root (scout.analysis.*)
+    from scout.analysis.db import connect
 
 MIN_GAP_S = 5
 MIN_SPAN_S = 180
