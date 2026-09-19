@@ -28,7 +28,6 @@ output, satisfying the repo financial-precision rule.
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import itertools
 import json
 import random
@@ -244,10 +243,6 @@ def main(argv=None) -> int:
     return 1
 
 
-if __name__ == "__main__":
-    sys.exit(main())
-
-
 # ── Pivot-A: mirror-first shadow validation on the dune cohort ──────────
 # Pre-registered GO bar (frozen 2026-09-07, before collection starts):
 #   n >= 300 AND avg_pnl > 0 AND bootstrap 95% CI lower bound > 0
@@ -307,3 +302,7 @@ def run_mirror_validation(days: int) -> dict:
     metrics = summarize_mirror(days)
     metrics["meets_go_bar"] = evaluate_go_bar(metrics)
     return metrics
+
+
+if __name__ == "__main__":
+    sys.exit(main())
