@@ -64,3 +64,19 @@ and `wallet_sell` plus `meets_robustness_bar`. The legacy
 - Applying this gate to the 2026-09-20 verdict (post-hoc amendment — forbidden).
 - Lowering any gate to manufacture a GO.
 - Live capital (still ruled out).
+
+## Pre-window context (2026-09-19 diagnostic — NOT a verdict)
+
+Run against the *closing* window (13d) only to confirm the gate discriminates.
+Result: **`meets_robustness_bar = false`**.
+
+| Rail | n_total | n_priced | winsorized mean | CI-lo | median | cost-adj | win% |
+|---|---|---|---|---|---|---|---|
+| `mirror_main` | 1,971 | **414** | +0.97 | **−3.81** | **−8.17** | **−1.03** | 46.4 |
+| `wallet_sell` (live) | 2,021 | 464 | **−4.55** | **−7.03** | **0.00** | **−6.55** | 6.5 |
+
+The legacy bar's GO on the same window was a moonshot artifact: once `no_price`
+zeros are excluded (n 1,971 → 414), the median turns negative, the CI crosses
+zero, and the live-reachable rail is clearly negative. The gate discriminates
+as designed. This diagnostic does not consume the next window's first look.
+
