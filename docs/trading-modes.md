@@ -137,9 +137,9 @@ To switch modes, update `CHIMERA_TRADE_MODE` in `docker-compose.yml`:
 # On production server
 cd /opt/chimera
 # Edit docker-compose.yml: change CHIMERA_TRADE_MODE
-COMPOSE_PROFILE=mainnet-prod docker compose -f docker-compose.yml \
+COMPOSE_PROFILE=mainnet-prod docker compose --profile mainnet-prod -f docker-compose.yml \
   -f docker-compose-haproxy.yml up -d --force-recreate operator
-docker compose -f docker-compose.yml -f docker-compose-haproxy.yml restart haproxy
+COMPOSE_PROFILE=mainnet-prod docker compose --profile mainnet-prod -f docker-compose.yml -f docker-compose-haproxy.yml restart haproxy
 ```
 
 **Safety:** The operator logs `NO REAL TRANSACTIONS WILL BE SUBMITTED` on

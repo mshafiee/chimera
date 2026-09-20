@@ -6,10 +6,10 @@ set -euo pipefail
 echo "🔄 Restarting Chimera Operator in MAINNET PAPER TRADING mode..."
 
 # Stop services
-COMPOSE_PROFILE=mainnet-paper docker compose down operator
+COMPOSE_PROFILE=mainnet-paper docker compose --profile mainnet-paper down operator
 
 # Start with mainnet environment
-if ! COMPOSE_PROFILE=mainnet-paper docker compose up -d operator; then
+if ! COMPOSE_PROFILE=mainnet-paper docker compose --profile mainnet-paper up -d operator; then
     echo "❌ Failed to start operator - the service may be left stopped" >&2
     exit 1
 fi
@@ -33,13 +33,13 @@ curl -sf --max-time 10 http://localhost:8080/api/v1/health | jq '{status, rpc: .
 # Check RPC URL
 echo ""
 echo "🌐 Network Configuration:"
-COMPOSE_PROFILE=mainnet-paper docker compose exec -T operator printenv | grep -E "SOLANA_NETWORK|PRIMARY_URL" | head -2 || echo "Could not read network configuration"
+COMPOSE_PROFILE=mainnet-paper docker compose --profile mainnet-paper exec -T operator printenv | grep -E "SOLANA_NETWORK|PRIMARY_URL" | head -2 || echo "Could not read network configuration"
 
 # Check polling
 echo ""
 echo "🔍 RPC Polling Status:"
-if COMPOSE_PROFILE=mainnet-paper docker compose logs operator 2>&1 | grep -q "RPC polling task started"; then
-    COMPOSE_PROFILE=mainnet-paper docker compose logs operator 2>&1 | grep "RPC polling task started" | tail -1
+if COMPOSE_PROFILE=mainnet-paper docker compose --profile mainnet-paper logs operator 2>&1 | grep -q "RPC polling task started"; then
+    COMPOSE_PROFILE=mainnet-paper docker compose --profile mainnet-paper logs operator 2>&1 | grep "RPC polling task started" | tail -1
 else
     echo "⚠ RPC polling task not seen in logs yet (may still be starting)"
 fi
@@ -47,5 +47,5 @@ fi
 echo ""
 echo "✅ Operator restarted successfully!"
 echo ""
-echo "📝 Monitor logs: COMPOSE_PROFILE=mainnet-paper docker compose logs operator -f"
+echo "📝 Monitor logs: COMPOSE_PROFILE=mainnet-paper docker compose --profile mainnet-paper logs operator -f"
 echo "📊 Check trades: curl http://localhost:8080/api/v1/trades | jq"

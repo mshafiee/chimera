@@ -63,7 +63,7 @@ echo -e "${BLUE}Starting DB cleanup...${NC}"
 
 # Step 1 — Stop Operator
 echo -e "${GREEN}[1/8]${NC} Stopping operator..."
-COMPOSE_PROFILE=mainnet-prod docker compose -f docker-compose.yml -f docker-compose-haproxy.yml stop operator
+COMPOSE_PROFILE=mainnet-prod docker compose --profile mainnet-prod -f docker-compose.yml -f docker-compose-haproxy.yml stop operator
 
 # Step 2 — Backup Preserved Tables
 echo -e "${GREEN}[2/8]${NC} Backing up preserved tables..."
@@ -138,7 +138,7 @@ rm -f data/chimera.db 2>/dev/null || true
 # Step 7 — Restart Operator (optional)
 if [ "$RESTART_OPERATOR" = true ]; then
     echo -e "${GREEN}[7/8]${NC} Restarting operator..."
-    COMPOSE_PROFILE=mainnet-prod docker compose -f docker-compose.yml -f docker-compose-haproxy.yml up -d --force-recreate operator
+    COMPOSE_PROFILE=mainnet-prod docker compose --profile mainnet-prod -f docker-compose.yml -f docker-compose-haproxy.yml up -d --force-recreate operator
     echo "Waiting for operator to start..."
     sleep 15
 else
@@ -174,7 +174,7 @@ echo -e "${GREEN}✓ DB cleanup completed successfully!${NC}"
 echo "Backup file: $BACKUP_FILE"
 echo ""
 echo "To restart the operator manually:"
-echo "  COMPOSE_PROFILE=mainnet-prod docker compose -f docker-compose.yml -f docker-compose-haproxy.yml up -d --force-recreate operator"
+echo "  COMPOSE_PROFILE=mainnet-prod docker compose --profile mainnet-prod -f docker-compose.yml -f docker-compose-haproxy.yml up -d --force-recreate operator"
 echo ""
 echo "To verify after restart:"
 echo "  curl -s http://localhost:8080/health"

@@ -8,9 +8,9 @@
 #
 #   git revert <commit> && git push origin main
 #   cd /opt/chimera && git pull origin main
-#   COMPOSE_PROFILE=mainnet-prod docker compose -f docker-compose.yml \
+#   COMPOSE_PROFILE=mainnet-prod docker compose --profile mainnet-prod -f docker-compose.yml \
 #       -f docker-compose-haproxy.yml build operator
-#   COMPOSE_PROFILE=mainnet-prod docker compose -f docker-compose.yml \
+#   COMPOSE_PROFILE=mainnet-prod docker compose --profile mainnet-prod -f docker-compose.yml \
 #       -f docker-compose-haproxy.yml up -d --force-recreate operator
 #
 # A Compose-native rollback script (with PostgreSQL PITR / volume snapshots)

@@ -60,7 +60,7 @@ Run on the production server, in-container, with a writable config override:
 ```bash
 cd /opt/chimera
 git pull origin main
-COMPOSE_PROFILE=mainnet-paper docker compose -f docker-compose.yml \
+COMPOSE_PROFILE=mainnet-paper docker compose --profile mainnet-paper -f docker-compose.yml \
   -f docker-compose-haproxy.yml build operator
 
 # Dry-run first — validates the keypair and prints the plan without writing:
@@ -114,7 +114,7 @@ shred -u /path/to/id.json   # or: gshred -u on BSD/macOS
 ## Step 3 — Restart and verify
 
 ```bash
-COMPOSE_PROFILE=mainnet-paper docker compose -f docker-compose.yml \
+COMPOSE_PROFILE=mainnet-paper docker compose --profile mainnet-paper -f docker-compose.yml \
   -f docker-compose-haproxy.yml up -d --force-recreate operator
 
 docker logs chimera-operator 2>&1 | grep -E \

@@ -19,8 +19,12 @@ git push origin main
 # 2. On the production server (root@chimera-01.moez.tech)
 cd /opt/chimera
 git pull origin main
-COMPOSE_PROFILE=mainnet-prod docker compose -f docker-compose.yml -f docker-compose-haproxy.yml build <service>
-COMPOSE_PROFILE=mainnet-prod docker compose -f docker-compose.yml -f docker-compose-haproxy.yml up -d --force-recreate <service>
+# --profile is REQUIRED: every service carries a `profiles:` key, so without it
+# docker compose activates zero profiles and starts nothing. COMPOSE_PROFILE
+# (singular) is kept for env_file selection (${COMPOSE_PROFILE:-devnet}) but is
+# NOT a profile selector — it must be paired with --profile.
+COMPOSE_PROFILE=mainnet-prod docker compose --profile mainnet-prod -f docker-compose.yml -f docker-compose-haproxy.yml build <service>
+COMPOSE_PROFILE=mainnet-prod docker compose --profile mainnet-prod -f docker-compose.yml -f docker-compose-haproxy.yml up -d --force-recreate <service>
 ```
 
 **Never scp binaries or files directly to the server.** Always commit to git and pull on the server.

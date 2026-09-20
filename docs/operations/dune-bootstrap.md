@@ -109,16 +109,16 @@ for the operator service).
 ```bash
 # Build + pull
 git pull origin main
-COMPOSE_PROFILE=mainnet-prod docker compose -f docker-compose.yml -f docker-compose-haproxy.yml build bootstrap_dune
+COMPOSE_PROFILE=mainnet-prod docker compose --profile mainnet-prod -f docker-compose.yml -f docker-compose-haproxy.yml build bootstrap_dune
 
 # 1. Dry-run (default; no writes) — review the per-wallet report
-COMPOSE_PROFILE=mainnet-prod docker compose -f docker-compose.yml -f docker-compose-haproxy.yml run --rm bootstrap_dune /app/bootstrap_dune --dry-run
+COMPOSE_PROFILE=mainnet-prod docker compose --profile mainnet-prod -f docker-compose.yml -f docker-compose-haproxy.yml run --rm bootstrap_dune /app/bootstrap_dune --dry-run
 
 # 2. Real run — replaces dune_% rows per wallet, idempotent
-COMPOSE_PROFILE=mainnet-prod docker compose -f docker-compose.yml -f docker-compose-haproxy.yml run --rm bootstrap_dune /app/bootstrap_dune --apply
+COMPOSE_PROFILE=mainnet-prod docker compose --profile mainnet-prod -f docker-compose.yml -f docker-compose-haproxy.yml run --rm bootstrap_dune /app/bootstrap_dune --apply
 
 # 3. Roster seed (CANDIDATE only; ACTIVE/REJECTED never touched)
-COMPOSE_PROFILE=mainnet-prod docker compose -f docker-compose.yml -f docker-compose-haproxy.yml run --rm bootstrap_dune /app/bootstrap_dune --apply --roster
+COMPOSE_PROFILE=mainnet-prod docker compose --profile mainnet-prod -f docker-compose.yml -f docker-compose-haproxy.yml run --rm bootstrap_dune /app/bootstrap_dune --apply --roster
 ```
 
 Flags: `--dry-run` (default), `--apply`, `--roster`, `--no-roster`,
