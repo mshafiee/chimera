@@ -319,7 +319,16 @@ services:
        # >6-sigma day. Paired with the livelock fix (trip now baselines the
        # streak, cooldown can actually expire to Active). Revisit at >=31%
        # win (break-even) before any live mode.
-       - CHIMERA_CIRCUIT_BREAKERS__MAX_CONSECUTIVE_LOSSES=10
+        - CHIMERA_CIRCUIT_BREAKERS__MAX_CONSECUTIVE_LOSSES=10
+        # Paper drawdown band (2026-09-19): the 15% default latched with zero
+        # open positions ("cooldown expired but breach still present — re-trip"),
+        # freezing admissions AND the measurement flow the robustness window
+        # needs (09-20 -> 10-04). 15 -> 30 for paper mode only: reversible,
+        # no live funds at risk, and every close still lands in the verdict
+        # sample. The paper book's expectancy is negative, so this buys
+        # measurement velocity, not profit — REVERT if drawdown exceeds 30%
+        # without verdict-sample improvement.
+        - CHIMERA_CIRCUIT_BREAKERS__MAX_DRAWDOWN_PERCENT=30
        # Profitability verdict enforcement (Phase C): populate the verdict
        # cache so live entry BUYs can reach GO. In Live mode the SignalProcessor
        # fail-closes any non-GO verdict; Paper mode always proceeds so shadow
