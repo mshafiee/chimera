@@ -32,11 +32,41 @@ if [ -z "${HELIUS_API_KEY:-}" ] && [ -f /opt/chimera/.env ]; then
 fi
 [ -n "${HELIUS_API_KEY:-}" ] || fail "HELIUS_API_KEY not set and /opt/chimera/.env not readable"
 
-# ── 0. Quota probe (fail fast — monthly cap does NOT clear at midnight) ──
-log "Step 0: Helius quota probe"
-code="$(curl -sS -o /dev/null -w '%{http_code}' "https://api.helius.xyz/v0/webhooks?api-key=${HELIUS_API_KEY}" || true)"
-[ "$code" = "200" ] || fail "Helius probe HTTP $code — 'max usage reached' means monthly cap: billing-cycle reset or fresh key required. Nothing else will work; stopping."
-log "Quota probe OK (HTTP 200)"
+# ── 0. Quota probe ────────────────────────────────────────────────────────
+# Two independent Helius surfaces:
+#   * RPC (getHealth/getLatestBlockhash) — TRADING-CRITICAL. Down = no quotes,
+#     no submission, no confirmation polling. Hard fail.
+#   * Webhook management (/v0/webhooks list/create) — INGRESS-SETUP only. A 429
+#     here ("max usage reached" monthly cap) blocks creating the program feed
+#     and listing coverage, but does NOT stop push delivery on existing
+#     webhooks, nor execution. Degraded, not dead: warn + continue.
+# `HYDRA_SKIP_QUOTA_PROBE=1` downgrades both to warnings (explicit operator
+# override; the deploy then proceeds with whatever the account currently serves).
+SKIP_PROBE="${HYDRA_SKIP_QUOTA_PROBE:-0}"
+
+HELIUS_RPC_URL="${CHIMERA_RPC__PRIMARY_URL:-https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}}"
+rpc_health="$(curl -sS --max-time 15 -X POST "$HELIUS_RPC_URL" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' 2>/dev/null | head -c 200 || true)"
+if echo "$rpc_health" | grep -q '"result":"ok"'; then
+    log "Quota probe: RPC healthy (getHealth ok)"
+elif [ "$SKIP_PROBE" = "1" ]; then
+    log "WARN: RPC probe failed ($rpc_health) — proceeding due to HYDRA_SKIP_QUOTA_PROBE=1; execution will NOT work until RPC recovers"
+else
+    fail "Helius RPC not healthy ($rpc_health) — trading impossible (no quotes/submission/confirmation). Stopping. Set HYDRA_SKIP_QUOTA_PROBE=1 to override."
+fi
+
+wh_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 \
+    "https://api.helius.xyz/v0/webhooks?api-key=${HELIUS_API_KEY}" 2>/dev/null || true)"
+WEBHOOK_MGMT_OK=false
+if [ "$wh_code" = "200" ]; then
+    WEBHOOK_MGMT_OK=true
+    log "Quota probe: webhook management OK (HTTP 200)"
+elif [ "$SKIP_PROBE" = "1" ]; then
+    log "WARN: webhook management HTTP $wh_code (quota) — skipping feed setup (override active)"
+else
+    log "WARN: webhook management HTTP $wh_code — monthly cap. Program feed creation will be SKIPPED; existing webhook push delivery unaffected. Execution proceeds."
+fi
 
 # ── 1. Pull ───────────────────────────────────────────────────────────────
 log "Step 1: git pull"
@@ -100,7 +130,16 @@ echo "" | tee -a "$LOG_FILE"
 
 # ── 6. Program feed (alongside — never deletes wallet webhooks) ──────────
 log "Step 6: Hydra program feed"
-bash scripts/consolidate_program_webhooks.sh || fail "program feed setup failed"
+if [ "$WEBHOOK_MGMT_OK" = "true" ]; then
+    bash scripts/consolidate_program_webhooks.sh || fail "program feed setup failed"
+else
+    log "SKIPPED: webhook management API is HTTP $wh_code (monthly cap)."
+    log "  -> Run 'bash scripts/consolidate_program_webhooks.sh' once quota resets."
+    log "  -> Signal ingress currently depends on PRE-EXISTING wallet webhooks"
+    log "     (push delivery, not the management API). Coverage is unverifiable"
+    log "     while the cap holds — confirm signals in the operator log before"
+    log "     treating dust evidence as trustworthy."
+fi
 
 # ── 7. Next steps ─────────────────────────────────────────────────────────
 log "Done. Dust-live lane deployed."
