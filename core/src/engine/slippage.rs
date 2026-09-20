@@ -56,6 +56,25 @@ const LIQ_IMPACT_CEIL: Decimal = dec!(0.15); // 15%
 /// 2% matches the executor's `max_price_impact_pct` BUY gate.
 pub const HYDRA_MAX_PRICE_IMPACT_FRACTION: &str = "0.02";
 
+/// Hydra on-chain assert band (Ix2 contract): the executed fill must be within
+/// 1.5% of the quoted expectation or the bundle must revert. Enforcement is
+/// Jupiter's `slippageBps` on the swap ix itself (the swap reverts on-chain
+/// when breached); the builder pins cluster-buy `slippageBps` to this band
+/// and verifies pre-sign + post-land (see `SlippageAssert` in
+/// `operator/src/engine/transaction_builder.rs`). No open-market orders.
+pub const HYDRA_ASSERT_BPS: u16 = 150;
+
+/// `slippageBps` to request for Hydra cluster buys.
+pub fn hydra_assert_bps() -> u16 {
+    HYDRA_ASSERT_BPS
+}
+
+/// Minimum acceptable output for a quoted `expected_out` under the Hydra
+/// assert band: `floor(expected * (1 - 0.015))`. Integer math — no float.
+pub fn hydra_min_out(expected_out: u64) -> u64 {
+    ((expected_out as u128) * 985 / 1000) as u64
+}
+
 /// Hydra rejection code for the universe/depth gate (mirrors
 /// `LIQUIDITY_BELOW_MINIMUM` but specifically means "would move the pool").
 pub const REJECTED_INSUFFICIENT_DEPTH: &str = "REJECTED_INSUFFICIENT_DEPTH";
@@ -457,6 +476,16 @@ mod tests {
         };
         assert_eq!(est.expected_cost_sol(dec!(1)), dec!(0.015));
         assert_eq!(est.expected_cost_sol(dec!(10)), dec!(0.15));
+    }
+
+    #[test]
+    fn hydra_assert_band_math() {
+        assert_eq!(hydra_assert_bps(), 150);
+        // 1.5% band: min_out = floor(expected * 0.985).
+        assert_eq!(hydra_min_out(1_000_000), 985_000);
+        assert_eq!(hydra_min_out(100), 98); // floor(98.5)
+        assert_eq!(hydra_min_out(0), 0);
+        assert_eq!(hydra_min_out(1), 0); // floor(0.985) — dust floors to 0, callers must reject 0
     }
 
     #[test]

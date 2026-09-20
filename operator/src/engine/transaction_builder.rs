@@ -117,6 +117,12 @@ impl BuiltTransaction {
             BuiltTransaction::Versioned { out_amount, .. } => *out_amount,
         }
     }
+
+    /// Hydra Ix2 assert terms derived from the quoted `outAmount`.
+    /// `None` when the quote is missing/zero — fail-closed, never submit.
+    pub fn slippage_assert(&self) -> Option<SlippageAssert> {
+        self.out_amount().and_then(SlippageAssert::for_hydra_buy)
+    }
 }
 
 pub struct QuoteResult {
@@ -129,6 +135,63 @@ pub struct QuoteResult {
     /// the quote response omitted route info. Used by paper mode so its cost
     /// simulation matches what live mode would actually pay (P2-17/F22 parity).
     pub route_fee_sol: Option<Decimal>,
+}
+
+/// Hydra Ix2 contract: strict slippage-check assertion for cluster buys.
+///
+/// On-chain enforcement is Jupiter's `slippageBps` on the swap ix itself (the
+/// swap reverts when the realized output breaches the tolerance) — there is no
+/// separate assert program to invoke, and splicing a memo ix into Jupiter's
+/// versioned tx would require ALT resolution (the fragile path removed in
+/// P1-7). This type is the defense-in-depth off-chain half:
+/// - pre-sign: [`SlippageAssert::verify_quote`] fails closed when the quoted
+///   `outAmount` already breaches the 1.5% band — never submit, no market orders;
+/// - post-land: [`SlippageAssert::verify_fill`] re-checks the realized output
+///   with `tip_inlining::hydra_bundle_slippage_ok` — breached fills are never banked.
+///
+/// Terms are recorded on [`BuiltTransaction`] (see `slippage_assert`) so the
+/// executor can log/verify them without re-deriving.
+#[derive(Debug, Clone, Copy)]
+pub struct SlippageAssert {
+    /// Quoted expected output (base units).
+    pub expected_out: u64,
+    /// Minimum acceptable output: `floor(expected * 0.985)`.
+    pub min_out: u64,
+    /// On-chain tolerance requested on the swap ix.
+    pub slippage_bps: u16,
+}
+
+impl SlippageAssert {
+    /// Build the assert terms for a Hydra cluster buy from the quoted output.
+    /// Returns `None` (fail-closed: no assert terms = no submit) when the quote
+    /// is zero — callers must refuse to build, never default to a market order.
+    pub fn for_hydra_buy(quoted_out: u64) -> Option<Self> {
+        if quoted_out == 0 {
+            return None;
+        }
+        Some(Self {
+            expected_out: quoted_out,
+            min_out: chimera_core::engine::slippage::hydra_min_out(quoted_out),
+            slippage_bps: chimera_core::engine::slippage::hydra_assert_bps(),
+        })
+    }
+
+    /// Pre-sign check: the quote output must clear `min_out` (it always does by
+    /// construction — this catches plumbing bugs where the wrong quote leg is
+    /// threaded through) and be non-zero.
+    pub fn verify_quote(&self, quote_out: u64) -> bool {
+        quote_out != 0 && quote_out >= self.min_out
+    }
+
+    /// Post-land check: realized output within the 1.5% band of expectation.
+    pub fn verify_fill(&self, realized_out: u64) -> bool {
+        if realized_out < self.min_out {
+            return false;
+        }
+        let expected = Decimal::from(self.expected_out);
+        let realized = Decimal::from(realized_out);
+        chimera_core::engine::tip_inlining::hydra_bundle_slippage_ok(realized, expected)
+    }
 }
 
 impl TransactionBuilder {
@@ -1138,6 +1201,40 @@ pub fn load_wallet_keypair(secrets: &VaultSecrets) -> AppResult<Keypair> {
     // for signing, but at least the source buffer is cleaned.
 
     Ok(keypair)
+}
+
+#[cfg(test)]
+mod hydra_slippage_assert_tests {
+    use super::*;
+
+    #[test]
+    fn hydra_buy_terms_pin_150bps() {
+        let a = SlippageAssert::for_hydra_buy(1_000_000).expect("terms");
+        assert_eq!(a.expected_out, 1_000_000);
+        assert_eq!(a.min_out, 985_000);
+        assert_eq!(a.slippage_bps, 150);
+    }
+
+    #[test]
+    fn zero_quote_is_fail_closed() {
+        assert!(SlippageAssert::for_hydra_buy(0).is_none());
+    }
+
+    #[test]
+    fn verify_quote_catches_plumbing_bugs() {
+        let a = SlippageAssert::for_hydra_buy(1_000_000).unwrap();
+        assert!(a.verify_quote(1_000_000));
+        assert!(!a.verify_quote(0));
+        assert!(!a.verify_quote(984_999));
+    }
+
+    #[test]
+    fn verify_fill_enforces_band() {
+        let a = SlippageAssert::for_hydra_buy(1_000_000).unwrap();
+        assert!(a.verify_fill(1_000_000));
+        assert!(a.verify_fill(985_000));
+        assert!(!a.verify_fill(984_999));
+    }
 }
 
 #[cfg(test)]
