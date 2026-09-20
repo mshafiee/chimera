@@ -86,6 +86,100 @@ pub fn enforce_price_impact_cap(
     Ok(())
 }
 
+/// Hydra Ix2 pre-sign gate: strict slippage-check assertion evaluated BEFORE
+/// any submission. BUY entries only; EXIT/SELL signals are exempt so
+/// protective exits always proceed. Refuses when:
+/// 1. no assert terms exist (zero/missing quote — never a market order), or
+/// 2. the quote fails its own assert (plumbing bug — wrong quote leg), or
+/// 3. the quoted price impact already breaches the 1.5% band (the bundle
+///    would revert on-chain — refuse pre-sign and save the tip).
+/// Call at every live build site, right after `enforce_price_impact_cap`.
+pub fn enforce_hydra_assert_cap(
+    signal: &Signal,
+    built_tx: &crate::engine::transaction_builder::BuiltTransaction,
+) -> Result<(), ExecutorError> {
+    use crate::models::Action;
+    if signal.payload.action != Action::Buy {
+        return Ok(());
+    }
+    let Some(assert) = built_tx.slippage_assert() else {
+        tracing::warn!(
+            trade_uuid = %signal.trade_uuid,
+            token = %signal.payload.token,
+            "Trade refused pre-sign: Hydra assert terms missing (zero/missing quote) — no market orders"
+        );
+        return Err(ExecutorError::TransactionFailed(
+            "Hydra assert missing (zero/missing quote) — refusing to submit (pre-sign gate)".to_string(),
+        ));
+    };
+    let quote_out = built_tx.out_amount().unwrap_or(0);
+    if !assert.verify_quote(quote_out) {
+        tracing::warn!(
+            trade_uuid = %signal.trade_uuid,
+            token = %signal.payload.token,
+            quote_out,
+            min_out = assert.min_out,
+            "Trade refused pre-sign: quote fails Hydra assert (plumbing bug)"
+        );
+        return Err(ExecutorError::TransactionFailed(
+            "Quote fails Hydra slippage assert — refusing to submit (pre-sign gate)".to_string(),
+        ));
+    }
+    if let Some(impact) = built_tx.price_impact_pct() {
+        let band = Decimal::from_str("1.5").unwrap_or(Decimal::ONE);
+        if impact > band {
+            tracing::warn!(
+                trade_uuid = %signal.trade_uuid,
+                token = %signal.payload.token,
+                price_impact_pct = %impact,
+                "Trade refused pre-sign: quoted impact breaches Hydra 1.5% band (would revert on-chain)"
+            );
+            return Err(ExecutorError::TransactionFailed(format!(
+                "Quoted impact {:.2}% breaches Hydra 1.5% assert band — refusing to submit (pre-sign gate)",
+                impact
+            )));
+        }
+    }
+    tracing::debug!(
+        trade_uuid = %signal.trade_uuid,
+        expected_out = assert.expected_out,
+        min_out = assert.min_out,
+        slippage_bps = assert.slippage_bps,
+        "Hydra assert verified pre-sign"
+    );
+    Ok(())
+}
+
+/// Post-land fill verdict for Hydra assert audit logging.
+/// - `Unconfirmed` (confirmed=false): existing behavior — recovery reconciles,
+///   the fill is never banked. This is the teeth: breached bundles revert
+///   on-chain, land unconfirmed, and are never recorded as fills.
+/// - `QuotedBeyondBand`: telemetry only — the pre-sign gate should have
+///   refused this; a warn fires so gate bypasses are visible.
+/// - `Accept`: within band and confirmed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HydraFillVerdict {
+    Accept,
+    Unconfirmed,
+    QuotedBeyondBand,
+}
+
+pub fn hydra_post_land_verdict(
+    confirmed: bool,
+    price_impact_pct: Option<Decimal>,
+) -> HydraFillVerdict {
+    if !confirmed {
+        return HydraFillVerdict::Unconfirmed;
+    }
+    if let Some(impact) = price_impact_pct {
+        let band = Decimal::from_str("1.5").unwrap_or(Decimal::ONE);
+        if impact > band {
+            return HydraFillVerdict::QuotedBeyondBand;
+        }
+    }
+    HydraFillVerdict::Accept
+}
+
 /// RPC mode for trade execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RpcMode {
@@ -182,6 +276,31 @@ impl ExecutionOutcome {
         route_fee_sol: Option<Decimal>,
         executed_output_sol: Option<Decimal>,
     ) -> Self {
+        // Hydra Ix2 post-land audit: every live outcome records its assert
+        // verdict. Unconfirmed fills are never banked (recovery reconciles);
+        // a quoted-beyond-band landing means the pre-sign gate was bypassed
+        // and fires a warn so it is visible.
+        match hydra_post_land_verdict(confirmed, price_impact_pct) {
+            HydraFillVerdict::Accept => {
+                tracing::debug!(
+                    confirmed,
+                    price_impact_pct = ?price_impact_pct,
+                    "Hydra assert post-land: fill within 1.5% band"
+                );
+            }
+            HydraFillVerdict::Unconfirmed => {
+                tracing::info!(
+                    price_impact_pct = ?price_impact_pct,
+                    "Hydra assert post-land: unconfirmed — never banked, recovery reconciles"
+                );
+            }
+            HydraFillVerdict::QuotedBeyondBand => {
+                tracing::warn!(
+                    price_impact_pct = ?price_impact_pct,
+                    "Hydra assert post-land: landed fill quoted beyond 1.5% band (pre-sign gate bypassed?)"
+                );
+            }
+        }
         Self {
             signature,
             confirmed,
@@ -1672,6 +1791,9 @@ impl Executor {
         // A2: absolute price-impact gate BEFORE tip calculation / submission.
         enforce_price_impact_cap(signal, price_impact)?;
 
+        // Hydra Ix2 pre-sign gate: assert terms + 1.5% band (BUY-only; exits exempt).
+        enforce_hydra_assert_cap(signal, &built_tx)?;
+
         // Calculate dynamic tip (or use the retry-increased override)
         let tip = match tip_override {
             Some(t) => t,
@@ -2147,6 +2269,9 @@ impl Executor {
             .fill_price_lamports_per_base()
             .and_then(|lpb| lamports_per_base_to_sol_per_token(lpb, signal.token_decimals));
 
+        // Hydra Ix2 pre-sign gate (BUY-only; exits exempt).
+        enforce_hydra_assert_cap(signal, &built_tx)?;
+
         // Calculate dynamic tip (for cost tracking, though Helius uses priority fees)
         let tip = self.calculate_jito_tip(signal).await;
 
@@ -2476,6 +2601,9 @@ impl Executor {
 
         // A2: absolute price-impact gate BEFORE submission.
         enforce_price_impact_cap(signal, price_impact)?;
+
+        // Hydra Ix2 pre-sign gate: assert terms + 1.5% band (BUY-only; exits exempt).
+        enforce_hydra_assert_cap(signal, &built_tx)?;
 
         // Check total execution cost cap
         self.check_execution_costs(
@@ -4002,5 +4130,87 @@ mod tests {
             derive_token_amount(dec!(0.25), Some(dec!(0)), Some(9)),
             None
         );
+    }
+
+    // --- Hydra Ix2 gate tests (pure, no network) ---
+    mod hydra_gate {
+        use super::*;
+        use crate::models::SignalPayload;
+        use rust_decimal_macros::dec;
+        use solana_sdk::{message::Message, transaction::Transaction};
+
+        fn buy_signal() -> Signal {
+            Signal::new(
+                SignalPayload {
+                    strategy: Strategy::Shield,
+                    token: "TOK".to_string(),
+                    token_address: Some("TokA111111111111111111111111111111111111111".to_string()),
+                    action: Action::Buy,
+                    amount_sol: dec!(0.05),
+                    wallet_address: "Wallet111111111111111111111111111111111111".to_string(),
+                    trade_uuid: None,
+                    exit_fraction: None,
+                    trial_admission: false,
+                },
+                12345,
+                None,
+            )
+        }
+
+        fn sell_signal() -> Signal {
+            let mut s = buy_signal();
+            s.payload.action = Action::Sell;
+            s.payload.strategy = Strategy::Exit;
+            s
+        }
+
+        fn built_tx(impact_pct: Option<Decimal>, out_amount: Option<u64>) -> BuiltTx {
+            BuiltTx::Legacy {
+                transaction: Transaction {
+                    signatures: vec![],
+                    message: Message::default(),
+                },
+                blockhash: solana_sdk::hash::Hash::default(),
+                price_impact_pct: impact_pct,
+                fill_price_lamports_per_base: None,
+                route_fee_sol: None,
+                out_amount,
+            }
+        }
+        use crate::engine::transaction_builder::BuiltTransaction as BuiltTx;
+
+        #[test]
+        fn presign_accepts_in_band_buy() {
+            assert!(enforce_hydra_assert_cap(&buy_signal(), &built_tx(Some(dec!(1.0)), Some(1_000_000))).is_ok());
+        }
+
+        #[test]
+        fn presign_refuses_missing_quote() {
+            assert!(enforce_hydra_assert_cap(&buy_signal(), &built_tx(Some(dec!(1.0)), None)).is_err());
+            assert!(enforce_hydra_assert_cap(&buy_signal(), &built_tx(Some(dec!(1.0)), Some(0))).is_err());
+        }
+
+        #[test]
+        fn presign_refuses_beyond_band() {
+            // 1.6% quoted impact breaches the 1.5% band — refuse pre-sign, save the tip.
+            assert!(enforce_hydra_assert_cap(&buy_signal(), &built_tx(Some(dec!(1.6)), Some(1_000_000))).is_err());
+        }
+
+        #[test]
+        fn presign_exempts_exits() {
+            // Exits always proceed — even with zero quote.
+            assert!(enforce_hydra_assert_cap(&sell_signal(), &built_tx(None, None)).is_ok());
+        }
+
+        #[test]
+        fn post_land_verdicts() {
+            assert_eq!(hydra_post_land_verdict(true, Some(dec!(1.0))), HydraFillVerdict::Accept);
+            assert_eq!(hydra_post_land_verdict(true, None), HydraFillVerdict::Accept);
+            assert_eq!(hydra_post_land_verdict(false, Some(dec!(1.0))), HydraFillVerdict::Unconfirmed);
+            assert_eq!(
+                hydra_post_land_verdict(true, Some(dec!(2.0))),
+                HydraFillVerdict::QuotedBeyondBand
+            );
+        }
     }
 }
