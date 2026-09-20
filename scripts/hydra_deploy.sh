@@ -87,12 +87,14 @@ grep '^CHIMERA_TRADE_MODE=' /opt/chimera/.env | tee -a "$LOG_FILE"
 
 # ── 3. Rebuild + recreate operator ────────────────────────────────────────
 log "Step 3: build + recreate operator (embeds 0026/0027)"
-export COMPOSE_PROFILE=mainnet-prod
 export HELIUS_API_KEY
-docker compose -f docker-compose.yml -f docker-compose-haproxy.yml build operator \
-    || fail "operator build failed"
-docker compose -f docker-compose.yml -f docker-compose-haproxy.yml up -d --force-recreate operator \
-    || fail "operator recreate failed"
+# Compose v5 does NOT honor COMPOSE_PROFILE (singular, the repo's documented
+# var) — it needs COMPOSE_PROFILES (plural) or an explicit --profile. Using
+# the flag directly so no environment leakage can silently activate zero
+# profiles (which starts nothing: every service here carries a profile).
+COMPOSE=(docker compose --profile mainnet-prod -f docker-compose.yml -f docker-compose-haproxy.yml)
+"${COMPOSE[@]}" build operator || fail "operator build failed"
+"${COMPOSE[@]}" up -d --force-recreate operator || fail "operator recreate failed"
 
 # ── 4. Assertions ─────────────────────────────────────────────────────────
 log "Step 4: assertions (waiting up to 120s for boot)"
