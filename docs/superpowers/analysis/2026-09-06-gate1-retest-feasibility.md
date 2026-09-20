@@ -53,3 +53,23 @@ permanently retired.**
 
 Note: this runs in parallel with the Pivot-A mirror validation window —
 independent instruments, no interference.
+
+## Verdict status (2026-09-20): INCONCLUSIVE — roster-blocked
+
+Window closed with **n = 36 triggers** (2026-09-06 → 2026-09-10), far below the
+n ≥ 300 bar and below the n < 100 extension threshold. The projection of
+~10/day (~140 by 09-20) did not materialise: triggers fell to **zero after
+2026-09-10** and none have been recorded since.
+
+The capture cron is alive (`*/15`, log fresh at 06:30 UTC on 09-20) but reports
+`inserted_now=0` every run. Root cause is upstream, not the capture job: cluster
+detection needs ≥3 tracked wallets in the same token within 12h, and the tracked
+roster has collapsed to **5 ACTIVE wallets**. The pipeline is observing correctly
+— there is simply no multi-wallet clustering to observe.
+
+Per the frozen protocol the n < 100 case allows **one** 14-day extension, logged
+before looking. Extension is **deferred as futile**: without roster recovery,
+the trigger rate stays zero and the window cannot accumulate evidence. The
+cluster hypothesis therefore has **no verdict** and cannot get one until the
+roster is repopulated. This is a data-availability outcome, not a negative
+finding about the hypothesis.
