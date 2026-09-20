@@ -75,7 +75,28 @@ flag, not applied.
 
 ## Verdict
 
-PENDING — collection window opened 2026-09-06 (amended). Verdict run no
-earlier than 2026-09-20.
+**GO (legacy bar) — 2026-09-20.** Collection window 2026-09-06 → 2026-09-20,
+`--mirror-validation 14`, scout image at commit `0c86479`.
+
+```
+n=2063  avg_pnl=+8.687  win_rate=10.8%  ci_lo=+1.436  ci_hi=+20.657  meets_go_bar=TRUE
+```
+
+**However, the frozen robustness gate run on the same 14d window returns
+`meets_robustness_bar = FALSE`** (see
+`docs/runbooks/2026-09-19-mirror-robustness-protocol.md` §14d diagnostic):
+`mirror_main` winsorized mean −0.15, median −8.43, cost-adjusted −2.15;
+live-reachable `wallet_sell` winsorized mean −3.92 (95% CI −5.97…−1.77).
+
+**Interpretation: the GO is a moonshot artifact and is NOT economically
+real.** Adding robustness to the frozen bar was pre-registered for the *next*
+window (2026-09-20 → 2026-10-04) precisely so this window's verdict could not
+be amended after the fact. The mirror hypothesis therefore stands as a
+**mechanical GO that fails robustness**, and must not proceed to live-sizing
+on this evidence. The next window's robustness verdict (no earlier than
+2026-10-04) is the deciding measurement.
+
+**Gate 2 hand-off: NOT triggered.**
 
 | 2026-09-06 | — | — | — | — | — | baseline captured (context: n=1265, mean +86.5%, 30d trailing); signal flow verified: 786/2245 signals from cohort, 0 failures — see docs/superpowers/analysis/2026-09-07-pivot-a-baseline.md |
+| 2026-09-20 | 14 | 2063 | +8.687 | +1.436 | yes (legacy) | FROZEN VERDICT: GO on the legacy bar; robustness gate FALSE on same window (moonshot artifact). Gate 2 NOT triggered. |

@@ -80,3 +80,11 @@ zeros are excluded (n 1,971 → 414), the median turns negative, the CI crosses
 zero, and the live-reachable rail is clearly negative. The gate discriminates
 as designed. This diagnostic does not consume the next window's first look.
 
+**14d confirmation (2026-09-20, closing window):** the frozen legacy verdict
+returned `meets_go_bar=TRUE` (n=2,063, mean +8.69, CI-lo +1.44), and the
+robustness gate on the identical window returned **`meets_robustness_bar =
+FALSE`** — `mirror_main` priced n=489, winsorized mean −0.15, median −8.43,
+cost-adjusted −2.15; live `wallet_sell` priced n=539, winsorized mean −3.92
+(CI −5.97…−1.77), median 0.00. The two bars agree that the legacy GO is not
+economically real.
+
