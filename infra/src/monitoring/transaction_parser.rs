@@ -41,6 +41,24 @@ pub enum SwapDirection {
     Sell,
 }
 
+/// Hydra established-pool program allowlist (program-subscription model).
+/// Raydium AMM v4 / CPMM / CLMM + Meteora DLMM / Dynamic AMM.
+/// Pump.fun + Orca are excluded — parsed only for legacy attribution, never
+/// admitted under `Gate::EstablishedPoolSafety`.
+pub const HYDRA_ESTABLISHED_PROGRAM_IDS: &[&str] = &[
+    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8", // Raydium AMM v4
+    "CPMMoo8L3F4NbTegBCKVN6G57yCiCR9xtsRGPBXyzs9",  // Raydium CPMM
+    "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", // Raydium CLMM
+    "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",  // Meteora DLMM
+    "EoCxW6Yoqw8ThpSV9fuib479C9R9SgfW1QKV7eYt",     // Meteora Dynamic AMM
+];
+
+/// Returns true when the transaction touches a Hydra-established pool program
+/// (checked across top-level + CPI inner instructions).
+pub fn is_hydra_established_pool_tx(tx_json: &Value) -> bool {
+    has_program_id(tx_json, HYDRA_ESTABLISHED_PROGRAM_IDS)
+}
+
 /// Parse transaction to detect swaps
 pub fn parse_transaction(tx_json: &Value, wallet_address: &str) -> Result<TransactionInfo> {
     let signature = tx_json
@@ -61,8 +79,17 @@ pub fn parse_transaction(tx_json: &Value, wallet_address: &str) -> Result<Transa
         });
     }
 
-    // Try to parse as Raydium swap
+    // Try to parse as Raydium swap (AMM v4 + CPMM + CLMM)
     if let Ok(swap) = parse_raydium_swap(tx_json, wallet_address) {
+        return Ok(TransactionInfo {
+            signature,
+            wallet_address: wallet_address.to_string(),
+            parsed_swap: Some(swap),
+        });
+    }
+
+    // Try to parse as Meteora swap (DLMM + Dynamic AMM) — Hydra primary venue
+    if let Ok(swap) = parse_meteora_swap(tx_json, wallet_address) {
         return Ok(TransactionInfo {
             signature,
             wallet_address: wallet_address.to_string(),
@@ -190,12 +217,13 @@ fn has_program_id(tx_json: &Value, program_ids: &[&str]) -> bool {
             .unwrap_or(false)
 }
 
-/// Parse Raydium swap (AMM v4 and CLMM)
+/// Parse Raydium swap (AMM v4, CPMM and CLMM)
 fn parse_raydium_swap(tx_json: &Value, wallet_address: &str) -> Result<ParsedSwap> {
     const RAYDIUM_AMM_V4: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
+    const RAYDIUM_CPMM: &str = "CPMMoo8L3F4NbTegBCKVN6G57yCiCR9xtsRGPBXyzs9";
     const RAYDIUM_CLMM: &str = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
 
-    if !has_program_id(tx_json, &[RAYDIUM_AMM_V4, RAYDIUM_CLMM]) {
+    if !has_program_id(tx_json, &[RAYDIUM_AMM_V4, RAYDIUM_CPMM, RAYDIUM_CLMM]) {
         return Err(anyhow::anyhow!("Not a Raydium swap"));
     }
 
@@ -255,7 +283,43 @@ fn parse_orca_swap(tx_json: &Value, wallet_address: &str) -> Result<ParsedSwap> 
     })
 }
 
-/// Parse Pump.fun swap
+/// Parse Meteora swap (DLMM + Dynamic AMM) — Hydra primary venue.
+/// Previously missing entirely (only listed in pools.rs/scout config).
+fn parse_meteora_swap(tx_json: &Value, wallet_address: &str) -> Result<ParsedSwap> {
+    const METEORA_DLMM: &str = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
+    const METEORA_DAMM: &str = "EoCxW6Yoqw8ThpSV9fuib479C9R9SgfW1QKV7eYt";
+
+    if !has_program_id(tx_json, &[METEORA_DLMM, METEORA_DAMM]) {
+        return Err(anyhow::anyhow!("Not a Meteora swap"));
+    }
+
+    let pre_balances = tx_json
+        .get("meta")
+        .and_then(|m| m.get("preTokenBalances"))
+        .and_then(|b| b.as_array());
+    let post_balances = tx_json
+        .get("meta")
+        .and_then(|m| m.get("postTokenBalances"))
+        .and_then(|b| b.as_array());
+
+    let (token_in, token_out, amount_in, amount_out, direction) =
+        parse_balance_changes(pre_balances, post_balances, wallet_address)?;
+
+    Ok(ParsedSwap {
+        token_in,
+        token_out,
+        amount_in,
+        amount_out,
+        direction,
+        dex: "Meteora".to_string(),
+        slippage: None,
+        token_decimals: None,
+    })
+}
+
+/// Parse Pump.fun swap — LEGACY ONLY. Retained for attribution of historical
+/// fills; Hydra universe gating rejects Pump.fun at admission
+/// (`Gate::EstablishedPoolSafety`). Do not add new callers.
 fn parse_pumpfun_swap(tx_json: &Value, wallet_address: &str) -> Result<ParsedSwap> {
     const PUMPFUN: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 
@@ -518,8 +582,15 @@ fn detect_dex_from_laserstream(payload: &Value) -> Result<String> {
 
         if log_str.contains("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4") {
             return Ok("Jupiter".to_string());
-        } else if log_str.contains("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8") {
+        } else if log_str.contains("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8")
+            || log_str.contains("CPMMoo8L3F4NbTegBCKVN6G57yCiCR9xtsRGPBXyzs9")
+            || log_str.contains("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK")
+        {
             return Ok("Raydium".to_string());
+        } else if log_str.contains("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo")
+            || log_str.contains("EoCxW6Yoqw8ThpSV9fuib479C9R9SgfW1QKV7eYt")
+        {
+            return Ok("Meteora".to_string());
         } else if log_str.contains("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc") {
             return Ok("Orca".to_string());
         } else if log_str.contains("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P") {
@@ -1200,6 +1271,9 @@ mod tests {
 
     const JUP: &str = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
     const RAYDIUM: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
+    const RAYDIUM_CPMM: &str = "CPMMoo8L3F4NbTegBCKVN6G57yCiCR9xtsRGPBXyzs9";
+    const METEORA_DLMM: &str = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
+    const METEORA_DAMM: &str = "EoCxW6Yoqw8ThpSV9fuib479C9R9SgfW1QKV7eYt";
     const ORCA: &str = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc";
     const PUMPFUN: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
     const TOK: &str = "TokA111111111111111111111111111111111111111";
@@ -1254,6 +1328,30 @@ mod tests {
             assert_eq!(swap.dex, dex);
             assert_eq!(swap.direction, SwapDirection::Buy);
         }
+    }
+
+    #[test]
+    fn test_parse_transaction_meteora_and_raydium_variants() {
+        // Hydra: Meteora DLMM/DAMM + Raydium CPMM must parse as established venues.
+        for (program, dex) in [
+            (METEORA_DLMM, "Meteora"),
+            (METEORA_DAMM, "Meteora"),
+            (RAYDIUM_CPMM, "Raydium"),
+        ] {
+            let tx = tx_with_program(program);
+            let info = parse_transaction(&tx, "wallet").unwrap();
+            let swap = info.parsed_swap.expect(dex);
+            assert_eq!(swap.dex, dex);
+            assert_eq!(swap.direction, SwapDirection::Buy);
+        }
+    }
+
+    #[test]
+    fn test_hydra_established_allowlist() {
+        assert!(is_hydra_established_pool_tx(&tx_with_program(RAYDIUM)));
+        assert!(is_hydra_established_pool_tx(&tx_with_program(METEORA_DLMM)));
+        assert!(!is_hydra_established_pool_tx(&tx_with_program(PUMPFUN)));
+        assert!(!is_hydra_established_pool_tx(&tx_with_program(ORCA)));
     }
 
     #[test]

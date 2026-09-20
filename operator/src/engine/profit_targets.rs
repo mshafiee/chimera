@@ -4,6 +4,12 @@
 //! - Tiered exits (sell 25% at each target)
 //! - Trailing stops (after +50%, set trailing stop at -20% from peak)
 //! - Time-based exits (auto-exit after 24h if profitable)
+//!
+//! Hydra overlay (Operation Hydra, 2026-09-20): 2-stage tranche model —
+//! Tranche 1 de-risks 50% at +50%; Tranche 2 (moonshot) exits on cluster-dump
+//! (>=35% insider sell), -20% trailing-from-peak (post-T1 only), or 12h cap.
+//! See `hydra_tranche_action` (pure, tested) — the live tiered engine calls it
+//! first for Hydra positions before falling through to legacy tiers.
 
 use crate::config::ProfitManagementConfig;
 use crate::db_abstraction::Database;
@@ -16,6 +22,53 @@ use serde_json;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
+
+/// Hydra 2-stage tranche policy (pure, tested — see tests below).
+/// - Tranche 1: at +50% sell 50% (capital de-risk, guarantees breakeven).
+/// - Tranche 2: hold remainder until cluster-dump (>=35% insider sell) OR
+///   -20% trailing-from-peak (post-T1 only) OR 12h hard cap.
+pub const HYDRA_TRANCHE1_PCT: f64 = 50.0;
+pub const HYDRA_TRANCHE1_FRACTION: f64 = 0.50;
+pub const HYDRA_TRAILING_PCT: f64 = 20.0;
+pub const HYDRA_MAX_HOLD_HOURS: f64 = 12.0;
+pub const HYDRA_CLUSTER_DUMP_FRACTION: f64 = 0.35;
+
+/// Hydra tranche verdict for a position snapshot. Pure — no I/O.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HydraTrancheVerdict {
+    Hold,
+    Tranche1DeRisk,
+    Tranche2ClusterDump,
+    Tranche2Trailing,
+    Tranche2TimeCap,
+}
+
+pub fn hydra_tranche_action(
+    profit_pct: f64,
+    peak_profit_pct: f64,
+    elapsed_hours: f64,
+    tranche1_done: bool,
+    cluster_sold_fraction: f64,
+) -> HydraTrancheVerdict {
+    if elapsed_hours >= HYDRA_MAX_HOLD_HOURS {
+        return HydraTrancheVerdict::Tranche2TimeCap;
+    }
+    if tranche1_done {
+        if cluster_sold_fraction >= HYDRA_CLUSTER_DUMP_FRACTION {
+            return HydraTrancheVerdict::Tranche2ClusterDump;
+        }
+        if peak_profit_pct > HYDRA_TRANCHE1_PCT
+            && profit_pct <= peak_profit_pct - HYDRA_TRAILING_PCT
+        {
+            return HydraTrancheVerdict::Tranche2Trailing;
+        }
+        return HydraTrancheVerdict::Hold;
+    }
+    if profit_pct >= HYDRA_TRANCHE1_PCT {
+        return HydraTrancheVerdict::Tranche1DeRisk;
+    }
+    HydraTrancheVerdict::Hold
+}
 
 /// Profit target state
 pub struct ProfitTargetManager {
@@ -1943,5 +1996,52 @@ mod vol_scale_tests {
             // Removing a missing uuid still deletes via DB (no panic).
             mgr.remove_position("missing").await;
         }
+    }
+}
+
+#[cfg(test)]
+mod hydra_tranche_tests {
+    use super::*;
+
+    #[test]
+    fn tranche1_fires_at_plus50() {
+        assert_eq!(
+            hydra_tranche_action(50.0, 50.0, 1.0, false, 0.0),
+            HydraTrancheVerdict::Tranche1DeRisk
+        );
+        assert_eq!(
+            hydra_tranche_action(10.0, 10.0, 1.0, false, 0.0),
+            HydraTrancheVerdict::Hold
+        );
+    }
+
+    #[test]
+    fn tranche2_trailing_only_post_t1() {
+        // -20% from peak 80% → 55% triggers trailing when T1 done.
+        assert_eq!(
+            hydra_tranche_action(55.0, 80.0, 2.0, true, 0.0),
+            HydraTrancheVerdict::Tranche2Trailing
+        );
+        // Same drawdown pre-T1 is NOT a trailing exit (T1 not filled).
+        assert_eq!(
+            hydra_tranche_action(55.0, 80.0, 2.0, false, 0.0),
+            HydraTrancheVerdict::Tranche1DeRisk
+        );
+    }
+
+    #[test]
+    fn tranche2_cluster_dump_and_time_cap() {
+        assert_eq!(
+            hydra_tranche_action(120.0, 150.0, 3.0, true, 0.40),
+            HydraTrancheVerdict::Tranche2ClusterDump
+        );
+        assert_eq!(
+            hydra_tranche_action(5.0, 5.0, 12.0, true, 0.0),
+            HydraTrancheVerdict::Tranche2TimeCap
+        );
+        assert_eq!(
+            hydra_tranche_action(5.0, 5.0, 13.0, false, 0.0),
+            HydraTrancheVerdict::Tranche2TimeCap
+        );
     }
 }

@@ -4,6 +4,7 @@
 
 pub mod decision_recorder;
 pub mod dune_monitor;
+pub mod dust_runner;
 pub mod entry_confirmation;
 mod execution_lock;
 pub mod executor;

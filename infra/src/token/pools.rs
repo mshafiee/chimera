@@ -13,16 +13,38 @@ use tokio::sync::RwLock;
 
 /// Known DEX program IDs for holder concentration filtering (Phase 2)
 /// Accounts owned by these programs are excluded from holder concentration checks.
+///
+/// Hydra (Operation Hydra): established-pool allowlist is Raydium AMM v4 /
+/// CPMM / CLMM + Meteora DLMM only. Orca + Pump.fun are intentionally
+/// excluded from the Hydra allowlist (Orca ID kept for legacy filtering).
 pub const KNOWN_DEX_PROGRAM_IDS: &[&str] = &[
     // Raydium AMM v4
     "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
-    // Orca Whirlpool
-    "whirLbUiic3C5yQJgR7Cm4U6gfH4Bi9sK1S9ZDm5pq9",
+    // Orca Whirlpool (canonical mainnet — fixed 2026-09-20, was a typo variant)
+    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
     // Meteora DLMM
     "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
     // Pump.fun bonding curve (already covered by PUMPFUN rejection but included for completeness)
     "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
 ];
+
+/// Hydra established-pool allowlist: Raydium V4 + CPMM + CLMM, Meteora DLMM.
+/// Jupiter is a router (not a pool) and is handled at the parser layer.
+pub const HYDRA_ESTABLISHED_DEX_PROGRAM_IDS: &[&str] = &[
+    // Raydium AMM v4
+    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+    // Raydium CPMM
+    "CPMMoo8L3F4NbTegBCKVN6G57yCiCR9xtsRGPBXyzs9",
+    // Raydium CLMM
+    "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+    // Meteora DLMM
+    "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+    // Meteora Dynamic AMM
+    "EoCxW6Yoqw8ThpSV9fuib479C9R9SgfW1QKV7eYt",
+];
+
+/// Hydra DexScreener `dexId` allowlist (mirrors the program list above).
+pub const HYDRA_ESTABLISHED_DEX_IDS: &[&str] = &["raydium", "meteora", "meteora-dlmm", "jupiter"];
 
 /// Pool liquidity data
 #[derive(Debug, Clone)]
@@ -68,8 +90,10 @@ impl PoolEnumerator {
         let raydium_program = Pubkey::from_str("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8")
             .expect("Invalid Raydium program ID");
 
-        // Orca program ID (mainnet)
-        let orca_program = Pubkey::from_str("9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP")
+        // Orca program ID (mainnet) — canonical Whirlpool ID (matches
+        // transaction_parser + KNOWN_DEX_PROGRAM_IDS; the Token-Swap-V2 ID
+        // 9W959... was a misconfiguration and is retired).
+        let orca_program = Pubkey::from_str("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc")
             .expect("Invalid Orca program ID");
 
         Self {

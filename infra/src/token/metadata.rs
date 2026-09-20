@@ -969,7 +969,11 @@ impl TokenMetadataFetcher {
 
     /// Fetch aggregated liquidity from DexScreener.
     ///
-    /// Returns the maximum `liquidity.usd` across all Solana pairs for the token.
+    /// Hydra `Gate::EstablishedPoolSafety`: only counts liquidity on the
+    /// established allowlist (`raydium`, `meteora`, `meteora-dlmm`,
+    /// `jupiter` router). Liquidity on any other `dexId` (Orca, pump.fun,
+    /// unknown) is ignored so phantom/junk-DEX depth can never admit a token.
+    /// Returns the maximum `liquidity.usd` across allowlisted Solana pairs.
     /// Returns `Ok(Decimal::ZERO)` when the token is not listed (not an error).
     async fn fetch_dexscreener_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
         let url = format!("{}/{}", self.dexscreener_base_url, token_address);
@@ -1004,6 +1008,13 @@ impl TokenMetadataFetcher {
         let max_liq = pairs
             .iter()
             .filter(|pair| pair.get("chainId").and_then(|c| c.as_str()) == Some("solana"))
+            .filter(|pair| {
+                // Hydra allowlist; missing dexId = untrusted = excluded.
+                matches!(
+                    pair.get("dexId").and_then(|d| d.as_str()),
+                    Some("raydium" | "meteora" | "meteora-dlmm" | "jupiter")
+                )
+            })
             .filter_map(|pair| {
                 pair.get("liquidity")
                     .and_then(|l| l.get("usd"))

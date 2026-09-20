@@ -32,6 +32,32 @@ use solana_sdk::{
 };
 use thiserror::Error;
 
+/// Hydra unified tip formula (single authority for cluster buys):
+/// `0.003 SOL + 10% of trade size`. Callers clamp to
+/// `[strategy_floor, tip_ceiling]`. Pure — Decimal to avoid float money.
+pub fn hydra_cluster_tip_sol(
+    amount_sol: rust_decimal::Decimal,
+) -> rust_decimal::Decimal {
+    use rust_decimal_macros::dec;
+    let base = dec!(0.003);
+    let pct = dec!(0.10);
+    base + amount_sol * pct
+}
+
+/// Hydra bundle slippage assertion: executed price must be within 1.5% of
+/// the expected (quoted) price or the bundle must revert. Pure.
+pub fn hydra_bundle_slippage_ok(
+    executed_price: rust_decimal::Decimal,
+    expected_price: rust_decimal::Decimal,
+) -> bool {
+    use rust_decimal_macros::dec;
+    if expected_price <= rust_decimal::Decimal::ZERO || executed_price <= rust_decimal::Decimal::ZERO {
+        return false;
+    }
+    let drift = (executed_price - expected_price).abs() / expected_price;
+    drift <= dec!(0.015)
+}
+
 /// Errors that can occur while inlining a tip.
 #[derive(Debug, Error)]
 pub enum TipInlineError {
@@ -427,5 +453,24 @@ mod tests {
             "expected WritabilityChanged, got {:?}",
             err
         );
+    }
+
+    #[test]
+    fn hydra_tip_is_base_plus_10pct() {
+        use rust_decimal_macros::dec;
+        assert_eq!(
+            super::hydra_cluster_tip_sol(dec!(0.5)),
+            dec!(0.003) + dec!(0.5) * dec!(0.10)
+        );
+        assert_eq!(super::hydra_cluster_tip_sol(dec!(0)), dec!(0.003));
+    }
+
+    #[test]
+    fn hydra_slippage_assert_15pct() {
+        use rust_decimal_macros::dec;
+        assert!(super::hydra_bundle_slippage_ok(dec!(100), dec!(100)));
+        assert!(super::hydra_bundle_slippage_ok(dec!(101.4), dec!(100)));
+        assert!(!super::hydra_bundle_slippage_ok(dec!(102), dec!(100)));
+        assert!(!super::hydra_bundle_slippage_ok(dec!(0), dec!(100)));
     }
 }

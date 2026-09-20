@@ -1425,12 +1425,14 @@ impl SelectionService {
         // recording) is merged in as attribution only — the is_consensus GATE
         // still requires the 5-minute aggregator signal.
         let mut consensus_wallet_count: Option<usize> = None;
+        // Hydra quorum: >=3 distinct wallets (was >=2). Single/double-wallet
+        // signals are never consensus under the cluster model.
         let is_consensus = if let Some(ref aggregator) = self.signal_aggregator {
             let count = aggregator
                 .peek_consensus_wallet_count(&req.token_address)
                 .await;
             consensus_wallet_count = Some(count.max(1));
-            count >= 2
+            count >= 3
         } else {
             false
         };
@@ -1466,20 +1468,42 @@ impl SelectionService {
             false
         };
 
-        // ── 7b. Consensus-OR-proven gate ───────────────────────────────────
-        // Single-wallet signals from wallets without a proven copy-trade
-        // record are the negative-EV class (all wallets net-negative since
-        // 2026-08-04; config note: only the 0.50+ signal-quality band is
-        // gross-profitable). Require either multi-wallet consensus or a wallet
-        // with >= min_proven_trades closed copy-trades (and, when configured,
-        // positive 30d copy PnL) before admitting a BUY. Exit/SELL decisions
-        // are never gated here.
+        // ── 7b. Hydra consensus-quorum gate ────────────────────────────────
+        // Operation Hydra deprecates single-wallet admission: BUY requires
+        // >=3 distinct wallets (5-min aggregator consensus OR smart-money
+        // cluster OR durable 12h DB count >=3). The proven-wallet bypass is
+        // retired — early-entry edge does not survive the established-pool
+        // model. Exit/SELL decisions are never gated here.
+        let durable_count = consensus_wallet_count.unwrap_or(1);
+        let hydra_quorum = is_consensus || is_smart_money_cluster || durable_count >= 3;
         if !bypass_consensus_proven
             && self.config.require_consensus_or_proven
-            && !is_consensus
-            && !is_smart_money_cluster
+            && !hydra_quorum
             && strategy != Strategy::Exit
         {
+            let reason = format!(
+                "Hydra quorum unmet: consensus_wallet_count={} (<3); requires >=3 clustered wallets, smart-money cluster (≥{} profitable wallets)",
+                durable_count,
+                self.config.cluster_min_profitable_wallets,
+            );
+            tracing::info!(
+                ingress = ?req.ingress,
+                decision = "BUY",
+                token = %req.token_address,
+                wallet = %req.wallet_address,
+                rejection_code = "CONSENSUS_QUORUM_UNMET",
+                reason = %reason,
+                strategy = ?strategy,
+                is_consensus,
+                is_smart_money_cluster,
+                profitable_cluster_count,
+                "selection: BUY rejected by hydra quorum gate"
+            );
+            return BuyDecision::rejected(req, &self.config_hash, "CONSENSUS_QUORUM_UNMET", reason);
+        }
+        // Legacy single-wallet-unproven gate retired under Hydra (kept for
+        // reference): any signal reaching here already holds quorum.
+        if false {
             let proven = self.wallet_is_proven(&req.wallet_address).await;
             if !proven {
                 let reason = format!(

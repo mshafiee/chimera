@@ -557,7 +557,10 @@ impl Executor {
             // simulate execution and don't depend on RPC speed)
             if signal.payload.strategy == Strategy::Spear
                 && rpc_mode == RpcMode::Standard
-                && self.config.trade_mode == crate::config::TradeMode::Live
+                && matches!(
+                    self.config.trade_mode,
+                    crate::config::TradeMode::Live | crate::config::TradeMode::DustLive
+                )
             {
                 return Err(ExecutorError::SpearDisabled);
             }
@@ -620,13 +623,17 @@ impl Executor {
             }
 
             // Execute based on mode
+            // Hydra DustLive shares the Live path (real execution) — size caps
+            // are enforced upstream in the dust lane, never here.
             let result = match self.config.trade_mode {
                 crate::config::TradeMode::Devnet => self.execute_devnet(signal).await,
                 crate::config::TradeMode::Paper => self.execute_paper(signal).await,
-                crate::config::TradeMode::Live => match rpc_mode {
-                    RpcMode::Jito => self.execute_jito_with_retry(signal).await,
-                    RpcMode::Standard => self.execute_standard(signal).await,
-                },
+                crate::config::TradeMode::Live | crate::config::TradeMode::DustLive => {
+                    match rpc_mode {
+                        RpcMode::Jito => self.execute_jito_with_retry(signal).await,
+                        RpcMode::Standard => self.execute_standard(signal).await,
+                    }
+                }
             };
 
             // A2: the absolute price-impact cap now runs BEFORE submission in
@@ -767,7 +774,10 @@ impl Executor {
                     // pollute the percentile data and skew future live tip calculations.
                     let jito_tip = if rpc_mode == RpcMode::Jito {
                         let tip = self.calculate_jito_tip(signal).await;
-                        if self.config.trade_mode == crate::config::TradeMode::Live {
+                        if matches!(
+                            self.config.trade_mode,
+                            crate::config::TradeMode::Live | crate::config::TradeMode::DustLive
+                        ) {
                             if let Some(ref tip_manager) = self.tip_manager {
                                 if let Err(e) = tip_manager
                                     .record_tip(
@@ -903,7 +913,10 @@ impl Executor {
                                     || m.contains("confirmation")
                             });
                     let tip_could_have_landed = rpc_mode == RpcMode::Jito
-                        && self.config.trade_mode == crate::config::TradeMode::Live
+                        && matches!(
+                            self.config.trade_mode,
+                            crate::config::TradeMode::Live | crate::config::TradeMode::DustLive
+                        )
                         && post_submission_failure;
                     if tip_could_have_landed {
                         let jito_tip = self.calculate_jito_tip(signal).await;
@@ -923,7 +936,10 @@ impl Executor {
                                 "Failed to record Jito tip cost for failed trade"
                             );
                         }
-                        if self.config.trade_mode == crate::config::TradeMode::Live {
+                        if matches!(
+                            self.config.trade_mode,
+                            crate::config::TradeMode::Live | crate::config::TradeMode::DustLive
+                        ) {
                             if let Some(ref tip_manager) = self.tip_manager {
                                 if let Err(tip_err) = tip_manager
                                     .record_tip(
@@ -2893,8 +2909,11 @@ impl Executor {
                 )
                 .await
         } else {
-            // Fallback to simple strategy-based tip calculation
-            // Scale tip by trade size (tip_percent_max default 10%), with strategy-specific floors
+            // Fallback: Hydra unified formula (single authority with
+            // MevProtection::calculate_tip): 0.003 + 10% of trade size,
+            // clamped to [strategy_floor, tip_ceiling_sol].
+            let hydra =
+                chimera_core::engine::tip_inlining::hydra_cluster_tip_sol(signal.payload.amount_sol);
             let strategy_floor = match signal.payload.strategy {
                 Strategy::Shield => self.config.jito.tip_floor_sol,
                 Strategy::Spear => {
@@ -2905,14 +2924,7 @@ impl Executor {
                 Strategy::Exit => self.config.jito.tip_floor_sol, // Use floor for exits, not ceiling
             };
 
-            // Calculate tip as percentage of trade size (realistic MEV cost)
-            let percentage_based_tip = signal.payload.amount_sol * self.config.jito.tip_percent_max;
-
-            // Apply floor, percentage cap, and ceiling
-
-            percentage_based_tip
-                .max(strategy_floor)
-                .min(self.config.jito.tip_ceiling_sol)
+            hydra.max(strategy_floor).min(self.config.jito.tip_ceiling_sol)
         }
     }
 

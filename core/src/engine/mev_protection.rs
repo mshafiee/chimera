@@ -36,25 +36,24 @@ impl MevProtection {
         Self { config }
     }
 
-    /// Calculate Jito tip based on signal urgency
+    /// Calculate Jito tip based on signal urgency.
     ///
-    /// # Arguments
-    /// * `signal` - Trading signal
-    /// * `is_consensus` - Whether this is a consensus signal (multiple wallets)
-    ///
-    /// # Returns
-    /// Tip amount in SOL (using Decimal for precision)
+    /// Hydra unification (single authority): cluster/consensus buys use
+    /// `hydra_cluster_tip_sol(amount) = 0.003 + 10%` clamped to
+    /// `[consensus_tip_sol, exit_tip_sol]`. Exits keep the flat exit tip.
+    /// Standard (non-consensus) signals keep the flat standard tip.
     pub fn calculate_tip(&self, signal: &Signal, is_consensus: bool) -> Decimal {
         // EXIT signals get highest priority
         if signal.payload.strategy == Strategy::Exit {
             return self.config.exit_tip_sol;
         }
 
-        // Consensus signals get higher priority (increased tip for consensus)
+        // Consensus/cluster signals: Hydra unified formula.
         if is_consensus {
-            // Use higher tip for consensus (1.5x the standard consensus tip)
-            let consensus_tip_multiplier: Decimal = Decimal::new(15, 1);
-            return self.config.consensus_tip_sol * consensus_tip_multiplier;
+            let hydra = super::tip_inlining::hydra_cluster_tip_sol(signal.payload.amount_sol);
+            return hydra
+                .max(self.config.consensus_tip_sol)
+                .min(self.config.exit_tip_sol);
         }
 
         // Standard signals get low priority
@@ -116,13 +115,18 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_tip_consensus_uses_multiplier() {
+    fn test_calculate_tip_consensus_uses_hydra_formula() {
         let config = Arc::new(MevProtectionConfig::default());
         let mev = MevProtection::new(config.clone());
+        // 0.5 SOL → hydra 0.003+0.05=0.053, clamped to exit_tip ceiling 0.007.
         let tip = mev.calculate_tip(&test_signal(Strategy::Shield), true);
-        // 1.5x the consensus tip
-        assert_eq!(tip, dec!(0.0045));
-        assert_eq!(tip, config.consensus_tip_sol * Decimal::new(15, 1));
+        assert_eq!(tip, config.exit_tip_sol);
+        assert_eq!(tip, dec!(0.007));
+        // Dust size 0.05 SOL → 0.003+0.005=0.008 → still ceiling 0.007.
+        // Small size 0.001 → 0.0031 → above consensus floor 0.003, below ceiling.
+        let mut small = test_signal(Strategy::Shield);
+        small.payload.amount_sol = dec!(0.001);
+        assert_eq!(mev.calculate_tip(&small, true), dec!(0.0031));
     }
 
     #[test]

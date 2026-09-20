@@ -24,6 +24,11 @@ pub enum TradeMode {
     #[default]
     Paper,
     Live,
+    /// Hydra dust-live: real execution, micro-size (0.05 SOL), isolated lane.
+    /// Shares the Live executor but enforces size caps + cluster-only admission
+    /// in code (not just config) so a misconfigured sizing file cannot escalate
+    /// to full-live risk.
+    DustLive,
 }
 
 /// Resolve trade mode from an optional explicit override, config value, and RPC URL.
@@ -64,6 +69,7 @@ impl std::fmt::Display for TradeMode {
             TradeMode::Devnet => write!(f, "DEVNET"),
             TradeMode::Paper => write!(f, "PAPER"),
             TradeMode::Live => write!(f, "LIVE"),
+            TradeMode::DustLive => write!(f, "DUST_LIVE"),
         }
     }
 }
@@ -1064,7 +1070,7 @@ fn default_allow_unlisted_heuristic() -> bool {
 }
 
 fn default_min_token_age_hours() -> f64 {
-    1.0
+    0.75 // Hydra Gate::EstablishedPoolSafety: 45 minutes minimum pool age
 }
 
 fn default_min_token_age_pumpfun_hours() -> f64 {
@@ -1103,11 +1109,11 @@ fn default_authority_whitelist() -> Vec<String> {
 }
 
 fn default_min_liquidity_shield() -> Decimal {
-    dec!(10000.0)
+    dec!(50000.0) // Hydra Gate::EstablishedPoolSafety floor
 }
 
 fn default_min_liquidity_spear() -> Decimal {
-    dec!(5000.0)
+    dec!(50000.0) // Hydra Gate::EstablishedPoolSafety floor
 }
 
 fn default_min_liquidity_pumpfun() -> Decimal {
@@ -3700,19 +3706,40 @@ mod full_coverage_tests {
     #[test]
     fn inactivity_rotation_defaults() {
         let config = InactivityRotationConfig::default();
-        assert_eq!(config.high_conviction_threshold_secs, default_inactivity_high_conviction_threshold());
-        assert_eq!(config.regular_conviction_threshold_secs, default_inactivity_regular_conviction_threshold());
-        assert_eq!(config.low_conviction_threshold_secs, default_inactivity_low_conviction_threshold());
-        assert_eq!(config.high_conviction_wqs_threshold, default_inactivity_high_conviction_wqs_threshold());
-        assert_eq!(config.regular_conviction_wqs_threshold, default_inactivity_regular_conviction_wqs_threshold());
-        assert_eq!(config.max_oscillation_cycles, default_inactivity_max_oscillation_cycles());
+        assert_eq!(
+            config.high_conviction_threshold_secs,
+            default_inactivity_high_conviction_threshold()
+        );
+        assert_eq!(
+            config.regular_conviction_threshold_secs,
+            default_inactivity_regular_conviction_threshold()
+        );
+        assert_eq!(
+            config.low_conviction_threshold_secs,
+            default_inactivity_low_conviction_threshold()
+        );
+        assert_eq!(
+            config.high_conviction_wqs_threshold,
+            default_inactivity_high_conviction_wqs_threshold()
+        );
+        assert_eq!(
+            config.regular_conviction_wqs_threshold,
+            default_inactivity_regular_conviction_wqs_threshold()
+        );
+        assert_eq!(
+            config.max_oscillation_cycles,
+            default_inactivity_max_oscillation_cycles()
+        );
     }
 
     #[test]
     fn degradation_ws_defaults() {
         // WebSocket settings live on MonitoringConfig (not DegradationConfig).
         let m = MonitoringConfig::default();
-        assert_eq!(m.websocket_health_timeout_secs, default_websocket_health_timeout());
+        assert_eq!(
+            m.websocket_health_timeout_secs,
+            default_websocket_health_timeout()
+        );
         assert_eq!(m.websocket_commitment, default_websocket_commitment());
         assert!(m.websocket_reconnect.is_none());
         let r = WebSocketReconnectConfig {
@@ -3835,7 +3862,10 @@ mod full_coverage_tests {
             helius_webhook_auth_header: Some("Bearer fixed".to_string()),
             ..MonitoringConfig::default()
         };
-        assert_eq!(m.resolved_helius_auth_header(), Some("Bearer fixed".to_string()));
+        assert_eq!(
+            m.resolved_helius_auth_header(),
+            Some("Bearer fixed".to_string())
+        );
 
         // Empty header → None.
         let m = MonitoringConfig {
@@ -3884,7 +3914,10 @@ mod full_coverage_tests {
         clear_chimera_env();
         let config = AppConfig::load_config().unwrap();
         // RPC URLs come from the yaml/defaults, not env overrides.
-        assert_eq!(config.rpc.primary_url, "https://api.mainnet-beta.solana.com");
+        assert_eq!(
+            config.rpc.primary_url,
+            "https://api.mainnet-beta.solana.com"
+        );
         assert!(config.rpc.fallback_url.is_none());
     }
 
@@ -3898,13 +3931,19 @@ mod full_coverage_tests {
         );
         std::env::set_var("CHIMERA_SECURITY__WEBHOOK_SECRET", "from-env");
         assert_eq!(
-            AppConfig::resolve_env_placeholder("${CHIMERA_SECURITY__WEBHOOK_SECRET}", "CHIMERA_SECURITY__WEBHOOK_SECRET"),
+            AppConfig::resolve_env_placeholder(
+                "${CHIMERA_SECURITY__WEBHOOK_SECRET}",
+                "CHIMERA_SECURITY__WEBHOOK_SECRET"
+            ),
             "from-env"
         );
         // Unset env var → empty string (fail-closed).
         std::env::remove_var("CHIMERA_SECURITY__WEBHOOK_SECRET");
         assert_eq!(
-            AppConfig::resolve_env_placeholder("${CHIMERA_SECURITY__WEBHOOK_SECRET}", "CHIMERA_SECURITY__WEBHOOK_SECRET"),
+            AppConfig::resolve_env_placeholder(
+                "${CHIMERA_SECURITY__WEBHOOK_SECRET}",
+                "CHIMERA_SECURITY__WEBHOOK_SECRET"
+            ),
             ""
         );
     }
@@ -4011,7 +4050,10 @@ mod full_coverage_tests {
         let mut c = valid_config();
         c.position_sizing.total_capital_sol = Decimal::ZERO;
         let err = c.validate().unwrap_err().to_string();
-        assert!(err.contains("total_capital_sol must be greater than zero"), "{err}");
+        assert!(
+            err.contains("total_capital_sol must be greater than zero"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -4034,29 +4076,53 @@ mod full_coverage_tests {
     fn validate_rejects_circuit_breaker_invariants() {
         let mut c = valid_config();
         c.circuit_breakers.cooldown_minutes = 0;
-        assert!(c.validate().unwrap_err().to_string().contains("cooldown_minutes"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("cooldown_minutes"));
 
         let mut c = valid_config();
         c.circuit_breakers.max_loss_24h_usd = Decimal::ZERO;
-        assert!(c.validate().unwrap_err().to_string().contains("max_loss_24h_usd"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("max_loss_24h_usd"));
 
         let mut c = valid_config();
         c.circuit_breakers.max_consecutive_losses = 0;
-        assert!(c.validate().unwrap_err().to_string().contains("max_consecutive_losses"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("max_consecutive_losses"));
 
         let mut c = valid_config();
         c.circuit_breakers.portfolio_stop_loss_percent = Decimal::ZERO;
-        assert!(c.validate().unwrap_err().to_string().contains("must be negative"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("must be negative"));
     }
 
     #[test]
     fn validate_rejects_db_connections_out_of_bounds() {
         let mut c = valid_config();
         c.database.max_connections = 1;
-        assert!(c.validate().unwrap_err().to_string().contains("max_connections"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("max_connections"));
         let mut c = valid_config();
         c.database.max_connections = 101;
-        assert!(c.validate().unwrap_err().to_string().contains("max_connections"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("max_connections"));
     }
 
     #[test]
@@ -4092,10 +4158,18 @@ mod full_coverage_tests {
     fn validate_rejects_kelly_fraction_out_of_range() {
         let mut c = valid_config();
         c.position_sizing.kelly_fraction = dec("1.5");
-        assert!(c.validate().unwrap_err().to_string().contains("kelly_fraction"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("kelly_fraction"));
         let mut c = valid_config();
         c.position_sizing.kelly_fraction = Decimal::ZERO;
-        assert!(c.validate().unwrap_err().to_string().contains("kelly_fraction"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("kelly_fraction"));
     }
 
     #[test]
@@ -4191,20 +4265,12 @@ mod full_coverage_tests {
     fn validate_telegram_checks() {
         let mut c = valid_config();
         c.notifications.telegram.enabled = true;
-        assert!(c
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("bot_token"));
+        assert!(c.validate().unwrap_err().to_string().contains("bot_token"));
 
         let mut c = valid_config();
         c.notifications.telegram.enabled = true;
         c.notifications.telegram.bot_token = "tok".to_string();
-        assert!(c
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("chat_id"));
+        assert!(c.validate().unwrap_err().to_string().contains("chat_id"));
 
         let mut c = valid_config();
         c.notifications.telegram.enabled = true;
@@ -4226,7 +4292,11 @@ mod full_coverage_tests {
         let mut c = valid_config();
         c.trade_mode = TradeMode::Live;
         c.jupiter.api_key = Some("   ".to_string());
-        assert!(c.validate().unwrap_err().to_string().contains("jupiter.api_key"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("jupiter.api_key"));
 
         let mut c = valid_config();
         c.trade_mode = TradeMode::Live;
@@ -4242,11 +4312,19 @@ mod full_coverage_tests {
     fn resolve_trade_mode_explicit_wins() {
         // An explicit override is returned regardless of config/RPC.
         assert_eq!(
-            resolve_trade_mode(Some(TradeMode::Paper), TradeMode::Live, "https://api.devnet.solana.com"),
+            resolve_trade_mode(
+                Some(TradeMode::Paper),
+                TradeMode::Live,
+                "https://api.devnet.solana.com"
+            ),
             TradeMode::Paper
         );
         assert_eq!(
-            resolve_trade_mode(Some(TradeMode::Live), TradeMode::Devnet, "https://api.mainnet-beta.solana.com"),
+            resolve_trade_mode(
+                Some(TradeMode::Live),
+                TradeMode::Devnet,
+                "https://api.mainnet-beta.solana.com"
+            ),
             TradeMode::Live
         );
     }
@@ -4268,7 +4346,11 @@ mod full_coverage_tests {
             TradeMode::Paper
         );
         assert_eq!(
-            resolve_trade_mode(None, TradeMode::Devnet, "https://api.mainnet-beta.solana.com"),
+            resolve_trade_mode(
+                None,
+                TradeMode::Devnet,
+                "https://api.mainnet-beta.solana.com"
+            ),
             TradeMode::Devnet
         );
     }
@@ -4334,7 +4416,10 @@ mod full_coverage_tests {
     #[test]
     fn polling_interval_disabled_uses_flat_interval() {
         let m = tiered_monitoring(None, false);
-        assert_eq!(m.get_polling_interval_for_wallet(Some(dec("90")), "ACTIVE"), m.rpc_poll_interval_secs);
+        assert_eq!(
+            m.get_polling_interval_for_wallet(Some(dec("90")), "ACTIVE"),
+            m.rpc_poll_interval_secs
+        );
     }
 
     #[test]
@@ -4347,11 +4432,20 @@ mod full_coverage_tests {
     fn polling_interval_tiered_selection() {
         let m = tiered_monitoring(Some(TieredPollingConfig::default()), true);
         // High conviction (>= 80) → high interval (30).
-        assert_eq!(m.get_polling_interval_for_wallet(Some(dec("90")), "ACTIVE"), 30);
+        assert_eq!(
+            m.get_polling_interval_for_wallet(Some(dec("90")), "ACTIVE"),
+            30
+        );
         // Regular conviction (>= 60) → regular interval (60).
-        assert_eq!(m.get_polling_interval_for_wallet(Some(dec("70")), "ACTIVE"), 60);
+        assert_eq!(
+            m.get_polling_interval_for_wallet(Some(dec("70")), "ACTIVE"),
+            60
+        );
         // Below regular threshold → emerging interval (120).
-        assert_eq!(m.get_polling_interval_for_wallet(Some(dec("50")), "ACTIVE"), 120);
+        assert_eq!(
+            m.get_polling_interval_for_wallet(Some(dec("50")), "ACTIVE"),
+            120
+        );
         // No WQS → treated as 0 → emerging.
         assert_eq!(m.get_polling_interval_for_wallet(None, "ACTIVE"), 120);
     }
@@ -4359,9 +4453,18 @@ mod full_coverage_tests {
     #[test]
     fn polling_interval_falls_back_to_default_tiers() {
         let m = tiered_monitoring(None, true);
-        assert_eq!(m.get_polling_interval_for_wallet(Some(dec("90")), "ACTIVE"), 30);
-        assert_eq!(m.get_polling_interval_for_wallet(Some(dec("70")), "ACTIVE"), 60);
-        assert_eq!(m.get_polling_interval_for_wallet(Some(dec("10")), "ACTIVE"), 120);
+        assert_eq!(
+            m.get_polling_interval_for_wallet(Some(dec("90")), "ACTIVE"),
+            30
+        );
+        assert_eq!(
+            m.get_polling_interval_for_wallet(Some(dec("70")), "ACTIVE"),
+            60
+        );
+        assert_eq!(
+            m.get_polling_interval_for_wallet(Some(dec("10")), "ACTIVE"),
+            120
+        );
     }
 
     // =========================================================================
@@ -4379,7 +4482,10 @@ mod full_coverage_tests {
         // Without a config file and with a cleared env, the defaults hold and
         // there is no fallback URL.
         let config = AppConfig::load_config().unwrap();
-        assert_eq!(config.rpc.primary_url, "https://api.mainnet-beta.solana.com");
+        assert_eq!(
+            config.rpc.primary_url,
+            "https://api.mainnet-beta.solana.com"
+        );
         assert!(config.rpc.fallback_url.is_none());
     }
 }

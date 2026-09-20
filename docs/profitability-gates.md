@@ -119,3 +119,22 @@ from real data — no backtest fabrication.
 5. **Validate, don't target.** Re-run the loop after a full shadow window. The only
    success criterion is a verdict whose 95% net-return CI excludes zero; never tune
    toward an arbitrary win-rate / monthly-return number, which overfits in-sample.
+
+## Hydra dust-live appendix (Operation Hydra, 2026-09-20)
+
+Post-pivot 14-day dust cohort (`TradeMode::DustLive`, 0.05 SOL/signal) is judged
+against the live 8-gate verdict above — not a parallel gate set. For the
+transition window only, the following *promotion* (not GO) thresholds apply to
+decide whether dust evidence warrants a full GO evaluation:
+
+| Check | Threshold |
+|---|---|
+| Sample | n ≥ 30 dust-live trades |
+| Mean net / trade (post-fees + Jito tips) | > +5.0% |
+| Lower 95% CI | > 0.0% |
+| Fill rate | ≥ 80% |
+| Missing / unpriced exits | 0 |
+
+If the dust cohort fails at Day 14, park the strategy (no scale-up). A passing
+dust cohort still requires the full 8-gate GO (n ≥ 60) before full-live sizing.
+`DustLive` is verdict-gated exactly like `Live` (`profitability_gate_blocks`).

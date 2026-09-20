@@ -155,6 +155,11 @@ impl JitoSearcherClient {
     /// at the transaction level, replacing the `[tip_tx, swap_tx]` two-tx bundle
     /// for legacy transactions. Returns a `bundle:<uuid>` ref the caller must
     /// resolve to a signature (F12) before polling.
+    ///
+    /// Hydra atomicity: the Jupiter quote is built with the unified slippage
+    /// tolerance (`slippage::estimate`, 2×+30bps) and the fill is verified
+    /// off-chain with `tip_inlining::hydra_bundle_slippage_ok` (>1.5% drift =
+    /// revert-equivalent: never bank the fill). No open-market market orders.
     pub async fn submit_single_bundle(
         &self,
         tipped_tx_bytes: &[u8],

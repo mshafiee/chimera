@@ -1828,11 +1828,9 @@ pub fn profitability_gate_blocks(
     verdict: &str,
 ) -> Option<&'static str> {
     use crate::config::TradeMode;
-    if !enforce
-        || trade_mode != TradeMode::Live
-        || action != Action::Buy
-        || strategy == Strategy::Exit
-    {
+    // Hydra: DustLive is real-money and is gated exactly like Live.
+    let is_live = matches!(trade_mode, TradeMode::Live | TradeMode::DustLive);
+    if !enforce || !is_live || action != Action::Buy || strategy == Strategy::Exit {
         return None;
     }
     match verdict {

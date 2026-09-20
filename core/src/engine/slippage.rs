@@ -51,6 +51,41 @@ const MIN_BUFFER: Decimal = dec!(0.003);
 const LIQ_IMPACT_FLOOR: Decimal = dec!(0.001); // 0.1%
 const LIQ_IMPACT_CEIL: Decimal = dec!(0.15); // 15%
 
+/// Hydra depth gate: orders that would move a constant-product pool more than
+/// this fraction are `REJECTED_INSUFFICIENT_DEPTH` (simulated PnL = -100%).
+/// 2% matches the executor's `max_price_impact_pct` BUY gate.
+pub const HYDRA_MAX_PRICE_IMPACT_FRACTION: &str = "0.02";
+
+/// Hydra rejection code for the universe/depth gate (mirrors
+/// `LIQUIDITY_BELOW_MINIMUM` but specifically means "would move the pool").
+pub const REJECTED_INSUFFICIENT_DEPTH: &str = "REJECTED_INSUFFICIENT_DEPTH";
+
+/// Constant-product (`x*y=k`) price impact for a buy of `dx` into reserves `x`:
+/// `Δp = dx / (x + dx)`. `pool_tvl_usd` is treated as `2x` (50/50 pool), so
+/// `x = tvl/2` in USD terms and `dx = trade_usd`.
+pub fn constant_product_impact(trade_usd: Decimal, pool_tvl_usd: Decimal) -> Option<Decimal> {
+    if trade_usd <= Decimal::ZERO || pool_tvl_usd <= Decimal::ZERO {
+        return None;
+    }
+    let x = pool_tvl_usd / Decimal::from(2);
+    let denom = x + trade_usd;
+    if denom <= Decimal::ZERO {
+        return None;
+    }
+    trade_usd.checked_div(denom)
+}
+
+/// Hydra depth verdict: `true` = fillable within the 2% impact budget,
+/// `false` = reject with `REJECTED_INSUFFICIENT_DEPTH`.
+pub fn hydra_depth_ok(trade_usd: Decimal, pool_tvl_usd: Decimal) -> bool {
+    match constant_product_impact(trade_usd, pool_tvl_usd) {
+        Some(impact) => {
+            impact <= Decimal::from_str(HYDRA_MAX_PRICE_IMPACT_FRACTION).unwrap_or(dec!(0.02))
+        }
+        None => false,
+    }
+}
+
 /// Per-strategy `slippageBps` bounds.
 /// Result of a slippage estimate.
 #[derive(Debug, Clone, Copy)]
@@ -153,8 +188,8 @@ pub fn estimate(
     let bounds = strategy.slippage_bounds();
 
     // tolerance = expected × BUFFER_MULT + MIN_BUFFER
-    let tolerance_fraction = expected * Decimal::from_f64(BUFFER_MULT).unwrap_or(Decimal::ONE)
-        + MIN_BUFFER;
+    let tolerance_fraction =
+        expected * Decimal::from_f64(BUFFER_MULT).unwrap_or(Decimal::ONE) + MIN_BUFFER;
     // A negative/overflowing fraction must NOT widen the on-chain tolerance:
     // fall back to the strategy floor (the tightest tolerance), never the
     // ceiling. Legitimate large impacts still clamp up to the ceiling below.
@@ -190,7 +225,14 @@ mod tests {
     fn jupiter_impact_is_preferred_and_buffers_to_2x() {
         // 0.5% impact → expected 0.005, tolerance = 0.005×2 + 0.003 = 0.013 → 130 bps
         // (within Spear [30,300], so unclamped — confirms the 2× buffer over impact).
-        let est = estimate(Strategy::Spear, Some(dec!(0.5)), dec!(1), None, None, fallback());
+        let est = estimate(
+            Strategy::Spear,
+            Some(dec!(0.5)),
+            dec!(1),
+            None,
+            None,
+            fallback(),
+        );
         assert_eq!(est.expected_fraction, dec!(0.005));
         assert_eq!(est.tolerance_bps, 130);
     }
@@ -198,13 +240,27 @@ mod tests {
     #[test]
     fn shield_clamps_to_tight_ceiling() {
         // 5% impact on Shield → tolerance = 0.05×2+0.003 = 0.103 → 1030 bps, ceiling 100.
-        let est = estimate(Strategy::Shield, Some(dec!(5.0)), dec!(1), None, None, fallback());
+        let est = estimate(
+            Strategy::Shield,
+            Some(dec!(5.0)),
+            dec!(1),
+            None,
+            None,
+            fallback(),
+        );
         assert_eq!(est.tolerance_bps, 100);
     }
 
     #[test]
     fn exit_is_generous() {
-        let est = estimate(Strategy::Exit, Some(dec!(10.0)), dec!(1), None, None, fallback());
+        let est = estimate(
+            Strategy::Exit,
+            Some(dec!(10.0)),
+            dec!(1),
+            None,
+            None,
+            fallback(),
+        );
         // 0.1×2 + 0.003 = 0.203 → 2030 bps, clamped to Exit ceiling 1500.
         assert_eq!(est.tolerance_bps, 1500);
     }
@@ -241,20 +297,55 @@ mod tests {
     #[test]
     fn bounds_are_respected_for_each_strategy() {
         // Zero impact: tolerance = 0 + 30 bps buffer = 30 bps raw.
-        let shield = estimate(Strategy::Shield, Some(dec!(0)), dec!(1), None, None, fallback());
+        let shield = estimate(
+            Strategy::Shield,
+            Some(dec!(0)),
+            dec!(1),
+            None,
+            None,
+            fallback(),
+        );
         // 30 bps is within Shield [10,100] → unchanged.
         assert_eq!(shield.tolerance_bps, 30);
-        let spear = estimate(Strategy::Spear, Some(dec!(0)), dec!(1), None, None, fallback());
+        let spear = estimate(
+            Strategy::Spear,
+            Some(dec!(0)),
+            dec!(1),
+            None,
+            None,
+            fallback(),
+        );
         // 30 bps == Spear floor.
         assert_eq!(spear.tolerance_bps, 30);
-        let exit = estimate(Strategy::Exit, Some(dec!(0)), dec!(1), None, None, fallback());
+        let exit = estimate(
+            Strategy::Exit,
+            Some(dec!(0)),
+            dec!(1),
+            None,
+            None,
+            fallback(),
+        );
         // 30 bps < Exit floor 50 → clamped up to 50.
         assert_eq!(exit.tolerance_bps, 50);
 
         // Ceilings: a huge impact clamps to each strategy's ceiling.
-        let shield_hi = estimate(Strategy::Shield, Some(dec!(50)), dec!(1), None, None, fallback());
+        let shield_hi = estimate(
+            Strategy::Shield,
+            Some(dec!(50)),
+            dec!(1),
+            None,
+            None,
+            fallback(),
+        );
         assert_eq!(shield_hi.tolerance_bps, 100); // Shield ceiling
-        let exit_hi = estimate(Strategy::Exit, Some(dec!(50)), dec!(1), None, None, fallback());
+        let exit_hi = estimate(
+            Strategy::Exit,
+            Some(dec!(50)),
+            dec!(1),
+            None,
+            None,
+            fallback(),
+        );
         assert_eq!(exit_hi.tolerance_bps, 1500); // Exit ceiling
     }
 
@@ -280,7 +371,10 @@ mod tests {
             Some(dec!(100)),
             fallback(),
         );
-        assert_eq!(est.expected_fraction, LIQ_IMPACT_FLOOR, "deep pool clamps to the impact floor");
+        assert_eq!(
+            est.expected_fraction, LIQ_IMPACT_FLOOR,
+            "deep pool clamps to the impact floor"
+        );
         // tolerance = (0.001×2 + 0.003) × 1e4 = 50 bps (within Spear [30,300]).
         assert_eq!(est.tolerance_bps, 50);
     }
@@ -366,6 +460,20 @@ mod tests {
     }
 
     #[test]
+    fn hydra_constant_product_depth_gate() {
+        // $100 trade on $50k TVL pool: x=25k → 100/25100 ≈ 0.398% → OK.
+        assert!(hydra_depth_ok(dec!(100), dec!(50_000)));
+        // $5k trade on $50k TVL: 5000/30000 ≈ 16.7% → REJECT.
+        assert!(!hydra_depth_ok(dec!(5000), dec!(50_000)));
+        // Zero/negative inputs → reject (fail-closed).
+        assert!(!hydra_depth_ok(dec!(0), dec!(50_000)));
+        assert!(!hydra_depth_ok(dec!(100), dec!(0)));
+        // Impact math spot-check: dx/(x+dx).
+        let impact = constant_product_impact(dec!(100), dec!(50_000)).unwrap();
+        assert!(impact > dec!(0.003) && impact < dec!(0.005));
+    }
+
+    #[test]
     fn overflow_in_liquidity_estimate_falls_back_to_tier() {
         // amount_sol * sol_price overflows Decimal → the checked arithmetic
         // degrades to the size-tier fallback rather than panicking.
@@ -395,4 +503,3 @@ mod tests {
         assert_eq!(est.tolerance_bps, 30); // Spear floor
     }
 }
-

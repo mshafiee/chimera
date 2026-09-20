@@ -22,6 +22,27 @@ use tracing::{error, info, warn};
 /// capacity to ~500 wallets.
 const MAX_WALLETS_PER_WEBHOOK: i64 = 10;
 
+/// Hydra program-subscription set: one webhook watching these program IDs
+/// receives every swap on established venues (no per-wallet fan-out).
+/// Wallet attribution comes from the payload's `accountData`, not the
+/// subscription mapping. Wallet webhooks are retained until the program feed
+/// proves ≥85% fill-rate parity (see scripts/consolidate_program_webhooks.sh).
+pub const HYDRA_PROGRAM_SUBSCRIPTION_IDS: &[&str] = &[
+    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8", // Raydium AMM v4
+    "CPMMoo8L3F4NbTegBCKVN6G57yCiCR9xtsRGPBXyzs9", // Raydium CPMM
+    "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", // Raydium CLMM
+    "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo", // Meteora DLMM
+    "EoCxW6Yoqw8ThpSV9fuib479C9R9SgfW1QKV7eYt",     // Meteora Dynamic AMM
+];
+
+/// Addresses to subscribe for the Hydra program feed.
+pub fn hydra_program_addresses() -> Vec<String> {
+    HYDRA_PROGRAM_SUBSCRIPTION_IDS
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
 /// Webhook lifecycle configuration
 #[derive(Debug, Clone)]
 pub struct WebhookLifecycleConfig {

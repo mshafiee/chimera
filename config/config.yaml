@@ -106,10 +106,11 @@ token_safety:
     - "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # USDC
     - "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"  # USDT
     - "So11111111111111111111111111111111111111112"   # Wrapped SOL
-  # Minimum liquidity thresholds (USD) - with 20% buffer for safety
-  min_liquidity_shield_usd: 20000  # Shield floor: $20K (was $5K: 0.5 SOL buy on $5K pool = ~1.6% slippage; $20K keeps it under 0.5%)
-  min_liquidity_spear_usd: 30000   # Spear floor: $30K (was $10K)
-  min_liquidity_pumpfun_usd: 15000  # Pump.fun floor: $15K (was $5K; pump.fun blocked anyway but kept sane)
+  # Minimum liquidity thresholds (USD) — Hydra Gate::EstablishedPoolSafety (2026-09-20):
+  # hard $50k floor on allowlisted venues only (Raydium/Meteora). No waivers.
+  min_liquidity_shield_usd: 50000
+  min_liquidity_spear_usd: 50000
+  min_liquidity_pumpfun_usd: 50000
   # Enable honeypot detection via transaction simulation
   honeypot_detection_enabled: true
   # Holder-concentration gate (enabled 2026-08-07): reject tokens where the
@@ -123,8 +124,10 @@ token_safety:
   cache_capacity: 1000
   cache_ttl_seconds: 3600  # 1 hour
   # Minimum token age in hours to allow a BUY signal (0 disables the check)
-  min_token_age_hours: 0.25        # 15min token age — paper experiment (was 0.5/30min): the shadow data shows the fresh-token edge (TOKEN_TOO_NEW = +239 SOL shadow) that the 30min floor filtered out. Loosened to 15min to measure whether that edge survives real execution. Still filters the <15min instant-rug zone. Revert if realized (post-cost) PnL is negative.
-  min_token_age_pumpfun_hours: 0.25 # Same: 15min minimum for pump.fun tokens
+  # Hydra Gate::EstablishedPoolSafety (2026-09-20): 0.75h = 45min hard floor.
+  # Proven-wallet waiver removed (was 6min — admitted zero-block rugs).
+  min_token_age_hours: 0.75
+  min_token_age_pumpfun_hours: 0.75
   # 2026-08-23 review of the remaining TOKEN_TOO_NEW rejects (24 in 12h):
   # 22/24 were SECONDS-to-minutes-old BONDING-CURVE tokens (pre-graduation,
   # $0 DEX liquidity) — they cannot actually be bought, so the shadow's
@@ -136,7 +139,9 @@ token_safety:
   # significant shadow PnL (t-stat > 1.645) trade early entries by design —
   # their signals are age-waived to 0.1h (6 min) instead of the 30 min global
   # minimum. Still filters instant rugs. 0 = disable the waiver.
-  min_token_age_proven_hours: 0.1
+  # Proven-wallet age waiver floor — DISABLED under Hydra (0 = waiver off).
+  # All wallets respect the 45min floor. Re-enable only with verdict-gate proof.
+  min_token_age_proven_hours: 0.0
   # Allow pump.fun tokens with real DEX liquidity (graduated). Bonding-curve
   # tokens stay blocked: they have $0 DEX liquidity and fail the $15K pumpfun
   # floor below. Positions exit via profit_management rails (copy_wallet_sells
