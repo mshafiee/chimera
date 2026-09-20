@@ -28,6 +28,9 @@ pub enum TradeMode {
     /// Shares the Live executor but enforces size caps + cluster-only admission
     /// in code (not just config) so a misconfigured sizing file cannot escalate
     /// to full-live risk.
+    /// Canonical config value is `dust_live` (alias `dustlive` for serde
+    /// rename_all=lowercase parity with the env parser).
+    #[serde(alias = "dust_live")]
     DustLive,
 }
 
@@ -4369,6 +4372,41 @@ mod full_coverage_tests {
         assert_eq!(TradeMode::Devnet.to_string(), "DEVNET");
         assert_eq!(TradeMode::Paper.to_string(), "PAPER");
         assert_eq!(TradeMode::Live.to_string(), "LIVE");
+        assert_eq!(TradeMode::DustLive.to_string(), "DUST_LIVE");
+    }
+
+    #[test]
+    fn trade_mode_dustlive_deserializes_both_spellings() {
+        // Canonical `dust_live` (documented) + `dustlive` (rename_all parity).
+        assert_eq!(
+            serde_json::from_str::<TradeMode>(r#""dust_live""#).unwrap(),
+            TradeMode::DustLive
+        );
+        assert_eq!(
+            serde_json::from_str::<TradeMode>(r#""dustlive""#).unwrap(),
+            TradeMode::DustLive
+        );
+    }
+
+    #[test]
+    fn resolve_trade_mode_passes_dustlive_through() {
+        // DustLive config is returned unchanged (never auto-flipped).
+        assert_eq!(
+            resolve_trade_mode(
+                None,
+                TradeMode::DustLive,
+                "https://api.mainnet-beta.solana.com"
+            ),
+            TradeMode::DustLive
+        );
+        assert_eq!(
+            resolve_trade_mode(
+                Some(TradeMode::DustLive),
+                TradeMode::Paper,
+                "https://api.devnet.solana.com"
+            ),
+            TradeMode::DustLive
+        );
     }
 
     // =========================================================================

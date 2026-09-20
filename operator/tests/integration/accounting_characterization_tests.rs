@@ -53,6 +53,7 @@ async fn insert_trade(
         amount_sol: dec(amount),
         status: "PENDING".to_string(),
         price_at_signal: None,
+        trade_mode: None,
     })
     .await
     .unwrap();

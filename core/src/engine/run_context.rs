@@ -33,6 +33,10 @@ pub struct RunContext {
     pub roster_hash: String,
     /// Process start time (UTC).
     pub started_at: DateTime<Utc>,
+    /// Trade-mode lane that produced this run (`PAPER` | `LIVE` | `DEVNET` |
+    /// `DUST_LIVE`, Display spelling). Stamped onto every decision record so
+    /// the Day-14 dust cohort is queryable without run_id bookkeeping.
+    pub trade_mode: String,
 }
 
 impl RunContext {
@@ -66,7 +70,16 @@ impl RunContext {
             config_hash,
             roster_hash: Self::hash_roster(roster_addresses),
             started_at,
+            trade_mode: "PAPER".to_string(),
         }
+    }
+
+    /// Stamp the trade-mode lane (call once at startup from the resolved
+    /// `TradeMode::to_string()`). Defaults to `PAPER` so tests and
+    /// rehearsal harnesses need no changes.
+    pub fn with_trade_mode(mut self, trade_mode: impl Into<String>) -> Self {
+        self.trade_mode = trade_mode.into();
+        self
     }
 
     /// Stable (order-independent) hash of the ACTIVE wallet roster.

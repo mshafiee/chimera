@@ -54,6 +54,7 @@ async fn test_trade_idempotency() {
         amount_sol: Decimal::from_str("0.1").unwrap(),
         status: "PENDING".to_string(),
         price_at_signal: None,
+        trade_mode: None,
     })
     .await
     .expect("First insert should succeed");
@@ -70,6 +71,7 @@ async fn test_trade_idempotency() {
             amount_sol: Decimal::from_str("0.1").unwrap(),
             status: "PENDING".to_string(),
             price_at_signal: None,
+            trade_mode: None,
         })
         .await;
     assert!(
@@ -106,6 +108,7 @@ async fn test_circuit_breaker_loss_tracking() {
         amount_sol: Decimal::from_str("1.0").unwrap(),
         status: "CLOSED".to_string(),
         price_at_signal: None,
+        trade_mode: None,
     })
     .await
     .unwrap();
@@ -150,6 +153,7 @@ async fn test_trade_status_update() {
         amount_sol: Decimal::from_str("0.5").unwrap(),
         status: "PENDING".to_string(),
         price_at_signal: None,
+        trade_mode: None,
     })
     .await
     .unwrap();

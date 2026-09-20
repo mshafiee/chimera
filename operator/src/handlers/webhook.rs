@@ -320,6 +320,8 @@ pub async fn webhook_handler(
             amount_sol: trade_amount_sol,
             status: "PENDING".to_string(),
             price_at_signal,
+            // Hydra lane for the Day-14 dust cohort query.
+            trade_mode: Some(state.selection.trade_mode().to_string()),
         })
         .await
     {

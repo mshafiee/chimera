@@ -235,8 +235,8 @@ impl Database for PostgresBackend {
             r#"
             INSERT INTO trades (
                 trade_uuid, wallet_address, token_address, token_symbol,
-                strategy, side, amount_sol, status, price_at_signal
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                strategy, side, amount_sol, status, price_at_signal, trade_mode
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, 'PAPER'))
             RETURNING id
             "#,
         )
@@ -249,6 +249,7 @@ impl Database for PostgresBackend {
         .bind(trade.amount_sol)
         .bind(&trade.status)
         .bind(trade.price_at_signal)
+        .bind(&trade.trade_mode)
         .fetch_one(&self.pool)
         .await?;
 
@@ -5035,7 +5036,7 @@ impl Database for PostgresBackend {
 
         // Insert trade
         let trade_id = sqlx::query(
-            "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status, price_at_signal, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING id"
+            "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status, price_at_signal, trade_mode, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, 'PAPER'), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING id"
         )
         .bind(&trade.trade_uuid)
         .bind(&trade.wallet_address)
@@ -5045,6 +5046,7 @@ impl Database for PostgresBackend {
         .bind(trade.amount_sol)
         .bind(&trade.status)
         .bind(trade.price_at_signal)
+        .bind(&trade.trade_mode)
         .fetch_one(&mut *tx)
         .await
         .map_err(AppError::Database)?

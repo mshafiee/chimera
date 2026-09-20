@@ -334,6 +334,8 @@ pub(crate) async fn queue_monitoring_signal(
             amount_sol: signal.payload.amount_sol,
             status: "PENDING".to_string(),
             price_at_signal,
+            // Hydra lane for the Day-14 dust cohort query.
+            trade_mode: Some(selection.trade_mode().to_string()),
         })
         .await
     {

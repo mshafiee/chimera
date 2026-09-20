@@ -48,6 +48,7 @@ async fn test_duplicate_buy_uuid_idempotency() {
         amount_sol: Decimal::from_str("1.0").unwrap(),
         status: "PENDING".to_string(),
         price_at_signal: None,
+        trade_mode: None,
     })
     .await
     .unwrap();
@@ -78,6 +79,7 @@ async fn test_duplicate_buy_uuid_idempotency() {
             amount_sol: Decimal::from_str("1.0").unwrap(),
             status: "PENDING".to_string(),
             price_at_signal: None,
+            trade_mode: None,
         })
         .await;
     assert!(
@@ -188,6 +190,7 @@ async fn test_pnl_calculation_accuracy_with_fees() {
         amount_sol: Decimal::from_str("1.0").unwrap(),
         status: "ACTIVE".to_string(),
         price_at_signal: None,
+        trade_mode: None,
     })
     .await
     .unwrap();
@@ -227,6 +230,7 @@ async fn test_pnl_calculation_accuracy_with_fees() {
         amount_sol: Decimal::from_str("1.0").unwrap(),
         status: "EXITING".to_string(),
         price_at_signal: None,
+        trade_mode: None,
     })
     .await
     .unwrap();
@@ -336,6 +340,7 @@ async fn test_full_trade_status_progression() {
         amount_sol: Decimal::from_str("1.0").unwrap(),
         status: "PENDING".to_string(),
         price_at_signal: None,
+        trade_mode: None,
     })
     .await
     .unwrap();
@@ -439,6 +444,7 @@ async fn test_failed_trade_can_retry() {
         amount_sol: Decimal::from_str("1.0").unwrap(),
         status: "PENDING".to_string(),
         price_at_signal: None,
+        trade_mode: None,
     })
     .await
     .unwrap();

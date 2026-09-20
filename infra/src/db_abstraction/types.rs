@@ -163,6 +163,11 @@ pub struct InsertTrade {
     /// Populated from the price cache at insert so the paper-vs-shadow
     /// entry-drift gap is measurable in SQL (2026-09-12).
     pub price_at_signal: Option<rust_decimal::Decimal>,
+    /// Trade-mode lane (`PAPER` | `LIVE` | `DEVNET` | `DUST_LIVE`, Display
+    /// spelling). Stamped at insert so the Hydra Day-14 dust cohort is
+    /// queryable without run_id bookkeeping. `None` reads back as `PAPER`
+    /// via COALESCE for rows written before 0027.
+    pub trade_mode: Option<String>,
 }
 
 /// Trade status update data

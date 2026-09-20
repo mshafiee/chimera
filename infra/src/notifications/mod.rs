@@ -137,6 +137,7 @@ impl NotificationEvent {
         let prefix = match trade_mode.trim().to_lowercase().as_str() {
             "paper" => "[PAPER] ",
             "devnet" => "[DEVNET] ",
+            "dust_live" | "dustlive" => "[DUST-LIVE] ",
             "live" | "" => "",
             other => {
                 tracing::warn!(mode = other, "Unknown trade mode, treating as live");

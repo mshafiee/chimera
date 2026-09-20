@@ -252,6 +252,7 @@ impl DecisionRecorder {
 struct DecisionRow {
     decision_id: String,
     run_id: String,
+    trade_mode: String,
     trade_uuid: Option<String>,
     ingress: String,
     wallet_address: String,
@@ -306,6 +307,7 @@ impl DecisionRow {
         Self {
             decision_id: decision.decision_id.clone(),
             run_id: run_context.run_id.clone(),
+            trade_mode: run_context.trade_mode.clone(),
             trade_uuid: trade_uuid.map(|s| s.to_string()),
             ingress: decision.ingress.as_str().to_string(),
             wallet_address: req.wallet_address.clone(),
@@ -393,7 +395,7 @@ async fn insert_decision_record(
     sqlx::query(
         r#"
         INSERT INTO decision_records (
-            decision_id, run_id, trade_uuid, ingress, wallet_address, token_address,
+            decision_id, run_id, trade_mode, trade_uuid, ingress, wallet_address, token_address,
             action, strategy, admitted, rejection_code, rejection_reason,
             size_sol, source_amount_sol, wqs, wqs_confidence, quality_score,
             consensus_wallet_count, regime_multiplier, token_age_hours, liquidity_usd,
@@ -401,17 +403,18 @@ async fn insert_decision_record(
             received_at, decided_at,
             code_revision, config_hash, roster_hash
         ) VALUES (
-            $1, $2, $3, $4, $5, $6,
-            $7, $8, $9, $10, $11,
-            $12, $13, $14, $15, $16,
-            $17, $18, $19, $20,
-            $21, $22, $23, $24, $25, $26,
-            $27, $28, $29
+            $1, $2, $3, $4, $5, $6, $7,
+            $8, $9, $10, $11, $12,
+            $13, $14, $15, $16, $17,
+            $18, $19, $20, $21,
+            $22, $23, $24, $25, $26, $27,
+            $28, $29, $30
         )
         "#,
     )
     .bind(&row.decision_id)
     .bind(&row.run_id)
+    .bind(&row.trade_mode)
     .bind(&row.trade_uuid)
     .bind(&row.ingress)
     .bind(&row.wallet_address)
@@ -505,6 +508,23 @@ mod tests {
     }
 
     #[test]
+    fn decision_row_stamps_dust_live_lane() {
+        // Hydra Day-14: the lane must survive from RunContext to row.
+        let req = sample_request(Action::Buy);
+        let decision = sample_decision(&req);
+        let ctx = Arc::new(
+            RunContext::new(
+                "cfg",
+                &["walletA".to_string()],
+                chrono::Utc::now(),
+            )
+            .with_trade_mode("DUST_LIVE"),
+        );
+        let row = DecisionRow::from_decision(&decision, &req, None, chrono::Utc::now(), &ctx);
+        assert_eq!(row.trade_mode, "DUST_LIVE");
+    }
+
+    #[test]
     fn clamp_num_bounds_values() {
         assert_eq!(
             clamp_num(1_000_000_000_000.0, NUMERIC_30_18_BOUND),
@@ -534,6 +554,7 @@ mod tests {
 
         assert_eq!(row.decision_id, "decision-42");
         assert_eq!(row.run_id, ctx.run_id);
+        assert_eq!(row.trade_mode, ctx.trade_mode);
         assert_eq!(row.code_revision, ctx.code_revision);
         assert_eq!(row.config_hash, ctx.config_hash);
         assert_eq!(row.roster_hash, ctx.roster_hash);

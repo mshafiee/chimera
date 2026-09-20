@@ -82,7 +82,7 @@ async fn run_preflight(config: &AppConfig) -> anyhow::Result<()> {
             }
             tracing::info!("Pre-flight passed: Jupiter API reachable (paper mode)");
         }
-        chimera_operator::config::TradeMode::Devnet | chimera_operator::config::TradeMode::Live => {
+        chimera_operator::config::TradeMode::Devnet | chimera_operator::config::TradeMode::Live | chimera_operator::config::TradeMode::DustLive => {
             let secrets = chimera_operator::vault::load_secrets_with_fallback()
                 .map_err(|e| anyhow::anyhow!("Pre-flight vault load failed: {}", e))?;
             let _keypair =
@@ -311,6 +311,21 @@ async fn auto_promote_wallets(
     }
 }
 
+/// Parse `CHIMERA_TRADE_MODE` into an explicit [`TradeMode`].
+/// Canonical dust value is `dust_live` (matches `Display` DUST_LIVE);
+/// `dustlive` is accepted for serde `rename_all=lowercase` parity.
+/// Returns `None` for anything else (caller warns + ignores).
+fn parse_trade_mode_env(raw: &str) -> Option<chimera_operator::config::TradeMode> {
+    use chimera_operator::config::TradeMode;
+    match raw.to_lowercase().as_str() {
+        "devnet" => Some(TradeMode::Devnet),
+        "paper" => Some(TradeMode::Paper),
+        "live" => Some(TradeMode::Live),
+        "dust_live" | "dustlive" => Some(TradeMode::DustLive),
+        _ => None,
+    }
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing
@@ -324,15 +339,10 @@ async fn main() -> anyhow::Result<()> {
     let explicit_mode = {
         let mut mode: Option<TradeMode> = None;
         if let Ok(mode_str) = std::env::var("CHIMERA_TRADE_MODE") {
-            mode = match mode_str.to_lowercase().as_str() {
-                "devnet" => Some(TradeMode::Devnet),
-                "paper" => Some(TradeMode::Paper),
-                "live" => Some(TradeMode::Live),
-                _ => {
-                    tracing::warn!(provided = %mode_str, "Invalid CHIMERA_TRADE_MODE — must be devnet|paper|live. Ignoring.");
-                    None
-                }
-            };
+            mode = parse_trade_mode_env(&mode_str);
+            if mode.is_none() {
+                tracing::warn!(provided = %mode_str, "Invalid CHIMERA_TRADE_MODE — must be devnet|paper|live|dust_live. Ignoring.");
+            }
         }
         if let Ok(old_val) = std::env::var("CHIMERA_JUPITER__DEVNET_SIMULATION_MODE") {
             if (old_val == "true" || old_val == "1") && mode.is_none() {
@@ -406,6 +416,7 @@ async fn main() -> anyhow::Result<()> {
         TradeMode::Paper => tracing::warn!("│  NO REAL TRANSACTIONS WILL BE SUBMITTED │"),
         TradeMode::Devnet => tracing::info!("│  Transactions on DEVNET (test network)  │"),
         TradeMode::Live => tracing::info!("│  LIVE TRADING — REAL SOL AT RISK        │"),
+        TradeMode::DustLive => tracing::info!("│  DUST-LIVE — REAL micro-size (0.05 SOL) │"),
     }
     tracing::info!("└─────────────────────────────────────────┘");
 
@@ -413,7 +424,7 @@ async fn main() -> anyhow::Result<()> {
         TradeMode::Paper => {
             tracing::info!("Paper mode: skipping vault validation (no keypair needed)");
         }
-        TradeMode::Devnet | TradeMode::Live => {
+        TradeMode::Devnet | TradeMode::Live | TradeMode::DustLive => {
             let _startup_secrets = vault::load_secrets_with_fallback()
                 .map_err(|e| anyhow::anyhow!("Vault startup validation failed: {}", e))?;
             tracing::info!("Vault/secrets validated at startup");
@@ -840,7 +851,7 @@ async fn main() -> anyhow::Result<()> {
         selection_config.hash(),
         &roster_addresses,
         Utc::now(),
-    ));
+    ).with_trade_mode(config.trade_mode.to_string()));
     let decision_recorder = Arc::new(chimera_operator::engine::DecisionRecorder::new(
         db_pool.clone(),
         run_context.clone(),
@@ -3614,7 +3625,10 @@ async fn main() -> anyhow::Result<()> {
         .with_shadow_fill_opt(shadow_quote_client.clone(), latency_tracker.clone())
         .with_wallet_performance(wallet_performance_tracker.clone())
         .with_shadow_trader(shadow_trader.clone())
-        .with_price_cache(price_cache.clone()),
+        .with_price_cache(price_cache.clone())
+        // Hydra lane: stamp the resolved trade mode so `trades` rows carry
+        // their lane for the Day-14 dust cohort query.
+        .with_trade_mode(config.trade_mode.to_string()),
     );
 
     let webhook_state = Arc::new(WebhookState {
@@ -4431,6 +4445,20 @@ mod tests {
         assert_eq!(secret.len(), 64);
         assert!(secret.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(validate_jwt_secret(&secret).is_ok());
+    }
+
+    #[test]
+    fn test_parse_trade_mode_env() {
+        use chimera_operator::config::TradeMode;
+        assert_eq!(parse_trade_mode_env("paper"), Some(TradeMode::Paper));
+        assert_eq!(parse_trade_mode_env("LIVE"), Some(TradeMode::Live));
+        assert_eq!(parse_trade_mode_env("devnet"), Some(TradeMode::Devnet));
+        // Hydra dust lane: canonical + serde-alias spellings.
+        assert_eq!(parse_trade_mode_env("dust_live"), Some(TradeMode::DustLive));
+        assert_eq!(parse_trade_mode_env("DUSTLIVE"), Some(TradeMode::DustLive));
+        // Garbage → None (caller warns + boots config-file mode, never live).
+        assert_eq!(parse_trade_mode_env("yolo"), None);
+        assert_eq!(parse_trade_mode_env(""), None);
     }
 
     /// The sizer-floor env override must bind; without it the paper book

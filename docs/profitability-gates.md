@@ -137,4 +137,7 @@ decide whether dust evidence warrants a full GO evaluation:
 
 If the dust cohort fails at Day 14, park the strategy (no scale-up). A passing
 dust cohort still requires the full 8-gate GO (n ≥ 60) before full-live sizing.
-`DustLive` is verdict-gated exactly like `Live` (`profitability_gate_blocks`).
+DustLive is EXEMPT from the GO gate (`profitability_gate_blocks` carve-out):
+it generates the evidence, so fail-closing it on non-GO would record zero
+fills. Full `Live` stays fail-closed. Dust risk is bounded in code instead
+(0.05 SOL clamp, cluster quorum ≥3, 1.5% slippage assert).

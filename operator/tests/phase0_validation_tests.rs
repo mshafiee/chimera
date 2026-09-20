@@ -65,6 +65,7 @@ async fn test_phase0_trade_insert_and_query() {
         amount_sol: Decimal::from_str("0.5").unwrap(),
         status: "PENDING".to_string(),
         price_at_signal: None,
+        trade_mode: None,
     })
     .await
     .expect("insert_trade should work");

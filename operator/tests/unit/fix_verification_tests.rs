@@ -79,6 +79,7 @@ async fn seed_trade(db: &Arc<dyn Database>, trade_uuid: &str) {
         amount_sol: Decimal::from_str("1.0").unwrap(),
         status: "PENDING".to_string(),
         price_at_signal: None,
+        trade_mode: None,
     })
     .await
     .unwrap();

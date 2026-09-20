@@ -403,6 +403,10 @@ impl AsyncWriteQueue {
                         // Queue replay path: the signal-time mark was taken at
                         // the original insert; async replay carries no price.
                         price_at_signal: None,
+                        // Replay carries no lane (TradeState has none); fresh
+                        // inserts are stamped at the two admission sites.
+                        // COALESCE defaults replayed rows to 'PAPER'.
+                        trade_mode: None,
                     })
                     .await
                     .map(|_| ()),

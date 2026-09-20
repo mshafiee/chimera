@@ -477,6 +477,11 @@ pub struct SelectionService {
     /// Shared price cache — used by the pump-chase gate (15m price delta).
     /// Optional: the gate fails open when not wired.
     price_cache: Option<Arc<crate::price_cache::PriceCache>>,
+    /// Trade-mode lane (`PAPER` | `LIVE` | `DEVNET` | `DUST_LIVE`, Display
+    /// spelling). Stamped onto `trades` rows at insert so the Day-14 dust
+    /// cohort is queryable. Defaults to `PAPER`; set via `with_trade_mode`
+    /// at construction (wired in `api/src/main.rs`).
+    trade_mode: String,
     config: SelectionConfig,
     config_hash: String,
 }
@@ -511,6 +516,7 @@ impl SelectionService {
             shadow_trader: None,
             mute_detector: None,
             price_cache: None,
+            trade_mode: "PAPER".to_string(),
             config,
             config_hash,
         }
@@ -551,6 +557,18 @@ impl SelectionService {
     ) -> Self {
         self.decision_recorder = Some(recorder);
         self
+    }
+
+    /// Stamp the trade-mode lane (call once at construction from the resolved
+    /// `TradeMode::to_string()`). Defaults to `PAPER`.
+    pub fn with_trade_mode(mut self, trade_mode: impl Into<String>) -> Self {
+        self.trade_mode = trade_mode.into();
+        self
+    }
+
+    /// Trade-mode lane stamped onto `trades` rows at insert.
+    pub fn trade_mode(&self) -> &str {
+        &self.trade_mode
     }
 
     /// Attach a Jupiter quote client + latency tracker (C3) for shadow-fill

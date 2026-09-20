@@ -1,6 +1,6 @@
 # Trading Modes & Position Sizing Configuration
 
-Chimera supports three operational modes. Each has different risk profiles,
+Chimera supports four operational modes. Each has different risk profiles,
 sizing strategies, and safety guardrails.
 
 ---
@@ -47,44 +47,49 @@ slippage, volatility, regime), then clamped to `[min_size_sol, strategy_max]`.
 
 ---
 
-## 2. Dust-Size Live Testing
+## 2. Dust-Live (Hydra — isolated micro-size live lane)
 
 **Purpose:** End-to-end live evaluation with minimal capital at risk.
 Verifies the full pipeline: signal → sizing → on-chain execution →
 position tracking → exit → PnL — all with real transactions but tiny sizes.
 
-**Risk:** ~0.01–0.10 SOL per trade (~$1.50–$15). Max 0.5 SOL total exposure.
+**Risk:** 0.01–0.10 SOL per trade, fixed 0.05 SOL per admitted cluster
+signal (clamped in code — `operator/src/engine/dust_runner.rs`, not config,
+so a misconfigured sizing file cannot escalate to full-live risk).
 
-**Config (add to docker-compose.yml operator environment):**
+**Config:**
 ```yaml
 environment:
-  - CHIMERA_TRADE_MODE=live
-  # Dust sizing
-  - CHIMERA_POSITION_SIZING__BASE_SIZE_SOL=0.05
-  - CHIMERA_POSITION_SIZING__MIN_SIZE_SOL=0.01
-  - CHIMERA_POSITION_SIZING__MIN_LIVE_POSITION_SOL=0.01
-  - CHIMERA_POSITION_SIZING__MAX_SIZE_SOL=0.1
-  - CHIMERA_POSITION_SIZING__SHIELD_MAX_SIZE_SOL=0.1
-  - CHIMERA_POSITION_SIZING__SPEAR_MAX_SIZE_SOL=0.05
-  - CHIMERA_STRATEGY__MIN_POSITION_SOL=0.01
-  - CHIMERA_STRATEGY__MAX_POSITION_SOL=0.1
-  # Disable friction gating — dust trades have unfavorable fee:profit ratio
-  - CHIMERA_STRATEGY__FRICTION_GATING_ENABLED=false
+  - CHIMERA_TRADE_MODE=dust_live
 ```
 
-**Expected trade sizes:**
-| Wallet WQS | Trade Size |
-|------------|-----------|
-| WQS-25 | 0.01 SOL (floored) |
-| WQS-50 | 0.02 SOL |
-| WQS-100 | 0.05 SOL |
-| Max (any) | 0.10 SOL |
+DustLive shares the Live executor (Jito atomic bundles, Hydra 1.5%
+slippage assert) and requires cluster quorum (≥3 wallets) like all Hydra
+buys. It is verdict-gated exactly like Live (see
+`docs/profitability-gates.md` Hydra appendix) unless a dust carve-out is
+configured. Size clamps live in code (`DUST_SIZE_SOL=0.05`,
+band `[0.01, 0.10]`); do NOT layer the legacy sizing overrides below —
+they predate the `DustLive` enum and fight the in-code clamp.
+Lane metrics: `DustLaneMetrics` (fills/signals, slippage-vs-quote).
+
+> Legacy recipe (pre-enum, `CHIMERA_TRADE_MODE=live` + dust sizing
+> overrides) — retained for reference only:
+> `BASE 0.05 / MIN 0.01 / MIN_LIVE 0.01 / MAX 0.1 / SHIELD 0.1 / SPEAR 0.05`
+> + `FRICTION=false`. Prefer `dust_live`.
+>
+> | Wallet WQS | Legacy recipe size |
+> |------------|--------------------|
+> | WQS-25 | 0.01 SOL (floored) |
+> | WQS-50 | 0.02 SOL |
+> | WQS-100 | 0.05 SOL |
+> | Max (any) | 0.10 SOL |
 
 **Checklist before enabling:**
 - [ ] Vault keypair configured and funded with SOL
-- [ ] `CHIMERA_TRADE_MODE=live` set
+- [ ] `CHIMERA_TRADE_MODE=dust_live` set (canonical; `dustlive` also accepted)
+- [ ] Startup banner shows `TRADE MODE: DUST_LIVE` (not PAPER — garbage values fall back silently)
 - [ ] RPC endpoint is mainnet (not devnet)
-- [ ] Helius webhooks registered for ACTIVE wallets
+- [ ] Helius webhooks registered (program feed: `scripts/consolidate_program_webhooks.sh`)
 - [ ] Jupiter API key valid for swap routing
 - [ ] Jito tip account configured (if using Jito)
 

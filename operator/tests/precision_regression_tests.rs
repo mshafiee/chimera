@@ -38,6 +38,7 @@ async fn test_high_precision_amount_round_trip() {
         amount_sol: precise_amount,
         status: "PENDING".to_string(),
         price_at_signal: None,
+        trade_mode: None,
     })
     .await
     .expect("insert_trade should succeed");
@@ -77,6 +78,7 @@ async fn test_high_precision_net_pnl_round_trip() {
         amount_sol: Decimal::from_str("1.0").unwrap(),
         status: "CLOSED".to_string(),
         price_at_signal: None,
+        trade_mode: None,
     })
     .await
     .expect("insert_trade should succeed");

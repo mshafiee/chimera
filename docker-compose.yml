@@ -310,8 +310,9 @@ services:
        # dominating rejections with no PnL improvement over ~50 signals).
        - CHIMERA_SELECTION__ENTRY_DRIFT_GUARD_ENABLED=true
        - CHIMERA_SELECTION__MAX_ENTRY_DRIFT_PCT=1.0
-       # Paper trading mode (simulated execution, no real SOL)
-       - CHIMERA_TRADE_MODE=paper
+        # Trade mode: paper default. Set CHIMERA_TRADE_MODE=dust_live in the
+        # server .env for the Hydra dust lane (real micro-size execution).
+        - CHIMERA_TRADE_MODE=${CHIMERA_TRADE_MODE:-paper}
        # Circuit breaker (2026-09-05): 5-loss streak tripped 5x/24h at the
        # current 18.8%-win paper book — near-certain at n=16/day — dropping
        # live signals (27 blocked in one window) and fragmenting evidence

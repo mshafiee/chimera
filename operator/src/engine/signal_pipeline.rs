@@ -1828,8 +1828,13 @@ pub fn profitability_gate_blocks(
     verdict: &str,
 ) -> Option<&'static str> {
     use crate::config::TradeMode;
-    // Hydra: DustLive is real-money and is gated exactly like Live.
-    let is_live = matches!(trade_mode, TradeMode::Live | TradeMode::DustLive);
+    // Hydra dust carve-out (decided): DustLive GENERATES the GO evidence, so
+    // it is exempt from the GO gate — full Live stays fail-closed. Dust risk
+    // is bounded in code instead (0.05 SOL clamp, cluster quorum, 1.5% assert).
+    if trade_mode == TradeMode::DustLive {
+        return None;
+    }
+    let is_live = trade_mode == TradeMode::Live;
     if !enforce || !is_live || action != Action::Buy || strategy == Strategy::Exit {
         return None;
     }
@@ -2025,5 +2030,39 @@ mod tests {
     #[test]
     fn non_sell_action_never_skipped() {
         assert!(!skip_wallet_sell_signal(Action::Buy, false, None));
+    }
+
+    #[test]
+    fn hydra_dust_carve_out_bypasses_go_gate() {
+        use crate::config::TradeMode;
+        // DustLive generates GO evidence: never blocked, even with no verdict.
+        assert_eq!(
+            profitability_gate_blocks(true, TradeMode::DustLive, Action::Buy, Strategy::Shield, ""),
+            None
+        );
+        assert_eq!(
+            profitability_gate_blocks(
+                true,
+                TradeMode::DustLive,
+                Action::Buy,
+                Strategy::Shield,
+                "INCONCLUSIVE"
+            ),
+            None
+        );
+        // Full Live stays fail-closed without GO.
+        assert!(
+            profitability_gate_blocks(true, TradeMode::Live, Action::Buy, Strategy::Shield, "")
+                .is_some()
+        );
+        assert_eq!(
+            profitability_gate_blocks(true, TradeMode::Live, Action::Buy, Strategy::Shield, "GO"),
+            None
+        );
+        // Paper never gated.
+        assert_eq!(
+            profitability_gate_blocks(true, TradeMode::Paper, Action::Buy, Strategy::Shield, ""),
+            None
+        );
     }
 }
