@@ -79,3 +79,27 @@ advance so the loop cannot run forever.
 - Lowering any admission floor to raise volume.
 - Investing live capital (ruled out).
 - Paid Dune limits (ruled out).
+
+## Execution record — 2026-09-20 (roster repair + paper drawdown band)
+
+- **Demoted** 3 decorative ACTIVE (`12kNFp`, `129i4z`, `Cr1n5Z`; never traded,
+  zero flow) → CANDIDATE.
+- **Promoted measurement lane** → ACTIVE: `12PPVhB8` (flow volume),
+  `HgPFzrUm` + `2h7Ns9w2` (best 14d shadow win-rates, 43–44%).
+- `132Tkgf` stays PROVING (lottery shape; its flow still feeds shadow
+  measurement either way).
+- **Method:** direct SQL replicating the API path (`wallets` UPDATE +
+  `config_audit` INSERT with reasons) — the operator API has no usable
+  credential server-side (no `api_keys` configured; wallet-signature auth is
+  unavailable headless). Skipped ephemeral effects only: Telegram
+  notification, in-memory toxic-detector baseline, Helius webhook cleanup
+  (429-blocked; coverage already exists for all six).
+- **Paper CB drawdown band 15 → 30**
+  (`CHIMERA_CIRCUIT_BREAKERS__MAX_DRAWDOWN_PERCENT`), operator recreated.
+  Reversible; buys measurement velocity, not profit.
+- Compose YAML repaired (this file's env lists use 7-space indent; an 8-space
+  edit broke parsing — caught before deploy completed).
+- **Pending:** CB cooldown expiry (~30 min) should clear the restored Tripped
+  state against the 30% band. **Binding constraint remains Helius 429 (quota
+  exhausted)** — no ingestion, no prices, no fills until it clears; Dune
+  promote queries also still failing (billing).
