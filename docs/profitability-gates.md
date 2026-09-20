@@ -135,6 +135,15 @@ decide whether dust evidence warrants a full GO evaluation:
 | Fill rate | ≥ 80% |
 | Missing / unpriced exits | 0 |
 
+Run the cohort report on the production server:
+
+```bash
+docker exec -i chimera-postgres psql -U chimera -d chimera < scripts/dust_cohort_report.sql
+```
+
+It prints the outcome stats, funnel fill rate, integrity counts, and a final
+`PROMOTE`/`PARK` line per check (all five must read `PROMOTE`).
+
 If the dust cohort fails at Day 14, park the strategy (no scale-up). A passing
 dust cohort still requires the full 8-gate GO (n ≥ 60) before full-live sizing.
 DustLive is EXEMPT from the GO gate (`profitability_gate_blocks` carve-out):
