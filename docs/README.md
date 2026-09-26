@@ -6,6 +6,7 @@ Welcome to the Chimera project documentation. This directory contains comprehens
 
 Essential system documentation and specifications:
 
+- **[Complete Architecture & Configuration Guide](ARCHITECTURE_AND_CONFIGURATION.md)** - ⭐ Master reference: how the whole app works, every subsystem, and every configuration option (operator + scout + deployment)
 - **[Product Design Document (PDD)](core/pdd.md)** - Complete system specification and requirements
 - **[Architecture Documentation](core/architecture.md)** - System design, components, and data flow
 - **[API Documentation](core/api.md)** - REST API reference and endpoints
